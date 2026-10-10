@@ -8,7 +8,7 @@
 //! `(EquipmentSlot, item id)` pair into real attribute modifiers, but nothing
 //! ever produced that pair for a **mob** (only [`crate::equipment::player_combat_stats`]
 //! had a caller, and only for a player's own inventory). That is the confirmed
-//! blocker this module exists to remove: a drowned's `RangedAttackGoal` trident
+//! blocker this module exists to remove: a drowned's `RangedStrikeGoal` trident
 //! builder ([`crate::ai::roster::ranged::trident_attack`]) has existed for a
 //! while with zero producers of "is this drowned holding a trident", and
 //! vanilla's generic armour-upgrade roll (`Mob.populateDefaultEquipmentSlots`)

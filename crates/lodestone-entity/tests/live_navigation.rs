@@ -20,9 +20,9 @@
 //! # Why exact position matching is impossible (and what we check instead)
 //!
 //! Vanilla AI has three unobservable-seed entropy sources here:
-//!   * `NearestAttackableTargetGoal` acquires on a random tick interval,
+//!   * `NearestTargetGoal` acquires on a random tick interval,
 //!   * `PathNavigation` recomputes on a jittered schedule,
-//!   * `RandomStrollGoal` injects noise before a target is locked, and the A*
+//!   * `WanderGoal` injects noise before a target is locked, and the A*
 //!     tie-break picks a detour side we cannot predict.
 //!
 //! So we do **not** assert the zombie's coordinates equal ours. We assert the
@@ -52,7 +52,7 @@
 //! `NoAI:1b` (stationary, still targetable) and *not* invulnerable; the zombie
 //! reaches melee range — and we break out — long before it can kill it.
 
-use lodestone_entity::ai::goals::MeleeAttackGoal;
+use lodestone_entity::ai::goals::MeleeStrikeGoal;
 use lodestone_entity::ai::{GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::pathfinding::{
     Aabb, MobShape, PathFinder, PathParams, PathStart, PathType, PathWorld,
@@ -419,7 +419,7 @@ fn live_zombie_detours_around_wall() {
         "our path must route through a column beyond the wall (|z|>=4), got {our_max_abs_z}"
     );
 
-    // Full-stack: the *goal-driven* mob (GoalSelector → MeleeAttackGoal → real
+    // Full-stack: the *goal-driven* mob (GoalSelector → MeleeStrikeGoal → real
     // A* through the MobController seam) must also detour, not just the bare
     // PathFinder. This is the connectedness check — it proves the same route
     // emerges when the pathfinder is reached through the goal scheduler the way
@@ -435,7 +435,7 @@ fn live_zombie_detours_around_wall() {
     );
     goal_mob.set_attack_target(Some(Vec3::new(10.5, -60.0, 0.5)));
     let mut ai = GoalSelector::new();
-    ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+    ai.add(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
     let mut goal_max_abs_z = 0.0f64;
     let mut goal_reached = false;
     for _ in 0..2000 {

@@ -89,12 +89,12 @@ pub const MAX_SWELL: i32 = 30;
 /// How long a mob remembers who hurt it, in ticks. Vanilla `LivingEntity::baseTick`
 /// clears `lastHurtByMob` once the record ages past this
 /// (`else if (this.tickCount - this.lastHurtByMobTimestamp > 100)`), which is
-/// what bounds `HurtByTargetGoal`'s retaliation window
-/// (`HurtByTargetGoal::canUse` reads exactly that pair).
+/// what bounds `RetaliateGoal`'s retaliation window
+/// (`RetaliateGoal::canUse` reads exactly that pair).
 pub const LAST_HURT_BY_TICKS: i32 = 100;
 
 /// How long a mob stays panicked after taking damage, in ticks. Vanilla's
-/// `PanicGoal::shouldPanic` tests
+/// `FleeInPanicGoal::shouldPanic` tests
 /// `getLastDamageSource() != null`, and `getLastDamageSource` self-clears once
 /// the stamp ages past this
 /// (`LivingEntity::getLastDamageSource`,
@@ -402,9 +402,9 @@ pub struct MobBody {
     /// [`love_partner_position`](MobController::love_partner_position) read
     /// this same field: the host is expected to clear it the instant the
     /// chosen partner becomes ineligible, which is what ends
-    /// [`BreedGoal`](super::goals::BreedGoal).
+    /// [`MateGoal`](super::goals::MateGoal).
     partner_candidate: Option<Vec3>,
-    /// Set by [`MobController::breed`] the tick a `BreedGoal` connects;
+    /// Set by [`MobController::breed`] the tick a `MateGoal` connects;
     /// drained by [`take_bred`](Self::take_bred) so a host can resolve the
     /// intent into an actual child spawn (this seam has no notion of the
     /// partner's identity or of creating a new entity, only of the *event*
@@ -424,13 +424,13 @@ pub struct MobBody {
     age_lock_cooldown: i32,
     /// Host injection point, refreshed once per tick: the position of the
     /// nearest eligible adult of this mob's own kind, or `None`. Drives
-    /// [`FollowParentGoal`](super::goals::FollowParentGoal) through
+    /// [`TrailParentGoal`](super::goals::TrailParentGoal) through
     /// [`MobController::parent_position`], the same host-computes-the-filter
     /// shape as [`partner_candidate`](Self::partner_candidate).
     parent_candidate: Option<Vec3>,
     /// Vanilla `Creeper::swellDir` (`DATA_SWELL_DIR`, defaults to `-1` —
     /// `Creeper::defineSynchedData`, `entityData.define(DATA_SWELL_DIR, -1)`). Set by
-    /// [`SwellGoal`](super::goals::SwellGoal) through
+    /// [`FuseGoal`](super::goals::FuseGoal) through
     /// [`MobController::set_swell_dir`], or forced to `1` every
     /// [`advance`](Self::advance) while [`ignited`](Self::ignited) is `true`
     /// (`Creeper::tick`). `> 0` climbs [`swell`](Self::swell) toward
@@ -440,12 +440,12 @@ pub struct MobBody {
     /// tick in [`advance`](Self::advance) unconditionally — exactly like
     /// [`age`](Self::age)/[`love_ticks`](Self::love_ticks) — regardless of
     /// whether any goal ran this tick. This is the entity's own `tick()`
-    /// (`Creeper::tick`), distinct from `SwellGoal`, which only ever
+    /// (`Creeper::tick`), distinct from `FuseGoal`, which only ever
     /// decides the *direction*.
     swell: i32,
     /// Vanilla `Creeper::isIgnited` / `DATA_IS_IGNITED`. `true` forces
     /// [`swell_dir`](Self::swell_dir) to `1` every tick regardless of what
-    /// [`SwellGoal`](super::goals::SwellGoal) would otherwise choose
+    /// [`FuseGoal`](super::goals::FuseGoal) would otherwise choose
     /// (`Creeper::tick`). Set by [`ignite`](Self::ignite); no
     /// production caller wires a flint-and-steel/fire-charge interaction to
     /// it yet (`Creeper::mobInteract`) — that is a separate,
@@ -460,13 +460,13 @@ pub struct MobBody {
     /// Host injection point, refreshed once per tick: the nearest player's
     /// position, or `None` when no player is in perception range. Drives
     /// [`MobController::nearest_player`] and therefore
-    /// [`LookAtPlayerGoal`](super::goals::LookAtPlayerGoal).
+    /// [`WatchPlayerGoal`](super::goals::WatchPlayerGoal).
     ///
     /// Host-injected for the same reason as
     /// [`partner_candidate`](Self::partner_candidate): `lodestone-entity` has
     /// no concept of a *player*, let alone a population of them, so vanilla's
     /// `level.getNearestPlayer(lookAtContext, mob, x, eyeY, z)`
-    /// (`LookAtPlayerGoal::canUse`) is the host's search to run. The
+    /// (`WatchPlayerGoal::canUse`) is the host's search to run. The
     /// goal still applies its own `lookDistance` cut-off on top, so a host
     /// that over-reports is merely wasteful, not wrong.
     nearest_player: Option<Vec3>,
@@ -491,6 +491,18 @@ pub struct MobBody {
     nest: Option<Vec3>,
     /// Whether the mob is walking back to its nest.
     going_home: bool,
+    /// Host-fed: whether the world lets mobs change blocks.
+    mob_griefing: bool,
+    /// Block changes goals asked for this tick, drained by the host.
+    block_edits: Vec<crate::ai::BlockEdit>,
+    /// Turtles only: whether the mob carries an egg.
+    has_egg: bool,
+    /// Turtles only: ticks spent laying, `0` when not laying.
+    laying_egg_ticks: i32,
+    /// Ticks left in a horse's rear.
+    rearing_ticks: i32,
+    more_carrot_ticks: i32,
+    raid_center: Option<Vec3>,
     /// What a bee remembers; inert for every other species.
     bee: crate::ai::bee::BeeState,
     /// Where a hovering flier is steered this tick, with the speed requested.
@@ -510,7 +522,7 @@ pub struct MobBody {
     /// Host injection point, refreshed once per tick: the position of a nearby
     /// entity currently tempting this mob, or `None`. Drives
     /// [`MobController::temptation`] and therefore
-    /// [`TemptGoal`](super::goals::TemptGoal).
+    /// [`LureGoal`](super::goals::LureGoal).
     ///
     /// The host owns **both** halves of vanilla's test: the range (an
     /// attribute, `Attributes::TEMPT_RANGE`, default `10.0`) and the item predicate, which in
@@ -519,21 +531,25 @@ pub struct MobBody {
     /// Resolving those tags is a data-generation job this crate deliberately
     /// does not do; see `docs/mob-perception.md`.
     temptation: Option<Vec3>,
+    /// Host injection point: the nearest player when they hold something a
+    /// begging mob wants; see [`MobController::begging_player`].
+    begging_player: Option<Vec3>,
+    interested: bool,
     /// Host injection point, refreshed once per tick: the position of a nearby
     /// entity this mob wants to flee, or `None`. Drives
     /// [`MobController::avoid_threat`] and therefore
-    /// [`AvoidEntityGoal`](super::goals::AvoidEntityGoal).
+    /// [`FleeEntityGoal`](super::goals::FleeEntityGoal).
     ///
     /// Vanilla's avoid set is per-species and per-goal-instance (a creeper
-    /// registers two separate `AvoidEntityGoal`s, `Ocelot` and `Cat`, both at
+    /// registers two separate `FleeEntityGoal`s, `Ocelot` and `Cat`, both at
     /// `6.0F` — `Creeper::registerGoals`), so the *class filter* is the
     /// host's, exactly like the temptation predicate above.
     avoid_threat: Option<Vec3>,
     /// Host injection point: vanilla `Mob::noActionTime`
     /// (`Mob::serverAiStep`'s `this.noActionTime++`, reset to `0` in
     /// `Mob::checkDespawn`). Read by
-    /// [`RandomStrollGoal`](super::goals::RandomStrollGoal)'s idle
-    /// suppression, which yields at `>= 100` (`RandomStrollGoal::canUse`).
+    /// [`WanderGoal`](super::goals::WanderGoal)'s idle
+    /// suppression, which yields at `>= 100` (`WanderGoal::canUse`).
     ///
     /// Injected rather than counted here because the *reset* conditions are
     /// the host's: vanilla zeroes it when a player is within the immune
@@ -548,7 +564,7 @@ pub struct MobBody {
     /// [`note_hurt`](Self::note_hurt), decayed unconditionally in
     /// [`advance`](Self::advance), and read by
     /// [`MobController::last_hurt_by`] — which is what
-    /// [`HurtByTargetGoal`](super::goals::HurtByTargetGoal) retaliates against.
+    /// [`RetaliateGoal`](super::goals::RetaliateGoal) retaliates against.
     last_hurt_by: Option<Vec3>,
     /// Ticks remaining on [`last_hurt_by`](Self::last_hurt_by). Vanilla stores
     /// the *timestamp* and compares against `tickCount`
@@ -559,21 +575,21 @@ pub struct MobBody {
     hurt_by_ticks: i32,
     /// The position of whoever most recently damaged this mob's **owner** —
     /// the owner-scoped twin of [`last_hurt_by`](Self::last_hurt_by). A
-    /// player is a `LivingEntity` like any other, so `OwnerHurtByTargetGoal`
+    /// player is a `LivingEntity` like any other, so `DefendOwnerGoal`
     /// reading `owner.getLastHurtByMob()` is the *same* field and the *same*
     /// 100-tick clear vanilla applies to a mob's own record — hence sharing
     /// [`LAST_HURT_BY_TICKS`] rather than a separate constant. Recorded by
     /// [`set_owner_hurt_by`](Self::set_owner_hurt_by), decayed in
     /// [`advance`](Self::advance), and read by
     /// [`MobController::owner_hurt_by`] — what
-    /// [`OwnerHurtByTargetGoal`](super::goals::OwnerHurtByTargetGoal)
+    /// [`DefendOwnerGoal`](super::goals::DefendOwnerGoal)
     /// retaliates against.
     owner_hurt_by: Option<Vec3>,
     /// Ticks remaining on [`owner_hurt_by`](Self::owner_hurt_by), decayed the
     /// same way as [`hurt_by_ticks`](Self::hurt_by_ticks).
     owner_hurt_by_ticks: i32,
     /// The position of whoever this mob's **owner** most recently attacked —
-    /// drives [`OwnerHurtTargetGoal`](super::goals::OwnerHurtTargetGoal),
+    /// drives [`AssistOwnerGoal`](super::goals::AssistOwnerGoal),
     /// which reads vanilla's `owner.getLastHurtMob()` (again the owner's own
     /// `LivingEntity` field, same [`LAST_HURT_BY_TICKS`] clear). Recorded by
     /// [`set_owner_hurt_target`](Self::set_owner_hurt_target).
@@ -585,7 +601,7 @@ pub struct MobBody {
     /// ([`PANIC_DAMAGE_TICKS`]). Set by [`note_hurt`](Self::note_hurt) for
     /// **every** hit, including one with no identifiable attacker, because
     /// vanilla's `shouldPanic` reads the damage *source* rather than the
-    /// attacking mob (`PanicGoal::shouldPanic`). Read by
+    /// attacking mob (`FleeInPanicGoal::shouldPanic`). Read by
     /// [`MobController::is_panicking`].
     damage_ticks: i32,
     /// This mob's `FOLLOW_RANGE` attribute value, in blocks — the range cut
@@ -597,7 +613,7 @@ pub struct MobBody {
     /// **This is the filter, and it is not optional.** The host's
     /// `nearest_player` feed is deliberately *unbounded* — `mobs.rs`'s
     /// `feed_perception` passes no range at all, because the range for
-    /// `LookAtPlayerGoal` (its original consumer) lives in the goal — so a
+    /// `WatchPlayerGoal` (its original consumer) lives in the goal — so a
     /// `find_nearest_target` that returned it raw would make every hostile mob
     /// in the world target the player from any distance. Vanilla's cut is
     /// `TargetGoal::getFollowDistance`, i.e. exactly this attribute.
@@ -648,7 +664,7 @@ pub struct MobBody {
     /// Separate from [`owner`](Self::owner) rather than derived from it: a tamed
     /// pet whose owner has logged out still *is* tame, so deriving tameness from
     /// a resolved owner position would un-tame every pet whenever its owner left
-    /// the player list. `SitWhenOrderedToGoal`'s untamed-guard arm and
+    /// the player list. `SitOnCommandGoal`'s untamed-guard arm and
     /// the wolf's own avoid-entity goal's untamed guard both read this.
     tame: bool,
     /// Host injection point: vanilla's own sit-order flag, the persisted
@@ -656,7 +672,7 @@ pub struct MobBody {
     /// [`MobController::is_ordered_to_sit`].
     ordered_to_sit: bool,
     /// The sitting **pose** — vanilla's `0x01` `DATA_FLAGS_ID` bit, written by
-    /// [`SitWhenOrderedToGoal`](super::goals::SitWhenOrderedToGoal)'s `start`
+    /// [`SitOnCommandGoal`](super::goals::SitOnCommandGoal)'s `start`
     /// and `stop` through [`MobController::set_in_sitting_pose`], and read back
     /// by the host to publish that flag.
     ///
@@ -698,7 +714,7 @@ pub struct MobBody {
     /// [`MobController::is_patrol_leader`].
     patrol_leader: bool,
     /// This mob's own current long-distance patrol waypoint, round-tripped
-    /// through [`LongDistancePatrolGoal`](super::goals::LongDistancePatrolGoal)
+    /// through [`PatrolRouteGoal`](super::goals::PatrolRouteGoal)
     /// via [`MobController::patrol_target`]/[`MobController::set_patrol_target`]
     /// — vanilla `PatrollingMonster.patrolTarget`.
     patrol_target: Option<Vec3>,
@@ -706,7 +722,7 @@ pub struct MobBody {
     /// the patrol's shared waypoint, as the host resolves it from nearby
     /// patrol leaders. Drives [`MobController::patrol_group_target`]; see that
     /// method's own doc comment for why this exists instead of the census
-    /// `LongDistancePatrolGoal` cannot run itself.
+    /// `PatrolRouteGoal` cannot run itself.
     patrol_group_target: Option<Vec3>,
     /// Self-damage requests this mob recorded via
     /// [`MobController::damage_self`], awaiting a host drain via
@@ -895,6 +911,13 @@ impl<'w> NavigatingMob<'w> {
             scary_near: false,
             nest: None,
             going_home: false,
+            mob_griefing: false,
+            block_edits: Vec::new(),
+            has_egg: false,
+            laying_egg_ticks: 0,
+            rearing_ticks: 0,
+            more_carrot_ticks: 0,
+            raid_center: None,
             bee: crate::ai::bee::BeeState::default(),
             air_hover: None,
             path_effort: 1.0,
@@ -904,6 +927,8 @@ impl<'w> NavigatingMob<'w> {
             flock_left: false,
             inflating: false,
             temptation: None,
+            begging_player: None,
+            interested: false,
             avoid_threat: None,
             no_action_time: 0,
             last_hurt_by: None,
@@ -1069,7 +1094,7 @@ impl<'w> NavigatingMob<'w> {
     /// block-perception goals.
     ///
     /// **A host that never calls this makes grazing an island**:
-    /// `EatBlockGoal` runs, the eat animation plays out, the sheep's head goes
+    /// `GrazeGoal` runs, the eat animation plays out, the sheep's head goes
     /// down, and no grass ever turns to dirt. The host owes two things per
     /// drained entry — the world mutation described on
     /// [`EatenBlock`](super::mob::EatenBlock), gated on `mobGriefing`, and the
@@ -1367,7 +1392,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Host injection point: refreshes the breeding-partner candidate this
-    /// mob's [`BreedGoal`](super::goals::BreedGoal) should see this tick. See
+    /// mob's [`MateGoal`](super::goals::MateGoal) should see this tick. See
     /// the `partner_candidate` field's own doc comment.
     pub fn set_love_partner_candidate(&mut self, partner: Option<Vec3>) -> &mut Self {
         self.partner_candidate = partner;
@@ -1375,7 +1400,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Host injection point: refreshes the nearest-eligible-parent candidate
-    /// this mob's [`FollowParentGoal`](super::goals::FollowParentGoal) should
+    /// this mob's [`TrailParentGoal`](super::goals::TrailParentGoal) should
     /// see this tick.
     pub fn set_parent_candidate(&mut self, parent: Option<Vec3>) -> &mut Self {
         self.parent_candidate = parent;
@@ -1398,7 +1423,7 @@ impl<'w> NavigatingMob<'w> {
 
     /// Marks the mob ignited (vanilla `Creeper::ignite`),
     /// forcing its swell direction to climb every
-    /// tick regardless of what [`SwellGoal`](super::goals::SwellGoal) would
+    /// tick regardless of what [`FuseGoal`](super::goals::FuseGoal) would
     /// otherwise pick from proximity alone. See the `ignited` field's own doc
     /// comment for the interaction (flint-and-steel) that would call this in
     /// a full implementation.
@@ -1414,7 +1439,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Host injection point: refreshes the nearest-player position this mob's
-    /// [`LookAtPlayerGoal`](super::goals::LookAtPlayerGoal) should see this
+    /// [`WatchPlayerGoal`](super::goals::WatchPlayerGoal) should see this
     /// tick. See the `nearest_player` field's own doc comment.
     pub fn set_nearest_player(&mut self, player: Option<Vec3>) -> &mut Self {
         self.nearest_player = player;
@@ -1481,6 +1506,41 @@ impl<'w> NavigatingMob<'w> {
     /// Drains the "gave up following" flag.
     pub fn take_flock_left(&mut self) -> bool {
         std::mem::take(&mut self.flock_left)
+    }
+
+    /// Host injection point: whether the world lets mobs change blocks.
+    pub fn set_mob_griefing(&mut self, allowed: bool) -> &mut Self {
+        self.mob_griefing = allowed;
+        self
+    }
+
+    /// Drains the block changes goals asked for.
+    pub fn take_block_edits(&mut self) -> Vec<crate::ai::BlockEdit> {
+        std::mem::take(&mut self.block_edits)
+    }
+
+    /// Restores a saved turtle's carried egg.
+    pub fn restore_has_egg(&mut self, has_egg: bool) -> &mut Self {
+        self.has_egg = has_egg;
+        self
+    }
+
+    /// Whether a horse is rearing.
+    #[must_use]
+    pub fn is_rearing(&self) -> bool {
+        self.rearing_ticks > 0
+    }
+
+    /// Whether this turtle carries an egg.
+    #[must_use]
+    pub fn carries_egg(&self) -> bool {
+        self.has_egg
+    }
+
+    /// Whether this turtle is laying.
+    #[must_use]
+    pub fn is_laying_egg(&self) -> bool {
+        self.laying_egg_ticks >= 1
     }
 
     /// Host injection point: the turtle's nesting beach.
@@ -1650,7 +1710,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Host injection point: refreshes the tempting-entity position this mob's
-    /// [`TemptGoal`](super::goals::TemptGoal) should see this tick. See the
+    /// [`LureGoal`](super::goals::LureGoal) should see this tick. See the
     /// `temptation` field's own doc comment for why the item predicate is the
     /// host's and not this crate's.
     pub fn set_temptation(&mut self, temptation: Option<Vec3>) -> &mut Self {
@@ -1658,8 +1718,26 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
+    /// Host injection point: the centre of the ongoing raid this mob raids for.
+    pub fn set_raid_center(&mut self, center: Option<Vec3>) -> &mut Self {
+        self.raid_center = center;
+        self
+    }
+
+    /// Host injection point: the begging-goal player for this tick.
+    pub fn set_begging_player(&mut self, player: Option<Vec3>) -> &mut Self {
+        self.begging_player = player;
+        self
+    }
+
+    /// Whether the mob is in its begging pose.
+    #[must_use]
+    pub fn is_interested(&self) -> bool {
+        self.interested
+    }
+
     /// Host injection point: refreshes the threat position this mob's
-    /// [`AvoidEntityGoal`](super::goals::AvoidEntityGoal) should flee this
+    /// [`FleeEntityGoal`](super::goals::FleeEntityGoal) should flee this
     /// tick. See the `avoid_threat` field's own doc comment.
     pub fn set_avoid_threat(&mut self, threat: Option<Vec3>) -> &mut Self {
         self.avoid_threat = threat;
@@ -1667,7 +1745,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Host injection point: sets vanilla `Mob.noActionTime`, which
-    /// [`RandomStrollGoal`](super::goals::RandomStrollGoal) uses to yield when
+    /// [`WanderGoal`](super::goals::WanderGoal) uses to yield when
     /// idle-throttled. See the `no_action_time` field's own doc comment —
     /// leaving this at `0` is *not* a neutral default.
     pub fn set_no_action_time(&mut self, ticks: i32) -> &mut Self {
@@ -1692,7 +1770,7 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
-    /// Host injection point: refreshes [`CatSitOnBlockGoal`](super::goals::CatSitOnBlockGoal)'s
+    /// Host injection point: refreshes [`CatPerchGoal`](super::goals::CatPerchGoal)'s
     /// candidate target from the host's bounded block search. `None` when the
     /// host found nothing (or has not searched this species at all).
     pub fn set_cat_sit_target(&mut self, target: Option<Vec3>) -> &mut Self {
@@ -1708,7 +1786,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Host injection point: refreshes
-    /// [`CatRelaxOnOwnerGoal`](super::goals::CatRelaxOnOwnerGoal)'s read of
+    /// [`CatSettleOnOwnerGoal`](super::goals::CatSettleOnOwnerGoal)'s read of
     /// how long the owner has been asleep. See
     /// [`MobController::owner_sleep_ticks`]'s own doc for the two moments it
     /// is read.
@@ -1718,7 +1796,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Host injection point: refreshes
-    /// [`LandOnOwnersShoulderGoal`](super::goals::LandOnOwnersShoulderGoal)'s
+    /// [`PerchOnOwnerGoal`](super::goals::PerchOnOwnerGoal)'s
     /// read of `ShoulderRidingEntity.rideCooldownCounter`.
     pub fn set_ticks_since_shoulder_dismount(&mut self, ticks: i32) -> &mut Self {
         self.ticks_since_shoulder_dismount = ticks;
@@ -1767,7 +1845,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// This mob's own current long-distance patrol waypoint, for a host that
-    /// wants to read back what [`LongDistancePatrolGoal`](super::goals::LongDistancePatrolGoal)
+    /// wants to read back what [`PatrolRouteGoal`](super::goals::PatrolRouteGoal)
     /// last chose — e.g. to resolve [`patrol_group_target`](Self::set_patrol_group_target)
     /// for a *different* mob's follower this same tick.
     #[must_use]
@@ -1792,7 +1870,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Whether this mob is currently in the sitting **pose** —
-    /// [`SitWhenOrderedToGoal`](super::goals::SitWhenOrderedToGoal)'s observable
+    /// [`SitOnCommandGoal`](super::goals::SitOnCommandGoal)'s observable
     /// output, and the `0x01` `DATA_FLAGS_ID` bit the host publishes. Read this
     /// (not [`is_ordered_to_sit`](MobController::is_ordered_to_sit)) to answer
     /// "did the goal actually run".
@@ -1826,10 +1904,10 @@ impl<'w> NavigatingMob<'w> {
     /// This is one call for vanilla's two separate records, because one hit
     /// writes both: `LivingEntity::hurtServer` sets `lastDamageSource`
     /// directly — which is what
-    /// [`PanicGoal`](super::goals::PanicGoal) reads — *and*, when the source
+    /// [`FleeInPanicGoal`](super::goals::FleeInPanicGoal) reads — *and*, when the source
     /// has a living attacker, calls `LivingEntity::resolveMobResponsibleForDamage`,
     /// which calls `setLastHurtByMob`, which is what
-    /// [`HurtByTargetGoal`](super::goals::HurtByTargetGoal) reads. They then
+    /// [`RetaliateGoal`](super::goals::RetaliateGoal) reads. They then
     /// expire on **different** timers ([`PANIC_DAMAGE_TICKS`] vs
     /// [`LAST_HURT_BY_TICKS`]), so both are tracked separately here.
     ///
@@ -1898,6 +1976,10 @@ impl<'w> NavigatingMob<'w> {
     /// [`MobController`] seam) followed by one locomotion step.
     pub fn tick(&mut self, ai: &mut GoalSelector) {
         self.sense_fluids();
+        self.rearing_ticks = (self.rearing_ticks - 1).max(0);
+        if self.more_carrot_ticks > 0 {
+            self.more_carrot_ticks = (self.more_carrot_ticks - MobController::next_i32(self, 3)).max(0);
+        }
         // Goals are evaluated on every second tick, offset per mob so a herd
         // does not think in lockstep; the off ticks run only the goals that
         // need every tick.
@@ -2077,7 +2159,7 @@ impl<'w> NavigatingMob<'w> {
             self.damage_ticks -= 1;
         }
         // Vanilla `Creeper::tick`: runs every tick
-        // regardless of whether `SwellGoal` (or anything else) is currently
+        // regardless of whether `FuseGoal` (or anything else) is currently
         // running, exactly like the age/love integration above. `ignited`
         // overrides whatever direction the goal picked.
         if self.ignited {
@@ -2948,7 +3030,7 @@ impl NavigatingMob<'_> {
         }
         const SEARCH_UP: i32 = 64;
         let world = self.world;
-        let is_air = |y: i32| world.base_path_type(block.x, y, block.z) == PathType::Open;
+        let is_air = |y: i32| world.is_air(block.x, y, block.z);
         let is_solid = |y: i32| world.collision_top(block.x, y, block.z) > 0.0;
         let mut y = block.y;
         if is_air(y) {
@@ -3140,12 +3222,12 @@ impl MobController for NavigatingMob<'_> {
 
     /// Whether the mob's feet cell held water when the tick began, sensed from
     /// the [`PathWorld`] the tick runs against, so
-    /// [`FloatGoal`](super::goals::FloatGoal) works for any world that
+    /// [`StayAfloatGoal`](super::goals::StayAfloatGoal) works for any world that
     /// classifies its blocks. Between ticks it keeps the last sensed value.
     ///
     /// **Scope cut, disclosed:** vanilla is
     /// `isInWater() && getFluidHeight(WATER) > getFluidJumpThreshold()`
-    /// (`FloatGoal::canUse`), where `isInWater` is a bounding-box
+    /// (`StayAfloatGoal::canUse`), where `isInWater` is a bounding-box
     /// sweep (`Entity::isInWater`, `wasTouchingWater`) and the threshold is
     /// `getEyeHeight() < 0.4 ? 0.0 : 0.4` (`Entity::getFluidJumpThreshold`). This
     /// composition has no fluid-height model at all — `PathWorld` exposes
@@ -3187,6 +3269,61 @@ impl MobController for NavigatingMob<'_> {
             let (dx, dy, dz) = (at.x - here.x, at.y - here.y, at.z - here.z);
             f64::from(dx * dx + dy * dy + dz * dz) < f64::from(radius) * f64::from(radius)
         })
+    }
+
+    fn block_state_at(&self, cell: (i32, i32, i32)) -> Option<lodestone_data::block_states::StateId> {
+        self.world.block_state(cell.0, cell.1, cell.2)
+    }
+
+    fn is_cell_within_home(&self, cell: (i32, i32, i32)) -> bool {
+        self.restriction.is_none_or(|(at, radius)| {
+            let (dx, dy, dz) = (at.x - cell.0, at.y - cell.1, at.z - cell.2);
+            f64::from(dx * dx + dy * dy + dz * dz) < f64::from(radius) * f64::from(radius)
+        })
+    }
+
+    fn mob_griefing(&self) -> bool {
+        self.mob_griefing
+    }
+
+    fn request_block_edit(&mut self, edit: crate::ai::BlockEdit) {
+        self.block_edits.push(edit);
+    }
+
+    fn raid_center(&self) -> Option<Vec3> {
+        self.raid_center
+    }
+
+    fn wants_more_food(&self) -> bool {
+        self.more_carrot_ticks <= 0
+    }
+
+    fn set_more_carrot_ticks(&mut self, ticks: i32) {
+        self.more_carrot_ticks = ticks;
+    }
+
+    fn rear_up(&mut self) {
+        self.rearing_ticks = 20;
+    }
+
+    fn has_egg(&self) -> bool {
+        self.has_egg
+    }
+
+    fn set_has_egg(&mut self, has_egg: bool) {
+        self.has_egg = has_egg;
+    }
+
+    fn laying_egg_ticks(&self) -> i32 {
+        self.laying_egg_ticks
+    }
+
+    fn set_laying_egg_ticks(&mut self, ticks: i32) {
+        self.laying_egg_ticks = ticks;
+    }
+
+    fn fall_in_love(&mut self) {
+        self.set_in_love();
     }
 
     fn random_target_towards(&mut self, towards: Vec3) -> Option<Vec3> {
@@ -3348,6 +3485,14 @@ impl MobController for NavigatingMob<'_> {
         self.temptation
     }
 
+    fn begging_player(&self) -> Option<Vec3> {
+        self.begging_player
+    }
+
+    fn set_interested(&mut self, interested: bool) {
+        self.interested = interested;
+    }
+
     fn avoid_threat(&self) -> Option<Vec3> {
         self.avoid_threat
     }
@@ -3426,9 +3571,9 @@ impl MobController for NavigatingMob<'_> {
     /// `TargetGoal::getFollowDistance` = the `FOLLOW_RANGE` attribute.
     ///
     /// **This used to return `self.attack_target` — the field the goal calling
-    /// it exists to write.** `NearestAttackableTargetGoal::can_use`
+    /// it exists to write.** `NearestTargetGoal::can_use`
     /// asks this and `start` writes the answer back, so the only production
-    /// writers of `attack_target` were that goal and `HurtByTargetGoal`: the
+    /// writers of `attack_target` were that goal and `RetaliateGoal`: the
     /// loop could not bootstrap and no mob ever attacked unprovoked. The data
     /// was already fed every tick and simply never read.
     ///
@@ -3438,7 +3583,7 @@ impl MobController for NavigatingMob<'_> {
     /// * **Follow range — here.** See [`follow_range`](Self::follow_range).
     /// * **Hostility — in the roster, structurally.** A cow must not target the
     ///   player, and it cannot: this method is reached *only* from
-    ///   [`NearestAttackableTargetGoal`](super::goals::NearestAttackableTargetGoal),
+    ///   [`NearestTargetGoal`](super::goals::NearestTargetGoal),
     ///   which is installed only for species whose vanilla table registers it
     ///   (`roster::goals_for`). No passive table has that row, so a cow never
     ///   owns the goal and never asks. Re-testing hostility here would need a
@@ -3820,7 +3965,7 @@ impl BrainMob for NavigatingMob<'_> {
     ///
     /// The brain's own [`SetPlayerLookTarget`](crate::brain::SetPlayerLookTarget)
     /// applies the distance cut (its `max_dist`), exactly as
-    /// `LookAtPlayerGoal` does on the goal side — so an over-reporting host feed
+    /// `WatchPlayerGoal` does on the goal side — so an over-reporting host feed
     /// is wasteful here, not wrong. Note this is deliberately **not**
     /// [`find_nearest_target`](MobController::find_nearest_target)'s
     /// `follow_range`-cut answer: that one is for acquiring something to attack,
@@ -3945,8 +4090,8 @@ mod tests {
     use crate::ai::goal::Goal;
     use crate::ai::mob::is_in_view_cone;
     use crate::ai::goals::{
-        AvoidEntityGoal, FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal, PanicGoal,
-        RandomStrollGoal, SwellGoal, TemptGoal,
+        FleeEntityGoal, StayAfloatGoal, RetaliateGoal, WatchPlayerGoal, MeleeStrikeGoal, FleeInPanicGoal,
+        WanderGoal, FuseGoal, LureGoal,
     };
     use crate::pathfinding::{Aabb, Path, PathType};
 
@@ -4029,7 +4174,7 @@ mod tests {
         mob.set_attack_target(Some(target));
 
         let mut ai = GoalSelector::new();
-        ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        ai.add(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
 
         let mut route = vec![mob.position()];
         let mut reached = false;
@@ -4070,7 +4215,7 @@ mod tests {
 
     #[test]
     fn goal_drives_pathfinder_to_detour_an_unjumpable_fence() {
-        // The load-bearing test: a `MeleeAttackGoal` — through the real
+        // The load-bearing test: a `MeleeStrikeGoal` — through the real
         // `MobController` seam — must invoke A\*, and the path must go *around*
         // the fence (|z| beyond ±3), not through it. A fake `move_to` (the only
         // other implementor of this seam) could never exercise any of this.
@@ -4096,7 +4241,7 @@ mod tests {
         let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0, 63);
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
-        ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        ai.add(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
 
         for _ in 0..2000 {
             mob.tick(&mut ai);
@@ -4127,7 +4272,7 @@ mod tests {
         // A target enclosed by a solid wall two cells thick: vanilla's pathfinder
         // returns a *best-effort partial* path (not `None`), so the mob genuinely
         // walks up to the wall — but the nearest reachable cell is >2 blocks from
-        // the sealed target, so a `MeleeAttackGoal` can never strike. This asserts
+        // the sealed target, so a `MeleeStrikeGoal` can never strike. This asserts
         // two things a fake `move_to` (which teleports/strikes unconditionally)
         // could never satisfy: the mob *does* make forward progress (it followed a
         // real partial path), yet *never* reaches melee reach of the sealed cell.
@@ -4159,7 +4304,7 @@ mod tests {
         );
 
         let mut ai = GoalSelector::new();
-        ai.add(1, Box::new(MeleeAttackGoal::new(0.25, 2.0)));
+        ai.add(1, Box::new(MeleeStrikeGoal::new(0.25, 2.0)));
         let mut closest = f64::INFINITY;
         let mut last_x = mob.position().x;
         let mut stalled = 0u32;
@@ -4240,7 +4385,7 @@ mod tests {
         );
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
-        ai.add(1, Box::new(MeleeAttackGoal::new(0.25, 2.0)));
+        ai.add(1, Box::new(MeleeStrikeGoal::new(0.25, 2.0)));
 
         const TICKS: usize = 2000;
         let mut tail: Vec<Vec3> = Vec::new();
@@ -4296,7 +4441,7 @@ mod tests {
         );
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
-        ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        ai.add(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
 
         const TICKS: usize = 2000;
         let mut ever_reached = false;
@@ -4330,14 +4475,14 @@ mod tests {
 
     // ---- Breeding / aging ---------------------------------------------------
     //
-    // These are driver-level: a real `GoalSelector` runs a real `BreedGoal`
+    // These are driver-level: a real `GoalSelector` runs a real `MateGoal`
     // against two real `NavigatingMob`s. The only "host" logic here is the
     // per-tick candidate refresh `MobController::find_love_partner`'s own doc
     // comment calls for (a population-wide `canMate` search this crate has no
     // way to do itself) — everything downstream of that one input is the
     // production seam, and `breed()` is never called directly.
 
-    use crate::ai::goals::{BreedGoal, FollowParentGoal};
+    use crate::ai::goals::{MateGoal, TrailParentGoal};
 
     /// Refreshes each mob's love-partner candidate from the other, mirroring
     /// what `MobSim::tick` will do every tick in production: a population
@@ -4353,8 +4498,8 @@ mod tests {
 
     #[test]
     fn breed_goal_drives_two_navigating_mobs_to_a_predicted_tick() {
-        // Two in-love animals, 2 blocks apart (distSqr=4 < BreedGoal's 9.0
-        // range) on open ground, each running the production `BreedGoal`.
+        // Two in-love animals, 2 blocks apart (distSqr=4 < MateGoal's 9.0
+        // range) on open ground, each running the production `MateGoal`.
         // The goal times 60 ticks as 30 goal ticks, and a goal ticks on game
         // ticks 1, 2 and then every even tick. Its 30th tick is therefore game
         // tick 2 * (30 - 1) = 58: bred must be false through tick 57 and
@@ -4369,9 +4514,9 @@ mod tests {
         b.set_in_love();
 
         let mut ai_a = GoalSelector::new();
-        ai_a.add(0, Box::new(BreedGoal::new(1.0)));
+        ai_a.add(0, Box::new(MateGoal::new(1.0)));
         let mut ai_b = GoalSelector::new();
-        ai_b.add(0, Box::new(BreedGoal::new(1.0)));
+        ai_b.add(0, Box::new(MateGoal::new(1.0)));
 
         for tick in 1..=58 {
             refresh_partner_candidates(&mut a, &mut b);
@@ -4418,9 +4563,9 @@ mod tests {
         a.set_in_love();
         b.set_in_love();
         let mut ai_a = GoalSelector::new();
-        ai_a.add(0, Box::new(BreedGoal::new(1.0)));
+        ai_a.add(0, Box::new(MateGoal::new(1.0)));
         let mut ai_b = GoalSelector::new();
-        ai_b.add(0, Box::new(BreedGoal::new(1.0)));
+        ai_b.add(0, Box::new(MateGoal::new(1.0)));
 
         for _ in 1..=200 {
             // No `refresh_partner_candidates` call: `find_love_partner`
@@ -4510,7 +4655,7 @@ mod tests {
         // The second goal this seam unblocks: a baby's `is_baby`/
         // `parent_position` are now real (host-injected) instead of the
         // `MobController` trait defaults (`false`/`None`), so
-        // `FollowParentGoal` — already fully implemented in `goals.rs` — is
+        // `TrailParentGoal` — already fully implemented in `goals.rs` — is
         // reachable through the concrete production type. Mirrors the
         // existing melee/pathfinder composition tests above: real A*, not a
         // fake `move_to`.
@@ -4526,7 +4671,7 @@ mod tests {
         baby.set_parent_candidate(Some(parent_pos));
 
         let mut ai = GoalSelector::new();
-        ai.add(0, Box::new(FollowParentGoal::new(1.0)));
+        ai.add(0, Box::new(TrailParentGoal::new(1.0)));
 
         let mut reached = false;
         for _ in 0..500 {
@@ -4545,7 +4690,7 @@ mod tests {
         );
         assert!(
             baby.path_searches() >= 1,
-            "FollowParentGoal must have driven a real A* search"
+            "TrailParentGoal must have driven a real A* search"
         );
     }
 
@@ -5107,7 +5252,7 @@ mod tests {
 
     #[test]
     fn swell_goal_drives_a_proximate_stationary_target_to_detonation_in_exactly_max_swell_ticks() {
-        // End-to-end: `SwellGoal` (proximity only, no ignition) through the
+        // End-to-end: `FuseGoal` (proximity only, no ignition) through the
         // real `GoalSelector` + `advance()` composition, exactly the path a
         // production `MobSim::tick` drives.
         let world = Arena {
@@ -5118,7 +5263,7 @@ mod tests {
         mob.set_attack_target(Some(Vec3::new(1.0, 0.0, 0.0))); // distSqr 1 < 9
 
         let mut ai = GoalSelector::new();
-        ai.add(0, Box::new(SwellGoal::new()));
+        ai.add(0, Box::new(FuseGoal::new()));
 
         let mut detonated_at: Option<i32> = None;
         for t in 1..=MAX_SWELL {
@@ -5146,7 +5291,7 @@ mod tests {
         let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0, 63);
         mob.set_attack_target(Some(Vec3::new(2.0, 0.0, 0.0)));
         let mut ai = GoalSelector::new();
-        ai.add(0, Box::new(SwellGoal::new()));
+        ai.add(0, Box::new(FuseGoal::new()));
         for _ in 0..MAX_SWELL {
             mob.tick(&mut ai);
             assert_eq!(mob.swell(), 0, "the fuse must not rise without sight");
@@ -5167,7 +5312,7 @@ mod tests {
         mob.set_attack_target(Some(Vec3::new(20.0, 0.0, 0.0))); // distSqr 400
 
         let mut ai = GoalSelector::new();
-        ai.add(0, Box::new(SwellGoal::new()));
+        ai.add(0, Box::new(FuseGoal::new()));
 
         for _ in 0..100 {
             mob.tick(&mut ai);
@@ -5271,10 +5416,10 @@ mod tests {
     /// mob as currently configured, in a fixed order:
     /// `[float, look_at_player, hurt_by_target, tempt, avoid_entity, panic]`.
     ///
-    /// `LookAtPlayerGoal` is built with `probability == 1.0` so its
+    /// `WatchPlayerGoal` is built with `probability == 1.0` so its
     /// `next_f32() >= probability` pre-roll (this crate's
-    /// `LookAtPlayerGoal::can_use`, vanilla's `0.02F`
-    /// default at `LookAtPlayerGoal::DEFAULT_PROBABILITY`) cannot make this test
+    /// `WatchPlayerGoal::can_use`, vanilla's `0.02F`
+    /// default at `WatchPlayerGoal::DEFAULT_PROBABILITY`) cannot make this test
     /// flaky in either direction — a probability roll is not what is under
     /// test here, the perception read behind it is.
     fn six_verdicts(mob: &mut NavigatingMob<'_>) -> [bool; 6] {
@@ -5282,32 +5427,32 @@ mod tests {
         // origin, so a `false` can only come from the perception method
         // returning the trait default.
         [
-            FloatGoal.can_use(mob),
-            LookAtPlayerGoal::new(8.0, 1.0).can_use(mob),
-            HurtByTargetGoal::new().can_use(mob),
-            TemptGoal::new(1.25).can_use(mob),
-            AvoidEntityGoal::new(6.0, 1.0).can_use(mob),
-            PanicGoal::new(1.25).can_use(mob),
+            StayAfloatGoal.can_use(mob),
+            WatchPlayerGoal::new(8.0, 1.0).can_use(mob),
+            RetaliateGoal::new().can_use(mob),
+            LureGoal::new(1.25).can_use(mob),
+            FleeEntityGoal::new(6.0, 1.0).can_use(mob),
+            FleeInPanicGoal::new(1.25).can_use(mob),
         ]
     }
 
     #[test]
     fn all_six_perception_starved_goals_fire_on_a_real_navigating_mob() {
-        // Water at the mob's feet cell drives `FloatGoal` with no injection at
-        // all — vanilla `FloatGoal::canUse`.
+        // Water at the mob's feet cell drives `StayAfloatGoal` with no injection at
+        // all — vanilla `StayAfloatGoal::canUse`.
         let world = FluidArena::with((0, 0, 0), PathType::Water);
         let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
 
         // Each of the remaining five, at a distance vanilla would accept:
-        //  * player 3 blocks away, inside `LookAtPlayerGoal`'s 8.0
-        //    (`Creeper::registerGoals`'s `LookAtPlayerGoal(Player, 8.0F)`);
-        //  * attacker 2 blocks away — `HurtByTargetGoal` has no range gate of
-        //    its own (`HurtByTargetGoal::canUse` tests only
+        //  * player 3 blocks away, inside `WatchPlayerGoal`'s 8.0
+        //    (`Creeper::registerGoals`'s `WatchPlayerGoal(Player, 8.0F)`);
+        //  * attacker 2 blocks away — `RetaliateGoal` has no range gate of
+        //    its own (`RetaliateGoal::canUse` tests only
         //    the timestamp and non-null attacker);
         //  * tempter 4 blocks away, inside `Attributes::TEMPT_RANGE`'s default
         //    `10.0`;
         //  * threat 3 blocks away, inside the `6.0F` every vanilla
-        //    `AvoidEntityGoal` registration uses (`Creeper::registerGoals`,
+        //    `FleeEntityGoal` registration uses (`Creeper::registerGoals`,
         //    `AbstractSkeleton::registerGoals`,
         //    `Spider::registerGoals`).
         mob.set_nearest_player(Some(Vec3::new(3.5, 0.0, 0.5)))
@@ -5350,7 +5495,7 @@ mod tests {
 
     #[test]
     fn lava_alone_floats_a_mob_and_water_alone_does_too() {
-        // `FloatGoal`'s condition is a disjunction (`FloatGoal::canUse`), so a
+        // `StayAfloatGoal`'s condition is a disjunction (`StayAfloatGoal::canUse`), so a
         // test that only ever sets water cannot tell `in_water() || in_lava()`
         // from `in_water()` — one arm could be dead. Drive each arm alone.
         let lava = FluidArena::with((0, 0, 0), PathType::Lava);
@@ -5361,30 +5506,30 @@ mod tests {
             "a lava cell must not also read as water — that would make the \
              two methods indistinguishable and the disjunction untestable"
         );
-        assert!(FloatGoal.can_use(&mut in_lava), "lava alone must float");
+        assert!(StayAfloatGoal.can_use(&mut in_lava), "lava alone must float");
 
         let water = FluidArena::with((0, 0, 0), PathType::Water);
         let mut in_water = perception_mob(&water, Vec3::new(0.5, 0.0, 0.5));
         assert!(crate::ai::mob::MobController::in_water(&in_water));
         assert!(!in_water.in_lava());
-        assert!(FloatGoal.can_use(&mut in_water), "water alone must float");
+        assert!(StayAfloatGoal.can_use(&mut in_water), "water alone must float");
     }
 
     #[test]
     fn a_navigating_mob_in_water_actually_jumps_through_the_real_scheduler() {
-        // Behavioural, not `can_use`: run `FloatGoal` through the same
+        // Behavioural, not `can_use`: run `StayAfloatGoal` through the same
         // `GoalSelector`/`NavigatingMob::tick` path production uses and assert
         // the mob ends up *jumping*. `can_use` returning true is the wiring;
         // the jump is the observable effect a player would see as floating.
         let world = FluidArena::with((0, 0, 0), PathType::Water);
         let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
         let mut ai = GoalSelector::new();
-        // Vanilla registers `FloatGoal` at priority 1 on a creeper and 9 on a
+        // Vanilla registers `StayAfloatGoal` at priority 1 on a creeper and 9 on a
         // bee (both in their own `registerGoals`); the absolute number is
         // private to one mob's set, so 0 is fine here.
-        ai.add(0, Box::new(FloatGoal));
+        ai.add(0, Box::new(StayAfloatGoal));
 
-        // `tick` is 0.8-probability per tick (`FloatGoal::tick`), so a
+        // `tick` is 0.8-probability per tick (`StayAfloatGoal::tick`), so a
         // handful of ticks makes a miss vanishingly unlikely; 20 is generous.
         let mut jumped = false;
         for _ in 0..20 {
@@ -5402,21 +5547,21 @@ mod tests {
         let dry = FluidArena::dry();
         let mut dry_mob = perception_mob(&dry, Vec3::new(0.5, 0.0, 0.5));
         let mut dry_ai = GoalSelector::new();
-        dry_ai.add(0, Box::new(FloatGoal));
+        dry_ai.add(0, Box::new(StayAfloatGoal));
         for _ in 0..20 {
             dry_mob.tick(&mut dry_ai);
             assert!(
                 !dry_mob.is_jumping(),
-                "a mob on dry land must never be driven to jump by FloatGoal"
+                "a mob on dry land must never be driven to jump by StayAfloatGoal"
             );
         }
     }
 
     #[test]
     fn a_hurt_mob_retaliates_through_the_real_scheduler_and_forgets_on_vanillas_timer() {
-        // `HurtByTargetGoal` end to end: note a hit, run the scheduler, and
+        // `RetaliateGoal` end to end: note a hit, run the scheduler, and
         // assert the mob's *attack target* became the attacker — the state a
-        // `MeleeAttackGoal` then chases. This is the observable retaliation,
+        // `MeleeStrikeGoal` then chases. This is the observable retaliation,
         // not a `can_use` probe.
         let world = FluidArena::dry();
         let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
@@ -5424,10 +5569,10 @@ mod tests {
         mob.note_hurt(Some(attacker));
 
         let mut ai = GoalSelector::new();
-        // Vanilla puts `HurtByTargetGoal` at target-priority 1 everywhere it
+        // Vanilla puts `RetaliateGoal` at target-priority 1 everywhere it
         // appears (`Zombie::addBehaviourGoals`,
         // `ZombifiedPiglin::addBehaviourGoals`).
-        ai.add(0, Box::new(HurtByTargetGoal::new()));
+        ai.add(0, Box::new(RetaliateGoal::new()));
 
         mob.tick(&mut ai);
         assert_eq!(
@@ -5532,8 +5677,8 @@ mod tests {
     #[test]
     fn attacker_less_damage_panics_without_giving_the_mob_anything_to_chase() {
         // Vanilla's panic reads the damage *source*, not the attacking mob
-        // (`PanicGoal::shouldPanic` vs
-        // `HurtByTargetGoal::canUse`), so fall damage panics a
+        // (`FleeInPanicGoal::shouldPanic` vs
+        // `RetaliateGoal::canUse`), so fall damage panics a
         // cow and gives it no retaliation target. `note_hurt(None)` is that
         // case; without this test the two records could be one field.
         let world = FluidArena::dry();
@@ -5545,8 +5690,8 @@ mod tests {
             None,
             "attacker-less damage must not invent a retaliation target"
         );
-        assert!(PanicGoal::new(1.25).can_use(&mut mob));
-        assert!(!HurtByTargetGoal::new().can_use(&mut mob));
+        assert!(FleeInPanicGoal::new(1.25).can_use(&mut mob));
+        assert!(!RetaliateGoal::new().can_use(&mut mob));
     }
 
     #[test]
@@ -5557,25 +5702,25 @@ mod tests {
         // fire for this — the goal simply behaved wrong.
         //
         // Vanilla: `checkNoActionTime && mob.getNoActionTime() >= 100`
-        // (`RandomStrollGoal::canUse`). Predict the boundary rather
+        // (`WanderGoal::canUse`). Predict the boundary rather
         // than asserting a direction: 99 must still allow, 100 must suppress.
         let world = FluidArena::dry();
 
         // `interval(1)` makes the goal's own `next_i32(interval) != 0` roll
-        // (`goals.rs`, vanilla `RandomStrollGoal::canUse`) deterministic, so
+        // (`goals.rs`, vanilla `WanderGoal::canUse`) deterministic, so
         // the only variable left is the idle suppression.
         let mut allowed = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
         allowed.set_no_action_time(99);
         assert!(
-            RandomStrollGoal::new(1.0).with_interval(1).can_use(&mut allowed),
+            WanderGoal::new(1.0).with_interval(1).can_use(&mut allowed),
             "no_action_time 99 is below vanilla's threshold and must still stroll"
         );
 
         let mut suppressed = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
         suppressed.set_no_action_time(100);
         assert!(
-            !RandomStrollGoal::new(1.0).with_interval(1).can_use(&mut suppressed),
-            "no_action_time 100 must suppress stroll (RandomStrollGoal::canUse)"
+            !WanderGoal::new(1.0).with_interval(1).can_use(&mut suppressed),
+            "no_action_time 100 must suppress stroll (WanderGoal::canUse)"
         );
     }
 

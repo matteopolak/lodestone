@@ -365,7 +365,7 @@ fn a_lethal_arrow_removes_the_mob_and_rolls_its_loot() {
 /// **The end-to-end island gate: a skeleton's own arrows now hurt.**
 ///
 /// Nothing here spawns a projectile by hand. A skeleton is given a target, the
-/// sim is ticked, and its `RangedBowAttackGoal` draws for `BOW_FULL_DRAW_TICKS`
+/// sim is ticked, and its `BowStrikeGoal` draws for `BOW_FULL_DRAW_TICKS`
 /// and releases on its own — the full production chain, goal to launch to impact.
 ///
 /// The expected value is a **bracket derived from outside constants**, not a

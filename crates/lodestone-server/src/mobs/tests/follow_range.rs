@@ -28,12 +28,14 @@ fn acquires_at(species: &str, distance: f64, ticks: usize) -> bool {
     let mut sim = MobSim::new(&world);
     let key = ResourceKey::from_str(&format!("minecraft:{species}")).expect("valid key");
     let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
-    sim.set_players(vec![PlayerPerception {
-        position: Vec3::new(distance, 0.0, 0.0),
-        held_item: None,
-        view_direction: Vec3::new(0.0, 0.0, 1.0),
-    }]);
     for _ in 0..ticks {
+        // Re-pinned each tick so the mob's own wandering cannot change the gap.
+        let x = sim.get(id).expect("alive").position().x + distance;
+        sim.set_players(vec![PlayerPerception {
+            position: Vec3::new(x, 0.0, 0.0),
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
+        }]);
         sim.tick();
         if sim.get(id).expect("alive").attack_target().is_some() {
             return true;

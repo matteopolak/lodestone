@@ -8,7 +8,7 @@
 //! already proves the feed (`PlayerPerception::view_direction` ->
 //! `is_in_view_cone` -> `set_stared_at`) reaches `MobController` — but it
 //! stops there and asserts the boolean directly. Nothing before this file
-//! proved that boolean actually reaches `EndermanLookForPlayerGoal`'s
+//! proved that boolean actually reaches `EndermanGazeWatchGoal`'s
 //! aggro-delay state machine (`crates/lodestone-entity/src/ai/goals.rs`)
 //! *through* `MobSim::spawn_species`'s real roster wiring
 //! (`roster::goals_for`) — the same "does any gate in this subsystem reach
@@ -17,10 +17,10 @@
 //!
 //! Two phases, in one continuous run against one enderman: sustained eye
 //! contact must freeze it in place once it acquires a target (vanilla's
-//! `EndermanFreezeWhenLookedAt`, priority 1 in the goal selector, requires an
+//! `EndermanFreezeUnderGazeGoal`, priority 1 in the goal selector, requires an
 //! existing `attack_target` to activate — so acquisition has to happen
 //! first), and looking away must release it to close the distance (vanilla's
-//! `MeleeAttackGoal`, which the already-acquired target now drives once the
+//! `MeleeStrikeGoal`, which the already-acquired target now drives once the
 //! freeze goal's `can_use` fails).
 
 use lodestone_model::{ResourceKey, Vec3};
@@ -73,7 +73,7 @@ fn a_sustained_stare_freezes_the_enderman_and_looking_away_releases_it_to_close_
 
     // --- Phase 1: sustained eye contact -----------------------------------
     //
-    // `EndermanLookForPlayerGoal`'s own aggro delay is 5 ticks before a
+    // `EndermanGazeWatchGoal`'s own aggro delay is 5 ticks before a
     // pending candidate is promoted to a live `attack_target`; ticking well
     // past that (40 ticks) both gives it time to acquire *and* proves the
     // freeze holds for a sustained stare, not just the one tick acquisition
@@ -91,7 +91,7 @@ fn a_sustained_stare_freezes_the_enderman_and_looking_away_releases_it_to_close_
     assert!(
         after_stare.attack_target().is_some(),
         "40 ticks of direct eye contact must be enough for \
-         EndermanLookForPlayerGoal's 5-tick aggro delay to acquire the player \
+         EndermanGazeWatchGoal's 5-tick aggro delay to acquire the player \
          as an attack target — if this is None, the gaze either never \
          reaches the goal or never gets past the pending stage"
     );
@@ -103,17 +103,17 @@ fn a_sustained_stare_freezes_the_enderman_and_looking_away_releases_it_to_close_
     assert!(
         drift < 0.5,
         "an enderman with an acquired target that is still being stared at \
-         must stay frozen (EndermanFreezeWhenLookedAt stops its navigation) \
+         must stay frozen (EndermanFreezeUnderGazeGoal stops its navigation) \
          — it drifted {drift:.3} blocks from its spawn point instead"
     );
 
     // --- Phase 2: look away -------------------------------------------------
     //
     // The target is already live from phase 1 — nothing has to re-acquire
-    // it. With the stare gone, `EndermanFreezeWhenLookedAt::can_use` fails
+    // it. With the stare gone, `EndermanFreezeUnderGazeGoal::can_use` fails
     // (`is_being_stared_at()` is now false) and yields MOVE/JUMP back to
     // whatever else wants them, which for a mob with a live attack target is
-    // `MeleeAttackGoal`: it must close the 8-block gap.
+    // `MeleeStrikeGoal`: it must close the 8-block gap.
     for _ in 0..300 {
         sim.set_players(vec![PlayerPerception {
             position: player_pos,
@@ -131,7 +131,7 @@ fn a_sustained_stare_freezes_the_enderman_and_looking_away_releases_it_to_close_
     assert!(
         gap_to_player < 3.0,
         "looking away must release the freeze and let the already-acquired \
-         target drive MeleeAttackGoal's pursuit — the enderman ended \
+         target drive MeleeStrikeGoal's pursuit — the enderman ended \
          {gap_to_player:.3} blocks from the player instead of closing to \
          melee range (started {:.3} blocks away)",
         ((enderman_pos.x - player_pos.x).powi(2) + (enderman_pos.z - player_pos.z).powi(2)).sqrt()

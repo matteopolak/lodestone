@@ -365,7 +365,7 @@ impl<'w> MobSim<'w> {
 
         // Retain the attacked position from each record so the resolution pass
         // can identify which player, if any, receives the hit.
-        let mut hits: Vec<(Option<i32>, Vec3, f32, Vec3)> = Vec::new();
+        let mut hits: Vec<(Option<i32>, Vec3, f32, Vec3, bool)> = Vec::new();
         let mut detonations: Vec<(i32, Vec3)> = Vec::new();
         let mut bred: Vec<(i32, Vec3, ResourceKey)> = Vec::new();
         // Accumulated into a local and moved into
@@ -402,6 +402,8 @@ impl<'w> MobSim<'w> {
         // Piglin-family mobs that finished their time in an unsafe dimension
         // this tick, converted after the loop releases the `self.mobs` borrow.
         let mut zombified: Vec<(i32, &'static str)> = Vec::new();
+        let mut cured: Vec<(i32, Option<Uuid>)> = Vec::new();
+        let mut block_edits: Vec<lodestone_entity::ai::BlockEdit> = Vec::new();
         let piglin_safe = self.piglin_safe;
         // The morning-gift request and per-tick shoulder-mount request — both
         // drained per mob the same way `bred`/`grazes` are (own mob id, since
@@ -605,7 +607,11 @@ impl<'w> MobSim<'w> {
             for target_pos in new_attacks {
                 // Carry the attacker's position so the victim can retaliate and
                 // identify the source of the hit.
-                hits.push((m.attack_target_id, target_pos, m.attack_damage, m.position()));
+                let infects = matches!(
+                    m.entity_type.path(),
+                    "zombie" | "husk" | "zombie_villager" | "drowned"
+                );
+                hits.push((m.attack_target_id, target_pos, m.attack_damage, m.position(), infects));
             }
             // A stung bee's self-destruct roll — see
             // `bee_sting_death_roll` for the exact formula
@@ -630,6 +636,24 @@ impl<'w> MobSim<'w> {
             // registry and the partner-independent spawn decision.
             if let Some(cell) = m.mob.take_hive_entry() {
                 hive_entries.push((m.id, cell));
+            }
+            block_edits.extend(m.mob.take_block_edits());
+            if self.mob_griefing
+                && m.mob.is_on_ground()
+                && !matches!(m.entity_type.path(), "turtle" | "bat")
+            {
+                let at = m.position();
+                let cell = (at.x.floor() as i32, (at.y - 0.2).floor() as i32, at.z.floor() as i32);
+                if let Some(state) = terrain(cell.0, cell.1, cell.2)
+                    && let Some((eggs, hatch)) = lodestone_entity::ai::turtle_egg::counts(state)
+                    && self.trample_rng.next_int(100) == 0
+                {
+                    block_edits.push(lodestone_entity::ai::BlockEdit {
+                        cell,
+                        expect: lodestone_entity::ai::BlockExpect::State(state),
+                        set: (eggs > 1).then(|| lodestone_entity::ai::turtle_egg::state(eggs - 1, hatch)).flatten(),
+                    });
+                }
             }
             crop_growths.extend(
                 m.mob.take_crop_growths().into_iter().map(|((x, y, z), state)| (BlockPos::new(x, y, z), state)),
@@ -703,42 +727,7 @@ impl<'w> MobSim<'w> {
                 );
                 state.remaining_ticks -= progress;
                 if state.remaining_ticks <= 0 {
-                    // Conversion changes the species-derived combat stats,
-                    // category, and gossip seed; profession, level, and XP are
-                    // already fields on `SimMob`.
-                    m.set_entity_type(
-                        ResourceKey::from_str("minecraft:villager").expect("static key"),
-                    );
-                    m.category = MobCategory::Creature;
-                    let (max_health, attack_damage, defenses, knockback_resistance) =
-                        combat_defaults(&m.entity_type);
-                    m.max_health = max_health;
-                    m.health = m.health.min(max_health);
-                    m.attack_damage = attack_damage;
-                    m.defenses = defenses;
-                    m.knockback_resistance = knockback_resistance;
-                    if let Some(starter) = state.starter {
-                        villager::reputation::apply_reputation_event(
-                            &mut m.gossip,
-                            villager::reputation::ReputationEventType::ZombieVillagerCured,
-                            starter,
-                        );
-                    }
-                    // Conversion applies nausea for 200 ticks at amplifier 0.
-                    // It is a timed effect visible through `SimMob::effects()`.
-                    m.effects.apply("minecraft:nausea", 200, 0);
-                    m.conversion = None;
-                    let block_pos = BlockPos::new(
-                        pos.x.floor() as i32,
-                        pos.y.floor() as i32,
-                        pos.z.floor() as i32,
-                    );
-                    ambient_sounds.push((pos, crate::effects::WorldEffect::LevelEvent {
-                        event: crate::effects::SOUND_ZOMBIE_CONVERTED,
-                        pos: block_pos,
-                        data: 0,
-                        global: false,
-                    }));
+                    cured.push((m.id, state.starter));
                 } else {
                     m.conversion = Some(state);
                 }
@@ -765,6 +754,7 @@ impl<'w> MobSim<'w> {
         self.push_entities();
         self.pending_grazes.extend(grazes);
         self.pending_crop_growths.extend(crop_growths);
+        self.pending_block_edits.extend(block_edits);
         self.resolve_hive_entries(hive_entries);
         self.pending_ambient_sounds.extend(
             ambient_sounds.into_iter().map(|(source, effect)| PendingEntityTickEffect {
@@ -776,6 +766,35 @@ impl<'w> MobSim<'w> {
         self.pending_mining_fatigue.extend(mining_fatigue);
         for (id, target) in zombified {
             self.convert_species(id, target);
+        }
+        for (id, starter) in cured {
+            let Some(new_id) = self.convert_species(id, "minecraft:villager") else {
+                continue;
+            };
+            let Some(villager) = self.get_mut(new_id) else {
+                continue;
+            };
+            if let Some(starter) = starter {
+                villager::reputation::apply_reputation_event(
+                    &mut villager.gossip,
+                    villager::reputation::ReputationEventType::ZombieVillagerCured,
+                    starter,
+                );
+            }
+            villager.effects.apply("minecraft:nausea", 200, 0);
+            let pos = villager.position();
+            let block_pos =
+                BlockPos::new(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
+            self.pending_ambient_sounds.push(PendingEntityTickEffect {
+                owner: entity_tick_owner(pos),
+                source: pos,
+                effect: crate::effects::WorldEffect::LevelEvent {
+                    event: crate::effects::SOUND_ZOMBIE_CONVERTED,
+                    pos: block_pos,
+                    data: 0,
+                    global: false,
+                },
+            });
         }
         // Propagate zombified-piglin alerts after the per-mob loop releases
         // each `SimMob` borrow. The shared box from
@@ -839,12 +858,16 @@ impl<'w> MobSim<'w> {
                 .expect("static projectile key");
             self.spawn_projectile_from(key, projectile, Some(shooter));
         }
-        for (target_id, target_pos, raw_damage, attacker_pos) in hits {
+        let mut infected: Vec<i32> = Vec::new();
+        for (target_id, target_pos, raw_damage, attacker_pos, infects) in hits {
             if let Some(target_id) = target_id
                 && let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id)
             {
                 let applied = target.apply_damage(raw_damage, DamageFlags::default());
                 target.mob.note_hurt(Some(attacker_pos));
+                if infects && target.health <= 0.0 && target.entity_type.path() == "villager" {
+                    infected.push(target_id);
+                }
                 self.note_vocalisation(target_id, applied);
                 continue;
             }
@@ -888,6 +911,18 @@ impl<'w> MobSim<'w> {
             if let Some(m) = self.get_mut(id) {
                 let applied = m.apply_damage(amount, DamageFlags::default());
                 self.note_vocalisation(id, applied);
+            }
+        }
+        // A zombie-family kill turns a villager into a zombie villager rather
+        // than killing it: never on Easy, a coin flip on Normal, always on Hard.
+        for id in infected {
+            let converts = match self.difficulty {
+                Difficulty::Peaceful | Difficulty::Easy => false,
+                Difficulty::Normal => self.zombie_conversion_rng.next_int(2) == 0,
+                Difficulty::Hard => true,
+            };
+            if converts {
+                self.convert_species(id, "minecraft:zombie_villager");
             }
         }
         self.reap_dead();

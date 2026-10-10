@@ -14,7 +14,7 @@
 //! Because of how this class of bug hides, which is the whole lesson. Three separate doubles
 //! — `ScriptMob` (`tests/mob_sim.rs`), `goals.rs`'s in-module fake, and
 //! `ai/roster/probe.rs` — each override `find_nearest_target` with a working
-//! implementation, so every existing test of `NearestAttackableTargetGoal` drove
+//! implementation, so every existing test of `NearestTargetGoal` drove
 //! a host that worked. The goal was always correct; the **host** was the defect.
 //! Nothing here may use those doubles. Every assertion below runs against a real
 //! [`NavigatingMob`] — the only production implementor of
@@ -127,7 +127,7 @@ struct Run {
     /// the player at that moment. `None` if it never acquired.
     ///
     /// Both are needed to *predict* how far the mob should then travel:
-    /// `NearestAttackableTargetGoal` throttles its search to one tick in
+    /// `NearestTargetGoal` throttles its search to one tick in
     /// `random_interval` (vanilla's own default random-interval constant, `10`),
     /// so a fixed fraction of the whole
     /// run is not a prediction, it is a guess with a tolerance.
@@ -205,7 +205,7 @@ fn run_in(
 /// about, and gets close enough to hit it.
 ///
 /// The prediction is not "it moved" — that is satisfied by a single twitch, or
-/// by `RandomStrollGoal` wandering in a lucky direction. A pursuing zombie is
+/// by `WanderGoal` wandering in a lucky direction. A pursuing zombie is
 /// pushed with `0.23^2` per tick, so once the throttled search has acquired on
 /// tick `t` the closure over the remaining `ticks - 1 - t` ticks is the
 /// geometric series in [`thrust_distance`], to within one tick's worth of the
@@ -412,7 +412,7 @@ fn a_pursued_player_is_tracked_while_in_range_and_released_when_it_leaves() {
 /// A cow must not target the player, and the reason it cannot is worth an
 /// assertion rather than a comment: hostility is not a filter inside
 /// `find_nearest_target`, it is the **absence of the goal**. No passive table
-/// registers `NearestAttackableTargetGoal`, so a cow never asks.
+/// registers `NearestTargetGoal`, so a cow never asks.
 ///
 /// This is the control that catches the naive form of the target-acquisition fix — reading
 /// `nearest_player` in a host that every species shares, with the goal installed
@@ -442,12 +442,12 @@ fn no_passive_species_can_acquire_a_target() {
 /// Vanilla's zombified piglin, wolf and bee registrations end in a
 /// `this::isAngryAt` selector, which narrows the candidate set to the entity
 /// their persistent grudge names (`NeutralMob.isAngryAt`). Our predicate-free
-/// `NearestAttackableTargetGoal` has no equivalent, so those three rows are
+/// `NearestTargetGoal` has no equivalent, so those three rows are
 /// `Coverage::Missing` — and while `find_nearest_target` was circular, a wrongly
 /// `Modelled` row would have been *invisible*. It is not invisible any more:
 /// this gate fails if one is flipped without the anger primitive.
 ///
-/// `NearestAttackableTargetGoal::anger_gated` is the shape that may eventually
+/// `NearestTargetGoal::anger_gated` is the shape that may eventually
 /// carry them, and it is checked here too: a mob with no grudge acquires
 /// nothing, a mob with one acquires the grudge holder rather than the nearest
 /// player. Nothing installs it yet, which is why the neutral rows stay
@@ -470,7 +470,7 @@ fn a_neutral_species_does_not_turn_hostile_on_sight() {
 /// two directions, so the gate is not satisfied by a goal that always fires.
 #[test]
 fn an_anger_gated_registration_targets_only_the_grudge_holder() {
-    use lodestone_entity::ai::goals::NearestAttackableTargetGoal;
+    use lodestone_entity::ai::goals::NearestTargetGoal;
 
     let world = Flat::new();
     let nearby_player = Vec3::new(3.5, 0.0, 0.5);
@@ -489,7 +489,7 @@ fn an_anger_gated_registration_targets_only_the_grudge_holder() {
         mob.set_follow_range(DEFAULT_FOLLOW_RANGE);
         mob.set_nearest_player(Some(nearby_player));
         let mut ai = GoalSelector::new();
-        ai.add(1, Box::new(NearestAttackableTargetGoal::anger_gated()));
+        ai.add(1, Box::new(NearestTargetGoal::anger_gated()));
         (mob, ai)
     };
 

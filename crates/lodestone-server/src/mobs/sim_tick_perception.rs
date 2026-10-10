@@ -613,6 +613,8 @@ impl<'w> MobSim<'w> {
         let mut sky_hunt: Vec<(Vec<Vec3>, bool)> = vec![(Vec::new(), false); n];
         let mut temptation = vec![None; n];
         let mut threat = vec![None; n];
+        let mut beg = vec![None; n];
+        let mut raid_centre = vec![None; n];
         let mut partner = vec![None; n];
         let mut parent = vec![None; n];
         let mut owner = vec![None; n];
@@ -718,10 +720,10 @@ impl<'w> MobSim<'w> {
 
             // --- nearest player -------------------------------------------
             // Fed with **no range cut**, deliberately: vanilla's range for this
-            // lives in the *goal*'s targeting conditions (`LookAtPlayerGoal`
+            // lives in the *goal*'s targeting conditions (`WatchPlayerGoal`
             // takes a look-distance, 6.0F or 8.0F per species,
             // set in its own constructor), not on the mob, and our
-            // `LookAtPlayerGoal::can_use` applies exactly that cut itself
+            // `WatchPlayerGoal::can_use` applies exactly that cut itself
             // (`goals.rs`). Cutting here as well would silently take the
             // minimum of two ranges and make the goal's own parameter a lie.
             nearest_player[i] =
@@ -790,6 +792,29 @@ impl<'w> MobSim<'w> {
                 );
             }
 
+            // --- raid centre ----------------------------------------------
+            raid_centre[i] = self
+                .raid_containing_raider(me.id)
+                .and_then(|id| self.raids.get(&id))
+                .filter(|raid| raid.status == super::raid::RaidStatus::Ongoing)
+                .map(|raid| raid.center);
+
+            // --- begging ---------------------------------------------------
+            // The nearest player within 8 blocks, and only if that player is
+            // the one holding a bone or wolf food.
+            if species == "wolf" {
+                let foods = species::breeding_food("wolf");
+                beg[i] = nearest_by(&self.players, pos, |p| p.perception.position, |_| true, Some((8.0, 8.0)))
+                    .filter(|&at| {
+                        self.players.iter().any(|p| {
+                            p.perception.position == at
+                                && p.perception.held_item.as_ref().is_some_and(|item| {
+                                    item.path() == "bone" || foods.contains(&item.path())
+                                })
+                        })
+                    });
+            }
+
             // --- avoid threat ---------------------------------------------
             let avoided = species::avoided_species(&species);
             if !avoided.is_empty() {
@@ -797,8 +822,12 @@ impl<'w> MobSim<'w> {
                     &self.mobs,
                     pos,
                     SimMob::position,
-                    |other| other.id != me.id && avoided.contains(&other.entity_type().path()),
-                    Some((AVOID_RANGE, AVOID_RANGE_Y)),
+                    |other| {
+                        other.id != me.id
+                            && avoided.contains(&other.entity_type().path())
+                            && (species != "wolf" || llama_scares_wolf(me, other, self.tick_count))
+                    },
+                    Some(if species == "wolf" { (24.0, AVOID_RANGE_Y) } else { (AVOID_RANGE, AVOID_RANGE_Y) }),
                 );
             }
             if species::flees_players(&species) {
@@ -950,7 +979,7 @@ impl<'w> MobSim<'w> {
                 let nearest = self
                     .mobs
                     .iter()
-                    .filter(|other| other.id != me.id && class_contains(class, other))
+                    .filter(|other| other.id != me.id && class_contains(class, me.entity_type().path(), other))
                     .filter(|other| {
                         let p = other.position();
                         (p.x - pos.x).abs() <= reach.0
@@ -987,7 +1016,7 @@ impl<'w> MobSim<'w> {
 
             // --- patrol group target ---------------------------------------
             // A leader never reads this — it computes its own
-            // fresh target from `LongDistancePatrolGoal` itself; only a
+            // fresh target from `PatrolRouteGoal` itself; only a
             // non-leading, still-patrolling member needs the host's census.
             // See `nearest_patrol_leader_target`'s own doc comment for why
             // this cannot reuse `nearest_by`.
@@ -1007,7 +1036,7 @@ impl<'w> MobSim<'w> {
             //
             // `0.025` is the enderman's own view-cone-size constant; this feed is per-mob, not per-species, so
             // every mob gets the same tolerance today — the only consumer is
-            // `EndermanFreezeWhenLookedAt`, so this is not yet observably
+            // `EndermanFreezeUnderGazeGoal`, so this is not yet observably
             // wrong, but a second gaze-gated species with a different
             // `coneSize` would need this to become species-aware.
             let mob_eye = Vec3::new(pos.x, pos.y + f64::from(me.shape().height) * 0.85, pos.z);
@@ -1057,6 +1086,7 @@ impl<'w> MobSim<'w> {
         // `mobs` field, so this and that are disjoint borrows regardless.
         let day_time = self.day_time;
         let universal_anger = self.universal_anger;
+        let mob_griefing = self.mob_griefing;
         let block_center = |p: BlockPos| {
             Vec3::new(f64::from(p.x) + 0.5, f64::from(p.y) + 0.5, f64::from(p.z) + 0.5)
         };
@@ -1084,6 +1114,8 @@ impl<'w> MobSim<'w> {
             m.mob
                 .set_nearest_player(nearest_player[i])
                 .set_temptation(temptation[i])
+                .set_begging_player(beg[i])
+                .set_raid_center(raid_centre[i])
                 .set_avoid_threat(threat[i])
                 // The sim has incremented this every tick since long before
                 // this mob's record, but it never crossed the
@@ -1112,7 +1144,8 @@ impl<'w> MobSim<'w> {
                 .set_sniffer_dig_target(m.sniffer_dig_target)
                 .set_ticks_since_shoulder_dismount(shoulder_dismount_ticks)
                 .set_day_time(day_time)
-                .set_universal_anger(universal_anger);
+                .set_universal_anger(universal_anger)
+                .set_mob_griefing(mob_griefing);
             m.class_target_ids.clear();
             for class in TargetClass::ALL {
                 if m.target_classes.contains(class) {
@@ -1129,7 +1162,7 @@ impl<'w> MobSim<'w> {
 }
 
 /// Whether `other` belongs to `class`.
-fn class_contains(class: TargetClass, other: &SimMob) -> bool {
+fn class_contains(class: TargetClass, asking: &str, other: &SimMob) -> bool {
     if other.health <= 0.0 {
         return false;
     }
@@ -1148,6 +1181,7 @@ fn class_contains(class: TargetClass, other: &SimMob) -> bool {
         TargetClass::Endermite => species == "endermite",
         TargetClass::Guardian => matches!(species, "guardian" | "elder_guardian"),
         TargetClass::Hostile => species::is_hostile_species(other.entity_type()),
+        TargetClass::OtherSpecies => species != asking,
     }
 }
 
@@ -1156,7 +1190,15 @@ fn class_search_reach(class: TargetClass, follow_range: f64) -> (f64, f64) {
     match class {
         // A look-at goal brings its own distance, a sphere.
         TargetClass::Guardian => (12.0, 12.0),
+        TargetClass::OtherSpecies => (7.0, 7.0),
         _ => (follow_range, 4.0),
     }
 }
 
+
+/// Whether `llama` frightens `wolf` this tick: only an untamed wolf flees, and
+/// a stronger llama frightens it more often (strength against a draw in `0..5`).
+fn llama_scares_wolf(wolf: &SimMob<'_>, llama: &SimMob<'_>, tick: u64) -> bool {
+    !wolf.is_tame()
+        && appearance::llama_strength(llama.uuid()) >= appearance::tick_roll(wolf.uuid(), tick, 5)
+}

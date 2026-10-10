@@ -48,10 +48,10 @@ pub static BAT: &[Registration] = &[];
 
 /// The phantom: strategy, sweep and circle goals, and the player target scan.
 pub static PHANTOM: &[Registration] = &[
-    Registration::goal(1, "Phantom.PhantomAttackStrategyGoal", attack_strategy),
-    Registration::goal(2, "Phantom.PhantomSweepAttackGoal", sweep_attack),
-    Registration::goal(3, "Phantom.PhantomCircleAroundAnchorGoal", circle_around_anchor),
-    Registration::target(1, "Phantom.PhantomAttackPlayerTargetGoal", attack_player_target),
+    Registration::goal(1, "phantom.attack_strategy", attack_strategy),
+    Registration::goal(2, "phantom.sweep_attack", sweep_attack),
+    Registration::goal(3, "phantom.circle_anchor", circle_around_anchor),
+    Registration::target(1, "phantom.player_target", attack_player_target),
 ];
 
 fn attack_strategy(_ctx: &SpeciesContext) -> Box<dyn Goal> {

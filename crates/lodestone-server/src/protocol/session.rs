@@ -372,14 +372,14 @@ pub enum MetadataField {
     /// index 18. See [`TamableFlags`](Self::TamableFlags) for why this is a
     /// separate variant.
     ///
-    /// Only the real tame bit (`0x02`) is modelled. The real bred bit (`0x08`), eating bit
-    /// (`0x10`), standing bit (`0x20`) and open-mouth bit (`0x40`) have no
-    /// server-side state to drive them yet — the values are transcribed from
-    /// the real abstract horse's own constants so the next one to be wired does not have to
-    /// be looked up again.
+    /// The tame bit (`0x02`) and the standing bit (`0x20`) are modelled. The bred
+    /// bit (`0x08`), eating bit (`0x10`) and open-mouth bit (`0x40`) have no
+    /// server-side state to drive them yet.
     HorseFlags {
         /// `0x02` — the real abstract horse's own is-tamed query.
         tame: bool,
+        /// `0x20` — rearing up.
+        standing: bool,
     },
     /// Whether this mob is a baby — the real ageable-mob's own baby field for the
     /// breedable-animal family (cow, sheep, pig, chicken, rabbit, wolf), and
@@ -671,6 +671,15 @@ pub enum MetadataField {
         /// Whether the wool has been sheared off.
         sheared: bool,
     },
+    /// A turtle's carried-egg flag (index 18) and laying flag (index 19).
+    TurtleEgg {
+        /// Whether the turtle carries an egg.
+        has_egg: bool,
+        /// Whether the turtle is digging to lay it.
+        laying: bool,
+    },
+    /// Whether a wolf is begging (index 20).
+    WolfInterested(bool),
     /// A wolf's collar dye ordinal (index 21).
     WolfCollar(u8),
     /// A cat's collar dye ordinal (index 23).

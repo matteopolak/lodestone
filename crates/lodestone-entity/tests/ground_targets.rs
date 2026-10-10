@@ -83,12 +83,12 @@ fn ground_destinations_snap_to_the_surface() {
 #[test]
 fn a_melee_chase_repaths_on_its_countdown_not_every_tick() {
     use lodestone_entity::ai::GoalSelector;
-    use lodestone_entity::ai::goals::MeleeAttackGoal;
+    use lodestone_entity::ai::goals::MeleeStrikeGoal;
 
     // Slow enough not to arrive within the run.
     let mut mob = NavigatingMob::new(&Plateau, MobShape::land(0.6, 1.95), Vec3::new(-2.5, 0.0, 0.5), 0.05, 64, 7, 63);
     let mut ai = GoalSelector::new();
-    ai.add(1, Box::new(MeleeAttackGoal::new(0.05, 1.0)));
+    ai.add(1, Box::new(MeleeStrikeGoal::new(0.05, 1.0)));
     for tick in 0..120 {
         let wobble = if tick % 2 == 0 { 0.0 } else { 2.0 };
         mob.set_attack_target(Some(Vec3::new(-0.5 + wobble, 0.0, 0.5)));

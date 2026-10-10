@@ -566,7 +566,7 @@ mod warden_anger_tests {
         for t in 0..MAX_ANGER {
             sim.tick();
             // Pinned back every tick: a real `pig` carries its own
-            // `RandomStrollGoal` and, left alone, wanders roughly as fast as
+            // `WanderGoal` and, left alone, wanders roughly as fast as
             // the warden closes — this test's subject is whether the warden
             // *chases*, not an unrelated race against a second mob's own
             // wander RNG. Re-teleporting isolates that one variable, the

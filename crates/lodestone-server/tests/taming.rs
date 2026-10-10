@@ -456,7 +456,7 @@ fn feeding_a_hurt_pet_heals_it_and_feeding_a_healthy_one_breeds_it() {
 // Ownership reaching behaviour
 // ---------------------------------------------------------------------------
 
-/// `SitWhenOrderedToGoal` and `FollowOwnerGoal` were `Missing` rows in the wolf's
+/// `SitOnCommandGoal` and `AccompanyOwnerGoal` were `Missing` rows in the wolf's
 /// roster table because no owner could be a player. This gate drives the **real**
 /// spawn path (never `add_goal`) and asserts both directions of the one switch
 /// that separates them, because either alone is satisfied by a pet that never
@@ -508,7 +508,7 @@ fn a_tamed_wolf_sits_when_ordered_and_walks_to_its_owner_when_not() {
 /// reported gap: cat and parrot were tameable and ownable with no roster
 /// entry at all, so a tamed one could be owned and would never sit or follow.
 ///
-/// `FollowOwnerGoal(1.0, 10.0F, 5.0F)` (vanilla's own cat goal registration): a cat
+/// `AccompanyOwnerGoal(1.0, 10.0F, 5.0F)` (vanilla's own cat goal registration): a cat
 /// stops **five** blocks out, not the wolf's two, so the final-position band
 /// below is what actually discriminates "the cat's own row" from "a copy of
 /// the wolf's row" — a `> sat_at.x + 2.0` check alone would pass either way.
@@ -568,7 +568,7 @@ fn a_tamed_cat_sits_when_ordered_and_walks_to_its_owner_when_not() {
 /// Same shape again, for the **parrot** — the species whose taming mechanism
 /// deliberately does *not* auto-sit (`docs/taming-and-breeding.md` §2), which
 /// this gate asserts as its own explicit step rather than assuming it from
-/// the cat/wolf pattern. `FollowOwnerGoal(1.0, 5.0F, 1.0F)`
+/// the cat/wolf pattern. `AccompanyOwnerGoal(1.0, 5.0F, 1.0F)`
 /// (vanilla's own parrot goal registration) is the tightest follow distance in the
 /// tameable set, which the final-position band below is chosen to separate
 /// from both the wolf's and the cat's.
@@ -595,7 +595,7 @@ fn a_tamed_parrot_does_not_auto_sit_but_can_still_be_ordered_to_and_follows_tigh
 
     // Right-click again, empty-handed: `interact_tamable`'s last arm, the
     // sit toggle — present because vanilla's own parrot goal registration really does register
-    // `SitWhenOrderedToGoal`, only the auto-sit-on-tame side effect is
+    // `SitOnCommandGoal`, only the auto-sit-on-tame side effect is
     // parrot-specific. Removing the roster row for "the parrot doesn't sit"
     // would make this assertion fail.
     sim.interact(parrot, alice(), None);
@@ -621,14 +621,14 @@ fn a_tamed_parrot_does_not_auto_sit_but_can_still_be_ordered_to_and_follows_tigh
     );
 
     sim.get_mut(parrot).expect("alive").set_ordered_to_sit(false);
-    // Vanilla's own parrot goal registration also registers `LookAtPlayerGoal(Player)` at
-    // priority 1 — strictly outranking `FollowOwnerGoal`'s priority 2 — and
-    // both claim the LOOK flag (`FollowOwnerGoal` alongside MOVE, so it keeps
+    // Vanilla's own parrot goal registration also registers `WatchPlayerGoal(Player)` at
+    // priority 1 — strictly outranking `AccompanyOwnerGoal`'s priority 2 — and
+    // both claim the LOOK flag (`AccompanyOwnerGoal` alongside MOVE, so it keeps
     // facing its owner while walking). `GoalSelector::update` evicts a
     // preempted goal on *any* contested flag, not just the one the challenger
-    // wanted, so a `LookAtPlayerGoal` roll (`mob.next_f32() >=
+    // wanted, so a `WatchPlayerGoal` roll (`mob.next_f32() >=
     // probability`, real per-tick RNG, not scripted) can stop the parrot's
-    // navigation mid-approach. `FollowOwnerGoal::can_use` then requires
+    // navigation mid-approach. `AccompanyOwnerGoal::can_use` then requires
     // distance `>= start_distance` (5.0) to resume — same as vanilla's own
     // `canUse`, checked on the *restart* path rather than the continue one —
     // so a parrot interrupted while already inside that band cannot resume on
@@ -987,7 +987,7 @@ fn feeding_two_cows_wheat_breeds_them_once_and_pops_an_orb() {
     assert_eq!(sim.len(), 2, "no child before the goal has run");
     assert_eq!(sim.orb_count(), 0);
 
-    // `BreedGoal.BREED_TIME` is 60 ticks together within 3 blocks.
+    // `MateGoal.BREED_TIME` is 60 ticks together within 3 blocks.
     sim.tick_for(120);
 
     assert_eq!(sim.len(), 3, "exactly one child, not two");
@@ -1275,7 +1275,7 @@ fn a_tamed_mob_streams_the_flag_variant_its_own_class_uses() {
         if !tamed
             .metadata
             .iter()
-            .any(|f| matches!(f, MetadataField::HorseFlags { tame: true }))
+            .any(|f| matches!(f, MetadataField::HorseFlags { tame: true, .. }))
         {
             mismatches.push(format!(
                 "{species}: expected HorseFlags {{ tame: true }}, got {:?}",

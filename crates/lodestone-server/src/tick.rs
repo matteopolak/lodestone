@@ -1837,6 +1837,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     // returning would make worldgen latency observable as lost gameplay.
     let mut pending_detonations: Vec<Detonation> = Vec::new();
     let mut pending_grazes: Vec<(BlockPos, EatenBlock)> = Vec::new();
+    let mut pending_block_edits: Vec<lodestone_entity::ai::BlockEdit> = Vec::new();
     let mut pending_projectile_block_hits: Vec<crate::mobs::ProjectileBlockHit> = Vec::new();
     let mut pending_lightning_fires: Vec<BlockPos> = Vec::new();
     let mut pending_falling_block_effects: Vec<crate::gravity_tick::FallingBlockEffect> = Vec::new();
@@ -2109,6 +2110,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             sim.set_spawn_monsters_enabled(world_state.spawn_mobs());
             sim.set_difficulty(world_state.difficulty().0);
             sim.set_universal_anger(world_state.universal_anger());
+            sim.set_mob_griefing(world_state.mob_griefing());
         });
         let players: Vec<lodestone_model::Vec3> =
             mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());
@@ -2462,7 +2464,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // the detonation drain above for the same structural reason —
         // `MobSim::tick` holds `world: &'w ChunkWorld` **immutably**, so it can
         // only record the eat as an intent; this loop is the one place that owns
-        // a mutable `ChunkSource` and can apply it. `EatBlockGoal` reaching this
+        // a mutable `ChunkSource` and can apply it. `GrazeGoal` reaching this
         // drain is what makes the grass actually disappear rather than the goal
         // counting down against a world that never changes.
         //
@@ -2520,6 +2522,36 @@ async fn run_tick_loop_with_weather_impl<W>(
                 break;
             }
             block_tick_out.publish_change(target.x, target.y, target.z, broken, state);
+        }
+        // Block changes mobs asked for (a turtle laying, a zombie or a trampling
+        // foot breaking an egg). An edit applies only if its cell still holds what
+        // the mob saw; a cell that is not resident right now waits for the next tick.
+        pending_block_edits.extend(mobs.with(MobSim::take_block_edits));
+        let mut edits = std::mem::take(&mut pending_block_edits).into_iter();
+        while let Some(edit) = edits.next() {
+            let (x, y, z) = edit.cell;
+            let Some(old) = resident_tick_state_id(&*world, x, y, z) else {
+                pending_block_edits.push(edit);
+                pending_block_edits.extend(edits);
+                break;
+            };
+            let holds = match edit.expect {
+                lodestone_entity::ai::BlockExpect::Air => lodestone_entity::ai::turtle_egg::is_air(old),
+                lodestone_entity::ai::BlockExpect::State(state) => old == state,
+                lodestone_entity::ai::BlockExpect::Block(block) => old.block() == block,
+            };
+            if !holds {
+                continue;
+            }
+            let new = edit.set.unwrap_or_else(crate::chunk::air_state);
+            if edit.set.is_none() || !lodestone_entity::ai::turtle_egg::is_air(old) {
+                if let Some(effect) = crate::effects::block_destroyed_id(BlockPos::new(x, y, z), old) {
+                    block_tick_out.publish_effect(effect);
+                }
+            }
+            if resident_tick_set_block(&*world, x, y, z, new) {
+                block_tick_out.publish_change(x, y, z, old, new);
+            }
         }
         // Bees go into and come out of hives, and nectar carriers tend crops.
         // `MobSim` holds the world immutably, so it records both as intents; the
@@ -4301,6 +4333,11 @@ async fn run_tick_loop_with_weather_impl<W>(
         // [`ChunkStore`] before the resident boundary is first admitted. See
         // [`INITIAL_RANDOM_TICK_DEFERRAL_TICKS`] for the arithmetic.
         let tick_speed = world_state.random_tick_speed();
+        random_ticks.set_hatch_chance(if follow_dimension == crate::dimension::Dimension::Overworld {
+            crate::random_tick::turtle_egg_hatch_chance(world_state.time().day_time)
+        } else {
+            crate::random_tick::turtle_egg_hatch_chance(0)
+        });
         if game_tick > INITIAL_RANDOM_TICK_DEFERRAL_TICKS && tick_speed > 0 {
             clock.record_owner_work(OwnerTickStats {
                 random_tick_owned_chunks: area.owned_chunks().len() as u64,
@@ -4336,6 +4373,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                             // positions next tick, hit the same cold neighbour, and
                             // stop every later chunk's random ticks for as long as
                             // that neighbour stays unloaded.
+                            candidate_random_ticks.take_hatched();
                             random_ticks = candidate_random_ticks;
                             continue 'random_chunks;
                         }
@@ -4347,6 +4385,20 @@ async fn run_tick_loop_with_weather_impl<W>(
                             publish_moving_piston(&block_tick_out, &*block_ticks, x, y, z, event.to);
                             shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, x, y, z, event.to);
                             block_tick_out.publish_change(x, y, z, event.from, event.to);
+                            if event.to == crate::chunk::air_state()
+                                && lodestone_entity::ai::turtle_egg::counts(event.from).is_some()
+                                && let Some(effect) = crate::effects::block_destroyed_id(BlockPos::new(x, y, z), event.from)
+                            {
+                                block_tick_out.publish_effect(effect);
+                            }
+                        }
+                        let hatched = candidate_random_ticks.take_hatched();
+                        if !hatched.is_empty() {
+                            mobs.with(|sim| {
+                                for hatch in hatched {
+                                    sim.hatch_turtles(hatch.pos, hatch.eggs);
+                                }
+                            });
                         }
                         random_ticks = candidate_random_ticks;
                     }
@@ -5561,7 +5613,7 @@ mod tests {
     // ---------------------------------------------------------------------
     // The graze drain connects `MobSim::take_grazes` to the live world.
     // Without it, the simulation has no
-    // consumer anywhere — a sheep ran a real `EatBlockGoal`, recorded a real
+    // consumer anywhere — a sheep ran a real `GrazeGoal`, recorded a real
     // eat, and the world never changed. These gates drive the **production
     // loop**, so they fail if the drain is removed from `run_tick_loop` rather
     // than merely if `take_grazes` regresses.
@@ -5640,7 +5692,7 @@ mod tests {
     /// Ticks the real [`run_tick_loop`] over a sheep on grass until the loop
     /// applies a block change, and returns `(world edits, feed publications)`.
     ///
-    /// The sheep comes from [`MobSim::spawn_species`], so its `EatBlockGoal`
+    /// The sheep comes from [`MobSim::spawn_species`], so its `GrazeGoal`
     /// comes from the per-species roster — **not** hand-installed. Installing it
     /// by hand *as well* is a known trap: two goals at the same priority each
     /// draw their own `next_i32(interval)`, and an interval gate built that way
@@ -5929,7 +5981,7 @@ mod tests {
     /// its `WaterAvoidingRandomStrollGoal` is live, so it wanders before it eats.
     /// Both arms observed the graze at `(-5, 4)`, not `(0, 0)`. Pinning the spawn
     /// column would have been the same mistake as an earlier gate in this repo
-    /// that pinned a mob to `(0,0,0)` while `RandomStrollGoal` legitimately
+    /// that pinned a mob to `(0,0,0)` while `WanderGoal` legitimately
     /// walked it to `(-2,0,-2)`.
     ///
     /// `y` remains asserted exactly, because `y` is the only coordinate that
@@ -5941,7 +5993,7 @@ mod tests {
 
     /// How long to let the loop run before giving up. An adult's mean grazing
     /// interval is `adjustedTickDelay(1000)` = 500 ticks
-    /// (`EatBlockGoal::ADULT_INTERVAL`), and the eat lands
+    /// (`GrazeGoal::ADULT_INTERVAL`), and the eat lands
     /// `EAT_ANIMATION_TICKS - CONSUME_AT` ticks into the animation after that,
     /// so a few thousand ticks is generous without being unbounded.
     const GRAZE_TICK_BUDGET: usize = 4_000;

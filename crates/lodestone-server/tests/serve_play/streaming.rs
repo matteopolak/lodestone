@@ -45,7 +45,7 @@ async fn a_player_moved_packet_feeds_mob_perception_through_the_real_connection(
         mobs.with(|sim| sim.get(cow_id).expect("alive").nearest_player()),
         None,
         "precondition: the cow must perceive no player yet — this is the state \
-         LookAtPlayerGoal and TemptGoal were permanently stuck in"
+         WatchPlayerGoal and LureGoal were permanently stuck in"
     );
 
     let conn_mobs = mobs.clone();

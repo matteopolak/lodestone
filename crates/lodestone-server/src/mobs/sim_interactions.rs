@@ -658,7 +658,7 @@ impl<'w> MobSim<'w> {
         let Some(mob) = self.get_mut(mob_id) else {
             return false;
         };
-        if mob.age() != 0 || mob.is_in_love() {
+        if mob.age() != 0 || mob.is_in_love() || mob.mob.carries_egg() {
             return false;
         }
         mob.set_in_love();
@@ -767,6 +767,18 @@ impl<'w> MobSim<'w> {
                 }
             }
 
+            // A turtle pair produces an egg for the breeder to lay, not a child.
+            if species.path() == "turtle" {
+                if let Some(m) = self.get_mut(breeder_id) {
+                    m.mob.restore_has_egg(true);
+                }
+                if self.mob_drops {
+                    let value = self.breed_rng.next_int(7) + 1;
+                    self.spawn_orb(value, breeder_pos, Vec3::new(0.0, 0.0, 0.0));
+                }
+                continue;
+            }
+
             // The child spawns through `spawn_species`, not `spawn_with_type`,
             // so it inherits the same goal set and category any other mob of
             // its species gets — a child that could not act would be a fresh
@@ -810,6 +822,18 @@ impl<'w> MobSim<'w> {
                 let value = self.breed_rng.next_int(7) + 1;
                 self.spawn_orb(value, breeder_pos, Vec3::new(0.0, 0.0, 0.0));
             }
+        }
+    }
+
+    /// Opens a turtle egg block at `pos`: one baby turtle per egg, each with the
+    /// egg's cell as its nest.
+    pub fn hatch_turtles(&mut self, pos: (i32, i32, i32), eggs: u32) {
+        let key: ResourceKey = "minecraft:turtle".parse().expect("static key");
+        for i in 0..eggs {
+            let at = Vec3::new(f64::from(pos.0) + 0.3 + f64::from(i) * 0.2, f64::from(pos.1), f64::from(pos.2) + 0.3);
+            let turtle = self.spawn_species(key.clone(), at);
+            turtle.set_age(BABY_START_AGE);
+            turtle.mob.set_nest(Some(Vec3::new(f64::from(pos.0) + 0.5, f64::from(pos.1), f64::from(pos.2) + 0.5)));
         }
     }
 

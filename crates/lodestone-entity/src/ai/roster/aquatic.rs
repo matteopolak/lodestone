@@ -16,7 +16,7 @@
 
 use crate::ai::goal::{FlagSet, Goal, reduced_tick_delay};
 use crate::ai::mob::{MobController, distance_sqr};
-use crate::ai::goals::{AvoidEntityGoal, DriftFleeGoal, DriftGoal, PanicGoal, RandomStrollGoal};
+use crate::ai::goals::{FleeEntityGoal, DriftFleeGoal, DriftGoal, FleeInPanicGoal, WanderGoal};
 
 use super::{Registration, SpeciesContext};
 
@@ -34,38 +34,38 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// A schooling fish: the base set plus following a flock leader at priority 5.
 pub static SCHOOLING_FISH: &[Registration] = &[
     Registration::goal(0, "panic", panic),
-    Registration::goal(2, "avoid player", avoid_player),
-    Registration::goal(4, "swim stroll", swim_stroll),
-    Registration::goal(5, "follow flock leader", follow_flock_leader),
+    Registration::goal(2, "avoid_player", avoid_player),
+    Registration::goal(4, "swim_stroll", swim_stroll),
+    Registration::goal(5, "follow_school_leader", follow_flock_leader),
 ];
 
 /// The pufferfish: the base set plus the puff goal at priority 1.
 pub static PUFFERFISH: &[Registration] = &[
     Registration::goal(0, "panic", panic),
-    Registration::goal(2, "avoid player", avoid_player),
-    Registration::goal(4, "swim stroll", swim_stroll),
+    Registration::goal(2, "avoid_player", avoid_player),
+    Registration::goal(4, "swim_stroll", swim_stroll),
     Registration::goal(1, "puff", puff),
 ];
 
 /// Squid and glow squid: pulsed drifting, and an escape from whoever hurt them.
 pub static SQUID: &[Registration] = &[
     Registration::goal(0, "drift", drift),
-    Registration::goal(1, "drift flee", drift_flee),
+    Registration::goal(1, "drift_flee", drift_flee),
 ];
 
 fn follow_flock_leader(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(FollowFlockLeaderGoal { speed: ctx.speed, until_path: 0 })
+    Box::new(FollowSchoolLeaderGoal { speed: ctx.speed, until_path: 0 })
 }
 
 /// Swims after the school leader while within 11 blocks of it, repathing every
 /// ten goal ticks; a leader with followers of its own never follows.
 #[derive(Debug)]
-struct FollowFlockLeaderGoal {
+struct FollowSchoolLeaderGoal {
     speed: f64,
     until_path: i32,
 }
 
-impl Goal for FollowFlockLeaderGoal {
+impl Goal for FollowSchoolLeaderGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::none()
     }
@@ -132,22 +132,22 @@ fn drift_flee(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 }
 
 fn panic(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(PanicGoal::new(ctx.speed * 1.25))
+    Box::new(FleeInPanicGoal::new(ctx.speed * 1.25))
 }
 
 /// Flee players within 8 blocks at 1.6 (1.4 when sprinting away); the goal
 /// has a single speed, so it uses the close-range figure.
 fn avoid_player(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(AvoidEntityGoal::new(8.0, ctx.speed * 1.4))
+    Box::new(FleeEntityGoal::new(8.0, ctx.speed * 1.4))
 }
 
 fn swim_stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(FishStrollGoal(RandomStrollGoal::new(ctx.speed).with_interval(40)))
+    Box::new(FishStrollGoal(WanderGoal::new(ctx.speed).with_interval(40)))
 }
 
 /// The swim stroll, which a school follower never starts.
 #[derive(Debug)]
-struct FishStrollGoal(RandomStrollGoal);
+struct FishStrollGoal(WanderGoal);
 
 impl Goal for FishStrollGoal {
     fn flags(&self) -> FlagSet {

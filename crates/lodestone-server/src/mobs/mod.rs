@@ -1880,7 +1880,7 @@ pub struct SimMob<'w> {
     /// moment its owner left the player list, and goals read this.
     tame: bool,
     /// Vanilla's own "ordered to sit" field — the sitting **intent** an owner's
-    /// right-click toggles, which is what `SitWhenOrderedToGoal` reads. NBT
+    /// right-click toggles, which is what `SitOnCommandGoal` reads. NBT
     /// round-trips it as `Sitting`.
     ///
     /// Kept here rather than only on the [`NavigatingMob`] because it is
@@ -2510,6 +2510,12 @@ pub struct MobSim<'w> {
     /// Crop states bees grew this tick, awaiting the driver's block write.
     /// Drained by [`take_crop_growths`](Self::take_crop_growths).
     pending_crop_growths: Vec<(BlockPos, lodestone_data::block_states::StateId)>,
+    /// World changes mobs asked for, drained by [`take_block_edits`](Self::take_block_edits).
+    pending_block_edits: Vec<lodestone_entity::ai::BlockEdit>,
+    /// Rolls whether a mob standing on a turtle egg crushes it.
+    trample_rng: SpawnRng,
+    /// The `mob_griefing` game rule.
+    mob_griefing: bool,
     /// Players struck by a hostile mob's melee attack this tick, awaiting the
     /// driver's `PlayerVitals::apply_damage` call — the same
     /// handoff shape as [`pending_detonations`](Self::pending_detonations)
@@ -3274,6 +3280,10 @@ const TAME_ROLL_SEED: u64 = 0x5441_4d45_5f52_4f4c;
 /// Default seed for [`MobSim::zombie_conversion_rng`]. See [`TAME_ROLL_SEED`]
 /// for why it is separate. ASCII `"ZVILLAGE"`.
 const ZOMBIE_VILLAGER_CONVERSION_SEED: u64 = 0x5A56_494C_4C41_4745;
+
+/// Default seed for [`MobSim::trample_rng`]. See [`TAME_ROLL_SEED`] for why it
+/// is separate.
+const TRAMPLE_SEED: u64 = 0x5452_414d_504c_4552;
 
 /// Default seed for [`MobSim::gossip_spread_rng`]. See [`TAME_ROLL_SEED`] for
 /// why it is separate. ASCII `"GOSSIPRN"`.

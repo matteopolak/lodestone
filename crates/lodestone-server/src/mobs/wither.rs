@@ -138,7 +138,7 @@ pub const MAX_HEALTH: f32 = 300.0;
 pub(super) const WITHER_SKULL_SEED: u64 = 0x5749_5448_4552_2121;
 
 /// A player within this many blocks (squared) counts as a live skull target
-/// — vanilla's own `RangedAttackGoal(this, 1.0, 40, 20.0F)` uses `20.0F` as
+/// — vanilla's own `RangedStrikeGoal(this, 1.0, 40, 20.0F)` uses `20.0F` as
 /// its *attack radius* parameter (squared internally); reused here as the
 /// single flat threshold standing in for vanilla's several different named
 /// ranges, exactly as `mobs::dragon`'s own `NEARBY_PLAYER_RANGE_SQ` does.

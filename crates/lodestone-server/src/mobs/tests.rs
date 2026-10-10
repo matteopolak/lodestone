@@ -184,3 +184,7 @@ mod leap_tests;
 #[cfg(test)]
 #[path = "tests/class_targets.rs"]
 mod class_targets_tests;
+#[path = "tests/turtle_eggs.rs"]
+mod turtle_eggs_tests;
+#[path = "tests/horse_parrot_rows.rs"]
+mod horse_parrot_rows_tests;

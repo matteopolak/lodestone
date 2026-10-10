@@ -6,7 +6,7 @@
 //! **not one read a block**, so every vanilla goal whose predicate consults the
 //! world was inexpressible; a sheep that eats grass could not ask whether there
 //! was grass. This drives the seam that fixed it end to end: a real
-//! [`NavigatingMob`] over a real [`PathWorld`], `EatBlockGoal` installed only by
+//! [`NavigatingMob`] over a real [`PathWorld`], `GrazeGoal` installed only by
 //! [`goals_for`], and a world that *applies* the drained eat intent, so the
 //! assertion is on the block, not on a counter.
 //!
@@ -31,13 +31,13 @@
 //! # The goal now comes from the roster, and this file no longer stubs it
 //!
 //! [`graze`] used to install the roster's whole set **and then add
-//! `EatBlockGoal` at its jar priority of 5**, because the sheep's row was
+//! `GrazeGoal` at its jar priority of 5**, because the sheep's row was
 //! `Coverage::Missing` in `ai/roster/passive.rs` and flipping it was a brokered
 //! patch. That row now carries the goal, so both stub `add` calls are gone and
 //! every goal these gates observe arrives through [`goals_for`].
 //!
 //! **Leaving the stub in place would have been a silent double-install, not a
-//! harmless duplicate.** Two `EatBlockGoal`s at priority 5 each draw their own
+//! harmless duplicate.** Two `GrazeGoal`s at priority 5 each draw their own
 //! `next_i32(interval)`, so grazing happens at roughly twice the rate:
 //! `the_grazing_interval_is_the_halved_delay_and_not_the_jar_literal` measured
 //! **627** eats against its predicted 444 the moment the row flipped, which is
@@ -51,7 +51,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use lodestone_entity::ai::goals::EatBlockGoal;
+use lodestone_entity::ai::goals::GrazeGoal;
 use lodestone_entity::ai::mob::EatenBlock;
 use lodestone_entity::ai::navigating_mob::BABY_START_AGE;
 use lodestone_entity::ai::{GoalSelector, NavigatingMob, SpeciesContext, goals_for};
@@ -144,7 +144,7 @@ impl GrassWorld {
     }
 
     /// What the brokered `MobSim::tick` drain owes each eaten block
-    /// (`EatBlockGoal.tick`). `mobGriefing` is assumed on, which is
+    /// (`GrazeGoal.tick`). `mobGriefing` is assumed on, which is
     /// vanilla's default.
     fn apply(&self, what: EatenBlock, x: i32, z: i32) {
         match what {
@@ -257,7 +257,7 @@ fn graze(world: &GrassWorld, baby: bool, ticks: usize, deplete: bool) -> Graze {
                 // The animation runs for EAT_ANIMATION_TICKS and consumes at
                 // CONSUME_AT, so the mob has been standing still for the
                 // difference. Measure it from the recorded positions.
-                let span = (EatBlockGoal::EAT_ANIMATION_TICKS - EatBlockGoal::CONSUME_AT) as usize;
+                let span = (GrazeGoal::EAT_ANIMATION_TICKS - GrazeGoal::CONSUME_AT) as usize;
                 let first = t.saturating_sub(span);
                 steps_while_eating = positions[first..=t.min(positions.len() - 1)]
                     .windows(2)
@@ -294,7 +294,7 @@ fn a_sheep_on_grass_eats_and_the_block_becomes_dirt_a_sheep_on_stone_does_not() 
     assert!(
         !on_grass.eaten.is_empty(),
         "a sheep stood on grass for {ticks} ticks and never grazed. Either the \
-         roster does not install EatBlockGoal, or block_cues_below is not \
+         roster does not install GrazeGoal, or block_cues_below is not \
          reaching the world"
     );
     assert!(
@@ -316,7 +316,7 @@ fn a_sheep_on_grass_eats_and_the_block_becomes_dirt_a_sheep_on_stone_does_not() 
     let on_stone = graze(&stone, false, ticks, true);
     assert!(
         on_stone.eaten.is_empty(),
-        "a sheep on stone grazed {} times. EatBlockGoal's predicate is not \
+        "a sheep on stone grazed {} times. GrazeGoal's predicate is not \
          reading the block, so the grass arm above proves nothing",
         on_stone.eaten.len()
     );
@@ -329,7 +329,7 @@ fn a_sheep_on_grass_eats_and_the_block_becomes_dirt_a_sheep_on_stone_does_not() 
 
 /// The other branch of vanilla's predicate: an *edible* block at the mob's own
 /// position is destroyed in place rather than turning the floor to dirt
-/// (`EatBlockGoal.tick`'s edible-at-feet branch vs its grass-to-dirt branch),
+/// (`GrazeGoal.tick`'s edible-at-feet branch vs its grass-to-dirt branch),
 /// and it takes priority over the block below.
 #[test]
 fn an_edible_block_at_the_mobs_feet_is_eaten_in_place_and_wins_over_the_floor() {
@@ -348,7 +348,7 @@ fn an_edible_block_at_the_mobs_feet_is_eaten_in_place_and_wins_over_the_floor() 
 }
 
 /// The sheep stands still while it eats. Vanilla stops the navigation in
-/// `EatBlockGoal.start` and the goal claims MOVE, LOOK and JUMP in its
+/// `GrazeGoal.start` and the goal claims MOVE, LOOK and JUMP in its
 /// constructor's `setFlags` call so `WaterAvoidingRandomStrollGoal` at the
 /// next priority down cannot preempt it.
 ///
@@ -367,7 +367,7 @@ fn a_grazing_sheep_holds_still_for_the_whole_animation() {
     for pair in steps.windows(2) {
         assert!(
             pair[1] <= pair[0] * 0.546 + 1e-5,
-            "the sheep thrust while grazing: steps {steps:?}; EatBlockGoal must stop \
+            "the sheep thrust while grazing: steps {steps:?}; GrazeGoal must stop \
              the navigation and hold MOVE for the whole animation"
         );
     }
@@ -382,7 +382,7 @@ fn a_grazing_sheep_holds_still_for_the_whole_animation() {
 ///
 /// Vanilla's literals are `1000` and `50`, but neither is the number of ticks
 /// that elapses: `adjustedTickDelay` is `positiveCeilDiv(t, 2)` for a goal that
-/// does not override `requiresUpdateEveryTick`, and `EatBlockGoal` does not
+/// does not override `requiresUpdateEveryTick`, and `GrazeGoal` does not
 /// (`Goal.reducedTickDelay`). So the real intervals are **500 and 25**.
 ///
 /// Both hypotheses are computed from outside constants and the measurement must
@@ -403,10 +403,10 @@ fn the_grazing_interval_is_the_halved_delay_and_not_the_jar_literal() {
     let world = GrassWorld::new(Block::Grass);
     let baby = graze(&world, true, ticks, false);
 
-    let cycle = |interval: i32| (interval + EatBlockGoal::EAT_ANIMATION_TICKS) as f64;
+    let cycle = |interval: i32| (interval + GrazeGoal::EAT_ANIMATION_TICKS) as f64;
     let goal_ticks = ticks as f64 / 2.0;
-    let predicted = goal_ticks / cycle(EatBlockGoal::BABY_INTERVAL);
-    let unhalved = goal_ticks / cycle(EatBlockGoal::BABY_INTERVAL * 2);
+    let predicted = goal_ticks / cycle(GrazeGoal::BABY_INTERVAL);
+    let unhalved = goal_ticks / cycle(GrazeGoal::BABY_INTERVAL * 2);
     let got = baby.eaten.len() as f64;
 
     assert!(
@@ -414,8 +414,8 @@ fn the_grazing_interval_is_the_halved_delay_and_not_the_jar_literal() {
         "a baby sheep grazed {got} times in {ticks} ticks; the halved interval \
          ({} ticks) predicts {predicted:.0} and the unhalved jar literal ({}) \
          predicts {unhalved:.0}",
-        EatBlockGoal::BABY_INTERVAL,
-        EatBlockGoal::BABY_INTERVAL * 2
+        GrazeGoal::BABY_INTERVAL,
+        GrazeGoal::BABY_INTERVAL * 2
     );
     assert!(
         (got - unhalved).abs() > 0.25 * predicted,
@@ -427,13 +427,13 @@ fn the_grazing_interval_is_the_halved_delay_and_not_the_jar_literal() {
     // world, the same seed, 20× the interval.
     let adult_world = GrassWorld::new(Block::Grass);
     let adult = graze(&adult_world, false, ticks, false);
-    let adult_predicted = goal_ticks / cycle(EatBlockGoal::ADULT_INTERVAL);
+    let adult_predicted = goal_ticks / cycle(GrazeGoal::ADULT_INTERVAL);
     assert!(
         (adult.eaten.len() as f64 - adult_predicted).abs() < 0.5 * adult_predicted,
         "an adult sheep grazed {} times where {adult_predicted:.0} was predicted \
          from a {}-tick interval",
         adult.eaten.len(),
-        EatBlockGoal::ADULT_INTERVAL
+        GrazeGoal::ADULT_INTERVAL
     );
 }
 

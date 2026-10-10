@@ -412,14 +412,14 @@ fn a_player_beyond_the_look_distance_does_not_turn_the_head() {
 /// | A\* searches | **0** | 1 | 5 | 14 | 32 |
 /// | moving ticks | **0** | 27 | 87 | 337 | 929 |
 ///
-/// An undisturbed zombie's only mover is `RandomStrollGoal`, whose `can_use`
+/// An undisturbed zombie's only mover is `WanderGoal`, whose `can_use`
 /// requires `mob.next_i32(120) == 0` (`ai/goals.rs`, vanilla's 120-tick interval),
 /// so the first stroll lands somewhere between tick 200 and 400 on this mob's
 /// deterministic seed. Raising the budget would have "fixed" it while still
 /// resting the whole arm on a 1-in-120 lottery — the weakest thing the table does.
 ///
 /// Supplying a player instead exercises the zombie table's actual signature —
-/// `NearestAttackableTargetGoal` acquires, `MeleeAttackGoal` paths in — which is
+/// `NearestTargetGoal` acquires, `MeleeStrikeGoal` paths in — which is
 /// immediate and deterministic (10 searches inside 200 ticks). It is a strictly
 /// stronger claim about the same wiring.
 ///

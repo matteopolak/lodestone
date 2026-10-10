@@ -15,9 +15,9 @@ use lodestone_model::Vec3;
 ///
 /// Vanilla's own float goal (flag JUMP, updates every tick).
 #[derive(Debug)]
-pub struct FloatGoal;
+pub struct StayAfloatGoal;
 
-impl Goal for FloatGoal {
+impl Goal for StayAfloatGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Jump])
     }
@@ -42,13 +42,13 @@ impl Goal for FloatGoal {
 /// Vanilla's own move-towards-restriction goal (flag MOVE): a random point up
 /// to 16 blocks out, within a quarter turn of the direction to the home centre.
 #[derive(Debug)]
-pub struct MoveTowardsRestrictionGoal {
+pub struct ReturnToHomeAreaGoal {
     speed: f64,
     wanted: Option<Vec3>,
     claims_look: bool,
 }
 
-impl MoveTowardsRestrictionGoal {
+impl ReturnToHomeAreaGoal {
     /// Creates the goal; `speed` multiplies the mob's movement speed.
     #[must_use]
     pub fn new(speed: f64) -> Self {
@@ -67,7 +67,7 @@ impl MoveTowardsRestrictionGoal {
     }
 }
 
-impl Goal for MoveTowardsRestrictionGoal {
+impl Goal for ReturnToHomeAreaGoal {
     fn flags(&self) -> FlagSet {
         if self.claims_look {
             FlagSet::of(&[Flag::Move, Flag::Look])
@@ -141,14 +141,14 @@ impl Goal for ResetUniversalAngerGoal {
 /// Vanilla's own random-stroll goal (flag MOVE). `interval` is the reciprocal chance
 /// per tick of picking a new destination.
 #[derive(Debug)]
-pub struct RandomStrollGoal {
+pub struct WanderGoal {
     speed: f64,
     interval: i32,
     target: Option<Vec3>,
     check_no_action: bool,
 }
 
-impl RandomStrollGoal {
+impl WanderGoal {
     /// Creates a stroll goal at `speed`, choosing a new target on average once
     /// per 120 ticks (vanilla default).
     #[must_use]
@@ -169,7 +169,7 @@ impl RandomStrollGoal {
     }
 }
 
-impl Goal for RandomStrollGoal {
+impl Goal for WanderGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }
@@ -205,7 +205,7 @@ impl Goal for RandomStrollGoal {
 ///
 /// Vanilla's own look-at-player goal (flag LOOK).
 #[derive(Debug)]
-pub struct LookAtPlayerGoal {
+pub struct WatchPlayerGoal {
     look_distance: f64,
     probability: f32,
     look_time: i32,
@@ -214,7 +214,7 @@ pub struct LookAtPlayerGoal {
     class: Option<TargetClass>,
 }
 
-impl LookAtPlayerGoal {
+impl WatchPlayerGoal {
     /// Creates the goal with the given max look distance and per-tick chance.
     #[must_use]
     pub fn new(look_distance: f64, probability: f32) -> Self {
@@ -244,7 +244,7 @@ impl LookAtPlayerGoal {
     }
 }
 
-impl Goal for LookAtPlayerGoal {
+impl Goal for WatchPlayerGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Look])
     }
@@ -301,19 +301,19 @@ impl Goal for LookAtPlayerGoal {
 ///
 /// Vanilla's own random-look-around goal (flags MOVE + LOOK, updates every tick).
 #[derive(Debug)]
-pub struct RandomLookAroundGoal {
+pub struct IdleGlanceGoal {
     rel_x: f64,
     rel_z: f64,
     look_time: i32,
 }
 
-impl Default for RandomLookAroundGoal {
+impl Default for IdleGlanceGoal {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RandomLookAroundGoal {
+impl IdleGlanceGoal {
     /// Creates the goal.
     #[must_use]
     pub fn new() -> Self {
@@ -325,7 +325,7 @@ impl RandomLookAroundGoal {
     }
 }
 
-impl Goal for RandomLookAroundGoal {
+impl Goal for IdleGlanceGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
@@ -363,7 +363,7 @@ impl Goal for RandomLookAroundGoal {
 /// can see the target, and only if the target has moved a block since the last
 /// path or on a 5% roll.
 #[derive(Debug)]
-pub struct MeleeAttackGoal {
+pub struct MeleeStrikeGoal {
     valid_target: Option<TargetFilter>,
     speed: f64,
     reach_sqr: f64,
@@ -374,7 +374,7 @@ pub struct MeleeAttackGoal {
     last_checked: Option<u64>,
 }
 
-impl MeleeAttackGoal {
+impl MeleeStrikeGoal {
     /// Game ticks between eligibility checks.
     const CHECK_INTERVAL: u64 = 20;
     /// Squared target movement that forces a fresh path.
@@ -401,7 +401,7 @@ impl MeleeAttackGoal {
     }
 }
 
-impl MeleeAttackGoal {
+impl MeleeStrikeGoal {
     /// Restricts the goal to targets `filter` accepts, checked on start and on
     /// every continue test.
     #[must_use]
@@ -418,7 +418,7 @@ impl MeleeAttackGoal {
     }
 }
 
-impl Goal for MeleeAttackGoal {
+impl Goal for MeleeStrikeGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }
@@ -501,12 +501,12 @@ impl Goal for MeleeAttackGoal {
 /// `lift`. The goal runs (holding the movement and jump flags) until the mob
 /// lands.
 #[derive(Debug)]
-pub struct LeapAtTargetGoal {
+pub struct PounceGoal {
     lift: f64,
     target: Option<Vec3>,
 }
 
-impl LeapAtTargetGoal {
+impl PounceGoal {
     /// A pounce with the given vertical velocity.
     #[must_use]
     pub fn new(lift: f64) -> Self {
@@ -514,7 +514,7 @@ impl LeapAtTargetGoal {
     }
 }
 
-impl Goal for LeapAtTargetGoal {
+impl Goal for PounceGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Jump, Flag::Move])
     }
@@ -555,7 +555,7 @@ impl Goal for LeapAtTargetGoal {
 /// otherwise.
 ///
 /// Vanilla's own swelling goal (flag MOVE, ticks every frame); the creeper's
-/// own goal registration puts it at priority 2 — one below `MeleeAttackGoal`'s
+/// own goal registration puts it at priority 2 — one below `MeleeStrikeGoal`'s
 /// own priority 4 —
 /// so once eligible it preempts melee on their shared MOVE flag through
 /// [`GoalSelector`]'s ordinary priority preemption, no special case needed. A
@@ -573,13 +573,13 @@ impl Goal for LeapAtTargetGoal {
 /// no raycast primitive (see [`MobController`]'s own doc comment on why
 /// movement/perception specifics are delegated to the host), so that check is
 /// deliberately omitted — the same disclosed simplification
-/// [`MeleeAttackGoal`]'s own doc comment already makes for its reach check.
+/// [`MeleeStrikeGoal`]'s own doc comment already makes for its reach check.
 /// Distance alone is sufficient to close the bug this goal exists to fix
 /// (creepers never priming near a player).
 #[derive(Debug, Default)]
-pub struct SwellGoal;
+pub struct FuseGoal;
 
-impl SwellGoal {
+impl FuseGoal {
     /// Vanilla's proximity-squared threshold that starts the fuse (3 blocks).
     const START_RANGE_SQR: f64 = 9.0;
     /// Vanilla's retreat-squared threshold that reverses it (7 blocks).
@@ -592,7 +592,7 @@ impl SwellGoal {
     }
 }
 
-impl Goal for SwellGoal {
+impl Goal for FuseGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }
@@ -764,9 +764,9 @@ impl Goal for FloatAroundGoal {
 /// While it is bright outside and the head is bare, the mob's new paths stop
 /// short of the first sunlit waypoint.
 #[derive(Debug, Default)]
-pub struct RestrictSunGoal;
+pub struct AvoidSunlightGoal;
 
-impl Goal for RestrictSunGoal {
+impl Goal for AvoidSunlightGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::none()
     }
@@ -789,12 +789,12 @@ impl Goal for RestrictSunGoal {
 /// within 10 blocks horizontally and 3 vertically and heads for the first one
 /// the sky does not light.
 #[derive(Debug)]
-pub struct FleeSunGoal {
+pub struct SeekShadeGoal {
     speed: f64,
     hide: Option<Vec3>,
 }
 
-impl FleeSunGoal {
+impl SeekShadeGoal {
     /// Creates the goal at `speed`.
     #[must_use]
     pub fn new(speed: f64) -> Self {
@@ -802,7 +802,7 @@ impl FleeSunGoal {
     }
 }
 
-impl Goal for FleeSunGoal {
+impl Goal for SeekShadeGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }
@@ -847,18 +847,75 @@ impl Goal for FleeSunGoal {
     }
 }
 
+/// Looks at a nearby player holding something the mob wants, tilting its head.
+///
+/// Flag LOOK. The host decides who is holding something interesting; this goal
+/// owns the range cut and the 40-79 tick attention span.
+#[derive(Debug)]
+pub struct BegForFoodGoal {
+    look_distance: f64,
+    look_time: i32,
+    player: Option<Vec3>,
+}
+
+impl BegForFoodGoal {
+    /// A beg goal that watches players within `look_distance` blocks.
+    #[must_use]
+    pub fn new(look_distance: f64) -> Self {
+        Self { look_distance, look_time: 0, player: None }
+    }
+}
+
+impl Goal for BegForFoodGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Look])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        self.player = mob.begging_player().filter(|p| {
+            distance_sqr(*p, mob.position()) <= self.look_distance * self.look_distance
+        });
+        self.player.is_some()
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        self.player = mob.begging_player();
+        self.player.is_some_and(|p| {
+            distance_sqr(p, mob.position()) <= self.look_distance * self.look_distance
+        }) && self.look_time > 0
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.set_interested(true);
+        self.look_time = reduced_tick_delay(40 + mob.next_i32(40));
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.set_interested(false);
+        self.player = None;
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        if let Some(p) = self.player {
+            mob.look_at(Vec3::new(p.x, p.y + 1.62, p.z));
+        }
+        self.look_time -= 1;
+    }
+}
+
 /// Flees from a nearby avoided entity.
 ///
 /// Vanilla's own avoid-entity goal (flag MOVE), simplified to: when a threat is close,
 /// stroll to a random position and keep going until far enough or the path ends.
 #[derive(Debug)]
-pub struct AvoidEntityGoal {
+pub struct FleeEntityGoal {
     max_distance: f64,
     speed: f64,
     flee_target: Option<Vec3>,
+    clears_target: bool,
 }
 
-impl AvoidEntityGoal {
+impl FleeEntityGoal {
     /// Creates the goal; the mob avoids threats within `max_distance` blocks.
     #[must_use]
     pub fn new(max_distance: f64, speed: f64) -> Self {
@@ -866,11 +923,19 @@ impl AvoidEntityGoal {
             max_distance,
             speed,
             flee_target: None,
+            clears_target: false,
         }
+    }
+
+    /// Drops the mob's attack target every tick the goal runs.
+    #[must_use]
+    pub fn clearing_target(mut self) -> Self {
+        self.clears_target = true;
+        self
     }
 }
 
-impl Goal for AvoidEntityGoal {
+impl Goal for FleeEntityGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }
@@ -891,8 +956,21 @@ impl Goal for AvoidEntityGoal {
     }
 
     fn start(&mut self, mob: &mut dyn MobController) {
+        if self.clears_target {
+            mob.set_attack_target(None);
+        }
         if let Some(t) = self.flee_target {
             mob.move_to(t, self.speed);
+        }
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        self.clears_target
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        if self.clears_target {
+            mob.set_attack_target(None);
         }
     }
 
@@ -905,13 +983,13 @@ impl Goal for AvoidEntityGoal {
 ///
 /// Vanilla's own panic goal (flag MOVE). Uninterruptible while panicking.
 #[derive(Debug)]
-pub struct PanicGoal {
+pub struct FleeInPanicGoal {
     speed: f64,
     target: Option<Vec3>,
     water_radius: Option<i32>,
 }
 
-impl PanicGoal {
+impl FleeInPanicGoal {
     /// Creates the goal at panic `speed`.
     #[must_use]
     pub fn new(speed: f64) -> Self {
@@ -954,7 +1032,7 @@ fn nearest_water(mob: &dyn MobController, radius: i32) -> Option<Vec3> {
     best.map(|(_, at)| at)
 }
 
-impl Goal for PanicGoal {
+impl Goal for FleeInPanicGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }
@@ -1017,14 +1095,14 @@ impl Goal for PanicGoal {
 ///   `dot > 1.0 - coneSize / dist` tolerance. Only the 16-block range check
 ///   belongs to *this* goal, exactly where vanilla
 ///   puts it — folding it into the boolean would silently take the minimum of
-///   two ranges, the same trap this crate's `LookAtPlayerGoal`/`nearest_player`
+///   two ranges, the same trap this crate's `WatchPlayerGoal`/`nearest_player`
 ///   split already avoids.
 #[derive(Debug, Default)]
-pub struct EndermanFreezeWhenLookedAt {
+pub struct EndermanFreezeUnderGazeGoal {
     target: Option<Vec3>,
 }
 
-impl EndermanFreezeWhenLookedAt {
+impl EndermanFreezeUnderGazeGoal {
     /// Creates the goal with no remembered target.
     #[must_use]
     pub fn new() -> Self {
@@ -1032,7 +1110,7 @@ impl EndermanFreezeWhenLookedAt {
     }
 }
 
-impl Goal for EndermanFreezeWhenLookedAt {
+impl Goal for EndermanFreezeUnderGazeGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Jump, Flag::Move])
     }
@@ -1060,7 +1138,7 @@ impl Goal for EndermanFreezeWhenLookedAt {
 
 /// Turns a stare into an actual attack: the enderman's own aggro/teleport
 /// state machine, and the goal that is missing precisely when "an enderman
-/// does nothing when I look at it" is reported — `EndermanFreezeWhenLookedAt`
+/// does nothing when I look at it" is reported — `EndermanFreezeUnderGazeGoal`
 /// only pins the head, this is what ever calls
 /// [`set_attack_target`](MobController::set_attack_target) unprovoked.
 ///
@@ -1075,7 +1153,7 @@ impl Goal for EndermanFreezeWhenLookedAt {
 /// live, blink randomly away if it is staring from within 4 blocks, and blink
 /// toward it (on a cooldown) if it drifts beyond 16 blocks.
 ///
-/// # Three disclosed narrowings, same shape as [`EndermanFreezeWhenLookedAt`]
+/// # Three disclosed narrowings, same shape as [`EndermanFreezeUnderGazeGoal`]
 ///
 /// * **No per-player identity.** This seam's [`MobController::is_being_stared_at`]
 ///   is one boolean over every nearby player, not "is *this specific* player
@@ -1087,7 +1165,7 @@ impl Goal for EndermanFreezeWhenLookedAt {
 ///   one player in range — the case every existing gaze/target gate in this
 ///   crate exercises — this agrees with vanilla exactly; a second player in
 ///   range could pick a different one than vanilla's live-reference candidate
-///   would have, the same divergence [`NearestAttackableTargetGoal`]'s own doc
+///   would have, the same divergence [`NearestTargetGoal`]'s own doc
 ///   comment already discloses for its position-valued seam.
 /// * **Line of sight is not modelled**, the same disclosed gap
 ///   [`MobController::find_nearest_target`] already carries.
@@ -1103,7 +1181,7 @@ impl Goal for EndermanFreezeWhenLookedAt {
 ///   footprint beneath it is simply not committed, so an enderman over a
 ///   ravine or the void does not blink into open air.
 #[derive(Debug, Default)]
-pub struct EndermanLookForPlayerGoal {
+pub struct EndermanGazeWatchGoal {
     /// The candidate found by `can_use`, still counting down `aggro_time`
     /// before it is promoted to a real target — vanilla's own pending-target
     /// field.
@@ -1116,7 +1194,7 @@ pub struct EndermanLookForPlayerGoal {
     teleport_time: i32,
 }
 
-impl EndermanLookForPlayerGoal {
+impl EndermanGazeWatchGoal {
     /// Creates the goal with no pending or live target.
     #[must_use]
     pub fn new() -> Self {
@@ -1138,7 +1216,7 @@ impl EndermanLookForPlayerGoal {
     }
 }
 
-impl Goal for EndermanLookForPlayerGoal {
+impl Goal for EndermanGazeWatchGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Target])
     }
@@ -1162,7 +1240,7 @@ impl Goal for EndermanLookForPlayerGoal {
         // Vanilla's `continueAggroTargetConditions` ignores line of sight and
         // the stare test — it is the ordinary "still a valid combat target"
         // check, which this seam resolves the same way
-        // `NearestAttackableTargetGoal::can_continue_to_use` re-derives a live
+        // `NearestTargetGoal::can_continue_to_use` re-derives a live
         // position: ask the same feed `can_use` used, and refresh from it so a
         // moving player is actually pursued rather than chased to a frozen
         // point.
@@ -1297,7 +1375,7 @@ pub type TargetFilter = fn(&dyn MobController, Vec3) -> bool;
 /// *target* selector. `random_interval` throttles the (potentially expensive)
 /// search: on average only one in `random_interval` ticks actually scans.
 #[derive(Debug)]
-pub struct NearestAttackableTargetGoal {
+pub struct NearestTargetGoal {
     random_interval: i32,
     target: Option<Vec3>,
     /// Whether this registration carries vanilla's own is-angry-at selector,
@@ -1319,13 +1397,13 @@ pub struct NearestAttackableTargetGoal {
 /// Ticks a held target may stay out of sight before the goal drops it.
 const UNSEEN_MEMORY_TICKS: i32 = reduced_tick_delay(60);
 
-impl Default for NearestAttackableTargetGoal {
+impl Default for NearestTargetGoal {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl NearestAttackableTargetGoal {
+impl NearestTargetGoal {
     /// Creates the goal with vanilla's default 10-tick search throttle.
     #[must_use]
     pub fn new() -> Self {
@@ -1413,7 +1491,7 @@ impl NearestAttackableTargetGoal {
     }
 }
 
-impl Goal for NearestAttackableTargetGoal {
+impl Goal for NearestTargetGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Target])
     }
@@ -1522,11 +1600,11 @@ impl Goal for NearestAttackableTargetGoal {
 /// Vanilla's own hurt-by targeting goal (flag TARGET). Ignores line of sight — a mob shot
 /// from cover still turns to fight.
 #[derive(Debug, Default)]
-pub struct HurtByTargetGoal {
+pub struct RetaliateGoal {
     target: Option<Vec3>,
 }
 
-impl HurtByTargetGoal {
+impl RetaliateGoal {
     /// Creates the goal.
     #[must_use]
     pub fn new() -> Self {
@@ -1534,7 +1612,7 @@ impl HurtByTargetGoal {
     }
 }
 
-impl Goal for HurtByTargetGoal {
+impl Goal for RetaliateGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Target])
     }
@@ -1561,15 +1639,15 @@ impl Goal for HurtByTargetGoal {
 /// Retaliates against whoever last damaged this mob's **owner**.
 ///
 /// Vanilla's own owner-hurt-by targeting goal (flag TARGET), reading
-/// whatever last hurt the owner — same shape as [`HurtByTargetGoal`], read from
+/// whatever last hurt the owner — same shape as [`RetaliateGoal`], read from
 /// [`MobController::owner_hurt_by`] instead of `last_hurt_by`. Ignores line of
-/// sight, same as `HurtByTargetGoal`.
+/// sight, same as `RetaliateGoal`.
 #[derive(Debug, Default)]
-pub struct OwnerHurtByTargetGoal {
+pub struct DefendOwnerGoal {
     target: Option<Vec3>,
 }
 
-impl OwnerHurtByTargetGoal {
+impl DefendOwnerGoal {
     /// Creates the goal.
     #[must_use]
     pub fn new() -> Self {
@@ -1577,7 +1655,7 @@ impl OwnerHurtByTargetGoal {
     }
 }
 
-impl Goal for OwnerHurtByTargetGoal {
+impl Goal for DefendOwnerGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Target])
     }
@@ -1604,14 +1682,14 @@ impl Goal for OwnerHurtByTargetGoal {
 /// Joins whatever fight this mob's **owner** just started.
 ///
 /// Vanilla's own owner-hurt-target goal (flag TARGET), reading
-/// whatever the owner last hurt — same shape as [`HurtByTargetGoal`], read from
+/// whatever the owner last hurt — same shape as [`RetaliateGoal`], read from
 /// [`MobController::owner_hurt_target`] instead of `last_hurt_by`.
 #[derive(Debug, Default)]
-pub struct OwnerHurtTargetGoal {
+pub struct AssistOwnerGoal {
     target: Option<Vec3>,
 }
 
-impl OwnerHurtTargetGoal {
+impl AssistOwnerGoal {
     /// Creates the goal.
     #[must_use]
     pub fn new() -> Self {
@@ -1619,7 +1697,7 @@ impl OwnerHurtTargetGoal {
     }
 }
 
-impl Goal for OwnerHurtTargetGoal {
+impl Goal for AssistOwnerGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Target])
     }
@@ -1648,14 +1726,14 @@ impl Goal for OwnerHurtTargetGoal {
 /// Vanilla's own tempt goal (flags MOVE + LOOK). After it ends, a `calm_down` cooldown
 /// briefly suppresses re-tempting (vanilla's 100 ticks).
 #[derive(Debug)]
-pub struct TemptGoal {
+pub struct LureGoal {
     speed: f64,
     stop_distance_sqr: f64,
     calm_down: i32,
     target: Option<Vec3>,
 }
 
-impl TemptGoal {
+impl LureGoal {
     /// Creates the goal with the given follow `speed`; uses vanilla's 2.5-block
     /// stop distance.
     #[must_use]
@@ -1669,7 +1747,7 @@ impl TemptGoal {
     }
 }
 
-impl Goal for TemptGoal {
+impl Goal for LureGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
@@ -1713,13 +1791,13 @@ impl Goal for TemptGoal {
 /// 3 blocks away (squared distance >= 9) and gives up beyond 16 (squared distance > 256);
 /// re-paths every 10 ticks.
 #[derive(Debug)]
-pub struct FollowParentGoal {
+pub struct TrailParentGoal {
     speed: f64,
     time_to_recalc: i32,
     parent: Option<Vec3>,
 }
 
-impl FollowParentGoal {
+impl TrailParentGoal {
     const NEAR_SQR: f64 = 9.0;
     const FAR_SQR: f64 = 256.0;
 
@@ -1734,7 +1812,7 @@ impl FollowParentGoal {
     }
 }
 
-impl Goal for FollowParentGoal {
+impl Goal for TrailParentGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }
@@ -1796,12 +1874,13 @@ impl Goal for FollowParentGoal {
 /// and lives behind the [`MobController`] seam, so this goal holds only the
 /// scheduler-visible timing state.
 #[derive(Debug)]
-pub struct BreedGoal {
+pub struct MateGoal {
     speed: f64,
     love_time: i32,
+    unless_carrying_egg: bool,
 }
 
-impl BreedGoal {
+impl MateGoal {
     /// Ticks the pair must stay together before a child spawns (vanilla's 60).
     const BREED_TIME: i32 = reduced_tick_delay(60);
     /// Squared distance within which breeding completes (vanilla's `9.0`).
@@ -1813,17 +1892,25 @@ impl BreedGoal {
         Self {
             speed,
             love_time: 0,
+            unless_carrying_egg: false,
         }
+    }
+
+    /// Makes the goal start only while the mob carries no egg (the turtle).
+    #[must_use]
+    pub fn unless_carrying_egg(mut self) -> Self {
+        self.unless_carrying_egg = true;
+        self
     }
 }
 
-impl Goal for BreedGoal {
+impl Goal for MateGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        if !mob.is_in_love() {
+        if !mob.is_in_love() || (self.unless_carrying_egg && mob.has_egg()) {
             return false;
         }
         mob.find_love_partner().is_some()
@@ -1894,9 +1981,9 @@ impl Goal for BreedGoal {
 /// when ordered") instead of the record would have produced
 /// `is_ordered_to_sit()` in both arms and silently dropped it.
 #[derive(Debug, Default)]
-pub struct SitWhenOrderedToGoal;
+pub struct SitOnCommandGoal;
 
-impl Goal for SitWhenOrderedToGoal {
+impl Goal for SitOnCommandGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Jump])
     }
@@ -1959,7 +2046,7 @@ impl Goal for SitWhenOrderedToGoal {
 /// dragged along behind its owner, with the two goals fighting over MOVE every
 /// tick.
 #[derive(Debug)]
-pub struct FollowOwnerGoal {
+pub struct AccompanyOwnerGoal {
     speed: f64,
     /// Squared `startDistance` — the goal begins beyond this.
     start_sqr: f64,
@@ -1968,7 +2055,7 @@ pub struct FollowOwnerGoal {
     time_to_recalc: i32,
 }
 
-impl FollowOwnerGoal {
+impl AccompanyOwnerGoal {
     /// Vanilla's own recalculation delay of 10, halved because this goal does
     /// not request an every-tick update — the re-path interval is **5**
     /// ticks, not the literal 10.
@@ -1987,7 +2074,7 @@ impl FollowOwnerGoal {
     }
 }
 
-impl Goal for FollowOwnerGoal {
+impl Goal for AccompanyOwnerGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
@@ -2060,7 +2147,7 @@ impl Goal for FollowOwnerGoal {
 ///   randomized, still roughly the same order of magnitude, but not
 ///   bit-identical to vanilla's distribution.
 #[derive(Debug, Default)]
-pub struct CatSitOnBlockGoal {
+pub struct CatPerchGoal {
     speed: f64,
     target: Vec3,
     try_ticks: i32,
@@ -2068,7 +2155,7 @@ pub struct CatSitOnBlockGoal {
     next_start_tick: i32,
 }
 
-impl CatSitOnBlockGoal {
+impl CatPerchGoal {
     /// Vanilla's own speed modifier for this goal — `0.8` for the
     /// cat.
     #[must_use]
@@ -2080,7 +2167,7 @@ impl CatSitOnBlockGoal {
     }
 }
 
-impl Goal for CatSitOnBlockGoal {
+impl Goal for CatPerchGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Jump])
     }
@@ -2096,7 +2183,7 @@ impl Goal for CatSitOnBlockGoal {
         }
         // Vanilla's own next-start-tick roll (200 + a roll of 200) —
         // unhalved, because vanilla's own move-to-block goal requests an
-        // every-tick update (see `EatBlockGoal`'s own
+        // every-tick update (see `GrazeGoal`'s own
         // doc comment on this module for the halving rule this escapes).
         self.next_start_tick = 200 + mob.next_i32(200);
         mob.is_tame() && !mob.is_ordered_to_sit() && mob.cat_sit_target().is_some_and(|t| {
@@ -2141,10 +2228,10 @@ impl Goal for CatSitOnBlockGoal {
 /// `verticalSearchRange = 6` (flags MOVE + JUMP, per its own explicit
 /// `setFlags`). The search itself is host-computed — see
 /// [`MobController::cat_bed_target`]'s own doc, same reasoning as
-/// [`CatSitOnBlockGoal`].
+/// [`CatPerchGoal`].
 ///
 /// `maxStayTicks`'s doubly-nested roll is simplified the same way
-/// [`CatSitOnBlockGoal`]'s own doc discloses.
+/// [`CatPerchGoal`]'s own doc discloses.
 #[derive(Debug, Default)]
 pub struct CatLieOnBedGoal {
     speed: f64,
@@ -2182,7 +2269,7 @@ impl Goal for CatLieOnBedGoal {
             return false;
         }
         // Vanilla's own next-start-tick override for this goal is a fixed `40`
-        // — unlike `CatSitOnBlockGoal`'s randomised 200-400.
+        // — unlike `CatPerchGoal`'s randomised 200-400.
         self.next_start_tick = 40;
         mob.is_tame()
             && !mob.is_ordered_to_sit()
@@ -2232,7 +2319,7 @@ impl Goal for CatLieOnBedGoal {
 ///
 /// Vanilla's own cat-relax-on-owner goal — priority 3,
 /// no explicit flags (an empty default, so it does not exclude
-/// movement or look goals the way `MeleeAttackGoal`'s `MOVE` flag would).
+/// movement or look goals the way `MeleeStrikeGoal`'s `MOVE` flag would).
 ///
 /// # Disclosed simplifications
 ///
@@ -2241,7 +2328,7 @@ impl Goal for CatLieOnBedGoal {
 ///   direction the bed faces, derived from
 ///   the bed block's own facing property. This crate's block-cue seam has no
 ///   per-position block-state query outside the neighbourhood searches
-///   [`CatSitOnBlockGoal`]/[`CatLieOnBedGoal`] already use
+///   [`CatPerchGoal`]/[`CatLieOnBedGoal`] already use
 ///   (`docs/mob-block-perception.md`), and a sleeping owner occupies the same
 ///   block their bed does in every legal sleeping arrangement, so this lands
 ///   within a block of vanilla's own target.
@@ -2254,17 +2341,17 @@ impl Goal for CatLieOnBedGoal {
 ///   is a bare intent; the RNG roll against the day-time-keyed gift chance,
 ///   the loot-table roll and the item spawn all happen in
 ///   `lodestone_server::mobs::MobSim` — the same split
-///   [`EatBlockGoal`]/[`MobController::ate`] already uses for a mutation a
+///   [`GrazeGoal`]/[`MobController::ate`] already uses for a mutation a
 ///   goal cannot perform itself.
 #[derive(Debug, Default)]
-pub struct CatRelaxOnOwnerGoal {
+pub struct CatSettleOnOwnerGoal {
     speed: f64,
     target: Option<Vec3>,
     on_bed_ticks: i32,
     deep_sleep_seen: bool,
 }
 
-impl CatRelaxOnOwnerGoal {
+impl CatSettleOnOwnerGoal {
     /// The goal takes no speed
     /// argument in vanilla; its own move calls hardcode `1.1F`.
     #[must_use]
@@ -2276,7 +2363,7 @@ impl CatRelaxOnOwnerGoal {
     }
 }
 
-impl Goal for CatRelaxOnOwnerGoal {
+impl Goal for CatSettleOnOwnerGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
@@ -2364,23 +2451,23 @@ impl Goal for CatRelaxOnOwnerGoal {
 /// and its per-tick update requires an actual bounding-box intersection before
 /// mounting. None of that owner-physical-state is on this seam — `owner_position`
 /// is the only fact available — so this narrows to "close enough" (the same
-/// `< 1.0` block radius [`MeleeAttackGoal`] uses for "in range") in place of
+/// `< 1.0` block radius [`MeleeStrikeGoal`] uses for "in range") in place of
 /// the box-intersect test, and drops the four owner-state clauses entirely. A
 /// parrot may therefore land on a swimming or flying owner's shoulder, which
 /// vanilla would refuse.
 #[derive(Debug, Default)]
-pub struct LandOnOwnersShoulderGoal {
+pub struct PerchOnOwnerGoal {
     sitting_on_shoulder: bool,
 }
 
-impl LandOnOwnersShoulderGoal {
+impl PerchOnOwnerGoal {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl Goal for LandOnOwnersShoulderGoal {
+impl Goal for PerchOnOwnerGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::none()
     }
@@ -2463,14 +2550,14 @@ impl Goal for LandOnOwnersShoulderGoal {
 /// numbers would make a sheep graze half as often and hold the animation twice
 /// as long, which no test asserting only "it eventually ate" would catch.
 #[derive(Debug, Default)]
-pub struct EatBlockGoal {
+pub struct GrazeGoal {
     /// Counts down from [`EAT_ANIMATION_TICKS`](Self::EAT_ANIMATION_TICKS);
     /// `> 0` is "still eating" (the same shape as vanilla's own
     /// continue-eligibility check).
     eat_animation_tick: i32,
 }
 
-impl EatBlockGoal {
+impl GrazeGoal {
     /// Vanilla's own eat-animation length, halved — 20 ticks in practice.
     pub const EAT_ANIMATION_TICKS: i32 = 20;
 
@@ -2494,7 +2581,7 @@ impl EatBlockGoal {
 
 }
 
-impl Goal for EatBlockGoal {
+impl Goal for GrazeGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Look, Flag::Jump])
     }
@@ -2576,7 +2663,7 @@ impl Goal for EatBlockGoal {
 /// * **Vanilla's own controlling-passenger clause is not modelled** — no
 ///   passenger state crosses this seam (see `docs/pillager-patrols.md`).
 #[derive(Debug)]
-pub struct LongDistancePatrolGoal {
+pub struct PatrolRouteGoal {
     /// A non-leader's pace.
     follower_speed: f64,
     /// Faster than a follower's, so the leader does
@@ -2587,7 +2674,7 @@ pub struct LongDistancePatrolGoal {
     cooldown: i32,
 }
 
-impl LongDistancePatrolGoal {
+impl PatrolRouteGoal {
     /// Vanilla's own navigation-failed cooldown.
     const NAVIGATION_FAILED_COOLDOWN: i32 = 200;
     /// Vanilla's own 10-block repick threshold, squared.
@@ -2616,7 +2703,7 @@ impl LongDistancePatrolGoal {
     }
 }
 
-impl Goal for LongDistancePatrolGoal {
+impl Goal for PatrolRouteGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }
@@ -2939,7 +3026,7 @@ mod tests {
     #[test]
     fn float_jumps_while_in_water() {
         let mut sel = GoalSelector::new();
-        sel.add(0, Box::new(FloatGoal));
+        sel.add(0, Box::new(StayAfloatGoal));
         let mut mob = ScriptMob {
             in_water: true,
             ..Default::default()
@@ -2953,8 +3040,8 @@ mod tests {
     fn float_preempts_stroll_but_they_share_no_flag() {
         // Float uses JUMP, stroll uses MOVE: both can run together.
         let mut sel = GoalSelector::new();
-        sel.add(0, Box::new(FloatGoal));
-        sel.add(1, Box::new(RandomStrollGoal::new(1.0)));
+        sel.add(0, Box::new(StayAfloatGoal));
+        sel.add(1, Box::new(WanderGoal::new(1.0)));
         let mut mob = ScriptMob {
             in_water: true,
             i32_val: 0, // stroll's random roll == 0 => picks target
@@ -2968,7 +3055,7 @@ mod tests {
 
     #[test]
     fn melee_attacks_when_in_reach() {
-        let mut goal = MeleeAttackGoal::new(1.0, 2.0);
+        let mut goal = MeleeStrikeGoal::new(1.0, 2.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             attack: Some(Vec3::new(1.0, 64.0, 0.0)),
@@ -2982,7 +3069,7 @@ mod tests {
 
     #[test]
     fn swell_starts_and_climbs_within_three_blocks() {
-        let mut goal = SwellGoal::new();
+        let mut goal = FuseGoal::new();
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             attack: Some(Vec3::new(2.0, 64.0, 0.0)), // distSqr 4 < 9
@@ -3001,7 +3088,7 @@ mod tests {
         // and no swell already in progress, must not make the goal eligible —
         // proving `can_use` actually gates on distance rather than firing
         // unconditionally whenever a target exists at all.
-        let mut goal = SwellGoal::new();
+        let mut goal = FuseGoal::new();
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             attack: Some(Vec3::new(10.0, 64.0, 0.0)), // distSqr 100 > 9
@@ -3017,7 +3104,7 @@ mod tests {
         // serves as the default `can_continue_to_use`) stays eligible from
         // `swell_dir() > 0` alone, regardless of the 3-block start gate — the
         // 7-block *stop* gate is a separate, wider threshold checked in `tick`.
-        let mut goal = SwellGoal::new();
+        let mut goal = FuseGoal::new();
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             attack: Some(Vec3::new(6.0, 64.0, 0.0)), // distSqr 36: >9, <=49
@@ -3031,7 +3118,7 @@ mod tests {
 
     #[test]
     fn swell_reverses_beyond_seven_blocks() {
-        let mut goal = SwellGoal::new();
+        let mut goal = FuseGoal::new();
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             attack: Some(Vec3::new(8.0, 64.0, 0.0)), // distSqr 64 > 49
@@ -3044,7 +3131,7 @@ mod tests {
 
     #[test]
     fn swell_reverses_and_stops_once_the_target_is_lost() {
-        let mut goal = SwellGoal::new();
+        let mut goal = FuseGoal::new();
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             attack: None,
@@ -3065,7 +3152,7 @@ mod tests {
         // entity's own unconditional integration (`NavigatingMob::advance`),
         // independent of any goal target — `can_use`'s first branch must see
         // that and start the goal even though `attack_target()` is `None`.
-        let mut goal = SwellGoal::new();
+        let mut goal = FuseGoal::new();
         let mut mob = ScriptMob {
             attack: None,
             swell_dir: 1,
@@ -3074,7 +3161,7 @@ mod tests {
         assert!(goal.can_use(&mut mob));
     }
 
-    // ---- EndermanFreezeWhenLookedAt --------------------------------------
+    // ---- EndermanFreezeUnderGazeGoal --------------------------------------
 
     /// The discriminating pair, at goal level: identical position and target,
     /// only `is_being_stared_at` differs. A distance-only implementation (the
@@ -3082,7 +3169,7 @@ mod tests {
     /// cannot produce this split, because both mobs stand at the same spot.
     #[test]
     fn freezes_only_while_its_target_stares_within_range() {
-        let mut goal = EndermanFreezeWhenLookedAt::new();
+        let mut goal = EndermanFreezeUnderGazeGoal::new();
         let mut watched = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             attack: Some(Vec3::new(6.0, 64.0, 0.0)), // distSqr 36 <= 256
@@ -3115,7 +3202,7 @@ mod tests {
         // consulting the gaze check, so a stare from far away never freezes
         // the goal — a control on the 16-block gate, independent of the gaze
         // boolean.
-        let mut goal = EndermanFreezeWhenLookedAt::new();
+        let mut goal = EndermanFreezeUnderGazeGoal::new();
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             attack: Some(Vec3::new(17.0, 64.0, 0.0)), // distSqr 289 > 256
@@ -3127,7 +3214,7 @@ mod tests {
 
     #[test]
     fn freeze_stops_navigation_and_looks_at_its_target() {
-        let mut goal = EndermanFreezeWhenLookedAt::new();
+        let mut goal = EndermanFreezeUnderGazeGoal::new();
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             attack: Some(Vec3::new(6.0, 64.0, 0.0)),
@@ -3148,9 +3235,9 @@ mod tests {
         );
     }
 
-    // ---- EndermanLookForPlayerGoal ---------------------------------------
+    // ---- EndermanGazeWatchGoal ---------------------------------------
     //
-    // Unlike `EndermanFreezeWhenLookedAt` above, nothing previously exercised
+    // Unlike `EndermanFreezeUnderGazeGoal` above, nothing previously exercised
     // this goal's own state machine directly — only the roster's multiset
     // gate (which checks the *table row*, not runtime behaviour) and, at a
     // much higher level, `lodestone-server`'s `feed_perception` wiring. This
@@ -3166,7 +3253,7 @@ mod tests {
     /// (`nearest_player`, since nothing here is angry yet).
     #[test]
     fn look_for_player_acquires_only_after_the_five_tick_aggro_delay() {
-        let mut goal = EndermanLookForPlayerGoal::new();
+        let mut goal = EndermanGazeWatchGoal::new();
         let candidate = Vec3::new(6.0, 64.0, 0.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
@@ -3202,7 +3289,7 @@ mod tests {
     /// angry_target().is_some()`.
     #[test]
     fn look_for_player_acquires_from_a_grudge_alone_with_no_stare() {
-        let mut goal = EndermanLookForPlayerGoal::new();
+        let mut goal = EndermanGazeWatchGoal::new();
         let grudge = Vec3::new(9.0, 64.0, 0.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
@@ -3229,7 +3316,7 @@ mod tests {
     /// either/or, not a fallthrough).
     #[test]
     fn look_for_player_teleports_away_when_stared_at_up_close() {
-        let mut goal = EndermanLookForPlayerGoal::new();
+        let mut goal = EndermanGazeWatchGoal::new();
         let close = Vec3::new(3.0, 64.0, 0.0); // distSqr 9 < 16
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
@@ -3269,7 +3356,7 @@ mod tests {
     /// = 12.0`. `y' = 64 + (-8) - 0 = 56.0`. `z' = 0 + (-4.0) - 0 = -4.0`.
     #[test]
     fn look_for_player_teleports_towards_after_the_throttle_once_out_of_range() {
-        let mut goal = EndermanLookForPlayerGoal::new();
+        let mut goal = EndermanGazeWatchGoal::new();
         let target = Vec3::new(20.0, 64.0, 0.0); // distSqr 400 > 256
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
@@ -3316,7 +3403,7 @@ mod tests {
     /// re-run here only to keep this assertion self-contained.
     #[test]
     fn look_for_player_teleport_towards_does_not_land_on_the_target_anchored_formula() {
-        let mut goal = EndermanLookForPlayerGoal::new();
+        let mut goal = EndermanGazeWatchGoal::new();
         let target = Vec3::new(20.0, 64.0, 0.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
@@ -3361,20 +3448,20 @@ mod tests {
             ..Default::default()
         };
         let near_and_far = vec![(-2, 65, 5), (3, 64, 0)];
-        let mut goal = PanicGoal::new(1.2).seeking_water(7);
+        let mut goal = FleeInPanicGoal::new(1.2).seeking_water(7);
         let mut m = mob(near_and_far.clone());
         assert!(goal.can_use(&mut m));
         goal.start(&mut m);
         assert_eq!(m.moved_to, Some(Vec3::new(3.5, 64.0, 0.5)));
 
         let mut m = mob(vec![(20, 64, 0)]);
-        let mut goal = PanicGoal::new(1.2).seeking_water(7);
+        let mut goal = FleeInPanicGoal::new(1.2).seeking_water(7);
         assert!(goal.can_use(&mut m));
         goal.start(&mut m);
         assert_eq!(m.moved_to, Some(Vec3::new(9.0, 64.0, 9.0)), "water beyond 7 blocks is ignored");
 
         let mut m = mob(near_and_far);
-        let mut goal = PanicGoal::new(1.2);
+        let mut goal = FleeInPanicGoal::new(1.2);
         assert!(goal.can_use(&mut m));
         goal.start(&mut m);
         assert_eq!(m.moved_to, Some(Vec3::new(9.0, 64.0, 9.0)), "a plain panic never looks for water");
@@ -3382,13 +3469,13 @@ mod tests {
 
     #[test]
     fn panic_is_uninterruptable() {
-        let g = PanicGoal::new(1.5);
+        let g = FleeInPanicGoal::new(1.5);
         assert!(!g.is_interruptable());
     }
 
     #[test]
     fn avoid_flees_when_threat_close() {
-        let mut goal = AvoidEntityGoal::new(8.0, 1.2);
+        let mut goal = FleeEntityGoal::new(8.0, 1.2);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             threat: Some(Vec3::new(2.0, 64.0, 0.0)),
@@ -3400,7 +3487,7 @@ mod tests {
 
     #[test]
     fn nearest_target_sets_and_clears_target() {
-        let mut goal = NearestAttackableTargetGoal::new().with_interval(1);
+        let mut goal = NearestTargetGoal::new().with_interval(1);
         let mut mob = ScriptMob {
             player: Some(Vec3::new(4.0, 64.0, 0.0)),
             ..Default::default()
@@ -3420,10 +3507,10 @@ mod tests {
         let mut ai = super::super::goal::MobAi::new();
         ai.target_selector.add(
             0,
-            Box::new(NearestAttackableTargetGoal::new().with_interval(1)),
+            Box::new(NearestTargetGoal::new().with_interval(1)),
         );
         ai.goal_selector
-            .add(0, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+            .add(0, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             player: Some(Vec3::new(1.0, 64.0, 0.0)),
@@ -3439,7 +3526,7 @@ mod tests {
 
     #[test]
     fn hurt_by_retaliates() {
-        let mut goal = HurtByTargetGoal::new();
+        let mut goal = RetaliateGoal::new();
         let mut mob = ScriptMob {
             hurt_by: Some(Vec3::new(-3.0, 64.0, 0.0)),
             ..Default::default()
@@ -3451,7 +3538,7 @@ mod tests {
 
     #[test]
     fn owner_hurt_by_retaliates_against_whoever_hurt_the_owner() {
-        let mut goal = OwnerHurtByTargetGoal::new();
+        let mut goal = DefendOwnerGoal::new();
         let mut mob = ScriptMob {
             owner_hurt_by: Some(Vec3::new(-3.0, 64.0, 0.0)),
             ..Default::default()
@@ -3463,7 +3550,7 @@ mod tests {
 
     #[test]
     fn owner_hurt_by_does_not_fire_with_no_fed_record() {
-        let mut goal = OwnerHurtByTargetGoal::new();
+        let mut goal = DefendOwnerGoal::new();
         let mut mob = ScriptMob::default();
         assert!(
             !goal.can_use(&mut mob),
@@ -3473,7 +3560,7 @@ mod tests {
 
     #[test]
     fn owner_hurt_target_joins_whatever_the_owner_attacked() {
-        let mut goal = OwnerHurtTargetGoal::new();
+        let mut goal = AssistOwnerGoal::new();
         let mut mob = ScriptMob {
             owner_hurt_target: Some(Vec3::new(4.0, 64.0, 1.0)),
             ..Default::default()
@@ -3485,7 +3572,7 @@ mod tests {
 
     #[test]
     fn owner_hurt_target_does_not_fire_with_no_fed_record() {
-        let mut goal = OwnerHurtTargetGoal::new();
+        let mut goal = AssistOwnerGoal::new();
         let mut mob = ScriptMob::default();
         assert!(
             !goal.can_use(&mut mob),
@@ -3495,7 +3582,7 @@ mod tests {
 
     #[test]
     fn tempt_follows_then_calms_down() {
-        let mut goal = TemptGoal::new(1.0);
+        let mut goal = LureGoal::new(1.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             tempt: Some(Vec3::new(10.0, 64.0, 0.0)),
@@ -3511,7 +3598,7 @@ mod tests {
 
     #[test]
     fn tempt_stops_within_range() {
-        let mut goal = TemptGoal::new(1.0);
+        let mut goal = LureGoal::new(1.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             tempt: Some(Vec3::new(1.0, 64.0, 0.0)), // within 2.5
@@ -3524,7 +3611,7 @@ mod tests {
 
     #[test]
     fn follow_parent_only_when_baby_and_far() {
-        let mut goal = FollowParentGoal::new(1.0);
+        let mut goal = TrailParentGoal::new(1.0);
         // Adult: never follows.
         let mut adult = ScriptMob {
             baby: false,
@@ -3555,7 +3642,7 @@ mod tests {
 
     #[test]
     fn breed_requires_love_and_a_partner() {
-        let mut goal = BreedGoal::new(1.0);
+        let mut goal = MateGoal::new(1.0);
         // In love but no partner nearby: cannot start.
         let mut lonely = ScriptMob {
             in_love: true,
@@ -3582,7 +3669,7 @@ mod tests {
 
     #[test]
     fn breed_spawns_a_child_after_thirty_goal_ticks_in_range() {
-        let mut goal = BreedGoal::new(1.0);
+        let mut goal = MateGoal::new(1.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             in_love: true,
@@ -3610,7 +3697,7 @@ mod tests {
 
     #[test]
     fn breed_stops_when_the_partner_becomes_ineligible() {
-        let mut goal = BreedGoal::new(1.0);
+        let mut goal = MateGoal::new(1.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
             in_love: true,
@@ -3632,7 +3719,7 @@ mod tests {
     /// candidate — dropping any one must refuse.
     #[test]
     fn cat_sit_on_block_requires_tame_not_sitting_and_a_host_candidate() {
-        let mut goal = CatSitOnBlockGoal::new(0.8);
+        let mut goal = CatPerchGoal::new(0.8);
         let mut untamed = ScriptMob {
             tame: false,
             cat_sit: Some(Vec3::new(3.0, 64.0, 0.0)),
@@ -3640,7 +3727,7 @@ mod tests {
         };
         assert!(!goal.can_use(&mut untamed), "an untamed cat must never sit on a block");
 
-        let mut goal2 = CatSitOnBlockGoal::new(0.8);
+        let mut goal2 = CatPerchGoal::new(0.8);
         let mut sitting_order = ScriptMob {
             tame: true,
             ordered_to_sit: true,
@@ -3652,7 +3739,7 @@ mod tests {
             "a cat already ordered to sit must not also chase a block"
         );
 
-        let mut goal3 = CatSitOnBlockGoal::new(0.8);
+        let mut goal3 = CatPerchGoal::new(0.8);
         let mut no_target = ScriptMob {
             tame: true,
             cat_sit: None,
@@ -3660,7 +3747,7 @@ mod tests {
         };
         assert!(!goal3.can_use(&mut no_target), "no host candidate means nothing to do");
 
-        let mut goal4 = CatSitOnBlockGoal::new(0.8);
+        let mut goal4 = CatPerchGoal::new(0.8);
         let mut eligible = ScriptMob {
             tame: true,
             cat_sit: Some(Vec3::new(3.0, 64.0, 0.0)),
@@ -3673,7 +3760,7 @@ mod tests {
     /// approaching, it must not.
     #[test]
     fn cat_sit_on_block_sets_the_pose_only_once_reached() {
-        let mut goal = CatSitOnBlockGoal::new(0.8);
+        let mut goal = CatPerchGoal::new(0.8);
         let target = Vec3::new(5.0, 64.0, 0.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
@@ -3751,7 +3838,7 @@ mod tests {
     /// four-way negative control `CatLieOnBedGoal`'s own test above uses.
     #[test]
     fn cat_relax_on_owner_requires_tame_not_sitting_and_a_sleeping_owner() {
-        let mut goal = CatRelaxOnOwnerGoal::new(1.1);
+        let mut goal = CatSettleOnOwnerGoal::new(1.1);
         let mut ready = ScriptMob {
             tame: true,
             pos: Vec3::new(2.0, 64.0, 0.0),
@@ -3768,7 +3855,7 @@ mod tests {
             owner_sleep_ticks: None,
             ..Default::default()
         };
-        assert!(!CatRelaxOnOwnerGoal::new(1.1).can_use(&mut awake), "an awake owner must not be relaxed on");
+        assert!(!CatSettleOnOwnerGoal::new(1.1).can_use(&mut awake), "an awake owner must not be relaxed on");
 
         let mut sitting_ordered = ScriptMob {
             tame: true,
@@ -3779,7 +3866,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !CatRelaxOnOwnerGoal::new(1.1).can_use(&mut sitting_ordered),
+            !CatSettleOnOwnerGoal::new(1.1).can_use(&mut sitting_ordered),
             "a cat ordered to sit must not go relax on its owner instead"
         );
 
@@ -3789,7 +3876,7 @@ mod tests {
             owner_sleep_ticks: Some(5),
             ..Default::default()
         };
-        assert!(!CatRelaxOnOwnerGoal::new(1.1).can_use(&mut wild), "an untamed cat has no owner to relax on");
+        assert!(!CatSettleOnOwnerGoal::new(1.1).can_use(&mut wild), "an untamed cat has no owner to relax on");
     }
 
     /// The whole gift chain, driven end to end through the goal's own
@@ -3800,7 +3887,7 @@ mod tests {
     /// whose owner never reaches the threshold must not.
     #[test]
     fn cat_relax_on_owner_requests_a_gift_only_after_the_deep_sleep_threshold() {
-        let mut deep = CatRelaxOnOwnerGoal::new(1.1);
+        let mut deep = CatSettleOnOwnerGoal::new(1.1);
         let mut deep_mob = ScriptMob {
             tame: true,
             pos: Vec3::new(2.0, 64.0, 0.0),
@@ -3818,7 +3905,7 @@ mod tests {
         deep.stop(&mut deep_mob);
         assert_eq!(deep_mob.gift_requested, 1, "a cat that saw deep sleep must request exactly one gift");
 
-        let mut shallow = CatRelaxOnOwnerGoal::new(1.1);
+        let mut shallow = CatSettleOnOwnerGoal::new(1.1);
         let mut shallow_mob = ScriptMob {
             tame: true,
             pos: Vec3::new(2.0, 64.0, 0.0),
@@ -3841,7 +3928,7 @@ mod tests {
     /// pick the goal up at all.
     #[test]
     fn land_on_owners_shoulder_mounts_once_close_and_off_cooldown() {
-        let mut goal = LandOnOwnersShoulderGoal::new();
+        let mut goal = PerchOnOwnerGoal::new();
         let mut mob = ScriptMob {
             tame: true,
             pos: Vec3::new(0.0, 64.0, 0.0),
@@ -3863,7 +3950,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !LandOnOwnersShoulderGoal::new().can_use(&mut cooling_down),
+            !PerchOnOwnerGoal::new().can_use(&mut cooling_down),
             "a parrot still inside its 100-tick ride cooldown must not mount again"
         );
     }
@@ -3872,7 +3959,7 @@ mod tests {
     /// mount — the goal's `tick` must not fire the intent from a distance.
     #[test]
     fn land_on_owners_shoulder_walks_first_when_far_away() {
-        let mut goal = LandOnOwnersShoulderGoal::new();
+        let mut goal = PerchOnOwnerGoal::new();
         let mut mob = ScriptMob {
             tame: true,
             pos: Vec3::new(0.0, 64.0, 0.0),

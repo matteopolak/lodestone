@@ -52,14 +52,14 @@ const FINISH_CONFIGURATION: i32 = 3;
 /// picks any id past the four real login/config ones above.
 const MOVE_PLAYER: i32 = 40;
 
-/// Bounded and generous — `NearestAttackableTargetGoal`'s own random search
-/// throttle plus `MeleeAttackGoal`'s swing cooldown need real ticks, not a
+/// Bounded and generous — `NearestTargetGoal`'s own random search
+/// throttle plus `MeleeStrikeGoal`'s swing cooldown need real ticks, not a
 /// single poll.
 const DEADLINE: Duration = Duration::from_secs(30);
 
 const PLAYER_X: f64 = 8.5;
 const PLAYER_Z: f64 = 8.5;
-/// One block over — inside `MeleeAttackGoal` reach the instant a target is
+/// One block over — inside `MeleeStrikeGoal` reach the instant a target is
 /// acquired, so this gate is not also (re-)proving pathfinding closes a gap;
 /// `mob_melee_damages_player.rs`'s own positive case already covers that.
 const ZOMBIE_X: f64 = 9.5;

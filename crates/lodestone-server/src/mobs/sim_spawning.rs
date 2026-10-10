@@ -317,7 +317,7 @@ impl<'w> MobSim<'w> {
         }
         // A follower spawned this same call has no group target until
         // `feed_perception` next runs its patrol census — a one-tick startup
-        // lag, not a correctness gap: `LongDistancePatrolGoal::can_use`
+        // lag, not a correctness gap: `PatrolRouteGoal::can_use`
         // requires `patrol_target().is_some()`, so it simply does not fire
         // until then.
         spawned

@@ -7,7 +7,7 @@
 //! supplied by [`MobSim::set_players`], resets `no_action_time` when that player
 //! is within the category's immune radius, and then increments the counter for
 //! the current tick. With no nearby player, no reset occurs: the counter is
-//! monotonic for a world's whole life and crosses `RandomStrollGoal`'s idle
+//! monotonic for a world's whole life and crosses `WanderGoal`'s idle
 //! throttle of 100 after five seconds, after which no mob can stroll again.
 //!
 //! A nearby player clears the counter immediately before the mob's own tick.
@@ -17,7 +17,7 @@
 //! # Why the throttle was fatal rather than merely slow
 //!
 //! A mob's goals only run on its own half-rate parity ticks, and
-//! `RandomStrollGoal::can_use` needs `next_i32(60) == 0` there (the 120 interval
+//! `WanderGoal::can_use` needs `next_i32(60) == 0` there (the 120 interval
 //! halved). So the first tick a lone stroll fires is the first *goal-tick* draw
 //! of that mob's stream where `next_u64() % 60 == 0`. If that draw lands past
 //! the throttle at 100 ticks, a mob with no player nearby can **never**
@@ -45,7 +45,7 @@
 //!
 //! Hermetic and deterministic, so these always run -- no skip path.
 
-use lodestone_entity::ai::goals::RandomStrollGoal;
+use lodestone_entity::ai::goals::WanderGoal;
 use lodestone_entity::pathfinding::MobShape;
 use lodestone_model::Vec3;
 use lodestone_server::{ChunkWorld, MobSim, PlayerPerception, StoneFloorSource};
@@ -67,7 +67,7 @@ const STROLL_MOB_ID: i32 = 12;
 /// tick `2n - 2`.
 const EXPECTED_FIRST_STROLL_TICK: usize = 144;
 
-/// `RandomStrollGoal`'s idle throttle: `goals.rs` returns early when
+/// `WanderGoal`'s idle throttle: `goals.rs` returns early when
 /// `no_action_time() >= 100`. Restated here because it is the number the
 /// control's whole premise rests on.
 const IDLE_THROTTLE_TICKS: usize = 100;
@@ -89,19 +89,19 @@ const _: () = assert!(TICKS > EXPECTED_FIRST_STROLL_TICK);
 
 
 /// What one arm observed over `TICKS` ticks of a mob whose only goal is a
-/// `RandomStrollGoal`.
+/// `WanderGoal`.
 struct Observed {
     /// The tick its first A\* search ran, i.e. the first tick the stroll goal
     /// actually reached `move_to`. `None` if it never strolled.
     first_stroll_tick: Option<usize>,
     /// The highest `no_action_time` the goals ever saw, read through the same
-    /// `MobController` seam `RandomStrollGoal::can_use` reads.
+    /// `MobController` seam `WanderGoal::can_use` reads.
     peak_no_action_time: i32,
     /// Its position at the end, to prove a stroll really moved it.
     end: Vec3,
 }
 
-/// Ticks one mob with exactly one goal — a `RandomStrollGoal` — so the mob RNG
+/// Ticks one mob with exactly one goal — a `WanderGoal` — so the mob RNG
 /// is drawn once per tick and nothing else competes for the MOVE flag.
 ///
 /// `players` is fed every tick, the way a connection feeds
@@ -124,7 +124,7 @@ fn observe(persistent: bool, players: Vec<PlayerPerception>) -> Observed {
     let id = {
         let m = sim.spawn(Vec3::new(8.5, 0.0, 8.5), MobShape::land(0.6, 1.95), 0.23, 560);
         m.set_persistent(persistent);
-        m.add_goal(7, Box::new(RandomStrollGoal::new(1.0)));
+        m.add_goal(7, Box::new(WanderGoal::new(1.0)));
         m.id()
     };
     assert_eq!(

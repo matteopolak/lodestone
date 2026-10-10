@@ -11,9 +11,9 @@
 //!
 //! # Why this family is where the roster first becomes visible
 //!
-//! Before this module, `MobSim::spawn_species` installed `RandomStrollGoal` and
-//! `RandomLookAroundGoal` on a cow and nothing else. `FloatGoal`, `PanicGoal`,
-//! `BreedGoal`, `TemptGoal` and `FollowParentGoal` were **fully implemented, fully
+//! Before this module, `MobSim::spawn_species` installed `WanderGoal` and
+//! `IdleGlanceGoal` on a cow and nothing else. `StayAfloatGoal`, `FleeInPanicGoal`,
+//! `MateGoal`, `LureGoal` and `TrailParentGoal` were **fully implemented, fully
 //! unit-tested, fully fed with real perception by `MobSim::tick` — and installed
 //! by nothing but tests.** Every call site outside `#[cfg(test)]` was zero. That
 //! is the island shape one layer up from a previously-fixed perception island:
@@ -28,7 +28,7 @@
 //! * **A pig's carrot-on-a-stick tempt** is [`Coverage::Missing`] separately from
 //!   its food tempt, because it is a distinct vanilla registration with a
 //!   distinct item and the server's `tempt_food` feed covers only the food tag.
-//! * **A rabbit's `AvoidEntityGoal` is modelled but inert**, because the server's
+//! * **A rabbit's `FleeEntityGoal` is modelled but inert**, because the server's
 //!   `avoided_species` feed has no rabbit arm — see [`rabbit_avoid_player`].
 //! * **Two rabbit rows are unmodelled for block-perception-adjacent reasons**, next.
 //! * **The cat and the parrot** ([`CAT`], [`PARROT`]) close a previously reported
@@ -65,9 +65,9 @@
 //! **A generalisation not to inherit.** The fix's body grouped seven `Missing` rows
 //! across two families as one seam capability. Measured against the jar it closes
 //! **one**: a rabbit's `ClimbOnTopOfPowderSnowGoal` needs powder-snow physics
-//! nothing here models, its `RaidGardenGoal` needs a host-computed candidate
+//! nothing here models, its `CropRaidGoal` needs a host-computed candidate
 //! block position (`MoveToBlockGoal`'s spiral) plus a block-state *property*, and
-//! [`hostile_melee`](super::hostile_melee)'s `RestrictSunGoal` reads no block at
+//! [`hostile_melee`](super::hostile_melee)'s `AvoidSunlightGoal` reads no block at
 //! all. Anyone planning off the original table would expect the rest to be free.
 //!
 //! **A stale claim not to inherit either.** An earlier plan said grazing is blocked on
@@ -102,9 +102,9 @@
 
 use crate::ai::goal::Goal;
 use crate::ai::goals::{
-    AvoidEntityGoal, BreedGoal, CatLieOnBedGoal, CatRelaxOnOwnerGoal, CatSitOnBlockGoal,
-    EatBlockGoal, FollowOwnerGoal, FollowParentGoal, LandOnOwnersShoulderGoal, LookAtPlayerGoal,
-    PanicGoal, RandomStrollGoal, TemptGoal,
+    FleeEntityGoal, MateGoal, CatLieOnBedGoal, CatSettleOnOwnerGoal, CatPerchGoal,
+    GrazeGoal, AccompanyOwnerGoal, TrailParentGoal, PerchOnOwnerGoal, WatchPlayerGoal,
+    FleeInPanicGoal, WanderGoal, LureGoal,
 };
 
 use super::{
@@ -147,66 +147,63 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// The only table in the roster with **no** gaps: all eight of vanilla's cow
 /// registrations have an equivalent here.
 pub static COW: &[Registration] = &[
-    Registration::goal(0, "FloatGoal", float_goal),
-    Registration::goal(1, "PanicGoal", panic_2_0),
-    Registration::goal(2, "BreedGoal", breed_1_0),
-    Registration::goal(3, "TemptGoal(COW_FOOD)", tempt_1_25),
-    Registration::goal(4, "FollowParentGoal", follow_parent_1_25),
-    Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll),
-    Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_6),
-    Registration::goal(7, "RandomLookAroundGoal", random_look_around),
+    Registration::goal(0, "stay_afloat", float_goal),
+    Registration::goal(1, "flee_in_panic", panic_2_0),
+    Registration::goal(2, "mate", breed_1_0),
+    Registration::goal(3, "lure(cow_food)", tempt_1_25),
+    Registration::goal(4, "trail_parent", follow_parent_1_25),
+    Registration::goal(5, "wander_dry", stroll),
+    Registration::goal(6, "watch_player(player)", look_at_player_6),
+    Registration::goal(7, "idle_glance", random_look_around),
 ];
 
 /// Vanilla's own sheep goal registration. Note it assigns `this.eatBlockGoal` before
 /// the first `addGoal`, so the `addGoal` calls themselves come after.
 pub static SHEEP: &[Registration] = &[
-    Registration::goal(0, "FloatGoal", float_goal),
-    Registration::goal(1, "PanicGoal", panic_1_25),
-    Registration::goal(2, "BreedGoal", breed_1_0),
-    Registration::goal(3, "TemptGoal(SHEEP_FOOD)", tempt_1_1),
-    Registration::goal(4, "FollowParentGoal", follow_parent_1_1),
+    Registration::goal(0, "stay_afloat", float_goal),
+    Registration::goal(1, "flee_in_panic", panic_1_25),
+    Registration::goal(2, "mate", breed_1_0),
+    Registration::goal(3, "lure(sheep_food)", tempt_1_1),
+    Registration::goal(4, "trail_parent", follow_parent_1_1),
     // The seam gap this row waited on is closed (`bdf7120`): the goal reads
     // the block below through `MobController::block_cues_below`. Grazing still
     // needs the host's drain of `take_new_eaten` to see grass turn to dirt — see
     // `docs/mob-block-perception.md`.
-    Registration::goal(5, "EatBlockGoal", eat_block),
-    Registration::goal(6, "WaterAvoidingRandomStrollGoal", stroll),
-    Registration::goal(7, "LookAtPlayerGoal(Player)", look_at_player_6),
-    Registration::goal(8, "RandomLookAroundGoal", random_look_around),
+    Registration::goal(5, "graze", eat_block),
+    Registration::goal(6, "wander_dry", stroll),
+    Registration::goal(7, "watch_player(player)", look_at_player_6),
+    Registration::goal(8, "idle_glance", random_look_around),
 ];
 
 /// Vanilla's own pig goal registration.
 ///
-/// A pig is the one species here with **two** `TemptGoal` registrations at the
+/// A pig is the one species here with **two** `LureGoal` registrations at the
 /// same priority, for carrot-on-a-stick and for `PIG_FOOD`.
 pub static PIG: &[Registration] = &[
-    Registration::goal(0, "FloatGoal", float_goal),
-    Registration::goal(1, "PanicGoal", panic_1_25),
-    // Vanilla puts a pig's `BreedGoal` at 3, not 2 — nothing occupies 2.
-    Registration::goal(3, "BreedGoal", breed_1_0),
-    // Vanilla's own carrot-on-a-stick tempt goal. A
-    // separate registration from the food one below, and a separate item: the
-    // server's `tempt_food` feed resolves the `pig_food` **tag** only, so
-    // steering a pig with a carrot on a stick is not modelled. It is also the
-    // riding-control item, so it belongs with saddles rather than with tempting.
-    Registration::missing(Selector::Goal, 4, "TemptGoal(CARROT_ON_A_STICK)"),
-    Registration::goal(4, "TemptGoal(PIG_FOOD)", tempt_1_2),
-    Registration::goal(5, "FollowParentGoal", follow_parent_1_1),
-    Registration::goal(6, "WaterAvoidingRandomStrollGoal", stroll),
-    Registration::goal(7, "LookAtPlayerGoal(Player)", look_at_player_6),
-    Registration::goal(8, "RandomLookAroundGoal", random_look_around),
+    Registration::goal(0, "stay_afloat", float_goal),
+    Registration::goal(1, "flee_in_panic", panic_1_25),
+    // Vanilla puts a pig's `MateGoal` at 3, not 2 — nothing occupies 2.
+    Registration::goal(3, "mate", breed_1_0),
+    // The carrot-on-a-stick goal differs from the food goal only in its item,
+    // and the server's tempt feed lists that item beside the foods.
+    Registration::covered(Selector::Goal, 4, "lure(carrot_on_a_stick)", "lure(pig_food)"),
+    Registration::goal(4, "lure(pig_food)", tempt_1_2),
+    Registration::goal(5, "trail_parent", follow_parent_1_1),
+    Registration::goal(6, "wander_dry", stroll),
+    Registration::goal(7, "watch_player(player)", look_at_player_6),
+    Registration::goal(8, "idle_glance", random_look_around),
 ];
 
 /// Vanilla's own chicken goal registration.
 pub static CHICKEN: &[Registration] = &[
-    Registration::goal(0, "FloatGoal", float_goal),
-    Registration::goal(1, "PanicGoal", panic_1_4),
-    Registration::goal(2, "BreedGoal", breed_1_0),
-    Registration::goal(3, "TemptGoal(CHICKEN_FOOD)", tempt_1_0),
-    Registration::goal(4, "FollowParentGoal", follow_parent_1_1),
-    Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll),
-    Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_6),
-    Registration::goal(7, "RandomLookAroundGoal", random_look_around),
+    Registration::goal(0, "stay_afloat", float_goal),
+    Registration::goal(1, "flee_in_panic", panic_1_4),
+    Registration::goal(2, "mate", breed_1_0),
+    Registration::goal(3, "lure(chicken_food)", tempt_1_0),
+    Registration::goal(4, "trail_parent", follow_parent_1_1),
+    Registration::goal(5, "wander_dry", stroll),
+    Registration::goal(6, "watch_player(player)", look_at_player_6),
+    Registration::goal(7, "idle_glance", random_look_around),
 ];
 
 /// Vanilla's own rabbit goal registration.
@@ -215,20 +212,20 @@ pub static CHICKEN: &[Registration] = &[
 /// a transcription choice. They are listed because four of the five are exactly
 /// the shape of thing that gets "fixed" into symmetry by a later reader:
 ///
-/// * **No `FollowParentGoal`.** Every other species here registers one; a rabbit
+/// * **No `TrailParentGoal`.** Every other species here registers one; a rabbit
 ///   does not — vanilla's own registration has no such line — so there is no row for it. Do not
 ///   add one for consistency with its siblings.
-/// * **Three registrations share priority 1** (`FloatGoal`,
+/// * **Three registrations share priority 1** (`StayAfloatGoal`,
 ///   `ClimbOnTopOfPowderSnowGoal`, `RabbitPanicGoal`), where every other species
 ///   here has exactly one goal per priority.
 /// * **Its look goal is at priority 11**, not 6 or 7, and at **`10.0F`** rather
 ///   than the `6.0F` every other farm animal uses.
 /// * **It is the only species in this family that flees anything**, and it
-///   registers three `AvoidEntityGoal`s to do it.
+///   registers three `FleeEntityGoal`s to do it.
 /// * **Its breed and stroll speeds are not the family's** — `0.8` and `0.6`
 ///   against everyone else's `1.0`, so neither shared builder applies.
 ///
-/// The killer-bunny variant installs a `MeleeAttackGoal(1.4, true)` and two
+/// The killer-bunny variant installs a `MeleeStrikeGoal(1.4, true)` and two
 /// target goals from vanilla's own variant setter, **not** from vanilla's own main
 /// registration.
 /// They are deliberately absent here: this table is the main registration's
@@ -237,7 +234,7 @@ pub static CHICKEN: &[Registration] = &[
 /// [`GoalSelector::remove`](crate::ai::goal::GoalSelector::remove) exists for.
 /// Adding them as rows would make the cited line range a lie.
 pub static RABBIT: &[Registration] = &[
-    Registration::goal(1, "FloatGoal", float_goal),
+    Registration::goal(1, "stay_afloat", float_goal),
     // Vanilla's own climb-on-powder-snow goal. The *cue* half
     // is now answerable — `MobController::block_cues_*` could carry
     // "the block above is powder snow or has empty collision" — but the goal
@@ -245,10 +242,10 @@ pub static RABBIT: &[Registration] = &[
     // sets, and `#powder_snow` identity is not a `BlockCues` field. Blocked on
     // powder-snow physics, not on block access;
     // `docs/mob-block-perception.md`.
-    Registration::missing(Selector::Goal, 1, "ClimbOnTopOfPowderSnowGoal"),
-    Registration::goal(1, "Rabbit.RabbitPanicGoal", panic_2_2),
-    Registration::goal(2, "BreedGoal", breed_0_8),
-    Registration::goal(3, "TemptGoal(RABBIT_FOOD)", tempt_1_0),
+    Registration::missing(Selector::Goal, 1, "walk_on_powder_snow"),
+    Registration::goal(1, "rabbit.panic", panic_2_2),
+    Registration::goal(2, "mate", breed_0_8),
+    Registration::goal(3, "lure(rabbit_food)", tempt_1_0),
     // The three `RabbitAvoidEntityGoal`s differ from the creeper's
     // pair in a way worth being explicit about: the creeper's Ocelot and Cat
     // registrations share one radius (`6.0F`), so one class-agnostic goal of
@@ -263,31 +260,29 @@ pub static RABBIT: &[Registration] = &[
     // three goals fighting over MOVE at equal priority.
     Registration::goal(
         4,
-        "Rabbit.RabbitAvoidEntityGoal(Player)",
+        "rabbit.flee_entity(player)",
         rabbit_avoid_player,
     ),
     Registration::covered(
         Selector::Goal,
         4,
-        "Rabbit.RabbitAvoidEntityGoal(Wolf)",
-        "Rabbit.RabbitAvoidEntityGoal(Player)",
+        "rabbit.flee_entity(wolf)",
+        "rabbit.flee_entity(player)",
     ),
     Registration::covered(
         Selector::Goal,
         4,
-        "Rabbit.RabbitAvoidEntityGoal(Monster)",
-        "Rabbit.RabbitAvoidEntityGoal(Player)",
+        "rabbit.flee_entity(monster)",
+        "rabbit.flee_entity(player)",
     ),
-    // Vanilla's own raid-garden goal — a `MoveToBlockGoal` that hunts
-    // carrot crops and eats them. Not a local-cue question: it needs a
-    // host-computed candidate block position (the `MoveToBlockGoal` spiral over
-    // 16 blocks), the `#supports_crops` tag, and the carrot block's own age property — a
-    // block-state *property*, not a boolean cue. The mutation half is the
-    // `ate`-style intent; `docs/mob-block-perception.md` has the full shape.
-    Registration::missing(Selector::Goal, 5, "Rabbit.RaidGardenGoal"),
-    Registration::goal(6, "WaterAvoidingRandomStrollGoal", stroll_0_6),
-    Registration::goal(11, "LookAtPlayerGoal(Player)", look_at_player_10),
+    Registration::goal(5, "rabbit.crop_raid", raid_garden),
+    Registration::goal(6, "wander_dry", stroll_0_6),
+    Registration::goal(11, "watch_player(player)", look_at_player_10),
 ];
+
+fn raid_garden(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raid_garden::CropRaidGoal::new())
+}
 
 /// Vanilla's own cat goal registration.
 ///
@@ -300,15 +295,15 @@ pub static RABBIT: &[Registration] = &[
 ///
 /// * **A cat's taming item is its whole food tag** (`#cat_food` = raw cod and
 ///   salmon), unlike the wolf, whose bone is in no wolf food tag at all. So an
-///   untamed cat fed cod always attempts a tame and never reaches `BreedGoal`
+///   untamed cat fed cod always attempts a tame and never reaches `MateGoal`
 ///   however the roll lands — see `docs/taming-and-breeding.md`'s note on
 ///   `breeding_items_are_per_species_and_a_parrot_has_none`'s sibling case.
-/// * **`SitWhenOrderedToGoal` and `FollowOwnerGoal` are shared with the wolf**
+/// * **`SitOnCommandGoal` and `AccompanyOwnerGoal` are shared with the wolf**
 ///   ([`sit_when_ordered`](super::sit_when_ordered)) and the parrot below, but
 ///   the follow distances are the cat's own — `(10, 5)`, not the wolf's
 ///   `(10, 2)` — so [`cat_follow_owner`] is a distinct builder.
 /// * **A cat has no combat goal at all.** Unlike the wolf, vanilla registers no
-///   `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` for `Cat` — its two
+///   `DefendOwnerGoal`/`AssistOwnerGoal` for `Cat` — its two
 ///   `targetSelector` rows are both `NonTameRandomTargetGoal`, an *untamed*
 ///   cat's own rabbit/turtle hunting, unrelated to its owner. A cat does not
 ///   defend you.
@@ -318,51 +313,47 @@ pub static RABBIT: &[Registration] = &[
 ///   bed essentially does not wander on its own, unlike every other species in
 ///   this family which strolls constantly.
 pub static CAT: &[Registration] = &[
-    Registration::goal(1, "FloatGoal", float_goal),
-    Registration::goal(1, "TamableAnimal.TamableAnimalPanicGoal", cat_panic_1_5),
-    Registration::goal(2, "SitWhenOrderedToGoal", sit_when_ordered),
+    Registration::goal(1, "stay_afloat", float_goal),
+    Registration::goal(1, "tamable.panic", cat_panic_1_5),
+    Registration::goal(2, "sit_on_command", sit_when_ordered),
     // Vanilla's own cat relax-on-owner goal — lies down near a sleeping owner and may
     // leave a morning gift on waking. `Coverage::Modelled` now —
-    // see [`CatRelaxOnOwnerGoal`]'s own doc for the disclosed simplifications
+    // see [`CatSettleOnOwnerGoal`]'s own doc for the disclosed simplifications
     // (bed-foot position, same-species exclusion, and the host-side gift
     // roll).
-    Registration::goal(3, "Cat.CatRelaxOnOwnerGoal", cat_relax_on_owner),
+    Registration::goal(3, "cat.settle_on_owner", cat_relax_on_owner),
     // Vanilla's own cat tempt goal,
     // added at priority 4. Vanilla's own scare argument
     // (fleeing a sudden nearby sprinting player) is not modelled — our
-    // `TemptGoal` has no scare state, same simplification as every other
-    // `TemptGoal` row in this roster.
-    Registration::goal(4, "Cat.CatTemptGoal(CAT_FOOD)", cat_tempt_0_6),
+    // `LureGoal` has no scare state, same simplification as every other
+    // `LureGoal` row in this roster.
+    Registration::goal(4, "cat.lure(cat_food)", cat_tempt_0_6),
     // Vanilla's own cat bed-hunt goal — a `MoveToBlockGoal` that hunts
     // beds in an 8-block radius. The candidate bed position is host-computed
     // (`MobController::cat_bed_target`, `docs/mob-block-perception.md`'s own
     // guidance for a goal that needs to search a neighbourhood) rather than
     // searched in-goal.
-    Registration::goal(5, "CatLieOnBedGoal", cat_lie_on_bed_1_1),
-    Registration::goal(6, "FollowOwnerGoal", cat_follow_owner),
+    Registration::goal(5, "cat.lie_on_bed", cat_lie_on_bed_1_1),
+    Registration::goal(6, "accompany_owner", cat_follow_owner),
     // Vanilla's own cat perch-hunt goal — hunts chests and lit furnaces to
     // perch on, same host-computed-candidate shape as `CatLieOnBedGoal` above
     // (`MobController::cat_sit_target`).
-    Registration::goal(7, "CatSitOnBlockGoal", cat_sit_on_block_0_8),
-    Registration::goal(8, "LeapAtTargetGoal", leap_0_3),
-    // `OcelotAttackGoal(this)` — an untamed cat's own chicken-stalking
-    // hunt. It picks its target internally (a nearby-entities-of-class query) rather
-    // than through `targetSelector`, so there is no companion target row to
-    // pin here either; no goal type models the stalk-then-pounce shape.
-    Registration::missing(Selector::Goal, 9, "OcelotAttackGoal"),
-    Registration::goal(10, "BreedGoal", breed_0_8),
-    Registration::goal(11, "WaterAvoidingRandomStrollGoal", cat_stroll),
-    Registration::goal(12, "LookAtPlayerGoal(Player)", look_at_player_10),
+    Registration::goal(7, "cat.perch", cat_sit_on_block_0_8),
+    Registration::goal(8, "pounce", leap_0_3),
+    Registration::goal(9, "cat.stalk_attack", stalk_attack),
+    Registration::goal(10, "mate", breed_0_8),
+    Registration::goal(11, "wander_dry", cat_stroll),
+    Registration::goal(12, "watch_player(player)", look_at_player_10),
     // An untamed cat hunting a random nearby rabbit.
-    Registration::target(1, "NonTameRandomTargetGoal(Rabbit)", untamed_target_rabbit),
+    Registration::target(1, "untamed_prey_target(rabbit)", untamed_target_rabbit),
     // The same hunt, narrowed to baby turtles on land.
-    Registration::target(1, "NonTameRandomTargetGoal(Turtle)", untamed_target_baby_turtle),
+    Registration::target(1, "untamed_prey_target(turtle)", untamed_target_baby_turtle),
 ];
 
 /// Vanilla's own parrot goal registration.
 ///
 /// Closes another previously reported gap. A parrot **does** register
-/// `SitWhenOrderedToGoal` — do not drop that row for symmetry with
+/// `SitOnCommandGoal` — do not drop that row for symmetry with
 /// "the parrot doesn't sit" — but vanilla's own try-to-tame step is the one taming success
 /// of the three that omits the automatic `setOrderedToSit(true)`
 /// (`docs/taming-and-breeding.md` §2, already correct in `mobs.rs`'s
@@ -371,35 +362,27 @@ pub static CAT: &[Registration] = &[
 /// is present in the jar regardless of how taming leaves the flag.
 ///
 /// A parrot registers **no targetSelector goal at all** — it cannot fight,
-/// has no `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal`, and (unlike every
-/// farm animal and the cat above) has no `BreedGoal` either:
+/// has no `DefendOwnerGoal`/`AssistOwnerGoal`, and (unlike every
+/// farm animal and the cat above) has no `MateGoal` either:
 /// vanilla's own can-mate check returns `false` and its own is-food check returns a literal
 /// `false`, so there is nothing to tempt it into breeding with — see
 /// `breeding_food`'s own comment on the empty `"parrot"` row.
 pub static PARROT: &[Registration] = &[
-    Registration::goal(0, "TamableAnimal.TamableAnimalPanicGoal", parrot_panic_1_25),
-    Registration::goal(0, "FloatGoal", float_goal),
-    Registration::goal(1, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::goal(2, "SitWhenOrderedToGoal", sit_when_ordered),
-    Registration::goal(2, "FollowOwnerGoal", parrot_follow_owner),
-    // Vanilla's own parrot-wander goal — a flying variant of
-    // random-stroll. Our `RandomStrollGoal` drives ground A*; a parrot's
-    // own flying-path navigation picks candidate points in the air, which this
-    // seam has no equivalent search for (same class of gap the bee's own
-    // wander goal is `Missing` for in the neutral family).
-    Registration::missing(Selector::Goal, 2, "Parrot.ParrotWanderGoal"),
+    Registration::goal(0, "tamable.panic", parrot_panic_1_25),
+    Registration::goal(0, "stay_afloat", float_goal),
+    Registration::goal(1, "watch_player(player)", look_at_player_8),
+    Registration::goal(2, "sit_on_command", sit_when_ordered),
+    Registration::goal(2, "accompany_owner", parrot_follow_owner),
+    Registration::goal(2, "parrot.perch_wander", parrot_wander),
     // Vanilla's own land-on-shoulder goal — shoulder riding. `Coverage::Modelled`
-    // now: see [`LandOnOwnersShoulderGoal`]'s own doc for the
+    // now: see [`PerchOnOwnerGoal`]'s own doc for the
     // disclosed owner-physical-state simplifications. Landing despawns the
     // parrot mob entity on the host side (vanilla discards it too — see
     // vanilla's own shoulder-mount setter); no client-visible perched
     // pose is rendered, since that is a player-model render layer this
     // crate's seam has no way to reach.
-    Registration::goal(3, "LandOnOwnersShoulderGoal", parrot_land_on_shoulder),
-    // Vanilla's own follow-mob goal — a tame, non-sitting
-    // parrot follows the nearest *other mob* it can imitate. No goal type here
-    // models following an arbitrary nearby mob rather than the owner.
-    Registration::missing(Selector::Goal, 3, "FollowMobGoal"),
+    Registration::goal(3, "perch_on_owner", parrot_land_on_shoulder),
+    Registration::goal(3, "trail_mob", parrot_follow_mob),
 ];
 
 // -- builders, one per distinct jar speed multiplier -------------------------
@@ -412,70 +395,70 @@ pub static PARROT: &[Registration] = &[
 /// The cow's panic speed factor, `2.0`, from vanilla's own cow registration. The fastest
 /// panic in this family.
 fn panic_2_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(PanicGoal::new(ctx.speed * 2.0))
+    Box::new(FleeInPanicGoal::new(ctx.speed * 2.0))
 }
 
 /// The panic speed factor `1.25` — sheep (vanilla's own sheep registration) and pig
 /// (vanilla's own pig registration).
 fn panic_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(PanicGoal::new(ctx.speed * 1.25))
+    Box::new(FleeInPanicGoal::new(ctx.speed * 1.25))
 }
 
 /// The chicken's panic speed factor, `1.4`, from vanilla's own chicken registration.
 fn panic_1_4(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(PanicGoal::new(ctx.speed * 1.4))
+    Box::new(FleeInPanicGoal::new(ctx.speed * 1.4))
 }
 
 /// The cow's tempt speed factor, `1.25`, from vanilla's own cow registration.
 fn tempt_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(TemptGoal::new(ctx.speed * 1.25))
+    Box::new(LureGoal::new(ctx.speed * 1.25))
 }
 
 /// The sheep's tempt speed factor, `1.1`, from vanilla's own sheep registration.
 fn tempt_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(TemptGoal::new(ctx.speed * 1.1))
+    Box::new(LureGoal::new(ctx.speed * 1.1))
 }
 
 /// The pig's tempt speed factor, `1.2`, from vanilla's own pig registration.
 fn tempt_1_2(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(TemptGoal::new(ctx.speed * 1.2))
+    Box::new(LureGoal::new(ctx.speed * 1.2))
 }
 
 /// The chicken's tempt speed factor, `1.0`, from vanilla's own chicken registration.
 fn tempt_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(TemptGoal::new(ctx.speed))
+    Box::new(LureGoal::new(ctx.speed))
 }
 
 /// The rabbit's own panic goal, speed factor `2.2`
 /// (vanilla's own rabbit registration). The fastest panic in the family; a cow's
 /// `2.0` is next.
 ///
-/// Vanilla's rabbit-specific panic goal is a `PanicGoal` subclass whose only addition is
+/// Vanilla's rabbit-specific panic goal is a `FleeInPanicGoal` subclass whose only addition is
 /// setting the jump control while fleeing, so the speed argument is the whole of
-/// what our `PanicGoal` models and the subclass is not a separate gap.
+/// what our `FleeInPanicGoal` models and the subclass is not a separate gap.
 fn panic_2_2(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(PanicGoal::new(ctx.speed * 2.2))
+    Box::new(FleeInPanicGoal::new(ctx.speed * 2.2))
 }
 
 /// The breed speed factor `0.8` — rabbit (vanilla's own rabbit registration) and cat
 /// (vanilla's own cat registration), the two species in this family whose breed
 /// speed is not `1.0`, which is why neither can use the shared [`breed_1_0`].
 fn breed_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(BreedGoal::new(ctx.speed * 0.8))
+    Box::new(MateGoal::new(ctx.speed * 0.8))
 }
 
 /// The rabbit's stroll speed factor, `0.6`
 /// (vanilla's own rabbit registration), against the `1.0` every other farm animal
 /// registers, so the shared [`stroll`] would be wrong by a factor of 1.67.
 fn stroll_0_6(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RandomStrollGoal::new(ctx.speed * 0.6))
+    Box::new(WanderGoal::new(ctx.speed * 0.6))
 }
 
 /// The rabbit's look-at-player distance, `10.0`
 /// (vanilla's own rabbit registration), the only non-`6.0F` look distance in this
 /// family, so [`look_at_player_6`] does not apply.
 fn look_at_player_10(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LookAtPlayerGoal::new(10.0, LOOK_PROBABILITY))
+    Box::new(WatchPlayerGoal::new(10.0, LOOK_PROBABILITY))
 }
 
 /// The rabbit's own avoid-player goal, radius `8.0`, walk and sprint speed factor `2.2`
@@ -487,7 +470,7 @@ fn look_at_player_10(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// modelled" caveat costs nothing here.
 ///
 /// **This goal is inert for a rabbit in production today**, and that is not a
-/// defect in this row. Our `AvoidEntityGoal` reads
+/// defect in this row. Our `FleeEntityGoal` reads
 /// [`MobController::avoid_threat`](crate::ai::MobController::avoid_threat),
 /// which `MobSim` feeds from its own `avoided_species` table — and that table
 /// has arms for creeper, the skeletons and the spiders only. Until it gains a
@@ -495,18 +478,18 @@ fn look_at_player_10(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// and this goal never starts. The roster deliberately does not carry perception
 /// data (see the module header of [`super`]), so the fix belongs there, not here.
 fn rabbit_avoid_player(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(AvoidEntityGoal::new(8.0, ctx.speed * 2.2))
+    Box::new(FleeEntityGoal::new(8.0, ctx.speed * 2.2))
 }
 
 /// The cow's follow-parent speed factor, `1.25`, from vanilla's own cow registration.
 fn follow_parent_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(FollowParentGoal::new(ctx.speed * 1.25))
+    Box::new(TrailParentGoal::new(ctx.speed * 1.25))
 }
 
 /// The follow-parent speed factor `1.1` — sheep, pig
 /// and chicken (each in their own goal registration).
 fn follow_parent_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(FollowParentGoal::new(ctx.speed * 1.1))
+    Box::new(TrailParentGoal::new(ctx.speed * 1.1))
 }
 
 /// Vanilla's own eat-block goal — sheep only, no arguments.
@@ -514,7 +497,7 @@ fn follow_parent_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// `MobController::block_cues_*`; a host whose `PathWorld` does not
 /// classify blocks leaves it inert rather than wrong.
 fn eat_block(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(EatBlockGoal::new())
+    Box::new(GrazeGoal::new())
 }
 
 // -- cat and parrot builders --------------------------------------------------
@@ -525,23 +508,23 @@ fn eat_block(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// so `build` must be a plain `fn` item, and the two live in different family
 /// modules by construction (see this module's "How to change it").
 fn cat_panic_1_5(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(PanicGoal::new(ctx.speed * 1.5))
+    Box::new(FleeInPanicGoal::new(ctx.speed * 1.5))
 }
 
 /// The cat's tempt speed factor, `0.6`, from vanilla's own cat registration.
 fn cat_tempt_0_6(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(TemptGoal::new(ctx.speed * 0.6))
+    Box::new(LureGoal::new(ctx.speed * 0.6))
 }
 
 /// The cat's own follow-owner distances, `(10.0, 5.0)`, from vanilla's own cat registration.
 /// A cat stops five blocks out, against the wolf's two.
 fn cat_follow_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(FollowOwnerGoal::new(ctx.speed, 10.0, 5.0))
+    Box::new(AccompanyOwnerGoal::new(ctx.speed, 10.0, 5.0))
 }
 
 /// The cat's perch-hunt speed factor, `0.8`, from vanilla's own cat registration.
 fn cat_sit_on_block_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(CatSitOnBlockGoal::new(ctx.speed * 0.8))
+    Box::new(CatPerchGoal::new(ctx.speed * 0.8))
 }
 
 /// The cat's bed-hunt speed factor, `1.1`, and search radius, `8`, from vanilla's own cat registration.
@@ -555,37 +538,49 @@ fn cat_lie_on_bed_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// builder here, since `1.1F` is itself a `speedModifier` multiplier on the
 /// mob's own movement-speed attribute, not a literal blocks/tick figure.
 fn cat_relax_on_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(CatRelaxOnOwnerGoal::new(ctx.speed * 1.1))
+    Box::new(CatSettleOnOwnerGoal::new(ctx.speed * 1.1))
 }
 
 /// The cat's stroll speed factor, `0.8`, and its near-zero wander probability
 /// (vanilla's own cat registration). The probability argument is the reciprocal
-/// of [`RandomStrollGoal::with_interval`]'s tick count: `1 / 1.0000001E-5 ≈
+/// of [`WanderGoal::with_interval`]'s tick count: `1 / 1.0000001E-5 ≈
 /// 100_000`, so a cat only picks a new wander target roughly once every
 /// 100,000 ticks (~83 minutes) — a near-total absence of unprompted wandering,
 /// unlike every other species in this family which uses the `120`-tick
 /// default.
+fn parrot_wander(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::parrot::PerchWanderGoal::new(ctx.speed))
+}
+
+fn parrot_follow_mob(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::parrot::TrailMobGoal::new(ctx.speed))
+}
+
+fn stalk_attack(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::stalk_attack::StalkAttackGoal::new(0.6))
+}
+
 fn cat_stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RandomStrollGoal::new(ctx.speed * 0.8).with_interval(100_000))
+    Box::new(WanderGoal::new(ctx.speed * 0.8).with_interval(100_000))
 }
 
 /// The parrot's panic speed factor, `1.25`
 /// (vanilla's own parrot registration).
 fn parrot_panic_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(PanicGoal::new(ctx.speed * 1.25))
+    Box::new(FleeInPanicGoal::new(ctx.speed * 1.25))
 }
 
 /// The parrot's own follow-owner distances, `(5.0, 1.0)`
 /// (vanilla's own parrot registration). The tightest follow distances in the
 /// tameable set — a parrot stays close.
 fn parrot_follow_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(FollowOwnerGoal::new(ctx.speed, 5.0, 1.0))
+    Box::new(AccompanyOwnerGoal::new(ctx.speed, 5.0, 1.0))
 }
 
 /// The parrot's own land-on-shoulder goal (vanilla's own parrot registration). No
 /// constructor arguments in the jar at all.
 fn parrot_land_on_shoulder(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LandOnOwnersShoulderGoal::new())
+    Box::new(PerchOnOwnerGoal::new())
 }
 
 #[cfg(test)]
@@ -609,7 +604,7 @@ mod tests {
             assert!(
                 matches!(r.coverage, Coverage::Modelled(_)),
                 "cow's {} is no longer modelled: {:?}",
-                r.vanilla,
+                r.name,
                 r.coverage
             );
         }
@@ -620,7 +615,7 @@ mod tests {
     /// the value predicted from the jar's own multiplier.
     ///
     /// This is the gate a priority-multiset check cannot replace. A cow's
-    /// `TemptGoal` built with sheep's `1.1` instead of cow's `1.25` sits at the
+    /// `LureGoal` built with sheep's `1.1` instead of cow's `1.25` sits at the
     /// right priority, under the right vanilla name, and still moves the cow
     /// toward the player — so every structural assertion and every
     /// direction-of-movement assertion passes. Only predicting `0.2 × 1.25 =
@@ -641,51 +636,51 @@ mod tests {
         // the decompiled sources, not from the tables above — the whole point is that
         // the expected value originates outside the code under test.
         let expected: &[(&str, &str, f64)] = &[
-            ("cow", "PanicGoal", 2.0),
-            ("cow", "BreedGoal", 1.0),
-            ("cow", "TemptGoal(COW_FOOD)", 1.25),
-            ("cow", "FollowParentGoal", 1.25),
-            ("cow", "WaterAvoidingRandomStrollGoal", 1.0),
-            ("sheep", "PanicGoal", 1.25),
-            ("sheep", "BreedGoal", 1.0),
-            ("sheep", "TemptGoal(SHEEP_FOOD)", 1.1),
-            ("sheep", "FollowParentGoal", 1.1),
-            ("sheep", "WaterAvoidingRandomStrollGoal", 1.0),
-            ("pig", "PanicGoal", 1.25),
-            ("pig", "BreedGoal", 1.0),
-            ("pig", "TemptGoal(PIG_FOOD)", 1.2),
-            ("pig", "FollowParentGoal", 1.1),
-            ("pig", "WaterAvoidingRandomStrollGoal", 1.0),
-            ("chicken", "PanicGoal", 1.4),
-            ("chicken", "BreedGoal", 1.0),
-            ("chicken", "TemptGoal(CHICKEN_FOOD)", 1.0),
-            ("chicken", "FollowParentGoal", 1.1),
-            ("chicken", "WaterAvoidingRandomStrollGoal", 1.0),
+            ("cow", "flee_in_panic", 2.0),
+            ("cow", "mate", 1.0),
+            ("cow", "lure(cow_food)", 1.25),
+            ("cow", "trail_parent", 1.25),
+            ("cow", "wander_dry", 1.0),
+            ("sheep", "flee_in_panic", 1.25),
+            ("sheep", "mate", 1.0),
+            ("sheep", "lure(sheep_food)", 1.1),
+            ("sheep", "trail_parent", 1.1),
+            ("sheep", "wander_dry", 1.0),
+            ("pig", "flee_in_panic", 1.25),
+            ("pig", "mate", 1.0),
+            ("pig", "lure(pig_food)", 1.2),
+            ("pig", "trail_parent", 1.1),
+            ("pig", "wander_dry", 1.0),
+            ("chicken", "flee_in_panic", 1.4),
+            ("chicken", "mate", 1.0),
+            ("chicken", "lure(chicken_food)", 1.0),
+            ("chicken", "trail_parent", 1.1),
+            ("chicken", "wander_dry", 1.0),
             // A rabbit shares not one multiplier with its siblings except the
             // tempt `1.0`, which makes it the strongest row in this table: four
             // of its five figures are unique in the family, so a builder copied
             // from a neighbour fails here rather than passing by coincidence.
-            ("rabbit", "Rabbit.RabbitPanicGoal", 2.2),
-            ("rabbit", "BreedGoal", 0.8),
-            ("rabbit", "TemptGoal(RABBIT_FOOD)", 1.0),
-            ("rabbit", "Rabbit.RabbitAvoidEntityGoal(Player)", 2.2),
-            ("rabbit", "WaterAvoidingRandomStrollGoal", 0.6),
+            ("rabbit", "rabbit.panic", 2.2),
+            ("rabbit", "mate", 0.8),
+            ("rabbit", "lure(rabbit_food)", 1.0),
+            ("rabbit", "rabbit.flee_entity(player)", 2.2),
+            ("rabbit", "wander_dry", 0.6),
             // Cat and parrot share no multiplier with each other or with any
             // farm animal here except the cat's breed `0.8` (shared with the
             // rabbit), so a builder copied from the wrong species fails this
             // gate rather than passing by coincidence.
-            ("cat", "TamableAnimal.TamableAnimalPanicGoal", 1.5),
-            ("cat", "Cat.CatTemptGoal(CAT_FOOD)", 0.6),
-            ("cat", "BreedGoal", 0.8),
-            ("cat", "WaterAvoidingRandomStrollGoal", 0.8),
-            ("parrot", "TamableAnimal.TamableAnimalPanicGoal", 1.25),
+            ("cat", "tamable.panic", 1.5),
+            ("cat", "cat.lure(cat_food)", 0.6),
+            ("cat", "mate", 0.8),
+            ("cat", "wander_dry", 0.8),
+            ("parrot", "tamable.panic", 1.25),
         ];
 
         for &(species, vanilla, multiplier) in expected {
             let table = super::super::registrations_for(species);
             let row = table
                 .iter()
-                .find(|r| r.vanilla == vanilla)
+                .find(|r| r.name == vanilla)
                 .unwrap_or_else(|| panic!("{species} has no {vanilla} row"));
             let build = row
                 .build()
@@ -729,9 +724,9 @@ mod tests {
         let ctx = SpeciesContext::new(BASE);
         let cow_panic = COW
             .iter()
-            .find(|r| r.vanilla == "PanicGoal")
+            .find(|r| r.name == "flee_in_panic")
             .and_then(super::Registration::build)
-            .expect("cow has a modelled PanicGoal");
+            .expect("cow has a modelled FleeInPanicGoal");
 
         let mut probe = SpeedProbe::new();
         let mut goal = cow_panic(&ctx);
@@ -762,21 +757,21 @@ mod tests {
     #[test]
     fn a_rabbits_table_matches_the_jars_addgoal_block() {
         let want: Vec<(Selector, i32, &str)> = vec![
-            (Selector::Goal, 1, "FloatGoal"),
-            (Selector::Goal, 1, "ClimbOnTopOfPowderSnowGoal"),
-            (Selector::Goal, 1, "Rabbit.RabbitPanicGoal"),
-            (Selector::Goal, 2, "BreedGoal"),
-            (Selector::Goal, 3, "TemptGoal(RABBIT_FOOD)"),
-            (Selector::Goal, 4, "Rabbit.RabbitAvoidEntityGoal(Player)"),
-            (Selector::Goal, 4, "Rabbit.RabbitAvoidEntityGoal(Wolf)"),
-            (Selector::Goal, 4, "Rabbit.RabbitAvoidEntityGoal(Monster)"),
-            (Selector::Goal, 5, "Rabbit.RaidGardenGoal"),
-            (Selector::Goal, 6, "WaterAvoidingRandomStrollGoal"),
-            (Selector::Goal, 11, "LookAtPlayerGoal(Player)"),
+            (Selector::Goal, 1, "stay_afloat"),
+            (Selector::Goal, 1, "walk_on_powder_snow"),
+            (Selector::Goal, 1, "rabbit.panic"),
+            (Selector::Goal, 2, "mate"),
+            (Selector::Goal, 3, "lure(rabbit_food)"),
+            (Selector::Goal, 4, "rabbit.flee_entity(player)"),
+            (Selector::Goal, 4, "rabbit.flee_entity(wolf)"),
+            (Selector::Goal, 4, "rabbit.flee_entity(monster)"),
+            (Selector::Goal, 5, "rabbit.crop_raid"),
+            (Selector::Goal, 6, "wander_dry"),
+            (Selector::Goal, 11, "watch_player(player)"),
         ];
         let got: Vec<(Selector, i32, &str)> = super::super::registrations_for("rabbit")
             .iter()
-            .map(|r| (r.selector, r.priority, r.vanilla))
+            .map(|r| (r.selector, r.priority, r.name))
             .collect();
         assert_eq!(
             got, want,
@@ -788,14 +783,14 @@ mod tests {
         // symmetry with the rest of the family. Asserted rather than left to the
         // comment on the table, because a comment cannot fail.
         assert!(
-            !RABBIT.iter().any(|r| r.vanilla == "FollowParentGoal"),
-            "vanilla's own rabbit registration registers no FollowParentGoal — every other \
+            !RABBIT.iter().any(|r| r.name == "trail_parent"),
+            "vanilla's own rabbit registration registers no TrailParentGoal — every other \
              species in this family does, and adding one here for consistency is \
              exactly what this assertion exists to reject"
         );
         assert!(
             RABBIT.iter().any(|r| r.priority == 11),
-            "a rabbit's LookAtPlayerGoal is at priority 11 (vanilla's own \
+            "a rabbit's WatchPlayerGoal is at priority 11 (vanilla's own \
              rabbit registration), \
              not 6 or 7 like its siblings'"
         );
@@ -813,25 +808,25 @@ mod tests {
     #[test]
     fn a_cats_table_matches_the_jars_addgoal_block() {
         let want: Vec<(Selector, i32, &str)> = vec![
-            (Selector::Goal, 1, "FloatGoal"),
-            (Selector::Goal, 1, "TamableAnimal.TamableAnimalPanicGoal"),
-            (Selector::Goal, 2, "SitWhenOrderedToGoal"),
-            (Selector::Goal, 3, "Cat.CatRelaxOnOwnerGoal"),
-            (Selector::Goal, 4, "Cat.CatTemptGoal(CAT_FOOD)"),
-            (Selector::Goal, 5, "CatLieOnBedGoal"),
-            (Selector::Goal, 6, "FollowOwnerGoal"),
-            (Selector::Goal, 7, "CatSitOnBlockGoal"),
-            (Selector::Goal, 8, "LeapAtTargetGoal"),
-            (Selector::Goal, 9, "OcelotAttackGoal"),
-            (Selector::Goal, 10, "BreedGoal"),
-            (Selector::Goal, 11, "WaterAvoidingRandomStrollGoal"),
-            (Selector::Goal, 12, "LookAtPlayerGoal(Player)"),
-            (Selector::Target, 1, "NonTameRandomTargetGoal(Rabbit)"),
-            (Selector::Target, 1, "NonTameRandomTargetGoal(Turtle)"),
+            (Selector::Goal, 1, "stay_afloat"),
+            (Selector::Goal, 1, "tamable.panic"),
+            (Selector::Goal, 2, "sit_on_command"),
+            (Selector::Goal, 3, "cat.settle_on_owner"),
+            (Selector::Goal, 4, "cat.lure(cat_food)"),
+            (Selector::Goal, 5, "cat.lie_on_bed"),
+            (Selector::Goal, 6, "accompany_owner"),
+            (Selector::Goal, 7, "cat.perch"),
+            (Selector::Goal, 8, "pounce"),
+            (Selector::Goal, 9, "cat.stalk_attack"),
+            (Selector::Goal, 10, "mate"),
+            (Selector::Goal, 11, "wander_dry"),
+            (Selector::Goal, 12, "watch_player(player)"),
+            (Selector::Target, 1, "untamed_prey_target(rabbit)"),
+            (Selector::Target, 1, "untamed_prey_target(turtle)"),
         ];
         let got: Vec<(Selector, i32, &str)> = super::super::registrations_for("cat")
             .iter()
-            .map(|r| (r.selector, r.priority, r.vanilla))
+            .map(|r| (r.selector, r.priority, r.name))
             .collect();
         assert_eq!(
             got, want,
@@ -843,9 +838,9 @@ mod tests {
         // owner-defence goal at all, unlike the wolf.
         assert!(
             !CAT.iter()
-                .any(|r| r.vanilla.contains("OwnerHurt")),
-            "vanilla's own cat registration targetSelector registers no OwnerHurtByTargetGoal or \
-             OwnerHurtTargetGoal — a cat does not defend its owner, and adding \
+                .any(|r| r.name.contains("defend_owner") || r.name.contains("assist_owner")),
+            "vanilla's own cat registration targetSelector registers no DefendOwnerGoal or \
+             AssistOwnerGoal — a cat does not defend its owner, and adding \
              one here for symmetry with the wolf is exactly what this assertion \
              exists to reject"
         );
@@ -856,18 +851,18 @@ mod tests {
     #[test]
     fn a_parrots_table_matches_the_jars_addgoal_block() {
         let want: Vec<(Selector, i32, &str)> = vec![
-            (Selector::Goal, 0, "TamableAnimal.TamableAnimalPanicGoal"),
-            (Selector::Goal, 0, "FloatGoal"),
-            (Selector::Goal, 1, "LookAtPlayerGoal(Player)"),
-            (Selector::Goal, 2, "SitWhenOrderedToGoal"),
-            (Selector::Goal, 2, "FollowOwnerGoal"),
-            (Selector::Goal, 2, "Parrot.ParrotWanderGoal"),
-            (Selector::Goal, 3, "LandOnOwnersShoulderGoal"),
-            (Selector::Goal, 3, "FollowMobGoal"),
+            (Selector::Goal, 0, "tamable.panic"),
+            (Selector::Goal, 0, "stay_afloat"),
+            (Selector::Goal, 1, "watch_player(player)"),
+            (Selector::Goal, 2, "sit_on_command"),
+            (Selector::Goal, 2, "accompany_owner"),
+            (Selector::Goal, 2, "parrot.perch_wander"),
+            (Selector::Goal, 3, "perch_on_owner"),
+            (Selector::Goal, 3, "trail_mob"),
         ];
         let got: Vec<(Selector, i32, &str)> = super::super::registrations_for("parrot")
             .iter()
-            .map(|r| (r.selector, r.priority, r.vanilla))
+            .map(|r| (r.selector, r.priority, r.name))
             .collect();
         assert_eq!(
             got, want,
@@ -877,19 +872,19 @@ mod tests {
 
         // The fact a later reader is most likely to "fix" into symmetry with
         // this file's other omission: unlike the cat, a parrot's
-        // `SitWhenOrderedToGoal` really is in the jar — only its
+        // `SitOnCommandGoal` really is in the jar — only its
         // *taming* mechanism omits the automatic sit, which is a different
         // mechanism entirely (`mobs.rs::tame_mechanism`'s `sit_on_success`).
         assert!(
-            PARROT.iter().any(|r| r.vanilla == "SitWhenOrderedToGoal"),
-            "vanilla's own parrot registration registers SitWhenOrderedToGoal — a parrot can \
+            PARROT.iter().any(|r| r.name == "sit_on_command"),
+            "vanilla's own parrot registration registers SitOnCommandGoal — a parrot can \
              still be ordered to sit by right-click even though taming it does \
              not auto-sit it. Removing this row for 'the parrot doesn't sit' is \
              exactly what this assertion exists to reject"
         );
         assert!(
-            !PARROT.iter().any(|r| r.vanilla == "BreedGoal"),
-            "vanilla's own parrot registration registers no BreedGoal — its own can-mate check is a \
+            !PARROT.iter().any(|r| r.name == "mate"),
+            "vanilla's own parrot registration registers no MateGoal — its own can-mate check is a \
              literal false, so a parrot cannot be bred at all"
         );
         assert!(
@@ -904,7 +899,7 @@ mod tests {
     /// missing, proven on a real mob rather than by the table's presence.
     ///
     /// The second half is the one a structural gate cannot see: `CAT` installs
-    /// both `SitWhenOrderedToGoal` (priority 2) and `FollowOwnerGoal`
+    /// both `SitOnCommandGoal` (priority 2) and `AccompanyOwnerGoal`
     /// (priority 6) claiming the same MOVE flag, so this also proves the
     /// priority ordering actually lets the sit order preempt an in-progress
     /// follow rather than the two fighting over motion forever.
@@ -942,7 +937,7 @@ mod tests {
             mob.tick(&mut ai);
         }
         let followed_gap = gap_to(mob.position(), owner);
-        // `FollowOwnerGoal`'s stop distance for a cat is 5.0 (vanilla's own cat registration),
+        // `AccompanyOwnerGoal`'s stop distance for a cat is 5.0 (vanilla's own cat registration),
         // against the wolf's 2.0 — a value prediction, not a direction: a
         // cat that merely moved *closer* than 12 blocks could still be short
         // of actually reaching its own stop distance.
@@ -954,7 +949,7 @@ mod tests {
         let settled_position = mob.position();
 
         // Order it to sit, then move the "owner" further away — if
-        // `SitWhenOrderedToGoal` did not actually preempt `FollowOwnerGoal`,
+        // `SitOnCommandGoal` did not actually preempt `AccompanyOwnerGoal`,
         // the cat would resume closing the new gap.
         mob.set_ordered_to_sit(true);
         mob.set_owner(Some(Vec3::new(60.5, 0.0, 0.5)));
@@ -967,8 +962,8 @@ mod tests {
         assert!(
             drift < 1e-6,
             "a cat ordered to sit drifted {drift} blocks toward its owner's new \
-             position over 300 ticks; SitWhenOrderedToGoal did not preempt \
-             FollowOwnerGoal as the priority-2-vs-6 ordering requires"
+             position over 300 ticks; SitOnCommandGoal did not preempt \
+             AccompanyOwnerGoal as the priority-2-vs-6 ordering requires"
         );
     }
 
@@ -1057,7 +1052,7 @@ mod tests {
     /// * **An empty roster entry** — the shape of "this species' table was never
     ///   filled in". The gap must not change at all.
     /// * **The [`FALLBACK`](super::super::FALLBACK) table**, which any unclaimed
-    ///   species gets: a stroll and a look, no `TemptGoal`. It receives the
+    ///   species gets: a stroll and a look, no `LureGoal`. It receives the
     ///   *identical* temptation feed, so it separates "the roster's tempt row
     ///   moved the rabbit" from "any goal set moves a mob about and 200 ticks is
     ///   long enough to arrive by accident".
@@ -1071,7 +1066,7 @@ mod tests {
             "precondition: the gap must start at 12 blocks, got {before}"
         );
 
-        // `TemptGoal` stops navigating inside 2.5 blocks (vanilla's stop
+        // `LureGoal` stops navigating inside 2.5 blocks (vanilla's stop
         // distance), so a rabbit that genuinely followed ends just inside that,
         // and one walk-step of slack covers the tick it crosses the line on.
         // This is a predicted *value*, not a direction: "it got closer" would be
@@ -1079,7 +1074,7 @@ mod tests {
         assert!(
             after < 2.5 + WALK,
             "a rabbit fed a temptation 12 blocks away ended {after} blocks from \
-             it; `TemptGoal`'s stop distance is 2.5, so it never followed"
+             it; `LureGoal`'s stop distance is 2.5, so it never followed"
         );
 
         let (c_before, c_after) = approach_gap(None, TICKS);
@@ -1097,9 +1092,9 @@ mod tests {
         );
         assert!(
             f_after > 2.5 + WALK,
-            "control: the FALLBACK table — a stroll and a look, no TemptGoal — \
+            "control: the FALLBACK table — a stroll and a look, no LureGoal — \
              also reached {f_after} blocks from the player. Then the rabbit's \
-             approach is not evidence about its TemptGoal row, and this gate is \
+             approach is not evidence about its LureGoal row, and this gate is \
              measuring nothing more than that mobs wander"
         );
     }
@@ -1143,7 +1138,7 @@ mod tests {
     /// Ticks a baby `species` on [`Grass`] with **no `add` call of this test's
     /// own** and returns how many eat intents reached the host.
     ///
-    /// A baby because [`EatBlockGoal::BABY_INTERVAL`] is 25 ticks against an
+    /// A baby because [`GrazeGoal::BABY_INTERVAL`] is 25 ticks against an
     /// adult's 500, so reachability is observable in a short run. The world never
     /// mutates, so nothing depletes the supply — the failure mode that made the
     /// seam's first interval measurement read grass scarcity instead of the eat
@@ -1174,7 +1169,7 @@ mod tests {
         eaten
     }
 
-    /// The [`SHEEP`] table installs an `EatBlockGoal` that a real
+    /// The [`SHEEP`] table installs an `GrazeGoal` that a real
     /// [`NavigatingMob`] can actually reach.
     ///
     /// **What this asserts is installation and reachability, not grazing.** The
@@ -1197,17 +1192,17 @@ mod tests {
         assert!(
             sheep > 0,
             "a baby sheep built only from the roster ate nothing in {TICKS} ticks \
-             on classified grass. Either SHEEP no longer carries the EatBlockGoal \
+             on classified grass. Either SHEEP no longer carries the GrazeGoal \
              row, or goals_for does not reach it: with BABY_INTERVAL = {} the \
              chance of a genuinely installed goal never firing is vanishing",
-            EatBlockGoal::BABY_INTERVAL
+            GrazeGoal::BABY_INTERVAL
         );
 
         let cow = grazes("cow", TICKS);
         assert_eq!(
             cow, 0,
             "control: a cow on the same grass, ticked the same {TICKS} times, ate \
-             {cow} times. vanilla's own cow registration registers no EatBlockGoal, so \
+             {cow} times. vanilla's own cow registration registers no GrazeGoal, so \
              something installs grazing regardless of the table and the sheep \
              measurement above is not attributable to its row"
         );

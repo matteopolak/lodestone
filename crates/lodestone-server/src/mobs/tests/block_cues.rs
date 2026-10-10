@@ -146,7 +146,7 @@ fn a_grazing_mob_hands_its_eat_to_the_driver() {
         .id();
     sim.get_mut(id).expect("just spawned").add_goal(
         5,
-        Box::new(lodestone_entity::ai::goals::EatBlockGoal::new()),
+        Box::new(lodestone_entity::ai::goals::GrazeGoal::new()),
     );
 
     assert!(

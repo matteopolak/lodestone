@@ -295,6 +295,10 @@ impl PathWorld for ChunkWorld {
         lodestone_data::redstone_conductor::conducts(self.block_state_id(x, y, z))
     }
 
+    fn block_state(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
+        Some(self.block_state_id(x, y, z))
+    }
+
     fn collides(&self, aabb: Aabb) -> bool {
         // Full-cell occupancy, with the max edges pulled in so a box that
         // merely touches a cell face does not count.
@@ -391,6 +395,10 @@ impl PathWorld for LivePathWorld<'_> {
 
     fn is_roost(&self, x: i32, y: i32, z: i32) -> bool {
         (self.terrain)(x, y, z).is_some_and(lodestone_data::redstone_conductor::conducts)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
+        (self.terrain)(x, y, z)
     }
 
     fn attracts_bees(&self, x: i32, y: i32, z: i32) -> bool {

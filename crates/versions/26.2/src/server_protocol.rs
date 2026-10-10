@@ -339,6 +339,7 @@ const METADATA_IDX_SHEEP_WOOL: u8 = 18;
 const METADATA_IDX_FOX_TYPE: u8 = 18;
 const METADATA_IDX_AXOLOTL_VARIANT: u8 = 18;
 const METADATA_IDX_HORSE_VARIANT: u8 = 19;
+const METADATA_IDX_WOLF_INTERESTED: u8 = 20;
 const METADATA_IDX_WOLF_COLLAR: u8 = 21;
 const METADATA_IDX_CAT_COLLAR: u8 = 23;
 const METADATA_IDX_LLAMA_VARIANT: u8 = 21;
@@ -487,6 +488,12 @@ const METADATA_IDX_GOAT_HAS_RIGHT_HORN: u8 = 20;
 /// caller) disambiguates, exactly as that constant's own doc describes for
 /// its pair.
 const METADATA_IDX_AXOLOTL_PLAYING_DEAD: u8 = 19;
+
+/// A turtle's carried-egg flag: index 18, `BOOLEAN`, and its laying flag at
+/// index 19 (`tests/support/entity_data_index_jvm.txt`: `Turtle.HAS_EGG`,
+/// `Turtle.LAYING_EGG`). Only turtle snapshots build [`MetadataField::TurtleEgg`].
+const METADATA_IDX_TURTLE_HAS_EGG: u8 = 18;
+const METADATA_IDX_TURTLE_LAYING_EGG: u8 = 19;
 
 /// the camel class's own dash accessor — index 19, serializer `BOOLEAN` (8). Off the jar dump
 /// (`tests/support/entity_data_index_jvm.txt`: `19 the camel class's own dash accessor 8 BOOLEAN`) —
@@ -4448,13 +4455,16 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_BYTE);
                     w.i8(byte);
                 }
-                MetadataField::HorseFlags { tame } => {
+                MetadataField::HorseFlags { tame, standing } => {
                     // the abstract-horse class's own flag-tame accessor = 2` — deliberately a *different* bit
                     // from the arm above at the *same* index. See
                     // [`METADATA_IDX_HORSE_FLAGS`].
                     let mut byte = 0i8;
                     if *tame {
                         byte |= 0x02;
+                    }
+                    if *standing {
+                        byte |= 0x20;
                     }
                     w.u8(METADATA_IDX_HORSE_FLAGS);
                     w.var_i32(METADATA_SER_BYTE);
@@ -4597,6 +4607,14 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*playing_dead);
                 }
+                MetadataField::TurtleEgg { has_egg, laying } => {
+                    w.u8(METADATA_IDX_TURTLE_HAS_EGG);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*has_egg);
+                    w.u8(METADATA_IDX_TURTLE_LAYING_EGG);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*laying);
+                }
                 MetadataField::Dash(is_dashing) => {
                     // the camel class's own dash accessor — index 19; only `SimMob::snapshot`'s
                     // `"camel"` arm ever builds this variant. See
@@ -4651,6 +4669,11 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_SHEEP_WOOL);
                     w.var_i32(METADATA_SER_BYTE);
                     w.i8(((*color & 0x0F) | if *sheared { 0x10 } else { 0 }) as i8);
+                }
+                MetadataField::WolfInterested(interested) => {
+                    w.u8(METADATA_IDX_WOLF_INTERESTED);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*interested);
                 }
                 MetadataField::WolfCollar(color) => {
                     w.u8(METADATA_IDX_WOLF_COLLAR);
@@ -4838,9 +4861,9 @@ impl ServerProtocol for V770ServerProtocol {
     /// is no powered-creeper
     /// sound variant to pick between. This crate has no charged-creeper
     /// producer today either way ([`lodestone_server::MobSim::take_detonations`]'s
-    /// only source is [`lodestone_server::SwellGoal`]/`ignite()`, neither of
+    /// only source is [`lodestone_server::FuseGoal`]/`ignite()`, neither of
     /// which ever sets `DATA_IS_POWERED` — see
-    /// `crates/lodestone-entity/src/ai/goals.rs`'s `SwellGoal`), so the
+    /// `crates/lodestone-entity/src/ai/goals.rs`'s `FuseGoal`), so the
     /// constant is correct for every detonation this encoder can currently
     /// be asked to encode, not merely the common case.
     ///

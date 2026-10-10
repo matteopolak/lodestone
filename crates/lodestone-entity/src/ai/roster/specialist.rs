@@ -7,7 +7,7 @@
 //! Its reason to exist is the **guardian's beam**, which is a third attack
 //! shape: no projectile entity, no contact — a charge-up on a tick counter,
 //! then damage when the counter reaches the species' own attack-duration getter.
-//! It needs neither [`MeleeAttackGoal`] nor the ranged-attack roster's
+//! It needs neither [`MeleeStrikeGoal`] nor the ranged-attack roster's
 //! (`super::ranged`) launch path, so this family does not wait on either.
 //!
 //! [`GuardianBeamGoal`] is the one new goal type, and it lives **here** rather
@@ -90,7 +90,7 @@
 //!   precisely what the multiset gate is supposed to catch — so neither is
 //!   guessed at here.
 //!
-//! [`MeleeAttackGoal`]: crate::ai::goals::MeleeAttackGoal
+//! [`MeleeStrikeGoal`]: crate::ai::goals::MeleeStrikeGoal
 
 use crate::ai::goal::{Flag, FlagSet, Goal};
 use crate::ai::mob::{MobController, distance_sqr};
@@ -133,7 +133,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// wherever it is. Nothing is spawned, nothing travels, and the mob does not close
 /// the distance — vanilla's own start step and every per-tick update
 /// **stop** the navigation. So it shares no machinery with the ranged-attack
-/// roster's launch path and none with `MeleeAttackGoal`'s reach check.
+/// roster's launch path and none with `MeleeStrikeGoal`'s reach check.
 ///
 /// # The timing, which is the whole behaviour
 ///
@@ -175,7 +175,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 ///   concept here either.
 /// * **Line of sight.** Vanilla drops the target when `!hasLineOfSight`, in
 ///   its own per-tick update. This seam has no raycast primitive — the same
-///   disclosed simplification `SwellGoal`'s own doc comment already makes.
+///   disclosed simplification `FuseGoal`'s own doc comment already makes.
 /// * **`randomStrollGoal.trigger()` on stop**, in vanilla's own stop step,
 ///   which has no seam.
 #[derive(Debug)]
@@ -244,15 +244,15 @@ impl GuardianBeamGoal {
 impl Goal for GuardianBeamGoal {
     /// Vanilla sets `EnumSet.of(Goal.Flag.MOVE, Goal.Flag.LOOK)`, in
     /// vanilla's own constructor, and this is transcribed exactly
-    /// rather than narrowed to `{MOVE}` the way `MeleeAttackGoal` is.
+    /// rather than narrowed to `{MOVE}` the way `MeleeStrikeGoal` is.
     ///
-    /// The narrowing in `MeleeAttackGoal` is a pre-existing, deliberately
+    /// The narrowing in `MeleeStrikeGoal` is a pre-existing, deliberately
     /// conservative deviation, and the reason it stays is that changing a shared
     /// goal's flag set reschedules every species at once. Neither applies here:
     /// this goal is new and has exactly two registrations, both in this file. And
     /// LOOK is load-bearing for the guardian specifically — vanilla's beam at
-    /// priority 4 is *meant* to hold LOOK against the two `LookAtPlayerGoal`
-    /// registrations at 8 and `RandomLookAroundGoal` at 9, so a charging guardian
+    /// priority 4 is *meant* to hold LOOK against the two `WatchPlayerGoal`
+    /// registrations at 8 and `IdleGlanceGoal` at 9, so a charging guardian
     /// stares at its victim instead of glancing away.
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Look])
@@ -338,10 +338,10 @@ pub fn elder_guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 ///
 /// Three rows are narrowed, and none of them is the beam:
 ///
-/// * **`MoveTowardsRestrictionGoal`** at 5 walks a mob back inside its home
+/// * **`ReturnToHomeAreaGoal`** at 5 walks a mob back inside its home
 ///   radius. Only an elder guardian has one (it restricts itself to 16 blocks
 ///   around where it first ticks), so a plain guardian's row never fires.
-/// * **The second `LookAtPlayerGoal`** at 8 watches the nearest other guardian
+/// * **The second `WatchPlayerGoal`** at 8 watches the nearest other guardian
 ///   within 12.0 blocks with a 0.01 probability, through a
 ///   [`TargetClass::Guardian`](crate::ai::TargetClass::Guardian) feed.
 /// * **The target row** at 1 is filtered by
@@ -357,19 +357,19 @@ pub fn elder_guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// 400-tick, set in `ElderGuardian`'s constructor — pause between wanders is not
 /// modelled) and claims
 /// `{MOVE}` only. The flag half is the same class of conservative deviation
-/// `MeleeAttackGoal` already carries and is left alone for the same reason; its
+/// `MeleeStrikeGoal` already carries and is left alone for the same reason; its
 /// one visible effect is that our guardian may glance around while strolling,
 /// where vanilla's cannot.
 pub static GUARDIAN: &[Registration] = &[
-    Registration::goal(4, "Guardian.GuardianAttackGoal", guardian_beam),
-    Registration::goal(5, "MoveTowardsRestrictionGoal", guardian_move_towards_restriction),
-    Registration::goal(7, "RandomStrollGoal", stroll),
-    Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::goal(8, "LookAtPlayerGoal(Guardian)", look_at_guardian),
-    Registration::goal(9, "RandomLookAroundGoal", random_look_around),
+    Registration::goal(4, "guardian.beam_attack", guardian_beam),
+    Registration::goal(5, "return_to_home_area", guardian_move_towards_restriction),
+    Registration::goal(7, "wander", stroll),
+    Registration::goal(8, "watch_player(player)", look_at_player_8),
+    Registration::goal(8, "watch_player(guardian)", look_at_guardian),
+    Registration::goal(9, "idle_glance", random_look_around),
     Registration::target(
         1,
-        "NearestAttackableTargetGoal(LivingEntity)",
+        "nearest_target(living)",
         nearest_attackable_target,
     ),
 ];
@@ -392,15 +392,15 @@ pub static GUARDIAN: &[Registration] = &[
 /// `the_beam_lands_on_vanillas_ninetieth_tick_and_the_elders_on_its_seventieth`
 /// is for.
 pub static ELDER_GUARDIAN: &[Registration] = &[
-    Registration::goal(4, "Guardian.GuardianAttackGoal", elder_guardian_beam),
-    Registration::goal(5, "MoveTowardsRestrictionGoal", guardian_move_towards_restriction),
-    Registration::goal(7, "RandomStrollGoal", stroll),
-    Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::goal(8, "LookAtPlayerGoal(Guardian)", look_at_guardian),
-    Registration::goal(9, "RandomLookAroundGoal", random_look_around),
+    Registration::goal(4, "guardian.beam_attack", elder_guardian_beam),
+    Registration::goal(5, "return_to_home_area", guardian_move_towards_restriction),
+    Registration::goal(7, "wander", stroll),
+    Registration::goal(8, "watch_player(player)", look_at_player_8),
+    Registration::goal(8, "watch_player(guardian)", look_at_guardian),
+    Registration::goal(9, "idle_glance", random_look_around),
     Registration::target(
         1,
-        "NearestAttackableTargetGoal(LivingEntity)",
+        "nearest_target(living)",
         nearest_attackable_target,
     ),
 ];
@@ -411,15 +411,15 @@ fn float_around(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 }
 
 fn ghast_look(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(GhastLookGoal)
+    Box::new(FaceTargetGoal)
 }
 
 /// Turns the ghast's whole body toward its target while the target is within 64
 /// blocks. With no target the free-flight move already faces the heading.
 #[derive(Debug)]
-struct GhastLookGoal;
+struct FaceTargetGoal;
 
-impl Goal for GhastLookGoal {
+impl Goal for FaceTargetGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Look])
     }
@@ -448,12 +448,12 @@ impl Goal for GhastLookGoal {
 /// is not modelled. The target row is the plain player scan without the +-4
 /// block vertical band.
 pub static GHAST: &[Registration] = &[
-    Registration::goal(5, "Ghast.RandomFloatAroundGoal", float_around),
-    Registration::goal(7, "Ghast.GhastLookGoal", ghast_look),
-    Registration::goal(7, "Ghast.GhastShootFireballGoal", super::ranged::ghast_fireball),
+    Registration::goal(5, "ghast.drift", float_around),
+    Registration::goal(7, "ghast.face_target", ghast_look),
+    Registration::goal(7, "ghast.shoot_fireball", super::ranged::ghast_fireball),
     Registration::target(
         1,
-        "NearestAttackableTargetGoal(Player)",
+        "nearest_target(player)",
         nearest_attackable_target,
     ),
 ];
@@ -483,16 +483,16 @@ mod tests {
     #[test]
     fn every_table_matches_the_jars_addgoal_block() {
         let guardian_rows: &[Row] = &[
-            (Selector::Goal, 4, "Guardian.GuardianAttackGoal"),
-            (Selector::Goal, 5, "MoveTowardsRestrictionGoal"),
-            (Selector::Goal, 7, "RandomStrollGoal"),
-            (Selector::Goal, 8, "LookAtPlayerGoal(Player)"),
-            (Selector::Goal, 8, "LookAtPlayerGoal(Guardian)"),
-            (Selector::Goal, 9, "RandomLookAroundGoal"),
+            (Selector::Goal, 4, "guardian.beam_attack"),
+            (Selector::Goal, 5, "return_to_home_area"),
+            (Selector::Goal, 7, "wander"),
+            (Selector::Goal, 8, "watch_player(player)"),
+            (Selector::Goal, 8, "watch_player(guardian)"),
+            (Selector::Goal, 9, "idle_glance"),
             (
                 Selector::Target,
                 1,
-                "NearestAttackableTargetGoal(LivingEntity)",
+                "nearest_target(living)",
             ),
         ];
 
@@ -505,10 +505,10 @@ mod tests {
             (
                 "ghast",
                 &[
-                    (Selector::Goal, 5, "Ghast.RandomFloatAroundGoal"),
-                    (Selector::Goal, 7, "Ghast.GhastLookGoal"),
-                    (Selector::Goal, 7, "Ghast.GhastShootFireballGoal"),
-                    (Selector::Target, 1, "NearestAttackableTargetGoal(Player)"),
+                    (Selector::Goal, 5, "ghast.drift"),
+                    (Selector::Goal, 7, "ghast.face_target"),
+                    (Selector::Goal, 7, "ghast.shoot_fireball"),
+                    (Selector::Target, 1, "nearest_target(player)"),
                 ],
             ),
         ];
@@ -516,7 +516,7 @@ mod tests {
         for &(species, want) in cases {
             let got: Vec<Row> = registrations_for(species)
                 .iter()
-                .map(|r| (r.selector, r.priority, r.vanilla))
+                .map(|r| (r.selector, r.priority, r.name))
                 .collect();
             assert_eq!(
                 got,
@@ -541,7 +541,7 @@ mod tests {
 
         let rows = |t: &'static [Registration]| -> Vec<Row> {
             t.iter()
-                .map(|r| (r.selector, r.priority, r.vanilla))
+                .map(|r| (r.selector, r.priority, r.name))
                 .collect()
         };
         assert_eq!(
@@ -819,7 +819,7 @@ mod tests {
     /// every other MOVE goal in the guardian's table.
     ///
     /// Not a restatement of the constant: this asserts the property the priority
-    /// exists to produce. `RandomStrollGoal` at 7 also claims MOVE, so transcribing
+    /// exists to produce. `WanderGoal` at 7 also claims MOVE, so transcribing
     /// the beam above 7 hands the stroll the MOVE flag and the beam never runs at
     /// all — the control this unit ran and observed. And the roster's own
     /// `target_and_goal_namespaces_cannot_contend` invariant requires a
@@ -843,12 +843,12 @@ mod tests {
 
         let beam_priority = GUARDIAN
             .iter()
-            .find(|r| r.vanilla == "Guardian.GuardianAttackGoal")
+            .find(|r| r.name == "guardian.beam_attack")
             .expect("the guardian's beam row")
             .priority;
         let mut compared = 0;
         for row in GUARDIAN {
-            if row.selector != Selector::Goal || row.vanilla == "Guardian.GuardianAttackGoal" {
+            if row.selector != Selector::Goal || row.name == "guardian.beam_attack" {
                 continue;
             }
             let Some(build) = row.build() else { continue };
@@ -858,7 +858,7 @@ mod tests {
                     beam_priority < row.priority,
                     "{} claims MOVE at priority {} and the beam is at {} — a \
                      charging guardian would be preempted and never fire",
-                    row.vanilla,
+                    row.name,
                     row.priority,
                     beam_priority
                 );
@@ -867,7 +867,7 @@ mod tests {
         assert!(
             compared > 0,
             "no other MOVE goal was compared, so this gate measured nothing — the \
-             guardian's RandomStrollGoal row at priority 7 should have been found"
+             guardian's WanderGoal row at priority 7 should have been found"
         );
     }
 

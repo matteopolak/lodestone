@@ -106,13 +106,13 @@ impl Aabb {
 /// # Why booleans rather than a block id or a `PathType`-style enum
 ///
 /// Vanilla's own tests are **predicates over tags**, not equality against a
-/// block: `EatBlockGoal`'s is `state.is(BlockTags.EDIBLE_FOR_SHEEP)`
+/// block: `GrazeGoal`'s is `state.is(BlockTags.EDIBLE_FOR_SHEEP)`
 /// (its `IS_EDIBLE` field) beside `state.is(Blocks.GRASS_BLOCK)`
-/// (`EatBlockGoal.canUse`). Two independent predicates that can hold together, so an enum would
+/// (`GrazeGoal.canUse`). Two independent predicates that can hold together, so an enum would
 /// have to enumerate the combinations. A block id would drag a registry into
 /// `lodestone-entity`, which the whole `PathWorld` seam exists to avoid, and
 /// would put tag resolution in the goal — the wrong side, exactly as with
-/// `TemptGoal`'s per-species food tags.
+/// `LureGoal`'s per-species food tags.
 ///
 /// # How to add a cue
 ///
@@ -127,11 +127,11 @@ pub struct BlockCues {
     /// The block is in `#minecraft:edible_for_sheep`
     /// (vanilla's own edible-for-sheep block tag) — what a sheep grazes when it is standing
     /// *in* it (`short_grass` and friends), consumed by
-    /// `EatBlockGoal`'s `IS_EDIBLE` field.
+    /// `GrazeGoal`'s `IS_EDIBLE` field.
     pub edible_for_sheep: bool,
     /// The block is exactly `minecraft:grass_block` — what a sheep grazes when
     /// standing *on* it, and the only cue whose vanilla test is block equality
-    /// rather than a tag (`EatBlockGoal.canUse` and `EatBlockGoal.tick`).
+    /// rather than a tag (`GrazeGoal.canUse` and `GrazeGoal.tick`).
     pub grass_block: bool,
 }
 
@@ -240,6 +240,21 @@ pub trait PathWorld: Send + Sync {
     fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
         let _ = (x, y, z);
         false
+    }
+
+    /// The block state in this cell, or `None` where the world has no answer.
+    fn block_state(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
+        let _ = (x, y, z);
+        None
+    }
+
+    /// Whether the cell holds an air block. A world that cannot name its block
+    /// states treats every passable cell as air.
+    fn is_air(&self, x: i32, y: i32, z: i32) -> bool {
+        match self.block_state(x, y, z) {
+            Some(state) => crate::ai::turtle_egg::is_air(state),
+            None => matches!(self.base_path_type(x, y, z), PathType::Open),
+        }
     }
 
     /// Whether the block is a full cube a bat can hang from.

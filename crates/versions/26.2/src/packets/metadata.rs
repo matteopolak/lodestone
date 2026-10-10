@@ -3169,7 +3169,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.push(IDX_CREEPER_SWELL_DIR);
         bytes.extend(varint(SER_INT));
-        bytes.extend(varint(1)); // counting up: ignited or in SwellGoal range
+        bytes.extend(varint(1)); // counting up: ignited or in FuseGoal range
         bytes.push(IDX_CREEPER_POWERED);
         bytes.extend(varint(SER_BOOLEAN));
         bytes.push(1);

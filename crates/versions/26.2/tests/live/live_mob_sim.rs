@@ -29,7 +29,7 @@
 //!
 //! # This gate used to be red, and part of the reason was its own premise
 //!
-//! It previously claimed to wait out "`RandomStrollGoal`'s real (~120-tick
+//! It previously claimed to wait out "`WanderGoal`'s real (~120-tick
 //! average, i.e. ~6s at the tick loop's 50ms cadence) interval before a
 //! wandering mob picks its first destination". Both halves of that were wrong,
 //! and the second half was wrong in a way no wait could fix:
@@ -39,7 +39,7 @@
 //!   `SplitMix64(0x1234_5678_9ABC_DEF0)`), so all three mobs roll the
 //!   *same* stream, whose first successful `next_u64() % 120 == 0` draw is draw
 //!   130 — not an average, a fixed tick.
-//! * That draw was unreachable. `RandomStrollGoal::can_use` early-returns once
+//! * That draw was unreachable. `WanderGoal::can_use` early-returns once
 //!   `no_action_time >= 100`, and nothing in production ever reset that counter
 //!   (`MobSim::despawn_pass` owns the reset and has no production caller), so
 //!   the throttle closed at tick 100, thirty draws early, and **no mob could

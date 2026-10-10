@@ -215,7 +215,7 @@ fn a_chasing_zombie_stops_at_the_edge_of_loaded_terrain() {
     let furthest = |loaded_to: i32| {
         let mut sim = MobSim::new(&base);
         let m = sim.spawn(Vec3::new(10.5, 1.0, 8.5), MobShape::land(0.6, 1.95), 0.25, 400);
-        m.add_goal(1, Box::new(lodestone_entity::ai::goals::MeleeAttackGoal::new(0.25, 2.0)));
+        m.add_goal(1, Box::new(lodestone_entity::ai::goals::MeleeStrikeGoal::new(0.25, 2.0)));
         m.set_attack_target(Some(Vec3::new(40.5, 1.0, 8.5)));
         let id = m.id();
         let mut furthest = 0.0_f64;
@@ -248,7 +248,7 @@ fn a_hunting_zombie_descends_a_drop_its_health_budget_allows() {
         let mut sim = MobSim::new(&base);
         sim.set_difficulty(difficulty);
         let m = sim.spawn(Vec3::new(5.5, 1.0, 8.5), MobShape::land(0.6, 1.95), 0.25, 400);
-        m.add_goal(1, Box::new(lodestone_entity::ai::goals::MeleeAttackGoal::new(0.25, 2.0)));
+        m.add_goal(1, Box::new(lodestone_entity::ai::goals::MeleeStrikeGoal::new(0.25, 2.0)));
         m.set_attack_target(Some(Vec3::new(14.5, -5.0, 8.5)));
         let id = m.id();
         let mut lowest = f64::MAX;

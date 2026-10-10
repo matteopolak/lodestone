@@ -148,6 +148,12 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_grazes)
     }
 
+    /// Drains the block changes mobs asked for since the last call. The driver
+    /// applies each only if its cell still holds what the mob saw.
+    pub fn take_block_edits(&mut self) -> Vec<lodestone_entity::ai::BlockEdit> {
+        std::mem::take(&mut self.pending_block_edits)
+    }
+
     /// Drains every player hit by a hostile mob's melee attack since the last
     /// call — the player-facing twin of
     /// [`take_detonations`](Self::take_detonations)'s handoff shape, for the

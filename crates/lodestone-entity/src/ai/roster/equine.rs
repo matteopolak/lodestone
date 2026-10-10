@@ -22,27 +22,17 @@
 //! guessing "no override" the way the shared-table gate below checks for
 //! horse/donkey/mule would be an unverified claim baked into a citation.
 //!
-//! # Known gaps, all disclosed as `Missing` rows
+//! # Known gap, disclosed as a `Missing` row
 //!
-//! * **Vanilla's own run-around-like-crazy goal and its own mount-panic goal** both
-//!   require an existing passenger to run at all (vanilla's own eligibility
-//!   check reads whether the mob is a ridden vehicle), and this table has no way to express "only
-//!   while ridden". The tame roll they gate is already ported directly as
-//!   [`MobSim::attempt_horse_tame`](crate) — called once per empty-handed
-//!   mount attempt from `interact_horse` rather than as a recurring goal —
-//!   see that method's own doc for the one disclosed pacing difference now
-//!   that a real passenger model exists.
-//! * **`TemptGoal(HORSE_TEMPT_ITEMS)`** needs a horse-specific tempt-item
-//!   feed the server's `tempt_food` table does not carry — the same
-//!   disclosed gap as the pig's carrot-on-a-stick row in
-//!   [`passive::PIG`](super::passive::PIG). Note this is a **different** item
-//!   set from `species::horse_temper_gain`'s feed table (that one drives
-//!   `handleEating`'s temper counter on interact, not idle wander-toward).
-//! * **`RandomStandGoal`** (rearing) needs a client-visible standing pose
-//!   this crate does not model.
+//! Run-around-like-crazy needs a rider-eject notification from the sim to the
+//! connection, which does not exist. The tame roll it gates runs once per
+//! empty-handed mount attempt as
+//! [`MobSim::attempt_horse_tame`](crate), and an untamed horse cannot be
+//! mounted.
 
-use crate::ai::goal::Goal;
-use crate::ai::goals::{BreedGoal, FollowParentGoal, LookAtPlayerGoal, RandomStrollGoal};
+use crate::ai::goal::{FlagSet, Goal};
+use crate::ai::goals::{MateGoal, TrailParentGoal, WatchPlayerGoal, FleeInPanicGoal, WanderGoal, LureGoal};
+use crate::ai::mob::MobController;
 
 use super::{LOOK_PROBABILITY, Registration, Selector, SpeciesContext, float_goal, random_look_around};
 
@@ -66,27 +56,85 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// donkey nor the mule override it), then a shared three-goal helper's own
 /// registrations, called last from inside the main registration method.
 pub static HORSE_FAMILY: &[Registration] = &[
-    Registration::missing(Selector::Goal, 1, "RunAroundLikeCrazyGoal"),
-    Registration::goal(2, "BreedGoal", breed_1_0),
-    Registration::goal(4, "FollowParentGoal", follow_parent_1_0),
-    Registration::goal(6, "WaterAvoidingRandomStrollGoal", stroll_0_7),
-    Registration::goal(7, "LookAtPlayerGoal(Player)", look_at_player_6),
-    Registration::goal(8, "RandomLookAroundGoal", random_look_around),
-    Registration::missing(Selector::Goal, 9, "RandomStandGoal"),
-    Registration::goal(0, "FloatGoal", float_goal),
-    Registration::missing(Selector::Goal, 1, "AbstractHorse.MountPanicGoal"),
-    Registration::missing(Selector::Goal, 3, "TemptGoal(HORSE_TEMPT_ITEMS)"),
+    Registration::missing(Selector::Goal, 1, "horse.buck_off_rider"),
+    Registration::goal(2, "mate", breed_1_0),
+    Registration::goal(4, "trail_parent", follow_parent_1_0),
+    Registration::goal(6, "wander_dry", stroll_0_7),
+    Registration::goal(7, "watch_player(player)", look_at_player_6),
+    Registration::goal(8, "idle_glance", random_look_around),
+    Registration::goal(9, "rear_up", random_stand),
+    Registration::goal(0, "stay_afloat", float_goal),
+    Registration::goal(1, "horse.mount_panic", mount_panic),
+    Registration::goal(3, "lure(horse_items)", tempt),
 ];
+
+/// Panic at 1.2, only ever running unridden: a ridden mount's goals do not
+/// tick, because its rider steers it.
+fn mount_panic(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(FleeInPanicGoal::new(ctx.speed * 1.2))
+}
+
+fn tempt(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(LureGoal::new(ctx.speed * 1.25))
+}
+
+fn random_stand(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(RearUpGoal::new())
+}
+
+/// Rears up now and then: a counter starts 80 ticks below zero and rises one a
+/// tick; once positive, each tick has `counter / 1000` odds of ending the wait,
+/// and a tenth of those rear.
+#[derive(Debug)]
+struct RearUpGoal {
+    next_stand: i32,
+}
+
+impl RearUpGoal {
+    const INTERVAL: i32 = 80;
+
+    fn new() -> Self {
+        Self { next_stand: -Self::INTERVAL }
+    }
+}
+
+impl Goal for RearUpGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::none()
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        self.next_stand += 1;
+        if self.next_stand > 0 && mob.next_i32(1000) < self.next_stand {
+            self.next_stand = -Self::INTERVAL;
+            mob.next_i32(10) == 0
+        } else {
+            false
+        }
+    }
+
+    fn can_continue_to_use(&mut self, _mob: &mut dyn MobController) -> bool {
+        false
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.rear_up();
+    }
+}
 
 /// Vanilla's own breed-goal registration: speed multiplier `1.0`, mate class
 /// the abstract horse type.
 fn breed_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(BreedGoal::new(ctx.speed))
+    Box::new(MateGoal::new(ctx.speed))
 }
 
 /// Vanilla's own follow-parent-goal registration: speed multiplier `1.0`.
 fn follow_parent_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(FollowParentGoal::new(ctx.speed))
+    Box::new(TrailParentGoal::new(ctx.speed))
 }
 
 /// Vanilla's own water-avoiding-random-stroll-goal registration at speed
@@ -94,13 +142,13 @@ fn follow_parent_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// in [`passive`](super::passive), whose shared [`super::passive`] strollers
 /// are all `1.0`.
 fn stroll_0_7(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RandomStrollGoal::new(ctx.speed * 0.7))
+    Box::new(WanderGoal::new(ctx.speed * 0.7))
 }
 
 /// Vanilla's own look-at-player-goal registration: look distance `6.0F`,
 /// target class the player.
 fn look_at_player_6(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LookAtPlayerGoal::new(6.0, LOOK_PROBABILITY))
+    Box::new(WatchPlayerGoal::new(6.0, LOOK_PROBABILITY))
 }
 
 #[cfg(test)]

@@ -268,6 +268,64 @@ pub trait MobController {
         false
     }
 
+    /// The block state in `cell`, or `None` where the world has no answer.
+    fn block_state_at(&self, cell: (i32, i32, i32)) -> Option<lodestone_data::block_states::StateId> {
+        let _ = cell;
+        None
+    }
+
+    /// Whether block `cell` lies inside the mob's home radius; always true
+    /// without a home.
+    fn is_cell_within_home(&self, cell: (i32, i32, i32)) -> bool {
+        let _ = cell;
+        true
+    }
+
+    /// Whether the world lets mobs change blocks.
+    fn mob_griefing(&self) -> bool {
+        false
+    }
+
+    /// Asks the host to change a block; see [`BlockEdit`](crate::ai::BlockEdit).
+    fn request_block_edit(&mut self, edit: crate::ai::BlockEdit) {
+        let _ = edit;
+    }
+
+    /// The centre of the raid this mob belongs to while that raid is ongoing.
+    fn raid_center(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Whether a rabbit is hungry enough to raid a crop.
+    fn wants_more_food(&self) -> bool {
+        true
+    }
+
+    /// Sets how long a rabbit stays satisfied after eating.
+    fn set_more_carrot_ticks(&mut self, _ticks: i32) {}
+
+    /// Rears up for 20 ticks (a horse's stand).
+    fn rear_up(&mut self) {}
+
+    /// Whether a turtle carries an egg.
+    fn has_egg(&self) -> bool {
+        false
+    }
+
+    /// Sets whether a turtle carries an egg.
+    fn set_has_egg(&mut self, _has_egg: bool) {}
+
+    /// Ticks a turtle has spent laying; `0` when not laying.
+    fn laying_egg_ticks(&self) -> i32 {
+        0
+    }
+
+    /// Sets a turtle's laying counter; `0` stops the laying pose.
+    fn set_laying_egg_ticks(&mut self, _ticks: i32) {}
+
+    /// Puts the animal in love for a full love period.
+    fn fall_in_love(&mut self) {}
+
     /// The state a bee tending the crop at `cell` would grow it to.
     fn bee_growth_at(&self, cell: (i32, i32, i32)) -> Option<lodestone_data::block_states::StateId> {
         let _ = cell;
@@ -424,13 +482,13 @@ pub trait MobController {
 
     /// The bare item id this mob is currently holding in its main hand (e.g.
     /// `"trident"`), or `None` for empty-handed. Feeds a goal whose vanilla
-    /// eligibility check reads the main-hand item — [`RangedAttackGoal`]'s optional
+    /// eligibility check reads the main-hand item — [`RangedStrikeGoal`]'s optional
     /// weapon requirement is the one production consumer today.
     ///
     /// Defaults to `None` so every existing implementor (including hermetic
     /// test doubles) keeps compiling; only [`NavigatingMob`] overrides it.
     ///
-    /// [`RangedAttackGoal`]: crate::ai::roster::ranged::RangedAttackGoal
+    /// [`RangedStrikeGoal`]: crate::ai::roster::ranged::RangedStrikeGoal
     /// [`NavigatingMob`]: crate::ai::NavigatingMob
     fn main_hand_item(&self) -> Option<&str> {
         None
@@ -438,7 +496,7 @@ pub trait MobController {
 
     /// The nearest position the mob considers an attackable target — the host
     /// applies the version/type-specific filter (hostility, follow range, line
-    /// of sight). Drives `NearestAttackableTargetGoal`.
+    /// of sight). Drives `NearestTargetGoal`.
     ///
     /// **A host that returns [`attack_target`](MobController::attack_target)
     /// here has written an island, not an implementation**: the
@@ -467,7 +525,7 @@ pub trait MobController {
     /// This mob's `FOLLOW_RANGE` attribute value, in blocks.
     ///
     /// Vanilla reads it in two places with the *same* number:
-    /// `NearestAttackableTargetGoal` acquires within it
+    /// `NearestTargetGoal` acquires within it
     /// (vanilla's own follow-distance getter) and
     /// vanilla's own continue-eligibility check **drops a target that leaves it**.
     /// The default is vanilla's own mob-attribute default of `16.0`, so a
@@ -478,13 +536,13 @@ pub trait MobController {
     }
 
     /// The position of the entity that most recently damaged this mob, within
-    /// the retaliation window. Drives `HurtByTargetGoal`.
+    /// the retaliation window. Drives `RetaliateGoal`.
     fn last_hurt_by(&self) -> Option<Vec3> {
         None
     }
 
     /// The position of whoever most recently damaged this mob's **owner**,
-    /// within the same retaliation window. Drives `OwnerHurtByTargetGoal`,
+    /// within the same retaliation window. Drives `DefendOwnerGoal`,
     /// which reads the owner's own last-hurt-by state
     /// directly — a player is a living entity
     /// like any other, so that is the *same* field and the *same* decay rule
@@ -499,7 +557,7 @@ pub trait MobController {
 
     /// The position of whoever this mob's **owner** most recently attacked,
     /// same decay rule as [`owner_hurt_by`](MobController::owner_hurt_by).
-    /// Drives `OwnerHurtTargetGoal`, which reads the owner's own
+    /// Drives `AssistOwnerGoal`, which reads the owner's own
     /// last-hurt-mob state — a pet joins whatever fight its
     /// owner just started.
     ///
@@ -518,7 +576,7 @@ pub trait MobController {
     /// which narrows the candidate set to the one
     /// entity the grudge names. A neutral mob with no grudge has an empty
     /// candidate set, which is what makes it neutral;
-    /// [`NearestAttackableTargetGoal::anger_gated`](crate::ai::goals::NearestAttackableTargetGoal::anger_gated)
+    /// [`NearestTargetGoal::anger_gated`](crate::ai::goals::NearestTargetGoal::anger_gated)
     /// is the registration shape that reads this.
     ///
     /// **The host owns the clock, on purpose.** 26.2 stores an **absolute
@@ -535,20 +593,29 @@ pub trait MobController {
         None
     }
 
+    /// The position of the nearest player when that player holds something this
+    /// mob begs for. Drives `BegForFoodGoal`.
+    fn begging_player(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Sets the begging pose the client renders (a wolf's tilted head).
+    fn set_interested(&mut self, _interested: bool) {}
+
     /// The position of a nearby entity currently tempting this mob (e.g. a
-    /// player holding food). Drives `TemptGoal`.
+    /// player holding food). Drives `LureGoal`.
     fn temptation(&self) -> Option<Vec3> {
         None
     }
 
     /// Whether this mob is a baby (`Age < 0` for animals). Gates
-    /// `FollowParentGoal`.
+    /// `TrailParentGoal`.
     fn is_baby(&self) -> bool {
         false
     }
 
     /// The position of the nearest adult of the same kind, if one is in range.
-    /// Drives `FollowParentGoal`.
+    /// Drives `TrailParentGoal`.
     fn parent_position(&self) -> Option<Vec3> {
         None
     }
@@ -585,7 +652,7 @@ pub trait MobController {
     /// wolf whose owner has logged out has no owner *position* and is still
     /// tame. A goal that reads `owner_position().is_some()` as "am I tame" would
     /// therefore un-tame every pet the moment its owner walked out of the
-    /// player list, which is what `SitWhenOrderedToGoal`'s own tame guard and
+    /// player list, which is what `SitOnCommandGoal`'s own tame guard and
     /// a wolf's own avoid-entity goal's tame guard both hinge on.
     fn is_tame(&self) -> bool {
         false
@@ -599,7 +666,7 @@ pub trait MobController {
     /// the ordered-to-sit field an owner's right-click toggles and NBT
     /// round-trips, while a separate sitting-pose setter is the *synced*
     /// `0x01` flag bit that
-    /// `SitWhenOrderedToGoal::start`/`stop` writes as the goal actually runs.
+    /// `SitOnCommandGoal::start`/`stop` writes as the goal actually runs.
     /// The intent is what a goal must read to decide whether to run; the pose is
     /// what the goal produces. Collapsing them means a sitting order silently
     /// evaporates whenever the goal is preempted by a higher-priority flag
@@ -609,13 +676,13 @@ pub trait MobController {
     }
 
     /// Reports that this mob has entered or left the sitting **pose** — vanilla's
-    /// own sitting-pose setter, called by `SitWhenOrderedToGoal`'s
+    /// own sitting-pose setter, called by `SitOnCommandGoal`'s
     /// `start` and `stop`. The host turns this into the synced `0x01` flag bit.
     fn set_in_sitting_pose(&mut self, sitting: bool) {
         let _ = sitting;
     }
 
-    /// Host-computed candidate target for `CatSitOnBlockGoal` — the nearest
+    /// Host-computed candidate target for `CatPerchGoal` — the nearest
     /// chest or lit furnace within its search radius, or `None`. Following
     /// `docs/mob-block-perception.md`'s own guidance ("a goal that needs to
     /// *search* a neighbourhood… must not be built on [`block_cues_at_feet`]…
@@ -655,7 +722,7 @@ pub trait MobController {
     /// How many consecutive ticks this mob's **owner** has been sleeping, or
     /// `None` while the owner is awake (or unresolved) — vanilla's own
     /// is-sleeping flag plus its own sleep-timer counter, read together
-    /// because [`CatRelaxOnOwnerGoal`](super::goals::CatRelaxOnOwnerGoal)
+    /// because [`CatSettleOnOwnerGoal`](super::goals::CatSettleOnOwnerGoal)
     /// needs both: *whether* to walk to the owner at all, and later, at
     /// `stop()`, whether the sleep timer has reached 100 (the host crate's own
     /// deep-sleep threshold, `lodestone_server::sleep::DEEP_SLEEP_TICKS`) to
@@ -718,7 +785,7 @@ pub trait MobController {
     /// Whether this mob leads its patrol — vanilla's own is-patrol-leader
     /// check. Only a leader repicks its own
     /// far-off waypoint once it arrives; see
-    /// [`LongDistancePatrolGoal`](super::goals::LongDistancePatrolGoal)'s own
+    /// [`PatrolRouteGoal`](super::goals::PatrolRouteGoal)'s own
     /// doc comment for why a follower's movement is driven by
     /// [`patrol_group_target`](MobController::patrol_group_target) instead.
     ///
@@ -751,7 +818,7 @@ pub trait MobController {
     /// has no "find nearby entities of a class" query on this seam at all — it
     /// hands goals answers, never populations — so the direction is reversed: a
     /// follower *pulls* its leader's long-distance target from the host here
-    /// instead. See [`LongDistancePatrolGoal`](super::goals::LongDistancePatrolGoal)
+    /// instead. See [`PatrolRouteGoal`](super::goals::PatrolRouteGoal)
     /// for the full account of what that changes.
     ///
     /// Defaults to `None`.
@@ -787,8 +854,8 @@ pub trait MobController {
     /// its own `hasLineOfSight`, omitted rather than faked, erring permissive.
     ///
     /// Defaults to `false` (nobody staring). The two consumers are the
-    /// enderman's [`EndermanFreezeWhenLookedAt`](crate::ai::goals::EndermanFreezeWhenLookedAt)
-    /// and [`EndermanLookForPlayerGoal`](crate::ai::goals::EndermanLookForPlayerGoal),
+    /// enderman's [`EndermanFreezeUnderGazeGoal`](crate::ai::goals::EndermanFreezeUnderGazeGoal)
+    /// and [`EndermanGazeWatchGoal`](crate::ai::goals::EndermanGazeWatchGoal),
     /// and a host that never feeds this must agree with both on `false` — a
     /// default of `true` would make every enderman react to every player on
     /// sight. Both goals exist and the feed is live in production:
@@ -799,7 +866,7 @@ pub trait MobController {
     }
 
     /// Whether this animal is in "love mode" (fed a breeding item and looking
-    /// for a mate). Gates [`BreedGoal`](crate::ai::goals::BreedGoal).
+    /// for a mate). Gates [`MateGoal`](crate::ai::goals::MateGoal).
     fn is_in_love(&self) -> bool {
         false
     }
@@ -833,7 +900,7 @@ pub trait MobController {
     /// Whether the mob is ignited (vanilla `Creeper::isIgnited`).
     /// While `true`, `Creeper::tick` forces the swell direction to
     /// climb every tick regardless of what
-    /// [`SwellGoal`](crate::ai::goals::SwellGoal) would otherwise pick.
+    /// [`FuseGoal`](crate::ai::goals::FuseGoal) would otherwise pick.
     /// Defaults to `false` for every mob that carries no fuse.
     fn is_ignited(&self) -> bool {
         false
@@ -862,7 +929,7 @@ pub trait MobController {
     /// pushed in once per tick (`nearest_player`, `temptation`, …), and a
     /// pre-fed block snapshot would have matched that shape. It would also have
     /// been about **three orders of magnitude** more work than the goals need:
-    /// `EatBlockGoal` is the only reader, and its `EatBlockGoal::canUse` consults
+    /// `GrazeGoal` is the only reader, and its `GrazeGoal::canUse` consults
     /// a block on roughly one tick in 500
     /// (`random.nextInt(adjustedTickDelay(1000))`). Pushing two block lookups
     /// per mob per tick to serve that multiplies by the whole mob population;
@@ -882,7 +949,7 @@ pub trait MobController {
 
     /// The [`BlockCues`] of the block **below** the mob — vanilla's
     /// `mob.blockPosition().below()`, the one a sheep grazes when it is standing
-    /// on grass rather than in it (`EatBlockGoal::canUse`).
+    /// on grass rather than in it (`GrazeGoal::canUse`).
     ///
     /// Two separate methods rather than one taking an offset because these are
     /// the only two positions any of the goals in question reads, and vanilla
@@ -897,7 +964,7 @@ pub trait MobController {
     /// Records that the mob just ate a block, for the host to resolve into the
     /// world mutation and the species' own `ate()` side effects.
     ///
-    /// Vanilla `EatBlockGoal::tick` does the mutation inline — `destroyBlock` for
+    /// Vanilla `GrazeGoal::tick` does the mutation inline — `destroyBlock` for
     /// the block at the mob's feet, `setBlock(below, DIRT)` for the grass block
     /// under it — and then calls
     /// `mob.ate()`, which for a sheep is `setSheared(false)` plus `ageUp(60)`
@@ -909,7 +976,7 @@ pub trait MobController {
     ///
     /// **A host that never drains it turns grazing into an island**: the goal
     /// runs, the animation plays, and the grass never changes. Note vanilla's
-    /// `EatBlockGoal::tick` calls `ate()` even when the `mobGriefing` gamerule
+    /// `GrazeGoal::tick` calls `ate()` even when the `mobGriefing` gamerule
     /// suppresses the block change, so the two effects are separable on the
     /// host side and the gamerule check belongs there, not here.
     fn ate(&mut self, what: EatenBlock) {
@@ -960,8 +1027,8 @@ pub trait MobController {
     ///
     /// [`teleport_to`](MobController::teleport_to) itself does **not** run
     /// this — it is the raw `Entity::teleportTo` primitive every other
-    /// caller (knockback-adjacent relocations, `FollowOwnerGoal`) still
-    /// wants unchecked. Only [`EndermanLookForPlayerGoal`](super::goals::EndermanLookForPlayerGoal)'s
+    /// caller (knockback-adjacent relocations, `AccompanyOwnerGoal`) still
+    /// wants unchecked. Only [`EndermanGazeWatchGoal`](super::goals::EndermanGazeWatchGoal)'s
     /// two random-offset teleports are vanilla's *validated* variant, so
     /// this is a separate query the goal calls before deciding whether to
     /// teleport at all.
@@ -1027,7 +1094,7 @@ pub trait MobController {
 }
 
 /// Which block a grazing mob just ate, relative to the mob — the two positions
-/// `EatBlockGoal` distinguishes, because vanilla's world mutation differs
+/// `GrazeGoal` distinguishes, because vanilla's world mutation differs
 /// between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EatenBlock {

@@ -140,6 +140,7 @@ use crate::scheduled_tick::{ScheduledTickKind, ScheduledTickQueueAccess, TickPri
 #[cfg(test)]
 use crate::scheduled_tick::ScheduledTickQueue;
 use lodestone_data::block::Block;
+use lodestone_entity::ai::turtle_egg;
 use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey, Properties, PropertyValue};
 use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
@@ -369,7 +370,7 @@ pub fn is_randomly_ticking_id(state: StateId) -> bool {
     predicate_calls::bump();
 
     match state.block() {
-        Block::GrassBlock | Block::Lava => true,
+        Block::GrassBlock | Block::Lava | Block::TurtleEgg => true,
         Block::Wheat | Block::Carrots | Block::Potatoes => {
             property_number(state, PropertyKey::Age).unwrap_or(0) < 7
         }
@@ -509,6 +510,26 @@ pub struct RandomTickScheduler {
     /// values, so a different (but still deterministic) generator is a
     /// faithful stand-in.
     behavior_rng: SpawnRng,
+    /// The chance a turtle egg's random tick advances its hatching, set by the
+    /// tick loop from the time of day.
+    hatch_chance: f32,
+    /// Eggs that finished hatching and have not yet been turned into turtles.
+    hatched: Vec<EggHatch>,
+}
+
+/// A turtle egg block that hatched: where it was and how many eggs it held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EggHatch {
+    pub pos: (i32, i32, i32),
+    pub eggs: u32,
+}
+
+/// The chance a random tick advances a turtle egg's hatching at `day_time`:
+/// certain from tick 21062 of the day until 21905, `0.002` otherwise.
+#[must_use]
+pub fn turtle_egg_hatch_chance(day_time: i64) -> f32 {
+    let t = day_time.rem_euclid(24_000);
+    if (21_062..21_905).contains(&t) { 1.0 } else { 0.002 }
 }
 
 impl RandomTickScheduler {
@@ -519,7 +540,22 @@ impl RandomTickScheduler {
     /// [`SpawnRng`].
     #[must_use]
     pub fn new(position_seed: i32, behavior_seed: u64) -> Self {
-        Self { position_state: position_seed, behavior_rng: SpawnRng::new(behavior_seed) }
+        Self {
+            position_state: position_seed,
+            behavior_rng: SpawnRng::new(behavior_seed),
+            hatch_chance: turtle_egg_hatch_chance(0),
+            hatched: Vec::new(),
+        }
+    }
+
+    /// Sets the chance a turtle egg's random tick advances its hatching.
+    pub fn set_hatch_chance(&mut self, chance: f32) {
+        self.hatch_chance = chance;
+    }
+
+    /// Drains the eggs that finished hatching since the last call.
+    pub fn take_hatched(&mut self) -> Vec<EggHatch> {
+        std::mem::take(&mut self.hatched)
     }
 
     /// Vanilla's `Level.randValue` as it stands now — the position LCG's whole
@@ -665,6 +701,8 @@ impl RandomTickScheduler {
             self.tick_grass_block(column, min_x, min_z, x, y, z, state)
         } else if block == Block::Lava {
             self.tick_lava(column, min_x, min_z, x, y, z, block_ticks, current_tick)
+        } else if block == Block::TurtleEgg {
+            self.tick_turtle_egg(column, min_x, min_z, x, y, z, state)
         } else if growth_tick::crop_max_age_id(state).is_some() {
             self.tick_crop_block(column, min_x, min_z, x, y, z, state)
         } else if growth_tick::is_sapling_id(state) {
@@ -766,6 +804,36 @@ impl RandomTickScheduler {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// A turtle egg on sand: with the day's hatch chance it cracks one stage, and
+    /// from the last stage it opens, leaving one baby turtle per egg.
+    fn tick_turtle_egg(
+        &mut self,
+        column: &mut crate::chunk::ChunkColumn,
+        min_x: i32,
+        min_z: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: StateId,
+    ) -> Vec<RandomTickEvent> {
+        let (lx, lz) = (x - min_x, z - min_z);
+        if self.behavior_rng.next_f32() >= self.hatch_chance
+            || !turtle_egg::is_sand(column.block_state_id(lx, y - 1, lz))
+        {
+            return Vec::new();
+        }
+        let Some((eggs, hatch)) = turtle_egg::counts(state) else { return Vec::new() };
+        let to = if hatch < turtle_egg::MAX_HATCH {
+            let Some(cracked) = turtle_egg::state(eggs, hatch + 1) else { return Vec::new() };
+            cracked
+        } else {
+            self.hatched.push(EggHatch { pos: (x, y, z), eggs });
+            lodestone_data::block_states::air_state()
+        };
+        column.set_block_id(lx, y, lz, to);
+        vec![RandomTickEvent { pos: (x, y, z), from: state, to }]
     }
 
     /// Leaf decay — see `crate::growth_tick`'s module doc for
@@ -3070,5 +3138,75 @@ mod tests {
             redstone_observer::set_observer(Direction::West, false),
             "control failed: the unreachable observer must keep the state it was seeded with"
         );
+    }
+    /// A column whose even layers are `floor` and odd layers hold an egg block
+    /// of `eggs` eggs, ticked `ticks` times. Returns the number of egg blocks
+    /// that opened, the number still standing but cracked, and the egg counts
+    /// the opened blocks reported.
+    fn hatch_run(floor: &str, eggs: u32, chance: f32, ticks: usize) -> (usize, usize, Vec<u32>) {
+        let mut column = ChunkColumn::new(0, 16);
+        for y in 0..16 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    if y % 2 == 0 {
+                        column.set_block(x, y, z, floor);
+                    } else {
+                        column.set_block_id(x, y, z, turtle_egg::state(eggs, 0).expect("egg"));
+                    }
+                }
+            }
+        }
+        let mut scheduler = RandomTickScheduler::new(7, 11);
+        scheduler.set_hatch_chance(chance);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut hatched = Vec::new();
+        for _ in 0..ticks {
+            scheduler.tick_chunk(&mut column, 0, 0, 20, &mut block_ticks, 0, &NoNeighbors);
+            hatched.extend(scheduler.take_hatched().into_iter().map(|h| h.eggs));
+        }
+        let mut cracked = 0;
+        let mut opened = 0;
+        for y in (1..16).step_by(2) {
+            for z in 0..16 {
+                for x in 0..16 {
+                    match turtle_egg::counts(column.block_state_id(x, y, z)) {
+                        Some((_, hatch)) if hatch > 0 => cracked += 1,
+                        None => opened += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!(opened, hatched.len(), "every opened block was reported");
+        (opened, cracked, hatched)
+    }
+
+    /// With a certain hatch chance eggs on sand crack through their stages and
+    /// open, reporting their egg count; the same eggs on dirt never change.
+    #[test]
+    fn turtle_eggs_on_sand_hatch_and_on_dirt_do_not() {
+        let (opened, _, counts) = hatch_run("minecraft:sand", 3, 1.0, 3000);
+        assert_eq!(opened, 8 * 256, "every egg block opens");
+        assert!(counts.iter().all(|&eggs| eggs == 3));
+        let (opened, cracked, _) = hatch_run("minecraft:dirt", 3, 1.0, 3000);
+        assert_eq!((opened, cracked), (0, 0), "control: dirt is not sand");
+    }
+
+    /// At the off-peak 0.002 chance a few eggs crack and none opens in the same
+    /// time that opens every egg at the peak chance.
+    #[test]
+    fn the_off_peak_hatch_chance_is_a_small_fraction_of_the_peak() {
+        let (opened, cracked, _) = hatch_run("minecraft:sand", 1, turtle_egg_hatch_chance(0), 3000);
+        assert_eq!(opened, 0);
+        assert!((10..200).contains(&cracked), "about 60 expected, got {cracked}");
+    }
+
+    #[test]
+    fn the_hatch_chance_is_certain_only_in_the_dawn_window() {
+        assert_eq!(turtle_egg_hatch_chance(21_062), 1.0);
+        assert_eq!(turtle_egg_hatch_chance(21_904), 1.0);
+        assert_eq!(turtle_egg_hatch_chance(21_905), 0.002);
+        assert_eq!(turtle_egg_hatch_chance(21_061), 0.002);
+        assert_eq!(turtle_egg_hatch_chance(24_000 + 21_500), 1.0);
     }
 }

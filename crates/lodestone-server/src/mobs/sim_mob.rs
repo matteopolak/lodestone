@@ -355,7 +355,7 @@ impl<'w> SimMob<'w> {
     /// Sets the sitting order — vanilla's own "set ordered to sit" call.
     ///
     /// Pushes straight through to the [`NavigatingMob`] as well as recording it
-    /// here, so `SitWhenOrderedToGoal` sees the order on the *same* tick rather
+    /// here, so `SitOnCommandGoal` sees the order on the *same* tick rather
     /// than one tick late. Every other perception input is refreshed by
     /// [`MobSim::feed_perception`], but an order given by an interaction arrives
     /// between ticks and a one-tick lag is visible as a pet that ignores the
@@ -373,7 +373,7 @@ impl<'w> SimMob<'w> {
     }
 
     /// Whether this mob is currently in the sitting **pose** —
-    /// `SitWhenOrderedToGoal`'s observable output, which is what the `0x01`
+    /// `SitOnCommandGoal`'s observable output, which is what the `0x01`
     /// bit of vanilla's shared entity-flags metadata field carries. Read this to answer "did the goal run",
     /// and [`is_ordered_to_sit`](Self::is_ordered_to_sit) to answer "was it
     /// told to".
@@ -496,7 +496,7 @@ impl<'w> SimMob<'w> {
     }
 
     /// The last position a goal asked this mob to look at, if any — the
-    /// observable effect of `LookAtPlayerGoal`. Distinct from
+    /// observable effect of `WatchPlayerGoal`. Distinct from
     /// [`head_yaw`](SimMob::head_yaw), which is the derived angle; this is the
     /// target the goal actually chose, so a test can assert *what* the mob
     /// turned toward rather than merely that some angle changed.
@@ -1247,11 +1247,14 @@ impl<'w> SimMob<'w> {
                         sitting: self.is_in_sitting_pose(),
                     });
                 }
-                "horse" | "donkey" | "mule" | "skeleton_horse" | "zombie_horse" => {
-                    metadata.push(MetadataField::HorseFlags { tame: true });
+                "skeleton_horse" | "zombie_horse" => {
+                    metadata.push(MetadataField::HorseFlags { tame: true, standing: false });
                 }
                 _ => {}
             }
+        }
+        if matches!(self.entity_type.path(), "horse" | "donkey" | "mule") {
+            metadata.push(MetadataField::HorseFlags { tame: self.tame, standing: self.mob.is_rearing() });
         }
         if self.entity_type.path() == "pufferfish" {
             metadata.push(MetadataField::PuffState(i32::from(self.puff.state)));
@@ -1308,6 +1311,15 @@ impl<'w> SimMob<'w> {
             metadata.push(MetadataField::GoatHorns {
                 has_left: self.has_left_horn,
                 has_right: self.has_right_horn,
+            });
+        }
+        if self.entity_type.path() == "wolf" {
+            metadata.push(MetadataField::WolfInterested(self.mob.is_interested()));
+        }
+        if self.entity_type.path() == "turtle" {
+            metadata.push(MetadataField::TurtleEgg {
+                has_egg: self.mob.carries_egg(),
+                laying: self.mob.is_laying_egg(),
             });
         }
         // Vanilla's own axolotl "playing dead" metadata field, index 19 — same "unconditional, so

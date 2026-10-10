@@ -3579,7 +3579,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
                 sitting: false,
             },
         );
-        let horse = flag_byte(&proto, &MetadataField::HorseFlags { tame: true });
+        let horse = flag_byte(&proto, &MetadataField::HorseFlags { tame: true, standing: false });
 
         assert_eq!(tamable, 0x04, "TamableAnimal.isTame() is `& 4`");
         assert_eq!(horse, 0x02, "AbstractHorse.FLAG_TAME is 2");
@@ -4565,7 +4565,7 @@ mod cosmetic_metadata_tests {
         METADATA_IDX_AXOLOTL_VARIANT, METADATA_IDX_BAT_FLAGS, METADATA_IDX_PUFF_STATE, METADATA_IDX_CAT_COLLAR, METADATA_IDX_CUSTOM_NAME,
         METADATA_IDX_CUSTOM_NAME_VISIBLE, METADATA_IDX_FOX_TYPE, METADATA_IDX_HORSE_VARIANT,
         METADATA_IDX_LLAMA_VARIANT, METADATA_IDX_MOOSHROOM_TYPE, METADATA_IDX_PARROT_VARIANT,
-        METADATA_IDX_RABBIT_TYPE, METADATA_IDX_SHEEP_WOOL, METADATA_IDX_WOLF_COLLAR, METADATA_SER_BOOLEAN,
+        METADATA_IDX_RABBIT_TYPE, METADATA_IDX_SHEEP_WOOL, METADATA_IDX_WOLF_COLLAR, METADATA_IDX_WOLF_INTERESTED, METADATA_SER_BOOLEAN,
         METADATA_SER_BYTE, METADATA_SER_INT, METADATA_SER_OPTIONAL_COMPONENT, V770ServerProtocol,
         holder_variant_slot,
     };
@@ -4622,6 +4622,7 @@ mod cosmetic_metadata_tests {
             ("Bat.DATA_ID_FLAGS", METADATA_IDX_BAT_FLAGS, METADATA_SER_BYTE),
             ("Pufferfish.PUFF_STATE", METADATA_IDX_PUFF_STATE, METADATA_SER_INT),
             ("Sheep.DATA_WOOL_ID", METADATA_IDX_SHEEP_WOOL, METADATA_SER_BYTE),
+            ("Wolf.DATA_INTERESTED_ID", METADATA_IDX_WOLF_INTERESTED, METADATA_SER_BOOLEAN),
             ("Wolf.DATA_COLLAR_COLOR", METADATA_IDX_WOLF_COLLAR, METADATA_SER_INT),
             ("Cat.DATA_COLLAR_COLOR", METADATA_IDX_CAT_COLLAR, METADATA_SER_INT),
             ("Entity.DATA_CUSTOM_NAME", METADATA_IDX_CUSTOM_NAME, METADATA_SER_OPTIONAL_COMPONENT),

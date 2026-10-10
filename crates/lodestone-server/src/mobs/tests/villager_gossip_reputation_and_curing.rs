@@ -144,15 +144,17 @@ fn a_completed_conversion_becomes_a_real_villager_with_seeded_gossip() {
     for _ in 0..10 {
         sim.tick();
         level_events.extend(sim.take_ambient_sounds());
-        if sim
-            .get(id)
-            .is_some_and(|m| m.entity_type().path() == "villager")
-        {
+        if sim.mobs.iter().any(|m| m.entity_type().path() == "villager") {
             break;
         }
     }
 
-    let mob = sim.get(id).expect("still alive");
+    let mob = sim
+        .mobs
+        .iter()
+        .find(|m| m.entity_type().path() == "villager")
+        .expect("the cured villager exists");
+    assert_ne!(mob.id(), id, "cure builds a new mob, as the wire needs a respawn");
     assert_eq!(mob.entity_type().path(), "villager", "must have become a real villager");
     assert!(mob.conversion.is_none(), "conversion state must be cleared");
     assert_eq!(
@@ -322,4 +324,79 @@ fn distant_villagers_never_spread_gossip() {
             .is_none(),
         "villagers 500 blocks apart must never spread gossip to each other"
     );
+}
+
+fn goal_names(mob: &SimMob<'_>) -> usize {
+    mob.goals.len()
+}
+
+/// A cure rebuilds the mob as a villager: its goal set and speed are a
+/// villager's, not the zombie villager's, and its career and gossip carry over.
+#[test]
+fn a_cured_villager_has_villager_goals_and_keeps_its_career() {
+    let world = flat_world();
+    let mut sim = MobSim::new(&world);
+    let villager_goals = {
+        let v = sim.spawn_species("minecraft:villager".parse().expect("key"), Vec3::new(30.0, 0.0, 30.0));
+        (goal_names(v), v.movement_speed())
+    };
+    let zombie_goals = {
+        let z = sim.spawn_species("minecraft:zombie_villager".parse().expect("key"), Vec3::new(10.0, 0.0, 10.0));
+        (goal_names(z), z.movement_speed())
+    };
+    assert_ne!(villager_goals, zombie_goals, "control: the two species differ");
+    let id = sim.mobs.last().expect("zombie villager").id();
+    let curer = alice().uuid;
+    {
+        let z = sim.get_mut(id).expect("spawned");
+        z.profession = villager::Profession::Librarian;
+        z.villager_level = 3;
+        z.villager_xp = 42;
+        z.conversion = Some(villager::conversion::ConversionState {
+            starter: Some(curer),
+            remaining_ticks: 1,
+        });
+    }
+    for _ in 0..10 {
+        sim.tick();
+    }
+    let cured = sim
+        .mobs
+        .iter()
+        .filter(|m| m.entity_type().path() == "villager")
+        .find(|m| m.profession == villager::Profession::Librarian)
+        .expect("the cured villager keeps its profession");
+    assert_eq!((goal_names(cured), cured.movement_speed()), villager_goals);
+    assert_eq!((cured.villager_level, cured.villager_xp), (3, 42));
+}
+
+/// A zombie that kills a villager converts it on Hard, never on Easy.
+#[test]
+fn a_zombie_kill_turns_a_villager_into_a_zombie_villager_by_difficulty() {
+    fn outcome(difficulty: lodestone_model::Difficulty) -> (usize, usize) {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        sim.set_difficulty(difficulty);
+        sim.set_day_time(18000);
+        sim.set_players(vec![PerceivedPlayer {
+            identity: None,
+            perception: PlayerPerception {
+                position: Vec3::new(10.0, 1.0, -60.0),
+                held_item: None,
+                view_direction: Vec3::new(0.0, 0.0, 1.0),
+            },
+        }]);
+        sim.spawn_species("minecraft:zombie".parse().expect("key"), Vec3::new(2.0, 1.0, 10.0));
+        let villager = sim
+            .spawn_species("minecraft:villager".parse().expect("key"), Vec3::new(10.0, 1.0, 10.0))
+            .id();
+        sim.get_mut(villager).expect("villager").health = 0.5;
+        for _ in 0..400 {
+            sim.tick();
+        }
+        let count = |name: &str| sim.mobs.iter().filter(|m| m.entity_type().path() == name).count();
+        (count("villager"), count("zombie_villager"))
+    }
+    assert_eq!(outcome(lodestone_model::Difficulty::Hard), (0, 1));
+    assert_eq!(outcome(lodestone_model::Difficulty::Easy), (0, 0));
 }

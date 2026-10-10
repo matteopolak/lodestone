@@ -125,14 +125,14 @@ pub(super) fn is_leashable_species(entity_type: &ResourceKey) -> bool {
 }
 
 /// The species a given species flees, i.e. the `avoidClass` of each vanilla
-/// `AvoidEntityGoal` registration. This is **perception data, not a goal set** —
+/// `FleeEntityGoal` registration. This is **perception data, not a goal set** —
 /// it answers "is that thing a threat to me", which is what
 /// [`MobController::avoid_threat`] needs; assembling the goals themselves is
 /// the roster's job (plan units B1/B4), not this feed's.
 ///
 /// Deliberately only the registrations that exist in 26.2 for species this sim
 /// can currently spawn. An unknown species yields an empty slice, so
-/// `AvoidEntityGoal` stays correctly inert for it rather than silently fleeing
+/// `FleeEntityGoal` stays correctly inert for it rather than silently fleeing
 /// everything.
 pub(super) fn avoided_species(species: &str) -> &'static [&'static str] {
     match species {
@@ -146,6 +146,8 @@ pub(super) fn avoided_species(species: &str) -> &'static [&'static str] {
         // state, so that filter is a disclosed omission rather than a silent
         // one — it can only make a spider flee slightly more often.
         "spider" | "cave_spider" => &["armadillo"],
+        // An untamed wolf only; `llama_scares_wolf` applies the rest.
+        "wolf" => &["llama", "trader_llama"],
         _ => &[],
     }
 }
@@ -173,7 +175,7 @@ pub(super) fn is_fire_immune(entity_type: &ResourceKey) -> bool {
     )
 }
 
-/// The item paths in each species' vanilla food tag — what `TemptGoal` follows
+/// The item paths in each species' vanilla food tag — what `LureGoal` follows
 /// a player for.
 ///
 /// **Every entry is transcribed from the jar's own tag JSON**, not from memory,
@@ -225,7 +227,7 @@ pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
         // `AbstractCow` covers both, and they share `cow_food`.
         "cow" | "mooshroom" => &["wheat"],
         "sheep" => &["wheat"],
-        "pig" => &["carrot", "potato", "beetroot"],
+        "pig" => &["carrot", "potato", "beetroot", "carrot_on_a_stick"],
         "chicken" => &[
             "wheat_seeds",
             "melon_seeds",
@@ -235,6 +237,7 @@ pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
             "pitcher_pod",
         ],
         "rabbit" => &["carrot", "golden_carrot", "dandelion"],
+        "horse" | "donkey" | "mule" => &["golden_carrot", "golden_apple", "enchanted_golden_apple"],
         // `#cat_food` — the same two items `tame_mechanism("cat")` and
         // `breeding_food("cat")` already use. `lodestone_entity`'s
         // `roster::passive::CAT` installs the goal this feeds
@@ -243,7 +246,7 @@ pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
         "cat" => &["cod", "salmon"],
         "turtle" => &["seagrass"],
         // Not a mistake: most species have no food tag, and an empty slice
-        // keeps `TemptGoal` correctly inert for them rather than tempting them
+        // keeps `LureGoal` correctly inert for them rather than tempting them
         // with anything.
         _ => &[],
     }
@@ -255,7 +258,7 @@ pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
 /// # This is not [`tempt_food`], and the two must not be merged
 ///
 /// They coincide for the five species [`tempt_food`] covers, because those
-/// species' `TemptGoal` is constructed with the very same tag. They diverge
+/// species' `LureGoal` is constructed with the very same tag. They diverge
 /// wherever vanilla constructs the tempt goal with a *different* predicate, and
 /// the wolf is the case that matters: `Wolf.isFood` is `#wolf_food` (meat and
 /// fish), while a **bone** is what tames it — and a bone is in neither tag.

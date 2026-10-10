@@ -30,7 +30,7 @@ Chunk inhabited time is not tracked (saved as `0`), so the local term understate
 
 ### Patrols and raids
 
-**Patrols** (`MobSim::run_patrol_spawn_cycle` plus `LongDistancePatrolGoal`): a pillager group spawns near a random player about every 12000 to 13200 ticks once `MobSim::tick_count` passes `PATROL_TIMELINE_GATE` (120000). Members path to a waypoint rotated 90 degrees about Y, shrunk to two-fifths and recentred (a loose-line wobble). The leader is slower (`0.595` vs `0.7`) and repicks a target in `-500..500` within 10 blocks. Followers pull the nearest leader's target once per tick in `MobSim::feed_perception` (no census primitive). Group size is Easy 2, Normal 3, Hard 4.
+**Patrols** (`MobSim::run_patrol_spawn_cycle` plus `PatrolRouteGoal`): a pillager group spawns near a random player about every 12000 to 13200 ticks once `MobSim::tick_count` passes `PATROL_TIMELINE_GATE` (120000). Members path to a waypoint rotated 90 degrees about Y, shrunk to two-fifths and recentred (a loose-line wobble). The leader is slower (`0.595` vs `0.7`) and repicks a target in `-500..500` within 10 blocks. Followers pull the nearest leader's target once per tick in `MobSim::feed_perception` (no census primitive). Group size is Easy 2, Normal 3, Hard 4.
 
 **Raids** (`MobSim::start_raid`/`tick_raids`): a `bad_omen` carrier within 64 blocks of an occupied village POI becomes `raid_omen` at the same amplifier (`absorb_raid_omen`, clamped `1..=5`); on its last tick `create_or_extend_raid` averages occupied POIs into a centre and extends a raid within 96 blocks or starts one. The occupied-POI signal sees only claimed villager beds (session-only), so a village with no claimed bed will not trigger. Ominous bottles are not modelled; testing needs `/effect give`.
 
@@ -67,5 +67,5 @@ In dense native scenes (128 or more withers, at most four lanes) the world-free 
 
 - Weather: `lodestone-render` (`fog`, `light`, `Camera`), `lodestone-assets`, `lodestone-shell` (`net`, `resources`), `GAME_EVENT`/`ADD_ENTITY` on the v26 families.
 - Lightning: `ChunkSource`, `SpawnRng`, `DifficultyInstance`, `crate::fire`, `crate::weather`.
-- Raids and patrols: `MobSim::spawn_species`, `ChunkWorld::surface_y`, `BossBarSnapshot`, `LongDistancePatrolGoal`, `ai::roster::ranged::PILLAGER`; see [mob AI](mob-ai.md) and [villagers](villagers.md).
+- Raids and patrols: `MobSim::spawn_species`, `ChunkWorld::surface_y`, `BossBarSnapshot`, `PatrolRouteGoal`, `ai::roster::ranged::PILLAGER`; see [mob AI](mob-ai.md) and [villagers](villagers.md).
 - Dragon: `lodestone_model::BlockPos` only. Wither: `lodestone_model::{BlockPos, Vec3, Difficulty}` and the shared projectile plumbing; see [projectiles](projectiles.md) and [entity physics](entity-physics.md).

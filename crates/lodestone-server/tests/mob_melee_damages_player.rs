@@ -4,7 +4,7 @@
 //! Before this, `SimMob::attack_target_id` — the field
 //! [`MobSim::tick_with_terrain`]'s hit-resolution pass reads — could only ever
 //! name another live [`SimMob`] (its own doc comment says so), and nothing in
-//! production ever set it to `Some` at all: `NearestAttackableTargetGoal`'s
+//! production ever set it to `Some` at all: `NearestTargetGoal`'s
 //! hostile-melee path targets `nearest_player`, a bare `Vec3` with no identity
 //! crossing the goal seam. So a zombie could path to a player, swing, and the
 //! attack simply vanished — no hop was reached past "the goal decided to
@@ -77,7 +77,7 @@ fn a_pursuing_zombie_lands_melee_hits_on_the_real_player_it_is_chasing() {
 
     // 400 ticks: `tests/mob_sim.rs`'s own pathfinding gate uses the same
     // order of magnitude to close an 8-block gap over the same floor;
-    // `NearestAttackableTargetGoal`'s 10-tick random search throttle also
+    // `NearestTargetGoal`'s 10-tick random search throttle also
     // needs headroom to actually roll a hit.
     let hits = run_and_collect_hits(&mut sim, &world, 400);
 
@@ -131,7 +131,7 @@ fn a_zombie_with_no_fed_player_lands_no_hits() {
 /// of the expected mob damage.
 #[test]
 fn attack_target_id_still_resolves_to_a_mob_not_the_unrelated_fed_player() {
-    use lodestone_entity::ai::goals::MeleeAttackGoal;
+    use lodestone_entity::ai::goals::MeleeStrikeGoal;
     use lodestone_entity::pathfinding::MobShape;
 
     let world = floor_world();
@@ -152,7 +152,7 @@ fn attack_target_id_still_resolves_to_a_mob_not_the_unrelated_fed_player() {
         // `sim.spawn` (unlike `spawn_species`) defaults `attack_damage` to
         // 0.0 — the same test above sets it explicitly for the same reason.
         m.set_attack_damage(5.0);
-        m.add_goal(0, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        m.add_goal(0, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
         m.set_attack_target(Some(defender_pos));
         m.set_attack_target_id(Some(defender_id));
         m.id()

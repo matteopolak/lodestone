@@ -49,6 +49,7 @@ pub(super) const OWNED_FIELDS: &[&str] = &[
     "CropsGrownSincePollination",
     "home_pos",
     "home_radius",
+    "has_egg",
 ];
 
 /// Species with a persistent grudge: the ones whose saves carry
@@ -236,6 +237,16 @@ impl<'w> MobSim<'w> {
         if let Some((at, radius)) = mob.mob.restriction() {
             fields.push(("home_radius".to_owned(), Nbt::Int(radius)));
             fields.push(("home_pos".to_owned(), int_array_pos(at)));
+        }
+
+        if mob.entity_type.path() == "turtle" {
+            fields.push(("has_egg".to_owned(), byte(mob.mob.carries_egg())));
+            if let Some(nest) = mob.mob.nest_position() {
+                fields.push((
+                    "home_pos".to_owned(),
+                    int_array_pos(BlockPos::new(nest.x.floor() as i32, nest.y.floor() as i32, nest.z.floor() as i32)),
+                ));
+            }
         }
 
         for (name, value) in &mob.passthrough {
@@ -464,6 +475,17 @@ impl<'w> MobSim<'w> {
             && radius >= 0
         {
             self.mobs[index].mob.set_restriction(Some((at, radius)));
+        }
+
+        if species == "turtle" {
+            self.mobs[index].mob.restore_has_egg(flag_of(get("has_egg")));
+            if let Some(nest) = read_pos(get("home_pos")) {
+                self.mobs[index].mob.set_nest(Some(Vec3::new(
+                    f64::from(nest.x) + 0.5,
+                    f64::from(nest.y),
+                    f64::from(nest.z) + 0.5,
+                )));
+            }
         }
 
         if species == "bee" {

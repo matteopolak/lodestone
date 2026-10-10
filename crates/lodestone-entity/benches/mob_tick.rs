@@ -36,7 +36,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use lodestone_entity::ai::goals::MeleeAttackGoal;
+use lodestone_entity::ai::goals::MeleeStrikeGoal;
 use lodestone_entity::ai::{GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::pathfinding::{Aabb, MobShape, PathType, PathWorld};
 use lodestone_model::Vec3;
@@ -120,7 +120,7 @@ fn fresh_mob(world: &Arena) -> (NavigatingMob<'_>, GoalSelector) {
     let mut mob = NavigatingMob::new(world, shape, START, 0.25, 20_000, 0, 63);
     mob.set_attack_target(Some(TARGET));
     let mut ai = GoalSelector::new();
-    ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+    ai.add(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
     (mob, ai)
 }
 

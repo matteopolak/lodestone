@@ -122,6 +122,20 @@ pub(super) fn owned_fields(species: &str) -> Vec<&'static str> {
     fields
 }
 
+/// A llama's strength, 1 to 5: three-fifths of the range for most, all five
+/// for one llama in twenty-five. Derived from the uuid, so it persists with the
+/// mob and needs no saved field.
+pub(super) fn llama_strength(uuid: Uuid) -> u32 {
+    let max = if roll(uuid, 31, 100) < 4 { 5 } else { 3 };
+    1 + roll(uuid, 32, max)
+}
+
+/// A per-tick draw in `0..bound` for a mob, for hosts that cannot borrow an
+/// RNG mutably.
+pub(super) fn tick_roll(uuid: Uuid, tick: u64, bound: u32) -> u32 {
+    roll(uuid, tick.wrapping_add(1000), bound)
+}
+
 fn roll(uuid: Uuid, salt: u64, bound: u32) -> u32 {
     let (hi, lo) = uuid.as_u64_pair();
     let mut z = hi ^ lo.rotate_left(17) ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);

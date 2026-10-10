@@ -3,7 +3,7 @@
 //!
 //! # What these gates are for
 //!
-//! `MobSim::run_patrol_spawn_cycle` and `LongDistancePatrolGoal` are each unit
+//! `MobSim::run_patrol_spawn_cycle` and `PatrolRouteGoal` are each unit
 //! tested on their own (`lodestone_entity`'s `roster::ranged` tests drive the
 //! goal directly; `mobs.rs`'s own module carries the spawn-cycle's structural
 //! citations). Neither of those proves the two actually compose in production:

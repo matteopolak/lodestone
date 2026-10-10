@@ -11,7 +11,7 @@
 //! # Why it exists rather than a structural check
 //!
 //! A roster gate that compares *priorities* against the jar cannot see a wrong
-//! speed: `TemptGoal` at priority 3 built with `1.1` instead of the cow's `1.25`
+//! speed: `LureGoal` at priority 3 built with `1.1` instead of the cow's `1.25`
 //! satisfies every priority assertion, and satisfies "the cow moved toward the
 //! player" too, because that is a direction. Only a gate that predicts the
 //! **value** `0.2 × 1.25 = 0.25` and requires the measurement to land on it can
@@ -36,7 +36,7 @@ pub struct SpeedProbe {
     pub moves: Vec<(Vec3, f64)>,
     /// A fixed position 4 blocks away, returned by every perception method that
     /// answers with a position — close enough to be inside every range check in
-    /// the roster (the tightest is `LookAtPlayerGoal(6.0)`).
+    /// the roster (the tightest is `WatchPlayerGoal(6.0)`).
     pub nearby: Vec3,
 }
 
@@ -61,8 +61,8 @@ impl MobController for SpeedProbe {
     fn sea_level(&self) -> i32 {
         63
     }
-    // `next_f32` returns 0.0 so every probability gate (`LookAtPlayerGoal`'s
-    // 0.02, `FloatGoal`'s 0.8) passes: they all test `next_f32() < p`.
+    // `next_f32` returns 0.0 so every probability gate (`WatchPlayerGoal`'s
+    // 0.02, `StayAfloatGoal`'s 0.8) passes: they all test `next_f32() < p`.
     fn next_f32(&mut self) -> f32 {
         0.0
     }
@@ -118,8 +118,8 @@ impl MobController for SpeedProbe {
     fn is_in_love(&self) -> bool {
         true
     }
-    // `FollowParentGoal` returns early unless the mob is a baby with a parent in
-    // range (`FollowParentGoal.canUse`, `getAge() >= 0` → no goal).
+    // `TrailParentGoal` returns early unless the mob is a baby with a parent in
+    // range (`TrailParentGoal.canUse`, `getAge() >= 0` → no goal).
     fn is_baby(&self) -> bool {
         true
     }
@@ -133,7 +133,7 @@ impl MobController for SpeedProbe {
         Some(self.nearby)
     }
     // Permissive like every other perception method here: the drowned's
-    // trident goal (`RangedAttackGoal::with_required_main_hand`) is the one
+    // trident goal (`RangedStrikeGoal::with_required_main_hand`) is the one
     // production reader of `main_hand_item` today, so answering "holding a
     // trident" lets that goal reach `start()` through this probe too, instead
     // of this file's own permissive design silently excluding it.

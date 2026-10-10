@@ -1,11 +1,11 @@
 //! Goal sets for the ranged attackers, and the goals themselves: the bow goal,
-//! the blaze's fireball burst, and vanilla's generic `RangedAttackGoal`.
+//! the blaze's fireball burst, and vanilla's generic `RangedStrikeGoal`.
 //!
 //! # What it is
 //!
 //! A real ranged-attack goal family, and the
 //! [`ProjectileLaunch`] intent that carries a shot out of the AI layer. Before
-//! this module, `RangedAttackGoal` and `BowAttack` were zero hits tree-wide, so
+//! this module, `RangedStrikeGoal` and `BowAttack` were zero hits tree-wide, so
 //! **no mob in this repo could shoot anything**.
 //!
 //! Three goals live here rather than in [`goals`](crate::ai::goals) because they
@@ -73,7 +73,7 @@ use super::{
     random_look_around, stroll, target_hostile, target_iron_golem, target_villager_unseen,
 };
 use crate::ai::goal::{Flag, FlagSet, Goal};
-use crate::ai::goals::LongDistancePatrolGoal;
+use crate::ai::goals::PatrolRouteGoal;
 use crate::ai::mob::{MobController, ProjectileKind, ProjectileLaunch, distance_sqr};
 
 // -- shared aiming constants -------------------------------------------------
@@ -147,7 +147,7 @@ fn arced_shot(
     ProjectileLaunch::aimed(kind, origin, dx, dy + horizontal * ARC_LIFT, dz, power)
 }
 
-// -- RangedBowAttackGoal -----------------------------------------------------
+// -- BowStrikeGoal -----------------------------------------------------
 
 /// Vanilla's own ranged bow-attack goal — the
 /// skeleton family's bow.
@@ -175,7 +175,7 @@ fn arced_shot(
 /// * **Strafing** (in vanilla's own per-tick update). It drives a strafe move-control, a controller this
 ///   repo has no equivalent of; the mob holds position instead of circling.
 #[derive(Debug)]
-pub struct RangedBowAttackGoal {
+pub struct BowStrikeGoal {
     speed: f64,
     /// Vanilla's `attackIntervalMin`, the cooldown after a release.
     attack_interval: i32,
@@ -189,8 +189,8 @@ pub struct RangedBowAttackGoal {
     drawing: Option<i32>,
 }
 
-impl RangedBowAttackGoal {
-    /// `RangedBowAttackGoal(mob, speedModifier, attackIntervalMin, attackRadius)`
+impl BowStrikeGoal {
+    /// `BowStrikeGoal(mob, speedModifier, attackIntervalMin, attackRadius)`
     /// (vanilla's own constructor). `speed` is already absolute
     /// (the caller has applied the jar's multiplier).
     #[must_use]
@@ -206,7 +206,7 @@ impl RangedBowAttackGoal {
     }
 }
 
-impl Goal for RangedBowAttackGoal {
+impl Goal for BowStrikeGoal {
     fn flags(&self) -> FlagSet {
         // Vanilla's own flag set: `setFlags(EnumSet.of(MOVE, LOOK))`.
         FlagSet::of(&[Flag::Move, Flag::Look])
@@ -277,7 +277,7 @@ impl Goal for RangedBowAttackGoal {
     }
 }
 
-// -- RangedAttackGoal --------------------------------------------------------
+// -- RangedStrikeGoal --------------------------------------------------------
 
 /// Vanilla's own generic ranged-attack goal — the generic
 /// one, shared by the snow golem, the witch and the drowned's trident.
@@ -292,10 +292,10 @@ impl Goal for RangedBowAttackGoal {
 /// a species that passes two different values is a one-line change and a
 /// flattened constant could not be checked against the jar.
 ///
-/// Line of sight is modelled the same way [`RangedBowAttackGoal`] models it, for
+/// Line of sight is modelled the same way [`BowStrikeGoal`] models it, for
 /// the same reason.
 #[derive(Debug)]
-pub struct RangedAttackGoal {
+pub struct RangedStrikeGoal {
     kind: ProjectileKind,
     power: f64,
     speed: f64,
@@ -307,15 +307,15 @@ pub struct RangedAttackGoal {
     see_time: i32,
     /// A main-hand item id this goal additionally requires, read through
     /// [`MobController::main_hand_item`]. `None` for the plain vanilla
-    /// `RangedAttackGoal` shape (the snow golem, the witch); the drowned's
+    /// `RangedStrikeGoal` shape (the snow golem, the witch); the drowned's
     /// trident is the one caller that sets it, matching
     /// vanilla's own drowned-trident-attack-goal eligibility check's
     /// held-trident conjunct on top of the base eligibility check.
     requires_main_hand: Option<&'static str>,
 }
 
-impl RangedAttackGoal {
-    /// `RangedAttackGoal(mob, speedModifier, attackIntervalMin, attackIntervalMax, attackRadius)`
+impl RangedStrikeGoal {
+    /// `RangedStrikeGoal(mob, speedModifier, attackIntervalMin, attackIntervalMax, attackRadius)`
     /// (vanilla's own 5-arg constructor), plus which projectile this
     /// species throws and at what power — vanilla carries those in the species'
     /// own ranged-attack step rather than in the goal.
@@ -342,7 +342,7 @@ impl RangedAttackGoal {
         }
     }
 
-    /// Adds a main-hand item requirement on top of the plain `RangedAttackGoal`
+    /// Adds a main-hand item requirement on top of the plain `RangedStrikeGoal`
     /// shape — vanilla's own drowned-trident-attack-goal eligibility check's extra conjunct. Builder
     /// style so [`new`](Self::new)'s call sites that do not need it (the snow
     /// golem, the witch) stay unchanged.
@@ -361,7 +361,7 @@ impl RangedAttackGoal {
     }
 }
 
-impl Goal for RangedAttackGoal {
+impl Goal for RangedStrikeGoal {
     fn flags(&self) -> FlagSet {
         // Vanilla's own constructor.
         FlagSet::of(&[Flag::Move, Flag::Look])
@@ -420,7 +420,7 @@ impl Goal for RangedAttackGoal {
 
 /// Vanilla's own private blaze attack goal.
 ///
-/// Not a `RangedAttackGoal`: a blaze fires in **bursts of three** on a fixed
+/// Not a `RangedStrikeGoal`: a blaze fires in **bursts of three** on a fixed
 /// cadence, and melees instead when very close. The state machine is
 /// vanilla's own per-tick update
 /// and the exact numbers are load-bearing:
@@ -436,7 +436,7 @@ impl Goal for RangedAttackGoal {
 /// why step 5 fires nothing.
 ///
 /// Within 4 blocks (in vanilla's own per-tick update) it melees on a 20-tick cooldown instead, via
-/// [`MobController::attack`] — the same intent `MeleeAttackGoal` uses, so the
+/// [`MobController::attack`] — the same intent `MeleeStrikeGoal` uses, so the
 /// host's existing melee resolution picks it up with no extra wiring.
 ///
 /// The triangle-distributed spread on each fireball (in vanilla's own per-tick update,
@@ -561,13 +561,13 @@ impl Goal for BlazeFireballGoal {
 
 /// Vanilla's own ghast fireball-shooting goal (private, registered at priority 7 in
 /// vanilla's own ghast registration). A charge-then-launch state machine, not a
-/// [`RangedAttackGoal`]: `chargeTime` counts up from `0` while a target is in
+/// [`RangedStrikeGoal`]: `chargeTime` counts up from `0` while a target is in
 /// range, fires once at `chargeTime == 20`, then the cooldown counts back up
 /// from `-40` toward `0` (vanilla's own per-tick update).
 ///
 /// **Registers no [`Flag`] at all** — its constructor never calls
 /// `setFlags`, unlike every other goal in this file — so it runs alongside
-/// [`Ghast::RandomFloatAroundGoal`](super::specialist)/`GhastLookGoal`
+/// [`Ghast::RandomFloatAroundGoal`](super::specialist)/`FaceTargetGoal`
 /// rather than contesting MOVE/LOOK with them, and this port's empty
 /// [`FlagSet`] reproduces that exactly rather than approximating it.
 ///
@@ -664,10 +664,10 @@ impl Goal for GhastFireballGoal {
 /// `pub` because the skeleton's row lives in [`super::hostile_melee`].
 #[must_use]
 pub fn bow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RangedBowAttackGoal::new(ctx.speed * 1.0, 40, 15.0))
+    Box::new(BowStrikeGoal::new(ctx.speed * 1.0, 40, 15.0))
 }
 
-/// Vanilla's own drowned trident-attack goal, a `RangedAttackGoal` subclass that additionally
+/// Vanilla's own drowned trident-attack goal, a `RangedStrikeGoal` subclass that additionally
 /// requires holding a trident (its own eligibility check) and
 /// drives the throw animation through `start`/`stop`
 /// (its own start/stop-using-item plus its own aggressive-flag setter).
@@ -676,7 +676,7 @@ pub fn bow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 #[must_use]
 pub fn trident_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(
-        RangedAttackGoal::new(ProjectileKind::Trident, ARROW_POWER, ctx.speed * 1.0, 40, 40, 10.0)
+        RangedStrikeGoal::new(ProjectileKind::Trident, ARROW_POWER, ctx.speed * 1.0, 40, 40, 10.0)
             // Vanilla's own drowned-trident-attack-goal eligibility check's extra conjunct: vanilla
             // registers this goal on *every* drowned unconditionally
             // (its own behaviour-goals helper) and gates it at runtime on the
@@ -709,7 +709,7 @@ fn blaze_fireball(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// Vanilla's own snow-golem ranged-attack goal, throwing a snowball at `1.6F`
 /// (its own ranged-attack step).
 fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RangedAttackGoal::new(
+    Box::new(RangedStrikeGoal::new(
         ProjectileKind::Snowball,
         ARROW_POWER,
         ctx.speed * 1.25,
@@ -725,7 +725,7 @@ fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// The power is vanilla's own ranged-attack step's own `dist <= 2.0 ? 0.45F : 0.75F`.
 /// `0.75` is used: the goal only fires while the witch is inside its
 /// 10-block attack radius and closing, so the far branch is the one a player meets,
-/// and this crate's `RangedAttackGoal` carries one power rather than a per-shot
+/// and this crate's `RangedStrikeGoal` carries one power rather than a per-shot
 /// function of distance.
 ///
 /// **Two disclosed divergences, both about the potion rather than the throw.**
@@ -744,7 +744,7 @@ fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// impact does nothing. That is the honest state, and it is the seam a potion-cloud
 /// pass plugs into rather than a hole in this table.
 fn witch_potion(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RangedAttackGoal::new(
+    Box::new(RangedStrikeGoal::new(
         ProjectileKind::SplashPotion,
         WITCH_POTION_POWER,
         ctx.speed * 1.0,
@@ -762,16 +762,16 @@ const WITCH_POTION_POWER: f64 = 0.75;
 /// (vanilla's own pillager registration), firing at `1.6F`
 /// (its own ranged-attack step, which calls a shared crossbow-attack helper at `1.6F`).
 ///
-/// Modelled with [`RangedAttackGoal`] rather than a new crossbow goal, and the
+/// Modelled with [`RangedStrikeGoal`] rather than a new crossbow goal, and the
 /// difference is worth stating: vanilla's `RangedCrossbowAttackGoal` has a
 /// four-state machine (uncharged → charging → charged → ready) driven by the
 /// crossbow item's own `CHARGED_PROJECTILES` component, which this repo has no item
-/// component model for. `RangedAttackGoal`'s fixed interval stands in for the
+/// component model for. `RangedStrikeGoal`'s fixed interval stands in for the
 /// charge cycle. The **projectile and its speed are exact**; the *cadence* is an
 /// approximation, and the interval below is the crossbow's own charge duration
 /// rather than a guess — see [`CROSSBOW_CHARGE_TICKS`].
 fn crossbow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RangedAttackGoal::new(
+    Box::new(RangedStrikeGoal::new(
         ProjectileKind::Arrow,
         ARROW_POWER,
         ctx.speed * 1.0,
@@ -797,11 +797,11 @@ const CROSSBOW_CHARGE_TICKS: i32 = 25;
 /// Vanilla's own long-distance-patrol goal, factors `(0.7, 0.595)`
 /// (vanilla's own patrolling-monster registration) — `(speedModifier, leaderSpeedModifier)`,
 /// the same kind of `MOVEMENT_SPEED` multiplier every other builder in this
-/// roster scales by `ctx.speed`. [`LongDistancePatrolGoal::new`]'s own doc
+/// roster scales by `ctx.speed`. [`PatrolRouteGoal::new`]'s own doc
 /// comment has the counterintuitive part: the *leader* is the slower of the
 /// two figures.
 fn patrol_goal(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LongDistancePatrolGoal::new(ctx.speed * 0.7, ctx.speed * 0.595))
+    Box::new(PatrolRouteGoal::new(ctx.speed * 0.7, ctx.speed * 0.595))
 }
 
 // -- tables ------------------------------------------------------------------
@@ -809,24 +809,24 @@ fn patrol_goal(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// Vanilla's own blaze goal registration. No base-class call, so this is the
 /// blaze's whole table.
 pub static BLAZE: &[Registration] = &[
-    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
-    Registration::target(2, "NearestAttackableTargetGoal", nearest_attackable_target),
-    Registration::goal(4, "Blaze.BlazeAttackGoal", blaze_fireball),
+    Registration::target(1, "retaliate", hurt_by_target),
+    Registration::target(2, "nearest_target", nearest_attackable_target),
+    Registration::goal(4, "blaze.fireball_barrage", blaze_fireball),
     // A blaze walks back inside its home radius, if it has one.
-    Registration::goal(5, "MoveTowardsRestrictionGoal", move_towards_restriction),
-    Registration::goal(7, "WaterAvoidingRandomStrollGoal", stroll),
-    Registration::goal(8, "LookAtPlayerGoal", look_at_player_8),
-    Registration::goal(8, "RandomLookAroundGoal", random_look_around),
+    Registration::goal(5, "return_to_home_area", move_towards_restriction),
+    Registration::goal(7, "wander_dry", stroll),
+    Registration::goal(8, "watch_player", look_at_player_8),
+    Registration::goal(8, "idle_glance", random_look_around),
 ];
 
 /// Vanilla's own snow-golem goal registration. No base-class call.
 pub static SNOW_GOLEM: &[Registration] = &[
     // A snow golem hunts hostile mobs, not players.
-    Registration::target(1, "NearestAttackableTargetGoal", target_hostile),
-    Registration::goal(1, "RangedAttackGoal", snowball_attack),
-    Registration::goal(2, "WaterAvoidingRandomStrollGoal", stroll),
-    Registration::goal(3, "LookAtPlayerGoal", look_at_player_6),
-    Registration::goal(4, "RandomLookAroundGoal", random_look_around),
+    Registration::target(1, "nearest_target", target_hostile),
+    Registration::goal(1, "ranged_strike", snowball_attack),
+    Registration::goal(2, "wander_dry", stroll),
+    Registration::goal(3, "watch_player", look_at_player_6),
+    Registration::goal(4, "idle_glance", random_look_around),
 ];
 
 /// Vanilla's own witch goal registration, **including** the base-class chain the
@@ -843,29 +843,33 @@ pub static SNOW_GOLEM: &[Registration] = &[
 /// The ranged row itself is real, and it is what this family exists for.
 pub static WITCH: &[Registration] = &[
     // -- inherited from PatrollingMonster / Raider --
-    Registration::missing(Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
-    Registration::missing(Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
-    Registration::missing(Selector::Goal, 3, "PathfindToRaidGoal"),
-    Registration::missing(Selector::Goal, 4, "Raider.RaiderMoveThroughVillageGoal"),
-    Registration::missing(Selector::Goal, 5, "Raider.RaiderCelebration"),
+    Registration::missing(Selector::Goal, 4, "patrol_route"),
+    Registration::missing(Selector::Goal, 1, "raider.fetch_leader_banner"),
+    Registration::goal(3, "march_on_raid", pathfind_to_raid),
+    Registration::missing(Selector::Goal, 4, "raider.patrol_village"),
+    Registration::missing(Selector::Goal, 5, "raider.celebrate"),
     // -- the witch's own --
-    Registration::goal(1, "FloatGoal", float_goal),
-    Registration::goal(2, "RangedAttackGoal", witch_potion),
-    Registration::goal(2, "WaterAvoidingRandomStrollGoal", stroll),
-    Registration::goal(3, "LookAtPlayerGoal", look_at_player_8),
-    Registration::goal(3, "RandomLookAroundGoal", random_look_around),
-    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
+    Registration::goal(1, "stay_afloat", float_goal),
+    Registration::goal(2, "ranged_strike", witch_potion),
+    Registration::goal(2, "wander_dry", stroll),
+    Registration::goal(3, "watch_player", look_at_player_8),
+    Registration::goal(3, "idle_glance", random_look_around),
+    Registration::target(1, "retaliate", hurt_by_target),
     // Vanilla's own nearest-healable-raider-target goal — a witch heals *other raiders*, which
     // needs both a raid and mob-vs-mob targeting. Neither exists.
-    Registration::missing(Selector::Target, 2, "NearestHealableRaiderTargetGoal"),
-    // `NearestAttackableWitchTargetGoal` is a `NearestAttackableTargetGoal`
+    Registration::missing(Selector::Target, 2, "witch.nearest_healable_raider"),
+    // `NearestAttackableWitchTargetGoal` is a `NearestTargetGoal`
     // subclass whose only override suppresses targeting *while a raid is active
     // and the witch has not finished its wave* (vanilla's own witch-specific inner class). With
     // no raid, the override is inert and the base behaviour is exactly ours — so
     // this is `Modelled`, not `Missing`, and that is a claim about the subclass
     // rather than a convenient substitution.
-    Registration::target(3, "NearestAttackableWitchTargetGoal", nearest_attackable_target),
+    Registration::target(3, "witch.nearest_target", nearest_attackable_target),
 ];
+
+fn pathfind_to_raid(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::pathfind_to_raid::MarchOnRaidGoal)
+}
 
 /// Vanilla's own pillager goal registration, plus the same inherited
 /// `Raider`/`PatrollingMonster` chain [`WITCH`] documents.
@@ -886,37 +890,37 @@ pub static PILLAGER: &[Registration] = &[
     // ever spawns, so it is the only
     // one that needs the goal to be real. `docs/pillager-patrols.md` has the
     // full account of what `patrol_goal`'s underlying
-    // `LongDistancePatrolGoal` does and does not port.
-    Registration::goal(4, "PatrollingMonster.LongDistancePatrolGoal", patrol_goal),
-    Registration::missing(Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
-    Registration::missing(Selector::Goal, 3, "PathfindToRaidGoal"),
-    Registration::missing(Selector::Goal, 4, "Raider.RaiderMoveThroughVillageGoal"),
-    Registration::missing(Selector::Goal, 5, "Raider.RaiderCelebration"),
+    // `PatrolRouteGoal` does and does not port.
+    Registration::goal(4, "patrol_route", patrol_goal),
+    Registration::missing(Selector::Goal, 1, "raider.fetch_leader_banner"),
+    Registration::goal(3, "march_on_raid", pathfind_to_raid),
+    Registration::missing(Selector::Goal, 4, "raider.patrol_village"),
+    Registration::missing(Selector::Goal, 5, "raider.celebrate"),
     // -- the pillager's own --
-    Registration::goal(0, "FloatGoal", float_goal),
+    Registration::goal(0, "stay_afloat", float_goal),
     // Vanilla's own pillager avoid-creaking goal. Ours resolves the avoided species
     // through the host's own feed, the same route the creeper's cat/ocelot
     // avoidance takes.
-    Registration::goal(1, "AvoidEntityGoal", avoid_entity),
+    Registration::goal(1, "flee_entity", avoid_entity),
     // Vanilla's own hold-ground-attack goal — the raid-wave "stand and fight at the
     // village bell" behaviour. Raid machinery again.
-    Registration::missing(Selector::Goal, 2, "Raider.HoldGroundAttackGoal"),
-    Registration::goal(3, "RangedCrossbowAttackGoal", crossbow_attack),
+    Registration::missing(Selector::Goal, 2, "raider.hold_ground"),
+    Registration::goal(3, "crossbow_strike", crossbow_attack),
     // Vanilla's own pillager stroll goal — note this is the plain stroll, not
     // the water-avoiding one the witch gets, and vanilla's speed factor is 0.6.
     // Ours is one goal for both, so the row is `Modelled` with the factor visible
     // at `stroll`'s own definition rather than here.
-    Registration::goal(8, "RandomStrollGoal", stroll),
-    Registration::goal(9, "LookAtPlayerGoal", look_at_player_8),
-    // The second `LookAtPlayerGoal` at priority 10 targets `Mob`, not `Player`
+    Registration::goal(8, "wander", stroll),
+    Registration::goal(9, "watch_player", look_at_player_8),
+    // The second `WatchPlayerGoal` at priority 10 targets `Mob`, not `Player`
     // (vanilla's own pillager registration) — a different class, so per this family's own rule it is a row
     // covered by the one above rather than a second instance fighting it for LOOK.
-    Registration::covered(Selector::Goal, 10, "LookAtPlayerGoal", "LookAtPlayerGoal"),
-    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
-    Registration::target(2, "NearestAttackableTargetGoal", nearest_attackable_target),
+    Registration::covered(Selector::Goal, 10, "watch_player", "watch_player"),
+    Registration::target(1, "retaliate", hurt_by_target),
+    Registration::target(2, "nearest_target", nearest_attackable_target),
     // The two priority-3 rows hunt villagers (unseen is fine) and iron golems.
-    Registration::target(3, "NearestAttackableTargetGoal", target_villager_unseen),
-    Registration::target(3, "NearestAttackableTargetGoal", target_iron_golem),
+    Registration::target(3, "nearest_target", target_villager_unseen),
+    Registration::target(3, "nearest_target", target_iron_golem),
 ];
 
 /// The registry path a [`ProjectileKind`] spawns as.
@@ -1065,7 +1069,7 @@ mod tests {
         let target = Vec3::new(8.0, 0.0, 0.0);
         MobController::set_attack_target(&mut mob, Some(target));
 
-        let mut goal = RangedBowAttackGoal::new(0.25, 40, 15.0);
+        let mut goal = BowStrikeGoal::new(0.25, 40, 15.0);
         assert!(
             goal.can_use(&mut mob),
             "a fed NavigatingMob must satisfy the bow goal's can_use; if this \
@@ -1127,7 +1131,7 @@ mod tests {
     fn an_unfed_navigating_mob_records_no_bow_launch() {
         let world = Flat;
         let mut mob = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.25);
-        let mut goal = RangedBowAttackGoal::new(0.25, 40, 15.0);
+        let mut goal = BowStrikeGoal::new(0.25, 40, 15.0);
         assert!(
             !goal.can_use(&mut mob),
             "no target means no bow goal"
@@ -1364,26 +1368,26 @@ mod tests {
     // -- the tables ----------------------------------------------------------
 
     /// The priority multiset, against the jar. Every row, whatever its coverage
-    /// — a table that silently dropped `MoveTowardsRestrictionGoal` would still
+    /// — a table that silently dropped `ReturnToHomeAreaGoal` would still
     /// build a working blaze, and this is what refuses it.
     #[test]
     fn every_table_matches_its_cited_addgoal_multiset() {
         // (species, file:line cite, expected (selector, priority, class) rows)
         let blaze_expected = vec![
-            (Selector::Goal, 4, "Blaze.BlazeAttackGoal"),
-            (Selector::Goal, 5, "MoveTowardsRestrictionGoal"),
-            (Selector::Goal, 7, "WaterAvoidingRandomStrollGoal"),
-            (Selector::Goal, 8, "LookAtPlayerGoal"),
-            (Selector::Goal, 8, "RandomLookAroundGoal"),
-            (Selector::Target, 1, "HurtByTargetGoal"),
-            (Selector::Target, 2, "NearestAttackableTargetGoal"),
+            (Selector::Goal, 4, "blaze.fireball_barrage"),
+            (Selector::Goal, 5, "return_to_home_area"),
+            (Selector::Goal, 7, "wander_dry"),
+            (Selector::Goal, 8, "watch_player"),
+            (Selector::Goal, 8, "idle_glance"),
+            (Selector::Target, 1, "retaliate"),
+            (Selector::Target, 2, "nearest_target"),
         ];
         let snow_golem_expected = vec![
-            (Selector::Goal, 1, "RangedAttackGoal"),
-            (Selector::Goal, 2, "WaterAvoidingRandomStrollGoal"),
-            (Selector::Goal, 3, "LookAtPlayerGoal"),
-            (Selector::Goal, 4, "RandomLookAroundGoal"),
-            (Selector::Target, 1, "NearestAttackableTargetGoal"),
+            (Selector::Goal, 1, "ranged_strike"),
+            (Selector::Goal, 2, "wander_dry"),
+            (Selector::Goal, 3, "watch_player"),
+            (Selector::Goal, 4, "idle_glance"),
+            (Selector::Target, 1, "nearest_target"),
         ];
 
         // The witch's own five goal rows and three target rows, plus the five
@@ -1393,37 +1397,37 @@ mod tests {
         // five, and no behavioural test could see the difference because all five
         // are `Missing` anyway.
         let witch_expected = vec![
-            (Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
-            (Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
-            (Selector::Goal, 3, "PathfindToRaidGoal"),
-            (Selector::Goal, 4, "Raider.RaiderMoveThroughVillageGoal"),
-            (Selector::Goal, 5, "Raider.RaiderCelebration"),
-            (Selector::Goal, 1, "FloatGoal"),
-            (Selector::Goal, 2, "RangedAttackGoal"),
-            (Selector::Goal, 2, "WaterAvoidingRandomStrollGoal"),
-            (Selector::Goal, 3, "LookAtPlayerGoal"),
-            (Selector::Goal, 3, "RandomLookAroundGoal"),
-            (Selector::Target, 1, "HurtByTargetGoal"),
-            (Selector::Target, 2, "NearestHealableRaiderTargetGoal"),
-            (Selector::Target, 3, "NearestAttackableWitchTargetGoal"),
+            (Selector::Goal, 4, "patrol_route"),
+            (Selector::Goal, 1, "raider.fetch_leader_banner"),
+            (Selector::Goal, 3, "march_on_raid"),
+            (Selector::Goal, 4, "raider.patrol_village"),
+            (Selector::Goal, 5, "raider.celebrate"),
+            (Selector::Goal, 1, "stay_afloat"),
+            (Selector::Goal, 2, "ranged_strike"),
+            (Selector::Goal, 2, "wander_dry"),
+            (Selector::Goal, 3, "watch_player"),
+            (Selector::Goal, 3, "idle_glance"),
+            (Selector::Target, 1, "retaliate"),
+            (Selector::Target, 2, "witch.nearest_healable_raider"),
+            (Selector::Target, 3, "witch.nearest_target"),
         ];
         let pillager_expected = vec![
-            (Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
-            (Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
-            (Selector::Goal, 3, "PathfindToRaidGoal"),
-            (Selector::Goal, 4, "Raider.RaiderMoveThroughVillageGoal"),
-            (Selector::Goal, 5, "Raider.RaiderCelebration"),
-            (Selector::Goal, 0, "FloatGoal"),
-            (Selector::Goal, 1, "AvoidEntityGoal"),
-            (Selector::Goal, 2, "Raider.HoldGroundAttackGoal"),
-            (Selector::Goal, 3, "RangedCrossbowAttackGoal"),
-            (Selector::Goal, 8, "RandomStrollGoal"),
-            (Selector::Goal, 9, "LookAtPlayerGoal"),
-            (Selector::Goal, 10, "LookAtPlayerGoal"),
-            (Selector::Target, 1, "HurtByTargetGoal"),
-            (Selector::Target, 2, "NearestAttackableTargetGoal"),
-            (Selector::Target, 3, "NearestAttackableTargetGoal"),
-            (Selector::Target, 3, "NearestAttackableTargetGoal"),
+            (Selector::Goal, 4, "patrol_route"),
+            (Selector::Goal, 1, "raider.fetch_leader_banner"),
+            (Selector::Goal, 3, "march_on_raid"),
+            (Selector::Goal, 4, "raider.patrol_village"),
+            (Selector::Goal, 5, "raider.celebrate"),
+            (Selector::Goal, 0, "stay_afloat"),
+            (Selector::Goal, 1, "flee_entity"),
+            (Selector::Goal, 2, "raider.hold_ground"),
+            (Selector::Goal, 3, "crossbow_strike"),
+            (Selector::Goal, 8, "wander"),
+            (Selector::Goal, 9, "watch_player"),
+            (Selector::Goal, 10, "watch_player"),
+            (Selector::Target, 1, "retaliate"),
+            (Selector::Target, 2, "nearest_target"),
+            (Selector::Target, 3, "nearest_target"),
+            (Selector::Target, 3, "nearest_target"),
         ];
 
         for (species, expected) in [
@@ -1435,7 +1439,7 @@ mod tests {
             let table = lookup(species).unwrap_or_else(|| panic!("{species} has no table"));
             let mut got: Vec<_> = table
                 .iter()
-                .map(|r| (r.selector, r.priority, r.vanilla))
+                .map(|r| (r.selector, r.priority, r.name))
                 .collect();
             let mut want = expected;
             got.sort_by_key(|&(s, p, v)| (format!("{s:?}"), p, v));
@@ -1457,7 +1461,7 @@ mod tests {
         // Every `Modelled` row builds and no `Missing` or `CoveredBy` one does, which is
         // what makes the raid rows honest bookkeeping rather than silent no-ops.
         for (species, expected_built) in
-            [("blaze", 7), ("snow_golem", 5), ("witch", 7), ("pillager", 10)]
+            [("blaze", 7), ("snow_golem", 5), ("witch", 8), ("pillager", 11)]
         {
             let ctx = SpeciesContext::new(0.23);
             let built = goals_for(species, &ctx);
@@ -1476,8 +1480,8 @@ mod tests {
     }
 
     /// A blaze registers two goals at priority 8 (vanilla's own blaze registration), which is
-    /// legal in vanilla and must stay legal here: `LookAtPlayerGoal` claims LOOK
-    /// and `RandomLookAroundGoal` claims LOOK, so the second is simply
+    /// legal in vanilla and must stay legal here: `WatchPlayerGoal` claims LOOK
+    /// and `IdleGlanceGoal` claims LOOK, so the second is simply
     /// preempted, not rejected. A `GoalSelector` that deduplicated by priority
     /// would silently drop one.
     #[test]
@@ -1574,7 +1578,7 @@ mod tests {
         let mut mob = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.25);
         MobController::set_attack_target(&mut mob, Some(Vec3::new(8.0, 0.0, 0.0)));
         let mut selector = GoalSelector::new();
-        let id = selector.add(4, Box::new(RangedBowAttackGoal::new(0.25, 40, 15.0)));
+        let id = selector.add(4, Box::new(BowStrikeGoal::new(0.25, 40, 15.0)));
 
         // `NavigatingMob::tick` is the production driver — the exact call
         // `MobSim::tick` makes (`mobs.rs`, `m.mob.tick(&mut m.goals)`).
@@ -1601,14 +1605,14 @@ mod tests {
     // -- pillager patrols -----------------------------------------------------
 
     /// The pillager's roster row installs a real, reachable
-    /// `LongDistancePatrolGoal` — the structural fact a table entry alone
+    /// `PatrolRouteGoal` — the structural fact a table entry alone
     /// cannot prove, per this module's own "not a fake" discipline above.
     #[test]
     fn the_pillagers_table_installs_a_reachable_patrol_goal() {
         let table = lookup("pillager").expect("pillager has a table");
         let row = table
             .iter()
-            .find(|r| r.vanilla == "PatrollingMonster.LongDistancePatrolGoal")
+            .find(|r| r.name == "patrol_route")
             .expect("the row must exist");
         assert!(
             matches!(row.coverage, Coverage::Modelled(_)),
@@ -1622,7 +1626,7 @@ mod tests {
     /// A leader with a real `NavigatingMob` walks toward its own
     /// `patrol_target`, driven by [`patrol_goal`] — the exact builder the
     /// pillager's roster row installs, held alone in the selector so a
-    /// sibling goal (the pillager also gets a `RandomStrollGoal`) cannot be
+    /// sibling goal (the pillager also gets a `WanderGoal`) cannot be
     /// the thing actually moving the mob.
     #[test]
     fn a_patrol_leader_walks_toward_its_own_target() {
@@ -1650,7 +1654,7 @@ mod tests {
 
         // Control: the identical goal, alone, on a mob never marked
         // patrolling. With only this one goal in the selector, zero movement
-        // is a direct read of `LongDistancePatrolGoal::can_use`'s own gate —
+        // is a direct read of `PatrolRouteGoal::can_use`'s own gate —
         // no sibling goal can supply a false positive here.
         let mut idle = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.3);
         idle.set_patrol_leader(true);
@@ -1663,7 +1667,7 @@ mod tests {
         assert!(
             (idle.position().x - 0.0).abs() < 1e-9,
             "control: a mob with a target but `is_patrolling() == false` must \
-             not move under `LongDistancePatrolGoal::can_use`'s own gate; it \
+             not move under `PatrolRouteGoal::can_use`'s own gate; it \
              moved to x={}",
             idle.position().x
         );
@@ -1672,7 +1676,7 @@ mod tests {
     /// A **follower** (`is_patrol_leader() == false`) with no target of its
     /// own adopts whatever [`MobController::patrol_group_target`] reports —
     /// the host-census pull this goal substitutes for vanilla's
-    /// leader-pushes-to-companions census (see `LongDistancePatrolGoal`'s own
+    /// leader-pushes-to-companions census (see `PatrolRouteGoal`'s own
     /// doc comment in `goals.rs`) — and then walks toward it. Same isolation
     /// as the leader test: [`patrol_goal`] alone in the selector.
     #[test]

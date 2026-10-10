@@ -11,7 +11,9 @@
 //! # Why the table is not just a `match` returning boxed goals
 //!
 //! A roster entry is a `&'static [Registration]`, and a [`Registration`] carries
-//! the **vanilla class name** alongside its priority, plus a [`Coverage`] saying
+//! a **descriptive name** (`data/goal-names.tsv` maps each to the reference
+//! registration it stands for; a test rejects class-style or unmapped names)
+//! alongside its priority, plus a [`Coverage`] saying
 //! whether this repo builds an equivalent, lacks one, or already covers it with a
 //! sibling row. Three things fall out of that shape, and all three were the
 //! point:
@@ -26,7 +28,7 @@
 //! * **An omission cannot go quiet.** Vanilla registers seven goals on a spider
 //!   and this repo implements six of them. [`Coverage::Missing`] says which one,
 //!   in the table, at its real vanilla priority — so implementing
-//!   `LeapAtTargetGoal` later is a one-row change the multiset gate already
+//!   `PounceGoal` later is a one-row change the multiset gate already
 //!   covers, rather than a discovery.
 //! * **The two priority namespaces stay legible.** [`Selector`] records whether
 //!   vanilla put a registration on `goalSelector` or `targetSelector`, so the
@@ -66,7 +68,7 @@
 //! tempt a pig" answer *what the mob can see*, are fed to
 //! [`MobController`](super::MobController) by the server's own census, and
 //! already live in `mobs.rs` next to that feed (`avoided_species`, `tempt_food`).
-//! The roster only decides that a spider gets an `AvoidEntityGoal` at all.
+//! The roster only decides that a spider gets an `FleeEntityGoal` at all.
 //!
 //! # Every registration table is a `static`, never a `const`
 //!
@@ -88,10 +90,10 @@
 
 use super::goal::Goal;
 use super::goals::{
-    AvoidEntityGoal, BreedGoal, FloatGoal, HurtByTargetGoal, LeapAtTargetGoal, LookAtPlayerGoal,
-    MeleeAttackGoal, MoveTowardsRestrictionGoal, NearestAttackableTargetGoal, OwnerHurtByTargetGoal,
-    OwnerHurtTargetGoal, RandomLookAroundGoal, RandomStrollGoal, ResetUniversalAngerGoal,
-    SitWhenOrderedToGoal, SwellGoal,
+    FleeEntityGoal, MateGoal, StayAfloatGoal, RetaliateGoal, PounceGoal, WatchPlayerGoal,
+    MeleeStrikeGoal, ReturnToHomeAreaGoal, NearestTargetGoal, DefendOwnerGoal,
+    AssistOwnerGoal, IdleGlanceGoal, WanderGoal, ResetUniversalAngerGoal,
+    SitOnCommandGoal, FuseGoal,
 };
 use super::target_class::TargetClass;
 
@@ -111,8 +113,8 @@ pub mod specialist;
 ///
 /// Vanilla's own mob base type owns a goal selector and a target selector with
 /// **independent**
-/// priority numbering, so a creeper's `FloatGoal` at goal-priority 1 and its
-/// `NearestAttackableTargetGoal` at target-priority 1 are not competing
+/// priority numbering, so a creeper's `StayAfloatGoal` at goal-priority 1 and its
+/// `NearestTargetGoal` at target-priority 1 are not competing
 /// (vanilla's own creeper registration puts them at goal-priority 1 and
 /// target-priority 1 respectively). Recording which one a number came from
 /// is what lets the jar's numbers be copied verbatim.
@@ -140,7 +142,7 @@ pub struct SpeciesContext {
     /// The mob's `minecraft:movement_speed` attribute value, in blocks per tick
     /// — what `MobSim` already calls `step_per_tick`.
     pub speed: f64,
-    /// How close a [`MeleeAttackGoal`] must be to connect, in blocks.
+    /// How close a [`MeleeStrikeGoal`] must be to connect, in blocks.
     ///
     /// Vanilla derives this from the attacker's and target's bounding boxes
     /// (vanilla's own attack-bounding-box getter); nothing here models the target's box at
@@ -183,8 +185,8 @@ pub enum Coverage {
     ///
     /// This happens because several of our goals are class-agnostic where
     /// vanilla's are generic over a target class. A creeper gets two
-    /// `AvoidEntityGoal` registrations, one for `Ocelot` and one for `Cat`
-    /// (vanilla's own creeper registration); our `AvoidEntityGoal` has no class
+    /// `FleeEntityGoal` registrations, one for `Ocelot` and one for `Cat`
+    /// (vanilla's own creeper registration); our `FleeEntityGoal` has no class
     /// parameter at all and flees whatever
     /// [`MobController::avoid_threat`](super::MobController::avoid_threat)
     /// reports, which the server's own `avoided_species` feed already resolves
@@ -202,10 +204,10 @@ pub struct Registration {
     /// Vanilla's own priority number, unshifted (lower = higher precedence).
     pub priority: i32,
     /// The vanilla class name exactly as it appears in the cited `addGoal` line,
-    /// e.g. `"WaterAvoidingRandomStrollGoal"`. This is the join key a gate uses
+    /// e.g. `"wander_dry"`. This is the join key a gate uses
     /// to compare a table against the jar, so it must match the jar's spelling,
     /// not ours.
-    pub vanilla: &'static str,
+    pub name: &'static str,
     /// What this repo does about it.
     pub coverage: Coverage,
 }
@@ -213,33 +215,33 @@ pub struct Registration {
 impl Registration {
     /// A `goalSelector` registration we implement.
     #[must_use]
-    pub const fn goal(priority: i32, vanilla: &'static str, build: Build) -> Self {
+    pub const fn goal(priority: i32, name: &'static str, build: Build) -> Self {
         Self {
             selector: Selector::Goal,
             priority,
-            vanilla,
+            name,
             coverage: Coverage::Modelled(build),
         }
     }
 
     /// A `targetSelector` registration we implement.
     #[must_use]
-    pub const fn target(priority: i32, vanilla: &'static str, build: Build) -> Self {
+    pub const fn target(priority: i32, name: &'static str, build: Build) -> Self {
         Self {
             selector: Selector::Target,
             priority,
-            vanilla,
+            name,
             coverage: Coverage::Modelled(build),
         }
     }
 
     /// A vanilla registration this repo has no equivalent goal for.
     #[must_use]
-    pub const fn missing(selector: Selector, priority: i32, vanilla: &'static str) -> Self {
+    pub const fn missing(selector: Selector, priority: i32, name: &'static str) -> Self {
         Self {
             selector,
             priority,
-            vanilla,
+            name,
             coverage: Coverage::Missing,
         }
     }
@@ -249,13 +251,13 @@ impl Registration {
     pub const fn covered(
         selector: Selector,
         priority: i32,
-        vanilla: &'static str,
+        name: &'static str,
         by: &'static str,
     ) -> Self {
         Self {
             selector,
             priority,
-            vanilla,
+            name,
             coverage: Coverage::CoveredBy(by),
         }
     }
@@ -276,17 +278,17 @@ impl Registration {
 // `const` table. Each multiplies `ctx.speed` by the jar's own factor, so the
 // factor is auditable at the registration site.
 
-/// `FloatGoal` takes no arguments in vanilla.
+/// `StayAfloatGoal` takes no arguments in vanilla.
 pub fn float_goal(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(FloatGoal)
+    Box::new(StayAfloatGoal)
 }
 
-/// `RandomLookAroundGoal` takes no arguments.
+/// `IdleGlanceGoal` takes no arguments.
 pub fn random_look_around(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RandomLookAroundGoal::new())
+    Box::new(IdleGlanceGoal::new())
 }
 
-/// Vanilla's default `LookAtPlayerGoal` probability: its own three-argument
+/// Vanilla's default `WatchPlayerGoal` probability: its own three-argument
 /// constructor forwards `0.02F`
 /// to its own four-argument constructor, and
 /// every registration in this roster uses that three-argument form.
@@ -301,26 +303,26 @@ const LOOK_PROBABILITY: f32 = 0.02;
 /// closure capturing the distance is not a function pointer. Two named constants
 /// also read better against the jar than one call with a magic argument.
 pub fn look_at_player_8(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LookAtPlayerGoal::new(8.0, LOOK_PROBABILITY))
+    Box::new(WatchPlayerGoal::new(8.0, LOOK_PROBABILITY))
 }
 
 /// The look distance `6.0` — every farm-animal registration
 /// uses it (the cow, sheep, pig and chicken families all register it this
 /// way).
 pub fn look_at_player_6(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LookAtPlayerGoal::new(6.0, LOOK_PROBABILITY))
+    Box::new(WatchPlayerGoal::new(6.0, LOOK_PROBABILITY))
 }
 
 /// The stroll speed factor `1.0` — the most common registration in
 /// the roster (the zombie, abstract skeleton, cow, sheep, pig and chicken
 /// families all register it).
 ///
-/// Our `RandomStrollGoal` is the plain stroll; vanilla's water-avoiding subclass
+/// Our `WanderGoal` is the plain stroll; vanilla's water-avoiding subclass
 /// only biases the candidate position away from water, which the A\* the goal
 /// drives does not model. A disclosed simplification shared by every species that
 /// registers it, which is why it is not a per-family `Coverage::Missing`.
 pub fn stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RandomStrollGoal::new(ctx.speed))
+    Box::new(WanderGoal::new(ctx.speed))
 }
 
 /// The avoid radius `6.0` and walk-speed modifier `1.0` — every registration in the
@@ -330,51 +332,51 @@ pub fn stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
 ///
 /// Vanilla's fourth and fifth arguments are separate *walk* and *sprint* speed
 /// modifiers, switching to the sprint tier once the threat is very close; our
-/// `AvoidEntityGoal` has one speed, so it takes the walk tier and the sprint tier
+/// `FleeEntityGoal` has one speed, so it takes the walk tier and the sprint tier
 /// is not modelled. The `6.0` radius is the same figure `mobs.rs`'s `AVOID_RANGE`
 /// already cites for the perception feed.
 pub fn avoid_entity(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(AvoidEntityGoal::new(6.0, ctx.speed))
+    Box::new(FleeEntityGoal::new(6.0, ctx.speed))
 }
 
 /// The melee speed factor `1.0` — the creeper's own registration, and
 /// via subclasses the zombie's own attack-goal registration
 /// and the spider's own attack-goal registration (which passes `1.0` up to
-/// `MeleeAttackGoal`).
+/// `MeleeStrikeGoal`).
 ///
 /// The skeleton's is `1.2` and has its own builder in
 /// [`hostile_melee`](hostile_melee).
 pub fn melee_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(MeleeAttackGoal::new(ctx.speed, ctx.attack_reach))
+    Box::new(MeleeStrikeGoal::new(ctx.speed, ctx.attack_reach))
 }
 
-/// `SwellGoal(this)` — creeper only. Takes no
+/// `FuseGoal(this)` — creeper only. Takes no
 /// arguments.
 pub fn swell(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(SwellGoal::new())
+    Box::new(FuseGoal::new())
 }
 
-/// `HurtByTargetGoal(this)` — a target-selector goal, no arguments.
+/// `RetaliateGoal(this)` — a target-selector goal, no arguments.
 ///
 /// Several registrations chain a same-owner alert-others flag (the zombie
 /// and zombified-piglin families both do); that
 /// propagation is not modelled anywhere yet.
 pub fn hurt_by_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(HurtByTargetGoal::new())
+    Box::new(RetaliateGoal::new())
 }
 
-/// `OwnerHurtByTargetGoal(this)` — a target-selector goal, no arguments.
+/// `DefendOwnerGoal(this)` — a target-selector goal, no arguments.
 /// Retaliates against whoever last hurt this mob's owner. See
-/// [`OwnerHurtByTargetGoal`]'s own doc comment.
+/// [`DefendOwnerGoal`]'s own doc comment.
 pub fn owner_hurt_by_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(OwnerHurtByTargetGoal::new())
+    Box::new(DefendOwnerGoal::new())
 }
 
-/// `OwnerHurtTargetGoal(this)` — a target-selector goal, no arguments. Joins
+/// `AssistOwnerGoal(this)` — a target-selector goal, no arguments. Joins
 /// whatever fight this mob's owner just started. See
-/// [`OwnerHurtTargetGoal`]'s own doc comment.
+/// [`AssistOwnerGoal`]'s own doc comment.
 pub fn owner_hurt_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(OwnerHurtTargetGoal::new())
+    Box::new(AssistOwnerGoal::new())
 }
 
 /// Vanilla's own player-targeting target-selector
@@ -386,77 +388,77 @@ pub fn owner_hurt_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// player-targeted registration only, and every registration naming another class
 /// is a [`Coverage::Missing`] row.
 pub fn nearest_attackable_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::new())
+    Box::new(NearestTargetGoal::new())
 }
 
 /// Hunts the nearest villager or wandering trader without needing to see it.
 pub fn target_villager_unseen(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Villager, false))
+    Box::new(NearestTargetGoal::of_class(TargetClass::Villager, false))
 }
 
 /// Hunts the nearest iron golem it can see.
 pub fn target_iron_golem(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::IronGolem, true))
+    Box::new(NearestTargetGoal::of_class(TargetClass::IronGolem, true))
 }
 
 /// Hunts the nearest baby turtle out of water that it can see.
 pub fn target_baby_turtle(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::BabyLandTurtle, true))
+    Box::new(NearestTargetGoal::of_class(TargetClass::BabyLandTurtle, true))
 }
 
 /// Hunts the nearest axolotl it can see.
 pub fn target_axolotl(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Axolotl, true))
+    Box::new(NearestTargetGoal::of_class(TargetClass::Axolotl, true))
 }
 
 /// Hunts the nearest piglin or piglin brute it can see.
 pub fn target_piglin(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Piglin, true))
+    Box::new(NearestTargetGoal::of_class(TargetClass::Piglin, true))
 }
 
 /// Hunts the nearest endermite it can see.
 pub fn target_endermite(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Endermite, true))
+    Box::new(NearestTargetGoal::of_class(TargetClass::Endermite, true))
 }
 
 /// Hunts the nearest skeleton variant without needing to see it.
 pub fn target_skeleton_unseen(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Skeleton, false))
+    Box::new(NearestTargetGoal::of_class(TargetClass::Skeleton, false))
 }
 
 /// Hunts the nearest hostile mob it can see.
 pub fn target_hostile(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Hostile, true))
+    Box::new(NearestTargetGoal::of_class(TargetClass::Hostile, true))
 }
 
 /// An untamed hunter's random pick among sheep, rabbits and foxes.
 pub fn untamed_target_prey(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::WolfPrey, false).untamed_only())
+    Box::new(NearestTargetGoal::of_class(TargetClass::WolfPrey, false).untamed_only())
 }
 
 /// An untamed hunter's random pick of a baby turtle out of water.
 pub fn untamed_target_baby_turtle(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::BabyLandTurtle, false).untamed_only())
+    Box::new(NearestTargetGoal::of_class(TargetClass::BabyLandTurtle, false).untamed_only())
 }
 
 /// An untamed hunter's random pick of a rabbit.
 pub fn untamed_target_rabbit(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Rabbit, false).untamed_only())
+    Box::new(NearestTargetGoal::of_class(TargetClass::Rabbit, false).untamed_only())
 }
 
 /// Watches the nearest other guardian: distance `12.0`, chance `0.01`.
 pub fn look_at_guardian(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LookAtPlayerGoal::of_class(12.0, 0.01, TargetClass::Guardian))
+    Box::new(WatchPlayerGoal::of_class(12.0, 0.01, TargetClass::Guardian))
 }
 
 /// Walks back inside the home radius at the mob's full speed.
 pub fn move_towards_restriction(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(MoveTowardsRestrictionGoal::new(ctx.speed))
+    Box::new(ReturnToHomeAreaGoal::new(ctx.speed))
 }
 
 /// The guardian's form of the same goal, which also holds the LOOK flag.
 pub fn guardian_move_towards_restriction(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(MoveTowardsRestrictionGoal::new(ctx.speed).claiming_look())
+    Box::new(ReturnToHomeAreaGoal::new(ctx.speed).claiming_look())
 }
 
 /// Universal-anger reset that also alerts the surrounding group.
@@ -471,27 +473,27 @@ pub fn reset_universal_anger_solo(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 
 /// A pounce with vertical velocity `0.4` (spider, wolf).
 pub fn leap_0_4(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LeapAtTargetGoal::new(0.4))
+    Box::new(PounceGoal::new(0.4))
 }
 
 /// A pounce with vertical velocity `0.3` (cat).
 pub fn leap_0_3(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LeapAtTargetGoal::new(0.3))
+    Box::new(PounceGoal::new(0.3))
 }
 
 /// The breed speed factor `1.0` — every farm animal registers it at exactly that value
 /// (the cow, sheep, pig and chicken families), only the priority
 /// differs.
 pub fn breed_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(BreedGoal::new(ctx.speed))
+    Box::new(MateGoal::new(ctx.speed))
 }
 
-/// `SitWhenOrderedToGoal(this)` — the wolf, the cat and the parrot all register
+/// `SitOnCommandGoal(this)` — the wolf, the cat and the parrot all register
 /// this at goal priority 2, and all three with no constructor arguments.
 /// One shared builder because the goal itself
 /// carries every per-species difference already — see its own doc comment.
 pub fn sit_when_ordered(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(SitWhenOrderedToGoal)
+    Box::new(SitOnCommandGoal)
 }
 
 /// The registrations every species without a family entry gets: wander and look
@@ -519,7 +521,7 @@ pub fn sit_when_ordered(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// which is the property `is_fallback`'s pointer comparison actually needs.
 pub static FALLBACK: &[Registration] = &[
     Registration::goal(5, "—", |ctx| {
-        Box::new(RandomStrollGoal::new(ctx.speed))
+        Box::new(WanderGoal::new(ctx.speed))
     }),
     Registration::goal(6, "—", random_look_around),
 ];
@@ -614,7 +616,7 @@ pub fn goals_for(species: &str, ctx: &SpeciesContext) -> Vec<(i32, Box<dyn Goal>
 /// `0`, i.e. the highest, and it is the only goal a brain mob gets — so the number
 /// is about *insulation* rather than arbitration. If a later species needs a real
 /// goal alongside its brain (vanilla does this: a `Villager` still registers
-/// `FloatGoal` and a `TradeWithPlayerGoal` on its goal selector), that goal takes
+/// `StayAfloatGoal` and a `TradeWithPlayerGoal` on its goal selector), that goal takes
 /// its own vanilla priority and loses `MOVE`/`LOOK` to the brain, which is the
 /// vanilla outcome.
 pub const BRAIN_PRIORITY: i32 = 0;
@@ -667,6 +669,70 @@ mod tests {
         }
     }
 
+    /// `data/goal-names.tsv`: `name<TAB>reference registration`, or `-` for a goal the reference has no counterpart to.
+    const GOAL_NAMES: &str = include_str!("../../../data/goal-names.tsv");
+
+    /// Whether `name` is lowercase snake_case with an optional `owner.` prefix
+    /// and an optional `(qualifier)` suffix.
+    fn is_descriptive(name: &str) -> bool {
+        let word = |w: &str| {
+            !w.is_empty()
+                && w.starts_with(|c: char| c.is_ascii_lowercase())
+                && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        };
+        let (head, qualifier) = match name.split_once('(') {
+            Some((h, q)) => (h, q.strip_suffix(')')),
+            None => (name, Some("x")),
+        };
+        let Some(qualifier) = qualifier else { return false };
+        let qualifier_ok = qualifier == "x" || qualifier.split(',').all(word);
+        let mut parts = head.split('.');
+        let (first, second, third) = (parts.next(), parts.next(), parts.next());
+        third.is_none() && first.is_some_and(word) && second.is_none_or(word) && qualifier_ok
+    }
+
+    /// Control: the check rejects the reference's class-name style.
+    #[test]
+    fn the_name_shape_check_rejects_class_style_names() {
+        for bad in ["WaterAvoidingRandomStrollGoal", "Ghast.FaceTargetGoal", "LureGoal(PIG_FOOD)", "flee_entity(Wolf)", "a.b.c", ""] {
+            assert!(!is_descriptive(bad), "{bad} must be rejected");
+        }
+        for good in ["wander_dry", "ghast.face_target", "lure(pig_food)", "nearest_target(player,angry_at)"] {
+            assert!(is_descriptive(good), "{good} must be accepted");
+        }
+    }
+
+    /// Every registration in every table has a descriptive name, an entry in
+    /// the goal-name file, and the file has no entry no table uses. A new
+    /// class-style name fails the first check; a new descriptive name that was
+    /// not mapped to its reference registration fails the second.
+    #[test]
+    fn every_registration_name_is_descriptive_and_mapped_to_its_reference() {
+        let mut mapped = std::collections::BTreeMap::new();
+        for line in GOAL_NAMES.lines().filter(|l| !l.is_empty()) {
+            let (name, reference) = line.split_once('\t').expect("name<TAB>reference");
+            assert!(is_descriptive(name), "goal-names.tsv entry {name} is not descriptive");
+            assert!(mapped.insert(name, reference).is_none(), "{name} is mapped twice");
+        }
+        let references: Vec<_> = mapped.values().filter(|r| **r != "-").collect();
+        let distinct: std::collections::BTreeSet<_> = references.iter().collect();
+        assert_eq!(distinct.len(), references.len(), "two names map to one reference registration");
+        let mut used = std::collections::BTreeSet::new();
+        let every_species = all_claimed_species()
+            .into_iter()
+            .chain(equine::SPECIES.iter().copied())
+            .chain(["cod", "pufferfish", "squid", "bat", "phantom", "turtle"]);
+        for species in every_species {
+            for r in registrations_for(species) {
+                assert!(is_descriptive(r.name), "{species}: {} is not a descriptive name", r.name);
+                assert!(mapped.contains_key(r.name), "{species}: {} is missing from goal-names.tsv", r.name);
+                used.insert(r.name);
+            }
+        }
+        let unused: Vec<_> = mapped.keys().filter(|k| !used.contains(**k)).collect();
+        assert!(unused.is_empty(), "goal-names.tsv entries no table uses: {unused:?}");
+    }
+
     /// The invariant that lets vanilla's two priority namespaces share one
     /// `GoalSelector`: a target-selector goal claims exactly `{TARGET}`, and no
     /// goal-selector goal claims TARGET at all. With that true, a priority
@@ -693,13 +759,13 @@ mod tests {
                         "{species}'s {} is on the target selector but claims \
                          flags other than TARGET; vanilla's two priority \
                          namespaces would now collide",
-                        r.vanilla
+                        r.name
                     ),
                     Selector::Goal => assert!(
                         !flags.contains(Flag::Target),
                         "{species}'s {} is on the goal selector but claims \
                          TARGET; its priority number is in the wrong namespace",
-                        r.vanilla
+                        r.name
                     ),
                 }
             }
@@ -788,52 +854,52 @@ mod tests {
             (
                 "creeper",
                 &[
-                    (Selector::Goal, 1, "FloatGoal"),
-                    (Selector::Goal, 2, "SwellGoal"),
-                    (Selector::Goal, 3, "AvoidEntityGoal(Ocelot)"),
-                    (Selector::Goal, 3, "AvoidEntityGoal(Cat)"),
-                    (Selector::Goal, 4, "MeleeAttackGoal"),
-                    (Selector::Goal, 5, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Goal, 6, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 6, "RandomLookAroundGoal"),
-                    (Selector::Target, 1, "NearestAttackableTargetGoal(Player)"),
-                    (Selector::Target, 2, "HurtByTargetGoal"),
+                    (Selector::Goal, 1, "stay_afloat"),
+                    (Selector::Goal, 2, "fuse"),
+                    (Selector::Goal, 3, "flee_entity(ocelot)"),
+                    (Selector::Goal, 3, "flee_entity(cat)"),
+                    (Selector::Goal, 4, "melee_strike"),
+                    (Selector::Goal, 5, "wander_dry"),
+                    (Selector::Goal, 6, "watch_player(player)"),
+                    (Selector::Goal, 6, "idle_glance"),
+                    (Selector::Target, 1, "nearest_target(player)"),
+                    (Selector::Target, 2, "retaliate"),
                 ],
             ),
             (
                 "spider",
                 &[
-                    (Selector::Goal, 1, "FloatGoal"),
-                    (Selector::Goal, 2, "AvoidEntityGoal(Armadillo)"),
-                    (Selector::Goal, 3, "LeapAtTargetGoal"),
-                    (Selector::Goal, 4, "Spider.SpiderAttackGoal"),
-                    (Selector::Goal, 5, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Goal, 6, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 6, "RandomLookAroundGoal"),
-                    (Selector::Target, 1, "HurtByTargetGoal"),
-                    (Selector::Target, 2, "Spider.SpiderTargetGoal(Player)"),
-                    (Selector::Target, 3, "Spider.SpiderTargetGoal(IronGolem)"),
+                    (Selector::Goal, 1, "stay_afloat"),
+                    (Selector::Goal, 2, "flee_entity(armadillo)"),
+                    (Selector::Goal, 3, "pounce"),
+                    (Selector::Goal, 4, "spider.melee_attack"),
+                    (Selector::Goal, 5, "wander_dry"),
+                    (Selector::Goal, 6, "watch_player(player)"),
+                    (Selector::Goal, 6, "idle_glance"),
+                    (Selector::Target, 1, "retaliate"),
+                    (Selector::Target, 2, "spider.target(player)"),
+                    (Selector::Target, 3, "spider.target(iron_golem)"),
                 ],
             ),
             (
                 "zombie",
                 &[
-                    (Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
-                    (Selector::Goal, 8, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 8, "RandomLookAroundGoal"),
-                    (Selector::Goal, 2, "SpearUseGoal"),
-                    (Selector::Goal, 3, "ZombieAttackGoal"),
-                    (Selector::Goal, 6, "MoveThroughVillageGoal"),
-                    (Selector::Goal, 7, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Target, 1, "HurtByTargetGoal"),
-                    (Selector::Target, 2, "NearestAttackableTargetGoal(Player)"),
+                    (Selector::Goal, 4, "zombie.break_turtle_egg"),
+                    (Selector::Goal, 8, "watch_player(player)"),
+                    (Selector::Goal, 8, "idle_glance"),
+                    (Selector::Goal, 2, "spear_lunge"),
+                    (Selector::Goal, 3, "zombie.melee_attack"),
+                    (Selector::Goal, 6, "patrol_village"),
+                    (Selector::Goal, 7, "wander_dry"),
+                    (Selector::Target, 1, "retaliate"),
+                    (Selector::Target, 2, "nearest_target(player)"),
                     (
                         Selector::Target,
                         3,
-                        "NearestAttackableTargetGoal(AbstractVillager)",
+                        "nearest_target(villager)",
                     ),
-                    (Selector::Target, 3, "NearestAttackableTargetGoal(IronGolem)"),
-                    (Selector::Target, 5, "NearestAttackableTargetGoal(Turtle)"),
+                    (Selector::Target, 3, "nearest_target(iron_golem)"),
+                    (Selector::Target, 5, "nearest_target(turtle)"),
                 ],
             ),
             (
@@ -845,71 +911,71 @@ mod tests {
                 // the bow branch for every normally-spawned skeleton and the melee
                 // fallback is unreachable outside the wither skeleton.
                 &[
-                    (Selector::Goal, 2, "RestrictSunGoal"),
-                    (Selector::Goal, 3, "FleeSunGoal"),
-                    (Selector::Goal, 3, "AvoidEntityGoal(Wolf)"),
-                    (Selector::Goal, 4, "RangedBowAttackGoal"),
-                    (Selector::Goal, 5, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Goal, 6, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 6, "RandomLookAroundGoal"),
-                    (Selector::Target, 1, "HurtByTargetGoal"),
-                    (Selector::Target, 2, "NearestAttackableTargetGoal(Player)"),
-                    (Selector::Target, 3, "NearestAttackableTargetGoal(IronGolem)"),
-                    (Selector::Target, 3, "NearestAttackableTargetGoal(Turtle)"),
+                    (Selector::Goal, 2, "avoid_sunlight"),
+                    (Selector::Goal, 3, "seek_shade"),
+                    (Selector::Goal, 3, "flee_entity(wolf)"),
+                    (Selector::Goal, 4, "bow_strike"),
+                    (Selector::Goal, 5, "wander_dry"),
+                    (Selector::Goal, 6, "watch_player(player)"),
+                    (Selector::Goal, 6, "idle_glance"),
+                    (Selector::Target, 1, "retaliate"),
+                    (Selector::Target, 2, "nearest_target(player)"),
+                    (Selector::Target, 3, "nearest_target(iron_golem)"),
+                    (Selector::Target, 3, "nearest_target(turtle)"),
                 ],
             ),
             (
                 "cow",
                 &[
-                    (Selector::Goal, 0, "FloatGoal"),
-                    (Selector::Goal, 1, "PanicGoal"),
-                    (Selector::Goal, 2, "BreedGoal"),
-                    (Selector::Goal, 3, "TemptGoal(COW_FOOD)"),
-                    (Selector::Goal, 4, "FollowParentGoal"),
-                    (Selector::Goal, 5, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Goal, 6, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 7, "RandomLookAroundGoal"),
+                    (Selector::Goal, 0, "stay_afloat"),
+                    (Selector::Goal, 1, "flee_in_panic"),
+                    (Selector::Goal, 2, "mate"),
+                    (Selector::Goal, 3, "lure(cow_food)"),
+                    (Selector::Goal, 4, "trail_parent"),
+                    (Selector::Goal, 5, "wander_dry"),
+                    (Selector::Goal, 6, "watch_player(player)"),
+                    (Selector::Goal, 7, "idle_glance"),
                 ],
             ),
             (
                 "sheep",
                 &[
-                    (Selector::Goal, 0, "FloatGoal"),
-                    (Selector::Goal, 1, "PanicGoal"),
-                    (Selector::Goal, 2, "BreedGoal"),
-                    (Selector::Goal, 3, "TemptGoal(SHEEP_FOOD)"),
-                    (Selector::Goal, 4, "FollowParentGoal"),
-                    (Selector::Goal, 5, "EatBlockGoal"),
-                    (Selector::Goal, 6, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Goal, 7, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 8, "RandomLookAroundGoal"),
+                    (Selector::Goal, 0, "stay_afloat"),
+                    (Selector::Goal, 1, "flee_in_panic"),
+                    (Selector::Goal, 2, "mate"),
+                    (Selector::Goal, 3, "lure(sheep_food)"),
+                    (Selector::Goal, 4, "trail_parent"),
+                    (Selector::Goal, 5, "graze"),
+                    (Selector::Goal, 6, "wander_dry"),
+                    (Selector::Goal, 7, "watch_player(player)"),
+                    (Selector::Goal, 8, "idle_glance"),
                 ],
             ),
             (
                 "pig",
                 &[
-                    (Selector::Goal, 0, "FloatGoal"),
-                    (Selector::Goal, 1, "PanicGoal"),
-                    (Selector::Goal, 3, "BreedGoal"),
-                    (Selector::Goal, 4, "TemptGoal(CARROT_ON_A_STICK)"),
-                    (Selector::Goal, 4, "TemptGoal(PIG_FOOD)"),
-                    (Selector::Goal, 5, "FollowParentGoal"),
-                    (Selector::Goal, 6, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Goal, 7, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 8, "RandomLookAroundGoal"),
+                    (Selector::Goal, 0, "stay_afloat"),
+                    (Selector::Goal, 1, "flee_in_panic"),
+                    (Selector::Goal, 3, "mate"),
+                    (Selector::Goal, 4, "lure(carrot_on_a_stick)"),
+                    (Selector::Goal, 4, "lure(pig_food)"),
+                    (Selector::Goal, 5, "trail_parent"),
+                    (Selector::Goal, 6, "wander_dry"),
+                    (Selector::Goal, 7, "watch_player(player)"),
+                    (Selector::Goal, 8, "idle_glance"),
                 ],
             ),
             (
                 "chicken",
                 &[
-                    (Selector::Goal, 0, "FloatGoal"),
-                    (Selector::Goal, 1, "PanicGoal"),
-                    (Selector::Goal, 2, "BreedGoal"),
-                    (Selector::Goal, 3, "TemptGoal(CHICKEN_FOOD)"),
-                    (Selector::Goal, 4, "FollowParentGoal"),
-                    (Selector::Goal, 5, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Goal, 6, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 7, "RandomLookAroundGoal"),
+                    (Selector::Goal, 0, "stay_afloat"),
+                    (Selector::Goal, 1, "flee_in_panic"),
+                    (Selector::Goal, 2, "mate"),
+                    (Selector::Goal, 3, "lure(chicken_food)"),
+                    (Selector::Goal, 4, "trail_parent"),
+                    (Selector::Goal, 5, "wander_dry"),
+                    (Selector::Goal, 6, "watch_player(player)"),
+                    (Selector::Goal, 7, "idle_glance"),
                 ],
             ),
             (
@@ -917,16 +983,16 @@ mod tests {
                 // Vanilla's own abstract-horse goal registration, then its own
                 // trailing shared-behaviour-goals call.
                 &[
-                    (Selector::Goal, 1, "RunAroundLikeCrazyGoal"),
-                    (Selector::Goal, 2, "BreedGoal"),
-                    (Selector::Goal, 4, "FollowParentGoal"),
-                    (Selector::Goal, 6, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Goal, 7, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 8, "RandomLookAroundGoal"),
-                    (Selector::Goal, 9, "RandomStandGoal"),
-                    (Selector::Goal, 0, "FloatGoal"),
-                    (Selector::Goal, 1, "AbstractHorse.MountPanicGoal"),
-                    (Selector::Goal, 3, "TemptGoal(HORSE_TEMPT_ITEMS)"),
+                    (Selector::Goal, 1, "horse.buck_off_rider"),
+                    (Selector::Goal, 2, "mate"),
+                    (Selector::Goal, 4, "trail_parent"),
+                    (Selector::Goal, 6, "wander_dry"),
+                    (Selector::Goal, 7, "watch_player(player)"),
+                    (Selector::Goal, 8, "idle_glance"),
+                    (Selector::Goal, 9, "rear_up"),
+                    (Selector::Goal, 0, "stay_afloat"),
+                    (Selector::Goal, 1, "horse.mount_panic"),
+                    (Selector::Goal, 3, "lure(horse_items)"),
                 ],
             ),
         ];
@@ -935,7 +1001,7 @@ mod tests {
             let table = registrations_for(species);
             let got: Vec<Row> = table
                 .iter()
-                .map(|r| (r.selector, r.priority, r.vanilla))
+                .map(|r| (r.selector, r.priority, r.name))
                 .collect();
             assert_eq!(
                 got,

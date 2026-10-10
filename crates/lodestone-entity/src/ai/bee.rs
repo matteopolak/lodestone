@@ -316,12 +316,12 @@ impl Goal for EnterHiveGoal {
 
 /// Forgets a hive that has gone, checked every 20 to 40 ticks.
 #[derive(Debug, Default)]
-pub struct ValidateHiveGoal {
+pub struct CheckHiveGoal {
     cooldown: Option<i32>,
     last: i64,
 }
 
-impl Goal for ValidateHiveGoal {
+impl Goal for CheckHiveGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::none()
     }
@@ -349,12 +349,12 @@ impl Goal for ValidateHiveGoal {
 
 /// Forgets a bloom that has gone, checked every 20 to 40 ticks.
 #[derive(Debug, Default)]
-pub struct ValidateFlowerGoal {
+pub struct CheckFlowerGoal {
     cooldown: Option<i32>,
     last: i64,
 }
 
-impl Goal for ValidateFlowerGoal {
+impl Goal for CheckFlowerGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::none()
     }
@@ -840,11 +840,11 @@ impl Goal for GrowCropGoal {
 
 /// Wanders at random, drifting back toward a hive it has strayed from.
 #[derive(Debug)]
-pub struct BeeWanderGoal {
+pub struct BeeRoamGoal {
     speed: f64,
 }
 
-impl BeeWanderGoal {
+impl BeeRoamGoal {
     /// A wander goal for a bee with base movement `speed`.
     #[must_use]
     pub const fn new(speed: f64) -> Self {
@@ -857,7 +857,7 @@ impl BeeWanderGoal {
     }
 }
 
-impl Goal for BeeWanderGoal {
+impl Goal for BeeRoamGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }

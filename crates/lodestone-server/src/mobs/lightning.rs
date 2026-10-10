@@ -68,11 +68,9 @@
 //!   [`LightningEffect::ToggleMooshroomVariant`]'s handler records the guard
 //!   (`SimMob::last_lightning_bolt`) and nothing else. The recorded guard prevents
 //!   duplicate toggles if a variant field gains a consumer later.
-//! - **Pig→zombified-piglin and villager→witch conversion is real but
-//!   minimal.** [`convert_species`] replaces the source record with the target
-//!   species and deliberately does **not**
-//!   preserve health, equipment, age or leash state because this sim has no
-//!   matching transfer state for those fields.
+//! - **Species conversion rebuilds the mob.** [`convert_species`] spawns the
+//!   target species and carries identity (uuid, age, name, villager career and
+//!   gossip). Equipment, leash and active effects are not carried.
 //!
 //! # Dependencies
 //!
@@ -358,17 +356,34 @@ impl<'w> MobSim<'w> {
         self.reap_dead();
     }
 
-    /// `Entity.convertTo`, reduced to what this crate can express with no NBT
-    /// carry-over — see the module doc's "pig/villager conversion is real but
-    /// minimal" entry for exactly what is and is not preserved.
-    pub(super) fn convert_species(&mut self, id: i32, new_type: &str) {
-        let Some(pos) = self.position(id) else {
-            return;
-        };
-        self.mobs.retain(|m| m.id != id);
-        if let Ok(key) = new_type.parse::<ResourceKey>() {
-            self.spawn_species(key, pos);
-        }
+    /// Replaces mob `id` with a freshly built mob of `new_type` at the same
+    /// position, so the result carries the target species' own goals, shape,
+    /// speed and combat stats. What survives the change is the mob's identity:
+    /// its uuid, age, custom name, and the villager profession, level, XP,
+    /// workstation, trade offers, gossip, bed and meeting point. Returns the
+    /// new mob's id.
+    pub(super) fn convert_species(&mut self, id: i32, new_type: &str) -> Option<i32> {
+        let key = new_type.parse::<ResourceKey>().ok()?;
+        let index = self.mobs.iter().position(|m| m.id == id)?;
+        let old = self.mobs.remove(index);
+        let pos = old.position();
+        let new = self.spawn_species(key, pos);
+        new.uuid = old.uuid;
+        new.set_age(old.mob.age());
+        new.appearance.custom_name = old.appearance.custom_name;
+        new.appearance.name_visible = old.appearance.name_visible;
+        new.persistent = old.persistent;
+        new.persistence_required = old.persistence_required;
+        new.profession = old.profession;
+        new.workstation = old.workstation;
+        new.villager_level = old.villager_level;
+        new.villager_xp = old.villager_xp;
+        new.trades = old.trades;
+        new.gossip = old.gossip;
+        new.last_gossip_decay_tick = old.last_gossip_decay_tick;
+        new.bed = old.bed;
+        new.meeting_point = old.meeting_point;
+        Some(new.id)
     }
 
     /// The number of live lightning-bolt entities — for a gate that needs to

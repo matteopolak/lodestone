@@ -27,17 +27,19 @@
 //! until within 7 blocks of it. Its panic flees to the nearest water within 7
 //! blocks when there is any.
 //!
-//! Not modelled: turtle eggs. Laying needs a hatching and trampling block
-//! system the server does not have, so breeding still produces a baby turtle
-//! directly. The drowned's beach goal is not modelled either.
+//! Breeding makes the breeder carry an egg; `LayEggGoal` digs near the nest and
+//! requests an egg block through the block-edit seam. The drowned's beach goal
+//! is not modelled.
 
 use lodestone_model::Vec3;
 
 use crate::ai::goal::{Flag, FlagSet, Goal, reduced_tick_delay};
-use crate::ai::goals::{PanicGoal, RandomStrollGoal};
+use crate::ai::block_seek::BlockSeek;
+use crate::ai::goals::{MateGoal, FleeInPanicGoal, WanderGoal};
+use crate::ai::turtle_egg;
 use crate::ai::mob::MobController;
 
-use super::{Registration, Selector, SpeciesContext};
+use super::{Registration, SpeciesContext};
 
 /// Resolves the species this module owns.
 #[must_use]
@@ -50,23 +52,31 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 
 /// The turtle: panic, tempt, find water, travel through it, look, wander ashore.
 pub static TURTLE: &[Registration] = &[
-    Registration::goal(0, "Turtle.TurtlePanicGoal", panic),
-    Registration::missing(Selector::Goal, 1, "Turtle.TurtleBreedGoal"),
-    Registration::missing(Selector::Goal, 1, "Turtle.TurtleLayEggGoal"),
-    Registration::goal(2, "TemptGoal(TURTLE_FOOD)", tempt),
-    Registration::goal(3, "Turtle.TurtleGoToWaterGoal", go_to_water),
-    Registration::goal(4, "Turtle.TurtleGoHomeGoal", go_home),
-    Registration::goal(7, "Turtle.TurtleTravelGoal", travel),
-    Registration::goal(8, "LookAtPlayerGoal(Player)", super::look_at_player_8),
-    Registration::goal(9, "Turtle.TurtleRandomStrollGoal", land_stroll),
+    Registration::goal(0, "turtle.panic", panic),
+    Registration::goal(1, "turtle.mate", breed),
+    Registration::goal(1, "turtle.lay_egg", lay_egg),
+    Registration::goal(2, "lure(turtle_food)", tempt),
+    Registration::goal(3, "turtle.go_to_water", go_to_water),
+    Registration::goal(4, "turtle.go_home", go_home),
+    Registration::goal(7, "turtle.travel", travel),
+    Registration::goal(8, "watch_player(player)", super::look_at_player_8),
+    Registration::goal(9, "turtle.land_stroll", land_stroll),
 ];
 
 fn panic(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(PanicGoal::new(ctx.speed * 1.2).seeking_water(7))
+    Box::new(FleeInPanicGoal::new(ctx.speed * 1.2).seeking_water(7))
+}
+
+fn breed(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(MateGoal::new(ctx.speed).unless_carrying_egg())
+}
+
+fn lay_egg(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(LayEggGoal::new(ctx.speed))
 }
 
 fn tempt(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(crate::ai::goals::TemptGoal::new(ctx.speed * 1.1))
+    Box::new(crate::ai::goals::LureGoal::new(ctx.speed * 1.1))
 }
 
 fn go_to_water(ctx: &SpeciesContext) -> Box<dyn Goal> {
@@ -82,7 +92,7 @@ fn travel(ctx: &SpeciesContext) -> Box<dyn Goal> {
 }
 
 fn land_stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(LandStrollGoal(RandomStrollGoal::new(ctx.speed).with_interval(100)))
+    Box::new(LandStrollGoal(WanderGoal::new(ctx.speed).with_interval(100)))
 }
 
 fn cell(at: Vec3) -> (i32, i32, i32) {
@@ -184,7 +194,8 @@ impl Goal for MoveToWaterGoal {
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        if mob.in_water() || mob.going_home() {
+        let baby_ashore = mob.is_baby() && !mob.in_water();
+        if !baby_ashore && (mob.in_water() || mob.going_home() || mob.has_egg()) {
             return false;
         }
         if self.next_start > 0 {
@@ -255,6 +266,9 @@ impl Goal for GoHomeGoal {
         if mob.is_baby() {
             return false;
         }
+        if mob.has_egg() {
+            return true;
+        }
         mob.next_i32(reduced_tick_delay(700)) == 0 && !within(mob, home, 64.0)
     }
 
@@ -297,6 +311,81 @@ impl Goal for GoHomeGoal {
     }
 }
 
+/// A turtle carrying an egg walks to sand within 16 blocks of its nest, digs
+/// there for 200 ticks and leaves one to four eggs on the sand.
+#[derive(Debug)]
+struct LayEggGoal {
+    seek: BlockSeek,
+}
+
+impl LayEggGoal {
+    fn new(speed: f64) -> Self {
+        Self { seek: BlockSeek::new(speed, 16, 1) }
+    }
+
+    fn near_nest(mob: &dyn MobController) -> bool {
+        mob.nest_position().is_some_and(|home| within(mob, home, 9.0))
+    }
+
+    fn valid(mob: &dyn MobController, (x, y, z): (i32, i32, i32)) -> bool {
+        mob.block_state_at((x, y + 1, z)).is_some_and(turtle_egg::is_air)
+            && mob.block_state_at((x, y, z)).is_some_and(turtle_egg::is_sand)
+    }
+}
+
+impl Goal for LayEggGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move, Flag::Jump])
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if !(mob.has_egg() && Self::near_nest(mob)) {
+            return false;
+        }
+        let delay = BlockSeek::default_delay(mob);
+        self.seek.can_use(mob, &Self::valid, delay)
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        self.seek.can_continue(mob, &Self::valid) && mob.has_egg() && Self::near_nest(mob)
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        self.seek.start(mob);
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        self.seek.tick(mob, 1.0);
+        if mob.in_water() || !self.seek.reached() {
+            return;
+        }
+        let laying = mob.laying_egg_ticks();
+        if laying < 1 {
+            mob.set_laying_egg_ticks(1);
+        } else if laying > reduced_tick_delay(200) {
+            let (x, y, z) = self.seek.block();
+            let eggs = 1 + mob.next_i32(4) as u32;
+            if let Some(egg) = turtle_egg::state(eggs, 0) {
+                mob.request_block_edit(crate::ai::BlockEdit {
+                    cell: (x, y + 1, z),
+                    expect: crate::ai::BlockExpect::Air,
+                    set: Some(egg),
+                });
+            }
+            mob.set_has_egg(false);
+            mob.set_laying_egg_ticks(0);
+            mob.fall_in_love();
+        }
+        if mob.laying_egg_ticks() >= 1 {
+            mob.set_laying_egg_ticks(mob.laying_egg_ticks() + 1);
+        }
+    }
+}
+
 /// Swims in legs toward a far random point chosen when it starts.
 #[derive(Debug)]
 struct TravelGoal {
@@ -317,11 +406,11 @@ impl Goal for TravelGoal {
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        mob.in_water() && !mob.going_home()
+        mob.in_water() && !mob.going_home() && !mob.has_egg()
     }
 
     fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
-        mob.in_water() && !self.stuck && !mob.going_home()
+        mob.in_water() && !self.stuck && !mob.going_home() && !mob.is_in_love() && !mob.has_egg()
     }
 
     fn start(&mut self, mob: &mut dyn MobController) {
@@ -357,7 +446,7 @@ impl Goal for TravelGoal {
 
 /// The stroll goal, only while out of the water.
 #[derive(Debug)]
-struct LandStrollGoal(RandomStrollGoal);
+struct LandStrollGoal(WanderGoal);
 
 impl Goal for LandStrollGoal {
     fn flags(&self) -> FlagSet {
@@ -365,7 +454,7 @@ impl Goal for LandStrollGoal {
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        !mob.in_water() && !mob.going_home() && self.0.can_use(mob)
+        !mob.in_water() && !mob.going_home() && !mob.has_egg() && self.0.can_use(mob)
     }
 
     fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
@@ -383,19 +472,19 @@ impl Goal for LandStrollGoal {
 
 /// Builds the drowned's daylight walk to water at `speed`.
 pub fn drowned_go_to_water(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(DrownedGoToWaterGoal { speed: ctx.speed, wanted: None })
+    Box::new(DrownedSeekWaterGoal { speed: ctx.speed, wanted: None })
 }
 
 /// Builds the drowned's night walk from the water to a nearby beach at `speed`.
 pub fn drowned_go_to_beach(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(DrownedGoToBeachGoal { speed: ctx.speed, next_start: 0, block: (0, 0, 0), try_ticks: 0, stay_ticks: 0 })
+    Box::new(DrownedSeekShoreGoal { speed: ctx.speed, next_start: 0, block: (0, 0, 0), try_ticks: 0, stay_ticks: 0 })
 }
 
 /// At night, in water near the surface, walks to the nearest standable block
 /// with two empty cells above it, found by the same ring search as the
 /// turtle's, 8 blocks out and from one below to two above the feet.
 #[derive(Debug)]
-struct DrownedGoToBeachGoal {
+struct DrownedSeekShoreGoal {
     speed: f64,
     next_start: i32,
     block: (i32, i32, i32),
@@ -403,7 +492,7 @@ struct DrownedGoToBeachGoal {
     stay_ticks: i32,
 }
 
-impl DrownedGoToBeachGoal {
+impl DrownedSeekShoreGoal {
     fn valid(mob: &dyn MobController, (x, y, z): (i32, i32, i32)) -> bool {
         let at = |dy: i32| bottom_center(x, y + dy, z);
         let standable = !mob.air_at(at(0)) && !mob.water_at(at(0));
@@ -439,7 +528,7 @@ impl DrownedGoToBeachGoal {
     }
 }
 
-impl Goal for DrownedGoToBeachGoal {
+impl Goal for DrownedSeekShoreGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Jump])
     }
@@ -495,18 +584,18 @@ impl Goal for DrownedGoToBeachGoal {
 
 /// Builds the drowned's night swim toward the surface at `speed`.
 pub fn drowned_swim_up(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(DrownedSwimUpGoal { speed: ctx.speed, stuck: false })
+    Box::new(DrownedSurfaceGoal { speed: ctx.speed, stuck: false })
 }
 
 /// In daylight and out of water, walks to the first of ten random cells that
 /// holds water.
 #[derive(Debug)]
-struct DrownedGoToWaterGoal {
+struct DrownedSeekWaterGoal {
     speed: f64,
     wanted: Option<Vec3>,
 }
 
-impl Goal for DrownedGoToWaterGoal {
+impl Goal for DrownedSeekWaterGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
     }
@@ -541,18 +630,18 @@ impl Goal for DrownedGoToWaterGoal {
 /// At night, in water more than two blocks under sea level, swims upward and
 /// marks itself as heading for land.
 #[derive(Debug)]
-struct DrownedSwimUpGoal {
+struct DrownedSurfaceGoal {
     speed: f64,
     stuck: bool,
 }
 
-impl DrownedSwimUpGoal {
+impl DrownedSurfaceGoal {
     fn eligible(mob: &dyn MobController) -> bool {
         !mob.bright_outside() && mob.in_water() && mob.position().y < f64::from(mob.sea_level() - 2)
     }
 }
 
-impl Goal for DrownedSwimUpGoal {
+impl Goal for DrownedSurfaceGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::default()
     }

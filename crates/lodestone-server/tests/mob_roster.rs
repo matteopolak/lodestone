@@ -70,7 +70,7 @@ fn gap(sim: &MobSim<'_>, id: i32, player: Vec3) -> f64 {
 /// Where the single player stands in every arm below.
 const PLAYER: Vec3 = Vec3::new(9.0, 0.0, 0.0);
 
-/// Ticks per arm. Long enough for a `TemptGoal` to cross the 9 blocks at the
+/// Ticks per arm. Long enough for a `LureGoal` to cross the 9 blocks at the
 /// roster's follow speed, and 120 was the original figure.
 const TICKS: usize = 120;
 
@@ -80,7 +80,7 @@ const TICKS: usize = 120;
 /// 120 ticks" — is a *premise* about an unconstrained random walk, and it was true
 /// only by accident of the RNG seed. Each mob now has its own stream seeded from
 /// its id; for id 1 the first successful 1/120 stroll draw is draw **9**, so a
-/// `RandomStrollGoal` can fire well inside the window and a ±10-block stroll can
+/// `WanderGoal` can fire well inside the window and a ±10-block stroll can
 /// carry a mob 3+ blocks toward a player it has no interest in. A distance margin
 /// would therefore measure a random walk rather than the roster.
 ///
@@ -88,7 +88,7 @@ const TICKS: usize = 120;
 /// is **"its movement does not depend on what the player is holding."** So each
 /// negative arm runs the same species twice from a fresh sim, identical in every
 /// way except the held item, and requires the trajectories to be *bit-identical*.
-/// A mob with no `TemptGoal` never reads `held_item`, and `TemptGoal::can_use`
+/// A mob with no `LureGoal` never reads `held_item`, and `LureGoal::can_use`
 /// consumes no RNG (it is a `mob.temptation()` lookup), so an untempted mob's
 /// stream is unperturbed by the item. That makes the assertion exact — no
 /// tolerance, no seed dependence, and strictly stronger than the 3-block margin,
@@ -116,13 +116,13 @@ fn run_species(species: &str, held: Option<&str>) -> Vec3 {
 }
 
 /// The headline gate: a cow spawned through the production path follows a player
-/// holding wheat, because the roster installed `TemptGoal` — which no production
+/// holding wheat, because the roster installed `LureGoal` — which no production
 /// code path installed before it existed.
 ///
 /// Two things make this non-vacuous. It never calls `add_goal`, so the only thing
-/// that can have installed `TemptGoal` is `spawn_species` consulting the roster.
+/// that can have installed `LureGoal` is `spawn_species` consulting the roster.
 /// And its control is the *same cow in the same world with the same player*,
-/// empty-handed: if a bare `RandomStrollGoal` happened to wander the cow toward
+/// empty-handed: if a bare `WanderGoal` happened to wander the cow toward
 /// the player, the control would show it too.
 #[test]
 fn a_cow_follows_food_because_the_roster_installed_temptgoal() {
@@ -186,7 +186,7 @@ fn a_cow_follows_food_because_the_roster_installed_temptgoal() {
 
 /// The negative control the plan asks for, run as a real test rather than
 /// described: a species with **no** roster entry gets `roster::FALLBACK`, which
-/// has no `TemptGoal`, so it must fail the assertion above under identical
+/// has no `LureGoal`, so it must fail the assertion above under identical
 /// conditions.
 ///
 /// This is the "empty the roster entry" control, expressed without editing the
@@ -208,13 +208,13 @@ fn a_species_with_no_roster_entry_does_not_follow_food() {
     );
 
     // The control, on the identical comparison: a species the roster *does* give a
-    // `TemptGoal` must not be item-blind. Without this, "the two arms matched"
+    // `LureGoal` must not be item-blind. Without this, "the two arms matched"
     // is also satisfied by perception never being fed at all.
     let cow_tempted = run_species("minecraft:cow", Some("wheat"));
     let cow_untempted = run_species("minecraft:cow", None);
     assert_ne!(
         cow_tempted, cow_untempted,
-        "control: a cow's roster has TemptGoal and wheat is cow_food, so wheat must change \
+        "control: a cow's roster has LureGoal and wheat is cow_food, so wheat must change \
          where it ends up. If a cow is item-blind too, the assertion above is vacuous"
     );
 }
@@ -224,14 +224,14 @@ fn a_species_with_no_roster_entry_does_not_follow_food() {
 /// contains potato and `cow_food` does not
 /// (`.cache/mc/26.2/src/data/minecraft/tags/item/{pig,cow}_food.json`).
 ///
-/// Both animals get a `TemptGoal` from the roster, so this is not a test of
+/// Both animals get a `LureGoal` from the roster, so this is not a test of
 /// whether the goal is installed — it is a test that the *perception* and the
 /// roster agree on which species is which. An assertion that passed for both
 /// would mean the species key is being ignored somewhere.
 /// The pig's half stays a **magnitude** assertion — it must really cross the gap,
 /// not merely move — while the cow's half is the exact trajectory comparison
 /// [`run_species`]'s doc comment explains. A pig and a cow cannot perceive each
-/// other (`BreedGoal`/`FollowParentGoal` are same-species, and nothing else in
+/// other (`MateGoal`/`TrailParentGoal` are same-species, and nothing else in
 /// either roster reads another mob), so the pig diverging between the two arms
 /// cannot move the cow.
 #[test]
@@ -285,7 +285,7 @@ fn one_item_tempts_a_pig_and_not_a_cow_through_the_same_spawn_path() {
 }
 
 /// A creeper's roster is not a cow's, observed through the production path: only
-/// the creeper gets `SwellGoal`, so only the creeper detonates when a target is
+/// the creeper gets `FuseGoal`, so only the creeper detonates when a target is
 /// inside its swell range.
 ///
 /// This behavior is observable through the complete server path: a player can
@@ -293,14 +293,14 @@ fn one_item_tempts_a_pig_and_not_a_cow_through_the_same_spawn_path() {
 /// it a useful second species gate in addition to the item-driven movement
 /// checks above.
 ///
-/// It also gates the priority ordering. `SwellGoal` must run before
-/// `MeleeAttackGoal` can hold MOVE; if the two priority numbers are transcribed
+/// It also gates the priority ordering. `FuseGoal` must run before
+/// `MeleeStrikeGoal` can hold MOVE; if the two priority numbers are transcribed
 /// in the wrong order, the creeper never swells.
 #[test]
 fn only_a_creeper_swells_and_vanillas_priority_order_is_preserved() {
     let world = pen();
     let mut sim = MobSim::new(&world);
-    // Within `SwellGoal`'s 9.0 squared proximity.
+    // Within `FuseGoal`'s 9.0 squared proximity.
     let target = Vec3::new(2.0, 0.0, 0.0);
     let creeper = sim
         .spawn_species(rk("minecraft:creeper"), Vec3::new(0.0, 0.0, 0.0))
@@ -328,15 +328,15 @@ fn only_a_creeper_swells_and_vanillas_priority_order_is_preserved() {
 
     assert!(
         creeper_swelled,
-        "a creeper spawned through spawn_species must get SwellGoal from the \
+        "a creeper spawned through spawn_species must get FuseGoal from the \
          roster and start swelling with a target 2 blocks away. If this fails \
          with the cow assertion below passing, check that vanilla's own creeper goal \
          priority 2 (Swell) is still lower than 4 (Melee) in the table — a \
-         MeleeAttackGoal holding MOVE prevents the swell"
+         MeleeStrikeGoal holding MOVE prevents the swell"
     );
     assert!(
         !cow_swelled,
-        "a cow must not get SwellGoal — if it does, every species is being \
+        "a cow must not get FuseGoal — if it does, every species is being \
          handed the same table"
     );
 }

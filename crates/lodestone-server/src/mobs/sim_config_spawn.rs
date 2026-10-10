@@ -52,6 +52,9 @@ impl<'w> MobSim<'w> {
             hives: std::sync::Arc::default(),
             pending_hive_entries: Vec::new(),
             pending_crop_growths: Vec::new(),
+            pending_block_edits: Vec::new(),
+            trample_rng: SpawnRng::new(TRAMPLE_SEED),
+            mob_griefing: true,
             pending_player_hits: Vec::new(),
             pending_mining_fatigue: Vec::new(),
             pending_vocalisations: Vec::new(),
@@ -125,6 +128,12 @@ impl<'w> MobSim<'w> {
     /// between attempts is also asserting how many draws each mechanism makes.
     pub fn set_tame_rng(&mut self, rng: SpawnRng) -> &mut Self {
         self.tame_rng = rng;
+        self
+    }
+
+    /// Sets the `mob_griefing` game rule: whether mobs may change blocks.
+    pub fn set_mob_griefing(&mut self, allowed: bool) -> &mut Self {
+        self.mob_griefing = allowed;
         self
     }
 
@@ -741,7 +750,7 @@ impl<'w> MobSim<'w> {
         mob.mob.set_follow_range(follow_range);
         // What the mob's main hand holds (a drowned's trident roll is the one
         // production reader today, through `MobController::main_hand_item` and
-        // `RangedAttackGoal`'s `requires_main_hand` gate), and `equip_attrs`
+        // `RangedStrikeGoal`'s `requires_main_hand` gate), and `equip_attrs`
         // folded above overriding `spawn_with_type`'s bare-species combat
         // numbers with the equipped versions — armour, weapon damage,
         // netherite's knockback resistance.

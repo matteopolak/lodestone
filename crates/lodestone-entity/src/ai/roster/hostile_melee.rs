@@ -55,7 +55,7 @@
 //!   used to say no ranged goals existed here, so the family took the melee half
 //!   of vanilla's own weapon-reassessment step unconditionally. They exist now
 //!   ([`super::ranged`]), and a later fix *replaced* [`SKELETON`]'s priority-4 row
-//!   with `RangedBowAttackGoal` rather than adding to it — both candidates claim
+//!   with `BowStrikeGoal` rather than adding to it — both candidates claim
 //!   MOVE and vanilla's own weapon-reassessment step removes both before
 //!   re-adding exactly one, so a second row would make the winner
 //!   registration-order dependent.
@@ -81,7 +81,7 @@
 //!   [`TargetClass`](crate::ai::TargetClass).** The host answers with the nearest
 //!   member's position, and a melee hit on that position lands on the mob.
 //! * **Vanilla's own same-owner alert-others flag is not modelled** — our
-//!   `HurtByTargetGoal` retaliates but never propagates anger to nearby mobs.
+//!   `RetaliateGoal` retaliates but never propagates anger to nearby mobs.
 //!   That needs a sim-side census of nearby same-species mobs this repo does
 //!   not have yet.
 //! * **The drowned's go-to-beach goal is `Missing`.** Its go-to-water, swim-up
@@ -92,7 +92,7 @@
 //! Every melee row below depends on the mob having an attack target, and this
 //! section **used to say nothing in production ever gives one** —
 //! `NavigatingMob::find_nearest_target` returned the `self.attack_target` its own
-//! caller writes, so `NearestAttackableTargetGoal::can_use` asked for a target,
+//! caller writes, so `NearestTargetGoal::can_use` asked for a target,
 //! got back the target it was supposed to be finding, and returned `false`
 //! forever. That was measured and true when written. It is not true now: a
 //! later fix (`23b3dd2`) made `find_nearest_target` read the `nearest_player`
@@ -103,7 +103,7 @@
 //!
 //! **`set_attack_target` is now written in production**, but only by the goal
 //! that reads `find_nearest_target` in the first place —
-//! `NearestAttackableTargetGoal` and `HurtByTargetGoal` in
+//! `NearestTargetGoal` and `RetaliateGoal` in
 //! [`crate::ai::goals`] are the only production writers. The gates below still
 //! hand the target over directly rather than waiting for acquisition, because
 //! that keeps a failure in this file attributable to a **table row** rather than
@@ -121,7 +121,7 @@ use lodestone_model::Vec3;
 
 use crate::ai::goal::Goal;
 use crate::ai::mob::MobController;
-use crate::ai::goals::{FleeSunGoal, MeleeAttackGoal, NearestAttackableTargetGoal, RandomStrollGoal};
+use crate::ai::goals::{SeekShadeGoal, MeleeStrikeGoal, NearestTargetGoal, WanderGoal};
 
 use super::{
     Registration, Selector, SpeciesContext, avoid_entity, float_goal, hurt_by_target, leap_0_4,
@@ -179,56 +179,56 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// existed.
 ///
 /// Note what vanilla's numbers buy over the hand-written baseline this replaced.
-/// That baseline numbered its own goals 0/1/2 and had to register `SwellGoal` at
+/// That baseline numbered its own goals 0/1/2 and had to register `FuseGoal` at
 /// **-1** to get "swell preempts melee", with a comment explaining the private
 /// scale. Vanilla's own numbers — swell 2, melee 4 — express the same precedence
 /// directly and can be checked against the jar.
 pub static CREEPER: &[Registration] = &[
-    Registration::goal(1, "FloatGoal", float_goal),
-    Registration::goal(2, "SwellGoal", swell),
+    Registration::goal(1, "stay_afloat", float_goal),
+    Registration::goal(2, "fuse", swell),
     // Vanilla's own creeper avoid-ocelot goal. Vanilla's last two
-    // arguments are walk and *sprint* speed modifiers; our `AvoidEntityGoal` has
+    // arguments are walk and *sprint* speed modifiers; our `FleeEntityGoal` has
     // a single speed, so it takes the walk tier (1.0) and the panic-sprint tier
     // is not modelled.
-    Registration::goal(3, "AvoidEntityGoal(Ocelot)", avoid_entity),
-    // Our `AvoidEntityGoal` is class-agnostic and the server's `avoided_species`
+    Registration::goal(3, "flee_entity(ocelot)", avoid_entity),
+    // Our `FleeEntityGoal` is class-agnostic and the server's `avoided_species`
     // feed already reports both ocelot and cat for a creeper.
     Registration::covered(
         Selector::Goal,
         3,
-        "AvoidEntityGoal(Cat)",
-        "AvoidEntityGoal(Ocelot)",
+        "flee_entity(cat)",
+        "flee_entity(ocelot)",
     ),
-    Registration::goal(4, "MeleeAttackGoal", melee_attack),
-    Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll_0_8),
-    Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::goal(6, "RandomLookAroundGoal", random_look_around),
-    Registration::target(1, "NearestAttackableTargetGoal(Player)", nearest_attackable_target),
-    Registration::target(2, "HurtByTargetGoal", hurt_by_target),
+    Registration::goal(4, "melee_strike", melee_attack),
+    Registration::goal(5, "wander_dry", stroll_0_8),
+    Registration::goal(6, "watch_player(player)", look_at_player_8),
+    Registration::goal(6, "idle_glance", random_look_around),
+    Registration::target(1, "nearest_target(player)", nearest_attackable_target),
+    Registration::target(2, "retaliate", hurt_by_target),
 ];
 
 /// Vanilla's own spider goal registration.
 pub static SPIDER: &[Registration] = &[
-    Registration::goal(1, "FloatGoal", float_goal),
+    Registration::goal(1, "stay_afloat", float_goal),
     // Vanilla's own spider avoid-armadillo goal, radius `6.0`.
     // The `isScared` filter is not modelled — see `mobs.rs`'s `avoided_species`,
     // which discloses it can only make a spider flee slightly more often.
-    Registration::goal(2, "AvoidEntityGoal(Armadillo)", avoid_entity),
-    Registration::goal(3, "LeapAtTargetGoal", leap_0_4),
-    // Vanilla's own spider attack goal extends `MeleeAttackGoal`; its only
+    Registration::goal(2, "flee_entity(armadillo)", avoid_entity),
+    Registration::goal(3, "pounce", leap_0_4),
+    // Vanilla's own spider attack goal extends `MeleeStrikeGoal`; its only
     // addition is
     // refusing to attack while the spider has a passenger, which this sim has no
     // notion of.
-    Registration::goal(4, "Spider.SpiderAttackGoal", melee_attack),
-    Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll_0_8),
-    Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::goal(6, "RandomLookAroundGoal", random_look_around),
-    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
+    Registration::goal(4, "spider.melee_attack", melee_attack),
+    Registration::goal(5, "wander_dry", stroll_0_8),
+    Registration::goal(6, "watch_player(player)", look_at_player_8),
+    Registration::goal(6, "idle_glance", random_look_around),
+    Registration::target(1, "retaliate", hurt_by_target),
     // Vanilla's own spider target goal extends
-    // `NearestAttackableTargetGoal`, adding only a daylight brightness penalty to
+    // `NearestTargetGoal`, adding only a daylight brightness penalty to
     // the search radius.
-    Registration::target(2, "Spider.SpiderTargetGoal(Player)", nearest_attackable_target),
-    Registration::target(3, "Spider.SpiderTargetGoal(IronGolem)", target_iron_golem),
+    Registration::target(2, "spider.target(player)", nearest_attackable_target),
+    Registration::target(3, "spider.target(iron_golem)", target_iron_golem),
 ];
 
 /// Vanilla's own zombie goal registration plus its own behaviour-goals
@@ -236,36 +236,31 @@ pub static SPIDER: &[Registration] = &[
 /// the main registration calls — the registrations are split across two methods and
 /// both halves belong to this table.
 ///
-/// A zombie gets **no** `FloatGoal`, which is not an omission: vanilla does not
+/// A zombie gets **no** `StayAfloatGoal`, which is not an omission: vanilla does not
 /// register one, because zombies sink and walk along the bottom.
 pub static ZOMBIE: &[Registration] = &[
-    // Vanilla's own zombie turtle-egg-attack goal — a `RemoveBlockGoal`
-    // subclass: a 24-block spiral search (vertical range 3) for a `turtle_egg`,
-    // then break-progress and a destroy intent. Neither the candidate search
-    // nor the mutation exists on this seam (`docs/mob-block-perception.md`), and
-    // no turtle can spawn in this sim regardless.
-    Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
-    Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::goal(8, "RandomLookAroundGoal", random_look_around),
+    Registration::goal(4, "zombie.break_turtle_egg", attack_turtle_egg),
+    Registration::goal(8, "watch_player(player)", look_at_player_8),
+    Registration::goal(8, "idle_glance", random_look_around),
     // Vanilla's own spear-use goal — new in 26.2, and a ranged
     // goal, so it belongs to the ranged-attack roster (`super::ranged`) rather
     // than here.
-    Registration::missing(Selector::Goal, 2, "SpearUseGoal"),
-    // Vanilla's own zombie melee goal extends `MeleeAttackGoal`, adding only
+    Registration::missing(Selector::Goal, 2, "spear_lunge"),
+    // Vanilla's own zombie melee goal extends `MeleeStrikeGoal`, adding only
     // the raised-arms metadata flag while it runs.
-    Registration::goal(3, "ZombieAttackGoal", melee_attack),
+    Registration::goal(3, "zombie.melee_attack", melee_attack),
     // Vanilla's own move-through-village goal — needs
     // village POI data that does not exist here.
-    Registration::missing(Selector::Goal, 6, "MoveThroughVillageGoal"),
-    Registration::goal(7, "WaterAvoidingRandomStrollGoal", stroll),
+    Registration::missing(Selector::Goal, 6, "patrol_village"),
+    Registration::goal(7, "wander_dry", stroll),
     // Vanilla's own registration chains an alert-others flag naming the
     // zombified piglin as the excluded species. The
     // retaliation is modelled; the alert propagation to nearby mobs is not.
-    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
-    Registration::target(2, "NearestAttackableTargetGoal(Player)", nearest_attackable_target),
-    Registration::target(3, "NearestAttackableTargetGoal(AbstractVillager)", target_villager_unseen),
-    Registration::target(3, "NearestAttackableTargetGoal(IronGolem)", target_iron_golem),
-    Registration::target(5, "NearestAttackableTargetGoal(Turtle)", target_baby_turtle),
+    Registration::target(1, "retaliate", hurt_by_target),
+    Registration::target(2, "nearest_target(player)", nearest_attackable_target),
+    Registration::target(3, "nearest_target(villager)", target_villager_unseen),
+    Registration::target(3, "nearest_target(iron_golem)", target_iron_golem),
+    Registration::target(5, "nearest_target(turtle)", target_baby_turtle),
 ];
 
 /// Vanilla's own zombie goal registration plus the drowned's own
@@ -286,41 +281,41 @@ pub static ZOMBIE: &[Registration] = &[
 /// beach goal stays `Missing`.
 pub static DROWNED: &[Registration] = &[
     // -- inherited from vanilla's own zombie registration ---------------------
-    Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
-    Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::goal(8, "RandomLookAroundGoal", random_look_around),
+    Registration::goal(4, "zombie.break_turtle_egg", attack_turtle_egg),
+    Registration::goal(8, "watch_player(player)", look_at_player_8),
+    Registration::goal(8, "idle_glance", random_look_around),
     // -- the drowned's own behaviour-goals helper -----------------------------
-    Registration::goal(1, "Drowned.DrownedGoToWaterGoal", super::amphibious::drowned_go_to_water),
+    Registration::goal(1, "drowned.seek_water", super::amphibious::drowned_go_to_water),
     // Vanilla's own drowned trident-attack goal extends
-    // `RangedAttackGoal` — its builder lives in the ranged-attack roster
+    // `RangedStrikeGoal` — its builder lives in the ranged-attack roster
     // (`super::ranged::trident_attack`), registered from here since the
     // drowned's melee half keeps this file. It shares priority 2 with the
     // melee goal below: vanilla registers both unconditionally and gates them
-    // at runtime on the held item (`RangedAttackGoal::can_use`'s
+    // at runtime on the held item (`RangedStrikeGoal::can_use`'s
     // `requires_main_hand` conjunct), not on precedence — a drowned that never
     // rolled a trident (`crate::spawn_equipment`, ~93.75% of spawns) simply
     // never has this goal's `can_use` return true.
-    Registration::goal(2, "Drowned.DrownedTridentAttackGoal", super::ranged::trident_attack),
-    Registration::goal(2, "Drowned.DrownedAttackGoal", drowned_melee),
-    Registration::goal(5, "Drowned.DrownedGoToBeachGoal", super::amphibious::drowned_go_to_beach),
-    Registration::goal(6, "Drowned.DrownedSwimUpGoal", super::amphibious::drowned_swim_up),
+    Registration::goal(2, "drowned.trident_attack", super::ranged::trident_attack),
+    Registration::goal(2, "drowned.melee_attack", drowned_melee),
+    Registration::goal(5, "drowned.seek_shore", super::amphibious::drowned_go_to_beach),
+    Registration::goal(6, "drowned.surface", super::amphibious::drowned_swim_up),
     // Vanilla's own plain stroll goal at speed `1.0` — the plain stroll, **not** the
     // water-avoiding subclass every other species in this family registers
     // (contrast the zombie's own behaviour-goals helper). So this is the one stroll row in
-    // the roster where our `RandomStrollGoal` is an exact match rather than a
+    // the roster where our `WanderGoal` is an exact match rather than a
     // disclosed simplification: a drowned is happy to wander into water.
-    Registration::goal(7, "RandomStrollGoal", stroll),
+    Registration::goal(7, "wander", stroll),
     // Vanilla's own registration chains an alert-others flag naming the
     // zombified piglin, with an ignore list naming the drowned itself — a
     // drowned does not
     // retaliate against other drowned. Not modelled; ours has no class filter,
     // and nothing yet makes one drowned hurt another.
-    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
-    Registration::target(2, "NearestAttackableTargetGoal(Player)", drowned_player_target),
-    Registration::target(3, "NearestAttackableTargetGoal(AbstractVillager)", target_villager_unseen),
-    Registration::target(3, "NearestAttackableTargetGoal(IronGolem)", target_iron_golem),
-    Registration::target(3, "NearestAttackableTargetGoal(Axolotl)", target_axolotl),
-    Registration::target(5, "NearestAttackableTargetGoal(Turtle)", target_baby_turtle),
+    Registration::target(1, "retaliate", hurt_by_target),
+    Registration::target(2, "nearest_target(player)", drowned_player_target),
+    Registration::target(3, "nearest_target(villager)", target_villager_unseen),
+    Registration::target(3, "nearest_target(iron_golem)", target_iron_golem),
+    Registration::target(3, "nearest_target(axolotl)", target_axolotl),
+    Registration::target(5, "nearest_target(turtle)", target_baby_turtle),
 ];
 
 /// A drowned goes for a target only in water, or at night wherever it is.
@@ -329,20 +324,20 @@ fn drowned_target_ok(mob: &dyn MobController, target: Vec3) -> bool {
 }
 
 fn drowned_melee(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(MeleeAttackGoal::new(ctx.speed, ctx.attack_reach).with_valid_target(drowned_target_ok))
+    Box::new(MeleeStrikeGoal::new(ctx.speed, ctx.attack_reach).with_valid_target(drowned_target_ok))
 }
 
 fn drowned_player_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(NearestAttackableTargetGoal::new().with_filter(drowned_target_ok))
+    Box::new(NearestTargetGoal::new().with_filter(drowned_target_ok))
 }
 
 /// The flee-sun registration's speed multiplier, `1.0`.
 fn restrict_sun(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(crate::ai::goals::RestrictSunGoal)
+    Box::new(crate::ai::goals::AvoidSunlightGoal)
 }
 
 fn flee_sun(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(FleeSunGoal::new(ctx.speed))
+    Box::new(SeekShadeGoal::new(ctx.speed))
 }
 
 /// Vanilla's own abstract-skeleton goal registration, plus the priority-4
@@ -388,23 +383,23 @@ pub static SKELETON: &[Registration] = &[
     // Flee-sun heads for the first of ten random spots the sky does not
     // light. The reference also wants that cell brighter than a threshold,
     // which needs block light the mob world does not carry.
-    Registration::goal(2, "RestrictSunGoal", restrict_sun),
-    Registration::goal(3, "FleeSunGoal", flee_sun),
-    Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
+    Registration::goal(2, "avoid_sunlight", restrict_sun),
+    Registration::goal(3, "seek_shade", flee_sun),
+    Registration::goal(3, "flee_entity(wolf)", avoid_entity),
     // Vanilla's own weapon-reassessment step's bow branch, the only one a
     // normally-spawned skeleton takes. Vanilla's own bow-goal field is
     // constructed at speed `1.0`, interval `20`, distance `15.0F`, with the
     // interval
     // overwritten per difficulty. The `else` branch installs the melee goal and
     // belongs to `WITHER_SKELETON` alone.
-    Registration::goal(4, "RangedBowAttackGoal", super::ranged::bow_attack),
-    Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll),
-    Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::goal(6, "RandomLookAroundGoal", random_look_around),
-    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
-    Registration::target(2, "NearestAttackableTargetGoal(Player)", nearest_attackable_target),
-    Registration::target(3, "NearestAttackableTargetGoal(IronGolem)", target_iron_golem),
-    Registration::target(3, "NearestAttackableTargetGoal(Turtle)", target_baby_turtle),
+    Registration::goal(4, "bow_strike", super::ranged::bow_attack),
+    Registration::goal(5, "wander_dry", stroll),
+    Registration::goal(6, "watch_player(player)", look_at_player_8),
+    Registration::goal(6, "idle_glance", random_look_around),
+    Registration::target(1, "retaliate", hurt_by_target),
+    Registration::target(2, "nearest_target(player)", nearest_attackable_target),
+    Registration::target(3, "nearest_target(iron_golem)", target_iron_golem),
+    Registration::target(3, "nearest_target(turtle)", target_baby_turtle),
 ];
 
 /// Vanilla's own wither-skeleton goal registration — one extra target
@@ -426,32 +421,32 @@ pub static SKELETON: &[Registration] = &[
 pub static WITHER_SKELETON: &[Registration] = &[
     // Vanilla's own wither-skeleton registration adds a targeting goal for
     // the abstract-piglin class.
-    Registration::target(3, "NearestAttackableTargetGoal(AbstractPiglin)", target_piglin),
+    Registration::target(3, "nearest_target(piglin)", target_piglin),
     // -- vanilla's own base registration plus the
     // -- weapon `else` branch --------------------------------------------
-    Registration::goal(2, "RestrictSunGoal", restrict_sun),
-    Registration::goal(3, "FleeSunGoal", flee_sun),
-    Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
+    Registration::goal(2, "avoid_sunlight", restrict_sun),
+    Registration::goal(3, "seek_shade", flee_sun),
+    Registration::goal(3, "flee_entity(wolf)", avoid_entity),
     // The `else` half of vanilla's own weapon-reassessment step — the one
     // branch of this family
     // that is really melee, because vanilla's own wither-skeleton equipment
     // assignment
     // overrides with a `STONE_SWORD` and so fails the bow test.
     // [`SKELETON`] takes the bow branch instead.
-    Registration::goal(4, "MeleeAttackGoal", melee_attack_1_2),
-    Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll),
-    Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::goal(6, "RandomLookAroundGoal", random_look_around),
-    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
-    Registration::target(2, "NearestAttackableTargetGoal(Player)", nearest_attackable_target),
-    Registration::target(3, "NearestAttackableTargetGoal(IronGolem)", target_iron_golem),
-    Registration::target(3, "NearestAttackableTargetGoal(Turtle)", target_baby_turtle),
+    Registration::goal(4, "melee_strike", melee_attack_1_2),
+    Registration::goal(5, "wander_dry", stroll),
+    Registration::goal(6, "watch_player(player)", look_at_player_8),
+    Registration::goal(6, "idle_glance", random_look_around),
+    Registration::target(1, "retaliate", hurt_by_target),
+    Registration::target(2, "nearest_target(player)", nearest_attackable_target),
+    Registration::target(3, "nearest_target(iron_golem)", target_iron_golem),
+    Registration::target(3, "nearest_target(turtle)", target_baby_turtle),
 ];
 
 /// The stroll speed factor `0.8` — the creeper's own registration
 /// and the spider's own registration.
 fn stroll_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RandomStrollGoal::new(ctx.speed * 0.8))
+    Box::new(WanderGoal::new(ctx.speed * 0.8))
 }
 
 /// The melee speed factor `1.2` — vanilla's own skeleton-family melee-goal field,
@@ -460,8 +455,18 @@ fn stroll_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// Declared on `AbstractSkeleton` but reachable only by [`WITHER_SKELETON`]: the
 /// `else` branch that installs it needs a non-bow main hand, and only the wither
 /// overrides `populateDefaultEquipmentSlots` to have one.
+/// The zombie family's walk to a turtle egg to stamp it out, at `ctx.speed`.
+pub fn attack_turtle_egg(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::remove_block::BreakBlockGoal::new(
+        lodestone_data::block::Block::TurtleEgg,
+        ctx.speed,
+        3,
+        1.14,
+    ))
+}
+
 fn melee_attack_1_2(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(MeleeAttackGoal::new(ctx.speed * 1.2, ctx.attack_reach))
+    Box::new(MeleeStrikeGoal::new(ctx.speed * 1.2, ctx.attack_reach))
 }
 
 #[cfg(test)]
@@ -495,25 +500,25 @@ mod tests {
             (
                 "drowned",
                 &[
-                    (Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
-                    (Selector::Goal, 8, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 8, "RandomLookAroundGoal"),
-                    (Selector::Goal, 1, "Drowned.DrownedGoToWaterGoal"),
-                    (Selector::Goal, 2, "Drowned.DrownedTridentAttackGoal"),
-                    (Selector::Goal, 2, "Drowned.DrownedAttackGoal"),
-                    (Selector::Goal, 5, "Drowned.DrownedGoToBeachGoal"),
-                    (Selector::Goal, 6, "Drowned.DrownedSwimUpGoal"),
-                    (Selector::Goal, 7, "RandomStrollGoal"),
-                    (Selector::Target, 1, "HurtByTargetGoal"),
-                    (Selector::Target, 2, "NearestAttackableTargetGoal(Player)"),
+                    (Selector::Goal, 4, "zombie.break_turtle_egg"),
+                    (Selector::Goal, 8, "watch_player(player)"),
+                    (Selector::Goal, 8, "idle_glance"),
+                    (Selector::Goal, 1, "drowned.seek_water"),
+                    (Selector::Goal, 2, "drowned.trident_attack"),
+                    (Selector::Goal, 2, "drowned.melee_attack"),
+                    (Selector::Goal, 5, "drowned.seek_shore"),
+                    (Selector::Goal, 6, "drowned.surface"),
+                    (Selector::Goal, 7, "wander"),
+                    (Selector::Target, 1, "retaliate"),
+                    (Selector::Target, 2, "nearest_target(player)"),
                     (
                         Selector::Target,
                         3,
-                        "NearestAttackableTargetGoal(AbstractVillager)",
+                        "nearest_target(villager)",
                     ),
-                    (Selector::Target, 3, "NearestAttackableTargetGoal(IronGolem)"),
-                    (Selector::Target, 3, "NearestAttackableTargetGoal(Axolotl)"),
-                    (Selector::Target, 5, "NearestAttackableTargetGoal(Turtle)"),
+                    (Selector::Target, 3, "nearest_target(iron_golem)"),
+                    (Selector::Target, 3, "nearest_target(axolotl)"),
+                    (Selector::Target, 5, "nearest_target(turtle)"),
                 ],
             ),
             (
@@ -522,19 +527,19 @@ mod tests {
                     (
                         Selector::Target,
                         3,
-                        "NearestAttackableTargetGoal(AbstractPiglin)",
+                        "nearest_target(piglin)",
                     ),
-                    (Selector::Goal, 2, "RestrictSunGoal"),
-                    (Selector::Goal, 3, "FleeSunGoal"),
-                    (Selector::Goal, 3, "AvoidEntityGoal(Wolf)"),
-                    (Selector::Goal, 4, "MeleeAttackGoal"),
-                    (Selector::Goal, 5, "WaterAvoidingRandomStrollGoal"),
-                    (Selector::Goal, 6, "LookAtPlayerGoal(Player)"),
-                    (Selector::Goal, 6, "RandomLookAroundGoal"),
-                    (Selector::Target, 1, "HurtByTargetGoal"),
-                    (Selector::Target, 2, "NearestAttackableTargetGoal(Player)"),
-                    (Selector::Target, 3, "NearestAttackableTargetGoal(IronGolem)"),
-                    (Selector::Target, 3, "NearestAttackableTargetGoal(Turtle)"),
+                    (Selector::Goal, 2, "avoid_sunlight"),
+                    (Selector::Goal, 3, "seek_shade"),
+                    (Selector::Goal, 3, "flee_entity(wolf)"),
+                    (Selector::Goal, 4, "melee_strike"),
+                    (Selector::Goal, 5, "wander_dry"),
+                    (Selector::Goal, 6, "watch_player(player)"),
+                    (Selector::Goal, 6, "idle_glance"),
+                    (Selector::Target, 1, "retaliate"),
+                    (Selector::Target, 2, "nearest_target(player)"),
+                    (Selector::Target, 3, "nearest_target(iron_golem)"),
+                    (Selector::Target, 3, "nearest_target(turtle)"),
                 ],
             ),
         ];
@@ -542,7 +547,7 @@ mod tests {
         for &(species, want) in cases {
             let got: Vec<Row> = registrations_for(species)
                 .iter()
-                .map(|r| (r.selector, r.priority, r.vanilla))
+                .map(|r| (r.selector, r.priority, r.name))
                 .collect();
             assert_eq!(
                 got,
@@ -623,8 +628,8 @@ mod tests {
     #[test]
     fn wither_skeleton_is_the_base_table_plus_the_piglin_row_and_the_weapon_swap() {
         assert_eq!(
-            WITHER_SKELETON[0].vanilla,
-            "NearestAttackableTargetGoal(AbstractPiglin)"
+            WITHER_SKELETON[0].name,
+            "nearest_target(piglin)"
         );
 
         // The weapon row: one slot, and a different occupant on each side.
@@ -632,7 +637,7 @@ mod tests {
             let rows: Vec<&str> = t
                 .iter()
                 .filter(|r| r.selector == Selector::Goal && r.priority == 4)
-                .map(|r| r.vanilla)
+                .map(|r| r.name)
                 .collect();
             assert_eq!(
                 rows.len(),
@@ -646,12 +651,12 @@ mod tests {
         };
         assert_eq!(
             weapon(SKELETON),
-            "RangedBowAttackGoal",
+            "bow_strike",
             "every normally-spawned skeleton holds a bow"
         );
         assert_eq!(
             weapon(&WITHER_SKELETON[1..]),
-            "MeleeAttackGoal",
+            "melee_strike",
             "the wither skeleton is handed a stone sword instead"
         );
 
@@ -659,7 +664,7 @@ mod tests {
         let without_weapon = |t: &[Registration]| {
             t.iter()
                 .filter(|r| !(r.selector == Selector::Goal && r.priority == 4))
-                .map(|r| (r.selector, r.priority, r.vanilla))
+                .map(|r| (r.selector, r.priority, r.name))
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -677,7 +682,7 @@ mod tests {
     fn speed_of(species: &str, vanilla: &str, ctx: &SpeciesContext) -> f64 {
         let row = registrations_for(species)
             .iter()
-            .find(|r| r.vanilla == vanilla)
+            .find(|r| r.name == vanilla)
             .unwrap_or_else(|| panic!("{species} has no {vanilla} row"));
         assert!(
             matches!(row.coverage, Coverage::Modelled(_)),
@@ -720,30 +725,30 @@ mod tests {
         let cases: &[(&str, f64, &str, f64)] = &[
             // Vanilla's own bow-goal field — 1.0, at
             // the abstract skeleton's own MOVEMENT_SPEED 0.25.
-            ("skeleton", 0.25, "RangedBowAttackGoal", 1.0),
+            ("skeleton", 0.25, "bow_strike", 1.0),
             // Vanilla's own melee-goal field — 1.2, at the same 0.25.
             // Only the wither ever installs it.
-            ("wither_skeleton", 0.25, "MeleeAttackGoal", 1.2),
+            ("wither_skeleton", 0.25, "melee_strike", 1.2),
             // The creeper's own registration — 1.0, at 0.25.
-            ("creeper", 0.25, "MeleeAttackGoal", 1.0),
+            ("creeper", 0.25, "melee_strike", 1.0),
             // The zombie's own behaviour-goals helper — its own attack goal at
             // speed `1.0`,
             // at the zombie's own MOVEMENT_SPEED 0.23.
-            ("zombie", 0.23, "ZombieAttackGoal", 1.0),
+            ("zombie", 0.23, "zombie.melee_attack", 1.0),
             // The drowned's own behaviour-goals helper — 1.0. The drowned's own
             // attribute builder is
             // the zombie's plus `STEP_HEIGHT 1.0`, so the speed is
             // the zombie's 0.23.
-            ("drowned", 0.23, "Drowned.DrownedAttackGoal", 1.0),
+            ("drowned", 0.23, "drowned.melee_attack", 1.0),
             // The creeper's own registration and the spider's own registration
             // — the 0.8
             // strolls.
-            ("creeper", 0.25, "WaterAvoidingRandomStrollGoal", 0.8),
-            ("spider", 0.3, "WaterAvoidingRandomStrollGoal", 0.8),
+            ("creeper", 0.25, "wander_dry", 0.8),
+            ("spider", 0.3, "wander_dry", 0.8),
             // The zombie's own behaviour-goals helper — 1.0.
-            ("zombie", 0.23, "WaterAvoidingRandomStrollGoal", 1.0),
+            ("zombie", 0.23, "wander_dry", 1.0),
             // The drowned's own behaviour-goals helper — the *plain* stroll goal at speed `1.0`.
-            ("drowned", 0.23, "RandomStrollGoal", 1.0),
+            ("drowned", 0.23, "wander", 1.0),
         ];
 
         for &(species, movement_speed, vanilla, factor) in cases {
@@ -765,7 +770,7 @@ mod tests {
         let unshifted = SpeciesContext::new(0.25).speed;
         let wither = speed_of(
             "wither_skeleton",
-            "MeleeAttackGoal",
+            "melee_strike",
             &SpeciesContext::new(0.25),
         );
         assert!(
@@ -830,7 +835,7 @@ mod tests {
         /// How many times a goal reached
         /// [`MobController::launch_projectile`](crate::ai::mob::MobController::launch_projectile).
         launches: usize,
-        /// Peak fuse counter — non-zero only if `SwellGoal` ran.
+        /// Peak fuse counter — non-zero only if `FuseGoal` ran.
         swell: i32,
     }
 
@@ -901,7 +906,7 @@ mod tests {
 
         assert!(
             zombie.attacks > 0,
-            "a zombie built from the roster must reach MeleeAttackGoal's attack: \
+            "a zombie built from the roster must reach MeleeStrikeGoal's attack: \
              gap {:?}, attacks {}. Nothing in this test adds a goal, so a failure \
              means ZombieAttackGoal is not reaching the goal selector",
             zombie.gap,
@@ -929,7 +934,7 @@ mod tests {
     /// A creeper swells and a zombie does not, from the same target and the same
     /// production path — the priority-order-sensitive gate.
     ///
-    /// `SwellGoal` is at goal-priority 2 and `MeleeAttackGoal` at 4
+    /// `FuseGoal` is at goal-priority 2 and `MeleeStrikeGoal` at 4
     /// (vanilla's own creeper registration), and both claim MOVE, so the *only*
     /// reason the fuse ever climbs is that 2 outranks 4. Transcribe the swell at
     /// any number above 4 and melee holds MOVE and the creeper never primes,
@@ -945,12 +950,12 @@ mod tests {
             creeper.swell > 0,
             "a creeper's fuse must climb with a target 1.5 blocks away. If this \
              fails, check that the creeper's own swell-goal priority 2 is still \
-             below its own melee-goal priority 4 in CREEPER — a MeleeAttackGoal \
+             below its own melee-goal priority 4 in CREEPER — a MeleeStrikeGoal \
              holding MOVE prevents the swell"
         );
         assert_eq!(
             zombie.swell, 0,
-            "a zombie has no SwellGoal (vanilla's own zombie registration \
+            "a zombie has no FuseGoal (vanilla's own zombie registration \
              registers none), so \
              its fuse must stay at 0 — if it climbs, every species is getting the \
              same table"
@@ -994,7 +999,7 @@ mod tests {
     /// assert it in *both* directions from the same world, target, speed and
     /// family — the two runs differ in exactly one table row.
     ///
-    /// Under the pre-fix table (`MeleeAttackGoal` in [`SKELETON`]) the skeleton's
+    /// Under the pre-fix table (`MeleeStrikeGoal` in [`SKELETON`]) the skeleton's
     /// three assertions all invert: it records attacks and no launches, and it
     /// closes to contact. That is the control, and it was run.
     ///
@@ -1036,7 +1041,7 @@ mod tests {
         );
         assert_eq!(
             skeleton.attacks, 0,
-            "and it must never swing: {} melee attacks means a MeleeAttackGoal is \
+            "and it must never swing: {} melee attacks means a MeleeStrikeGoal is \
              still in the table, modelling a branch vanilla's own \
              weapon-reassessment step never \
              takes for a bow-holding skeleton",

@@ -14,7 +14,7 @@
 //! Both are hermetic and deterministic, so they always run (a gate that cannot
 //! run must fail, never skip — there is no skip path here).
 
-use lodestone_entity::ai::goals::MeleeAttackGoal;
+use lodestone_entity::ai::goals::MeleeStrikeGoal;
 use lodestone_entity::pathfinding::MobShape;
 use lodestone_entity::{AttributeMap, DamageFlags, Defenses};
 use lodestone_data::block_states::StateId;
@@ -58,7 +58,7 @@ fn goal_driven_mob_walks_to_its_target_over_server_terrain() {
     let target = Vec3::new(8.5, 0.0, 0.5);
     let id = {
         let m = sim.spawn(start, MobShape::land(0.6, 1.95), 0.15, 400);
-        m.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        m.add_goal(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
         m.set_attack_target(Some(target));
         m.id()
     };
@@ -129,7 +129,7 @@ fn mob_detours_a_two_tall_wall_and_holds_the_recompute_throttle() {
     let target = Vec3::new(0.5, 0.0, 8.5); // directly across the wall
     let id = {
         let m = sim.spawn(start, MobShape::land(0.6, 1.95), 0.15, 600);
-        m.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        m.add_goal(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
         m.set_attack_target(Some(target));
         m.id()
     };
@@ -190,7 +190,7 @@ fn identity_and_motion_accessors_expose_real_derived_state() {
     let target = Vec3::new(8.5, 0.0, 0.5); // due east of the start
     let (id_a, uuid_a) = {
         let m = sim.spawn(start, MobShape::land(0.6, 1.95), 0.25, 400);
-        m.add_goal(1, Box::new(MeleeAttackGoal::new(0.25, 2.0)));
+        m.add_goal(1, Box::new(MeleeStrikeGoal::new(0.25, 2.0)));
         m.set_attack_target(Some(target));
         // Default entity_type is a valid, namespaced key.
         assert_eq!(m.entity_type().to_string(), "minecraft:zombie");
@@ -283,7 +283,7 @@ fn real_mobsim_behind_arc_mutex_is_an_entity_source_that_tracks_movement() {
     let id = {
         let mut guard = sim.lock().unwrap();
         let m = guard.spawn(start, MobShape::land(0.6, 1.95), 0.15, 400);
-        m.add_goal(1, Box::new(MeleeAttackGoal::new(0.15, 2.0)));
+        m.add_goal(1, Box::new(MeleeStrikeGoal::new(0.15, 2.0)));
         m.set_attack_target(Some(target));
         m.id()
     };
@@ -450,7 +450,7 @@ fn census_height_decides_whether_a_mob_fits_a_two_high_tunnel() {
         sim.set_day_time(18000);
         let id = {
             let m = sim.spawn(start, shape, 0.15, 600);
-            m.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+            m.add_goal(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
             m.set_attack_target(Some(target));
             m.id()
         };
@@ -484,7 +484,7 @@ fn census_height_decides_whether_a_mob_fits_a_two_high_tunnel() {
     );
 }
 
-/// The combat gate checks that `MeleeAttackGoal` calling `mob.attack(target)`
+/// The combat gate checks that `MeleeStrikeGoal` calling `mob.attack(target)`
 /// updates health through the real per-type attributes. A freshly spawned mob
 /// has `max_health` 20, `attack_damage` 3, and `armor` 2 from
 /// `lodestone_entity::attribute`'s hand-verified template, rather than a
@@ -540,7 +540,7 @@ fn melee_attack_reduces_target_health_and_a_lethal_hit_removes_the_mob() {
     let attacker_id = {
         let a = sim.spawn(attacker_pos, MobShape::land(0.6, 1.95), 0.2, 400);
         a.set_attack_damage(3.0);
-        a.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        a.add_goal(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
         a.set_attack_target(Some(defender_pos));
         a.set_attack_target_id(Some(defender_id));
         a.id()
@@ -607,7 +607,7 @@ fn two_attackers_hitting_the_same_tick_only_land_one_full_hit() {
     for start in [Vec3::new(2.5, 0.0, 1.4), Vec3::new(2.5, 0.0, -0.4)] {
         let a = sim.spawn(start, MobShape::land(0.6, 1.95), 0.0, 100);
         a.set_attack_damage(10.0);
-        a.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        a.add_goal(1, Box::new(MeleeStrikeGoal::new(1.0, 2.0)));
         a.set_attack_target(Some(defender_pos));
         a.set_attack_target_id(Some(defender_id));
     }
@@ -777,7 +777,7 @@ fn spawn_species_resolves_real_per_species_shape_speed_and_combat_stats() {
 
 /// Species-specific melee behavior: a `minecraft:pig` never acquires a melee
 /// hit while a `minecraft:zombie` does. A pig's
-/// `spawn_species` goal set has no `MeleeAttackGoal` at all, so setting an
+/// `spawn_species` goal set has no `MeleeStrikeGoal` at all, so setting an
 /// attack target on it (exactly as the zombie below is given one) can never
 /// produce a connecting hit — structurally, not by chance/timing. The zombie
 /// closes the same distance and its own real `attack_damage` (3.0, not a
@@ -833,7 +833,7 @@ fn spawn_species_only_the_hostile_species_can_ever_land_a_melee_hit() {
     assert_eq!(
         control_zombie_health,
         Some(20.0),
-        "a pig given an attack target must never actually connect: no MeleeAttackGoal exists to act on it"
+        "a pig given an attack target must never actually connect: no MeleeStrikeGoal exists to act on it"
     );
 
     let mut ticks_run = 0;
@@ -853,7 +853,7 @@ fn spawn_species_only_the_hostile_species_can_ever_land_a_melee_hit() {
 
 // -- Creeper swell/detonate: the complete production trigger path ----------
 //
-// `MobSim::tick` drives the complete trigger chain: a species with `SwellGoal`
+// `MobSim::tick` drives the complete trigger chain: a species with `FuseGoal`
 // updates its fuse state and reaches `MobSim::explode` without a test-only
 // shortcut. The server tick loop uses this same entry point.
 
@@ -906,7 +906,7 @@ fn ignited_creeper_climbs_by_exactly_one_per_tick_and_detonates_at_tick_30() {
     );
 }
 
-/// A creeper given a stationary attack target within `SwellGoal`'s 3-block
+/// A creeper given a stationary attack target within `FuseGoal`'s 3-block
 /// start range must prime from proximity alone, with no
 /// `ignite()` call — the actual bug report ("creepers never prime near a
 /// player"). Same exact-tick prediction as the ignited case.
@@ -1005,7 +1005,7 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
     let mut sim = MobSim::new(&world);
     sim.set_day_time(18000);
 
-    // Two blocks apart: inside `BreedGoal`'s 8.0 partner search and inside the
+    // Two blocks apart: inside `MateGoal`'s 8.0 partner search and inside the
     // 9.0 squared distance at
     // which the child actually spawns (`:57`).
     let a = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
@@ -1017,12 +1017,12 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
         sim.get_mut(id)
             .expect("just spawned")
             .set_in_love()
-            .add_goal(2, Box::new(lodestone_entity::ai::goals::BreedGoal::new(1.0)));
+            .add_goal(2, Box::new(lodestone_entity::ai::goals::MateGoal::new(1.0)));
     }
 
     assert_eq!(sim.len(), 2, "precondition: exactly the two parents");
 
-    // `BreedGoal` needs 60 ticks of proximity (`loveTime >= 60`); 200 is
+    // `MateGoal` needs 60 ticks of proximity (`loveTime >= 60`); 200 is
     // generous headroom without
     // outliving `LOVE_TICKS` (600).
     let mut ticks = 0;
@@ -1078,7 +1078,7 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
 #[test]
 fn cows_beyond_breed_range_never_produce_a_child() {
     // Negative control: identical setup, goal, and tick budget, with only the
-    // distance moved just outside `BreedGoal`'s 8.0 partner search. The
+    // distance moved just outside `MateGoal`'s 8.0 partner search. The
     // population must not grow.
     //
     // Without this, "a third mob appeared" is satisfied by any code path that
@@ -1093,7 +1093,7 @@ fn cows_beyond_breed_range_never_produce_a_child() {
         sim.get_mut(id)
             .expect("just spawned")
             .set_in_love()
-            .add_goal(2, Box::new(lodestone_entity::ai::goals::BreedGoal::new(1.0)));
+            .add_goal(2, Box::new(lodestone_entity::ai::goals::MateGoal::new(1.0)));
     }
 
     for _ in 0..200 {
@@ -1116,7 +1116,7 @@ fn cows_beyond_breed_range_never_produce_a_child() {
 
 #[test]
 fn a_baby_cow_is_fed_its_parent_and_an_orphan_is_not() {
-    // `FollowParentGoal` consumes `parent_candidate`, which the simulation
+    // `TrailParentGoal` consumes `parent_candidate`, which the simulation
     // populates from nearby adults of the same species. Its search envelope is
     // 8.0 horizontally and 4.0 vertically, and adults have `age() >= 0`.
     let world = breeding_pen();
@@ -1168,14 +1168,14 @@ fn a_player_attack_makes_a_mob_retaliate_through_the_production_path() {
     // `MobSim::attack` receives `attacker_pos` for knockback direction and is
     // reached by `crate::server::apply_attack` from the `ATTACK` packet. The
     // test therefore covers the same path as a player's swing and checks that
-    // the hit records an attacker for `HurtByTargetGoal`.
+    // the hit records an attacker for `RetaliateGoal`.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
     sim.set_day_time(18000);
     let zombie = sim.spawn_species(rk("minecraft:zombie"), Vec3::new(0.0, 0.0, 0.0)).id();
     sim.get_mut(zombie)
         .expect("just spawned")
-        .add_goal(-5, Box::new(lodestone_entity::ai::goals::HurtByTargetGoal::new()));
+        .add_goal(-5, Box::new(lodestone_entity::ai::goals::RetaliateGoal::new()));
 
     // Control first: an unhurt zombie must have no attacker and no target.
     sim.tick();
@@ -1198,7 +1198,7 @@ fn a_player_attack_makes_a_mob_retaliate_through_the_production_path() {
     );
     assert!(
         sim.get(zombie).expect("alive").is_panicking(),
-        "a hit also opens the panic window (PanicGoal reads the damage source, \
+        "a hit also opens the panic window (FleeInPanicGoal reads the damage source, \
          not the attacking mob)"
     );
 
@@ -1210,13 +1210,13 @@ fn a_player_attack_makes_a_mob_retaliate_through_the_production_path() {
     assert_eq!(
         sim.get(zombie).expect("alive").attack_target(),
         Some(attacker_pos),
-        "HurtByTargetGoal must adopt the attacker as the attack target"
+        "RetaliateGoal must adopt the attacker as the attack target"
     );
 }
 
 #[test]
 fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
-    // `FloatGoal` is the one perception method that needs **no injection at
+    // `StayAfloatGoal` is the one perception method that needs **no injection at
     // all** — `in_water` reads the `PathWorld` `NavigatingMob` already
     // borrows. So this gate runs entirely through production code: real
     // `ChunkWorld` block states, real `path_types` classification, real
@@ -1249,7 +1249,7 @@ fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
 
     sim.get_mut(id)
         .expect("alive")
-        .add_goal(-9, Box::new(lodestone_entity::ai::goals::FloatGoal));
+        .add_goal(-9, Box::new(lodestone_entity::ai::goals::StayAfloatGoal));
 
     let mut jumped = false;
     for _ in 0..40 {
@@ -1261,7 +1261,7 @@ fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
     }
     assert!(
         jumped,
-        "a cow standing in water must be driven to jump by FloatGoal through \
+        "a cow standing in water must be driven to jump by StayAfloatGoal through \
          the production MobSim::tick"
     );
 
@@ -1277,7 +1277,7 @@ fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
     dry_sim
         .get_mut(dry_id)
         .expect("alive")
-        .add_goal(-9, Box::new(lodestone_entity::ai::goals::FloatGoal));
+        .add_goal(-9, Box::new(lodestone_entity::ai::goals::StayAfloatGoal));
     for _ in 0..40 {
         dry_sim.tick();
         assert!(
@@ -1290,7 +1290,7 @@ fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
 #[test]
 fn no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record() {
     // `SimMob` increments `no_action_time`, and the controller exposes that
-    // value to `RandomStrollGoal` through the `MobController` seam. The goal's
+    // value to `WanderGoal` through the `MobController` seam. The goal's
     // idle suppression begins at `>= 100`; checking both views prevents a
     // disconnected record from silently passing.
     let world = breeding_pen();
@@ -1322,7 +1322,7 @@ fn no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record() {
 // `nearest_player` and `temptation` were the only two perception methods with
 // no possible source — `MobSim` knew nothing about players. The producer is now
 // `server::dispatch_play_packet`'s `PlayerMoved` arm, which feeds
-// `MobSim::set_players`. These gates assert `LookAtPlayerGoal` and `TemptGoal
+// `MobSim::set_players`. These gates assert `WatchPlayerGoal` and `LureGoal
 // actually act` through the real `MobSim::tick`, not that a setter was called.
 // =====================================================================
 
@@ -1342,7 +1342,7 @@ fn holding(at: Vec3, item: &str) -> PlayerPerception {
 
 #[test]
 fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
-    // `LookAtPlayerGoal` end to end. The observable is `facing()` — the
+    // `WatchPlayerGoal` end to end. The observable is `facing()` — the
     // position the goal actually chose to look at — not `can_use`.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
@@ -1352,24 +1352,24 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
     // gate flaky; the roll is not what is under test.
     sim.get_mut(id).expect("just spawned").add_goal(
         6,
-        Box::new(lodestone_entity::ai::goals::LookAtPlayerGoal::new(6.0, 1.0)),
+        Box::new(lodestone_entity::ai::goals::WatchPlayerGoal::new(6.0, 1.0)),
     );
 
     let player = Vec3::new(3.0, 0.0, 0.0);
 
-    // Control first: no players fed at all. `LookAtPlayerGoal` must never pick a
+    // Control first: no players fed at all. `WatchPlayerGoal` must never pick a
     // target, so the mob must never be pointed at where the player *will* be.
     //
     // The control checks for absence of the *player position*, not absence of
     // all facing data: an idle look direction may be written by another goal.
-    // This keeps the assertion specific to `LookAtPlayerGoal`, which is the
+    // This keeps the assertion specific to `WatchPlayerGoal`, which is the
     // only goal in this setup that can produce the fed player's position.
     for _ in 0..20 {
         sim.tick();
         assert_ne!(
             sim.get(id).expect("alive").facing(),
             Some(player),
-            "with no player fed, LookAtPlayerGoal must never pick a target — \
+            "with no player fed, WatchPlayerGoal must never pick a target — \
              this is the state the whole of #441 was stuck in"
         );
     }
@@ -1399,14 +1399,14 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
     let far_id = far_sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
     far_sim.get_mut(far_id).expect("just spawned").add_goal(
         6,
-        Box::new(lodestone_entity::ai::goals::LookAtPlayerGoal::new(6.0, 1.0)),
+        Box::new(lodestone_entity::ai::goals::WatchPlayerGoal::new(6.0, 1.0)),
     );
     let far_player = Vec3::new(20.0, 0.0, 0.0);
     far_sim.set_players(vec![empty_handed(far_player)]);
     for _ in 0..20 {
         far_sim.tick();
         // As above, an idle look direction is not the discriminating absence.
-        // Only `LookAtPlayerGoal` can produce the fed player's position.
+        // Only `WatchPlayerGoal` can produce the fed player's position.
         assert_ne!(
             far_sim.get(far_id).expect("alive").facing(),
             Some(far_player),
@@ -1423,7 +1423,7 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
 
 #[test]
 fn a_pig_follows_a_player_holding_a_potato_and_ignores_an_empty_hand() {
-    // `TemptGoal` end to end, and the observable is **movement**: the pig must
+    // `LureGoal` end to end, and the observable is **movement**: the pig must
     // measurably close the distance to the player. A `can_use` assertion would
     // not show that the goal's `move_to` reached the navigator.
     let world = breeding_pen();
@@ -1434,7 +1434,7 @@ fn a_pig_follows_a_player_holding_a_potato_and_ignores_an_empty_hand() {
     // this focused goal test.
     sim.get_mut(id)
         .expect("just spawned")
-        .add_goal(4, Box::new(lodestone_entity::ai::goals::TemptGoal::new(1.2)));
+        .add_goal(4, Box::new(lodestone_entity::ai::goals::LureGoal::new(1.2)));
 
     let player = Vec3::new(8.0, 0.0, 0.0);
 
