@@ -587,7 +587,8 @@ where
     // Notify the client only when the stored point changes; a repeat click on
     // the same bed is silent. This crate has no localization table or action-bar
     // encoder, so the notification uses a plain system-chat line.
-    if is_bed_block(source.block_state_id(pos.x, pos.y, pos.z)) {
+    let clicked_bed = source.block_state_id(pos.x, pos.y, pos.z);
+    if is_bed_block(clicked_bed) || crate::world_spawn::is_straw_bed(clicked_bed) {
         // Register the player in the night-skip vote. Bed-entry gates for
         // day/night, nearby monsters, and already-sleeping state are outside
         // this interaction; the 100-tick deep-sleep threshold prevents a
@@ -595,7 +596,8 @@ where
         // idempotent, so a repeat click does not double-count.
         sleep_vote.lay_down(player_entity_id);
         let bed_dimension = source.dimension().unwrap_or(crate::dimension::Dimension::Overworld);
-        if crate::respawn::bed_works_in(bed_dimension)
+        if is_bed_block(clicked_bed)
+            && crate::respawn::bed_works_in(bed_dimension)
             && is_legal_bed_respawn(source, pos, player_pos)
             && !respawn.is_some_and(|existing| existing.same_block(pos, bed_dimension))
         {

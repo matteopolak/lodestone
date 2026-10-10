@@ -615,6 +615,26 @@ fn typed_block_tag_membership_uses_the_state_block_identity() {
     );
 }
 
+/// The built-in tag accessors answer for the latest release's identities: blocks
+/// 26.3 appended are members of the tags its data pack lists them in (poplar
+/// leaves in `leaves`, the wool and concrete stairs and slabs in `stairs`/`slabs`).
+#[test]
+fn typed_block_tag_membership_covers_the_26_3_additions() {
+    for (tag, block) in [
+        ("minecraft:leaves", "minecraft:red_poplar_leaves"),
+        ("minecraft:logs", "minecraft:poplar_log"),
+        ("minecraft:stairs", "minecraft:white_wool_stairs"),
+        ("minecraft:stairs", "minecraft:black_concrete_stairs"),
+        ("minecraft:slabs", "minecraft:white_wool_slab"),
+        ("minecraft:slabs", "minecraft:black_concrete_slab"),
+    ] {
+        assert!(
+            tool::block_tag_contains(tag, state_named(block).block()),
+            "{block} must be in {tag}"
+        );
+    }
+}
+
 /// The headline number: a diamond pickaxe on stone. Every input is read from a
 /// committed table that came out of the real server; only the arithmetic is ours.
 #[test]

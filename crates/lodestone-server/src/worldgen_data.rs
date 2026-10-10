@@ -1464,7 +1464,7 @@ mod generation_spawn_reaches_a_real_chunk {
                         let state = col.block_state_id(lx, y, lz);
                         let motion = lodestone_data::block_solidity::blocks_motion(state)
                             || lodestone_data::snow_support::has_fluid_state(state);
-                        motion && (canopy || !lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", state.block()))
+                        motion && (canopy || !lodestone_data::tool::block_tag_contains("minecraft:leaves", state.block()))
                     })
                     .map_or(col.min_y, |y| y + 1);
                 assert_eq!(candidate.y, expected_y, "chunk=({cx},{cz}) candidate={candidate:?}");

@@ -63,18 +63,17 @@
 //!
 //! # The item → entity derivation
 //!
-//! Every one of the real item registry's twenty boat-item registrations pairs
+//! Every one of the real item registry's boat-item registrations (the `boats` item tag with its nested `chest_boats`) pairs
 //! the item id with the entity type id for the *same* name, irregular names
 //! included — `bamboo_raft` and `bamboo_chest_raft` carry no
 //! `_boat` suffix at all, and the chest boats are a second axis on top of the
 //! wood species. So the derivation is "the item id **is** the entity type id",
 //! validated against [`lodestone_data::entity_types`] and against the committed
-//! twenty-name extraction in this module's tests, exactly as
+//! name extraction in this module's tests, exactly as
 //! [`crate::spawn_egg`]'s 88-egg list works.
 //!
-//! Deriving from a suffix instead would be the trap: `strip_suffix("_boat")`
-//! misses both bamboo rafts, and `ends_with("boat") || ends_with("raft")` would
-//! accept `minecraft:bamboo` mangled into anything.
+//! Membership is the bundled item tag, not a name pattern: `strip_suffix("_boat")`
+//! misses both bamboo rafts, and a new wood needs no code change.
 //!
 //! # How to change it
 //!
@@ -138,7 +137,7 @@ pub fn block_interaction_range(creative: bool) -> f64 {
 }
 
 /// The entity type a boat-family item id names, or `None` when `item` is not one
-/// of the twenty or names no registered entity type.
+/// of the boat-tag members or names no registered entity type.
 ///
 /// The identity mapping — see the module doc for why a suffix rule is wrong. The
 /// registry check is what turns an assumption about the *name* into a validated
@@ -158,15 +157,49 @@ pub fn entity_type_for_boat_item(item: &str) -> Option<ResourceKey> {
     Some(key)
 }
 
-/// Whether a bare item path is one of the twenty boat items.
+/// Whether a bare item path is a boat-family item: a member of the bundled
+/// `boats` item tag, whose nested `chest_boats` tag is followed.
 ///
-/// A `&&`-of-suffixes rather than a twenty-entry table: `_boat`/`_chest_boat`
-/// covers eighteen and the two bamboo rafts are named outright, which is the same
-/// split `crate::furnace`'s fuel table already documents for `bamboo_raft`. The
-/// registry check in [`entity_type_for_boat_item`] is what rejects a name that
-/// passes here and is not real.
+/// A boat item and the entity it places share one path, so this is also the
+/// membership test for the entity type ([`is_boat_type_path`]).
 fn is_boat_item_path(path: &str) -> bool {
-    path.ends_with("_boat") || path == "bamboo_raft" || path == "bamboo_chest_raft"
+    boat_paths().contains(path)
+}
+
+/// Whether a bare entity-type path is a boat, chest boat, raft or chest raft.
+#[must_use]
+pub fn is_boat_type_path(path: &str) -> bool {
+    is_boat_item_path(path)
+}
+
+/// Every path in the `boats` item tag, nested tags expanded.
+fn boat_paths() -> &'static std::collections::HashSet<String> {
+    static PATHS: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    PATHS.get_or_init(|| {
+        let mut paths = std::collections::HashSet::new();
+        let mut pending = vec!["boats".to_owned()];
+        while let Some(tag) = pending.pop() {
+            let Some((_, json)) = crate::crafting::EMBEDDED_ITEM_TAGS
+                .iter()
+                .find(|(id, _)| *id == tag)
+            else {
+                continue;
+            };
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) else {
+                continue;
+            };
+            let values = parsed.get("values").and_then(serde_json::Value::as_array);
+            for value in values.into_iter().flatten().filter_map(serde_json::Value::as_str) {
+                if let Some(nested) = value.strip_prefix("#minecraft:") {
+                    pending.push(nested.to_owned());
+                } else if let Some(path) = value.strip_prefix("minecraft:") {
+                    paths.insert(path.to_owned());
+                }
+            }
+        }
+        paths
+    })
 }
 
 /// One hit from [`clip`] — the real block-hit result reduced to the two facts
@@ -659,11 +692,11 @@ pub fn apply_boat_item(
 mod tests {
     use super::*;
 
-    /// Every boat-item registration in the pinned 26.2 decompile's real item
+    /// Every boat-item registration in the pinned 26.3 decompile's real item
     /// registry, extracted as (item id, entity type id) pairs
-    /// and committed here so the gate does not need `.cache/` present. All twenty
+    /// and committed here so the gate does not need `.cache/` present. All
     /// pair a name with **itself**, which is what makes the derivation exact.
-    static JAR_BOAT_ITEMS: [&str; 20] = [
+    static JAR_BOAT_ITEMS: [&str; 22] = [
         "acacia_boat",
         "acacia_chest_boat",
         "bamboo_chest_raft",
@@ -682,6 +715,8 @@ mod tests {
         "oak_chest_boat",
         "pale_oak_boat",
         "pale_oak_chest_boat",
+        "poplar_boat",
+        "poplar_chest_boat",
         "spruce_boat",
         "spruce_chest_boat",
     ];
@@ -706,9 +741,39 @@ mod tests {
         assert_eq!(sorted, JAR_BOAT_ITEMS, "the list must stay sorted");
         assert_eq!(
             JAR_BOAT_ITEMS.len(),
-            20,
-            "the real item registry carries exactly 20 boat item registrations in 26.2"
+            22,
+            "the real item registry carries exactly 22 boat item registrations in 26.3"
         );
+    }
+
+    /// Every member of the reference release's `boat` entity tag and `chest_boats`
+    /// item tag is recognised as a boat type and places its own entity type.
+    #[test]
+    fn every_reference_tagged_boat_is_recognised() {
+        let root = lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version())
+            .join("src/data/minecraft/tags");
+        let tags = [root.join("entity_type/boat.json"), root.join("item/chest_boats.json")];
+        if tags.iter().any(|tag| !tag.is_file()) {
+            eprintln!("SKIP: {} is absent (no decompiled tree for the current release)", root.display());
+            return;
+        }
+        let mut seen = 0usize;
+        let mut wrong = Vec::new();
+        for tag in &tags {
+            let doc: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(tag).unwrap()).unwrap();
+            for id in doc["values"].as_array().unwrap().iter().filter_map(|v| v.as_str()) {
+                seen += 1;
+                let path = id.strip_prefix("minecraft:").unwrap();
+                if !is_boat_type_path(path)
+                    || entity_type_for_boat_item(id).map(|k| k.to_string()).as_deref() != Some(id)
+                {
+                    wrong.push(id.to_owned());
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        assert_eq!(seen, 11 + 11, "the entity tag lists 11 boats and the item tag 11 chest boats");
     }
 
     /// The refusals, each for its own reason. `bamboo` is the row that separates
@@ -1036,6 +1101,30 @@ mod tests {
             matches!(creative, BoatUse::Place { .. }),
             "5.0 does: {creative:?}"
         );
+    }
+
+    /// The 26.3 poplar pair places through the same path as every other boat and
+    /// reaches the snapshot set as its own entity type.
+    #[test]
+    fn poplar_boats_place_as_their_own_entity_types() {
+        let mobs = crate::MobHandle::new(crate::ChunkWorld::new(0, 128));
+        for item in ["minecraft:poplar_boat", "minecraft:poplar_chest_boat"] {
+            let applied = apply_boat_item(
+                item,
+                Vec3::new(4.5, 66.6, 4.5),
+                0.0,
+                90.0,
+                BLOCK_INTERACTION_RANGE,
+                &shore(vec![]),
+                &mobs,
+            );
+            let BoatApplied::Placed { entity_id, .. } = applied else {
+                panic!("{item} aimed at water must place: {applied:?}");
+            };
+            let snapshots = mobs.with(|sim| sim.snapshots());
+            let spawned = snapshots.iter().find(|s| s.id == entity_id).expect("on the wire");
+            assert_eq!(spawned.entity_type.to_string(), item);
+        }
     }
 
     /// **The composition.** A placed boat must reach an entity that is on the

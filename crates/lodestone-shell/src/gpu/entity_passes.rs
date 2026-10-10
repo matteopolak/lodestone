@@ -564,19 +564,13 @@ fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
 ///   block cell for every baby checked, so the probe cell is right and the
 ///   number is not.
 const EYE_HEIGHTS: &[(&str, f32)] = &[
-    ("acacia_boat", 0.5625),
-    ("acacia_chest_boat", 0.5625),
     ("allay", 0.36),
     ("armadillo", 0.26),
     ("armor_stand", 1.7775),
     ("arrow", 0.13),
     ("axolotl", 0.2751),
-    ("bamboo_chest_raft", 0.5625),
-    ("bamboo_raft", 0.5625),
     ("bat", 0.45),
     ("bee", 0.3),
-    ("birch_boat", 0.5625),
-    ("birch_chest_boat", 0.5625),
     ("bogged", 1.74),
     ("breeze", 1.3452),
     ("breeze_wind_charge", 0.0),
@@ -584,15 +578,11 @@ const EYE_HEIGHTS: &[(&str, f32)] = &[
     ("camel_husk", 2.275),
     ("cat", 0.35),
     ("cave_spider", 0.45),
-    ("cherry_boat", 0.5625),
-    ("cherry_chest_boat", 0.5625),
     ("chicken", 0.644),
     ("cod", 0.195),
     ("copper_golem", 0.8125),
     ("cow", 1.3),
     ("creaking", 2.3),
-    ("dark_oak_boat", 0.5625),
-    ("dark_oak_chest_boat", 0.5625),
     ("dolphin", 0.3),
     ("donkey", 1.425),
     ("drowned", 1.74),
@@ -610,21 +600,13 @@ const EYE_HEIGHTS: &[(&str, f32)] = &[
     ("husk", 1.74),
     ("item", 0.2125),
     ("item_frame", 0.0),
-    ("jungle_boat", 0.5625),
-    ("jungle_chest_boat", 0.5625),
     ("leash_knot", 0.0625),
     ("llama", 1.7765),
     ("magma_cube", 0.325),
-    ("mangrove_boat", 0.5625),
-    ("mangrove_chest_boat", 0.5625),
     ("mannequin", 1.62),
     ("mooshroom", 1.3),
     ("mule", 1.52),
     ("nautilus", 0.2751),
-    ("oak_boat", 0.5625),
-    ("oak_chest_boat", 0.5625),
-    ("pale_oak_boat", 0.5625),
-    ("pale_oak_chest_boat", 0.5625),
     ("parched", 1.74),
     ("parrot", 0.54),
     ("phantom", 0.175),
@@ -644,8 +626,6 @@ const EYE_HEIGHTS: &[(&str, f32)] = &[
     ("snow_golem", 1.7),
     ("spectral_arrow", 0.13),
     ("spider", 0.65),
-    ("spruce_boat", 0.5625),
-    ("spruce_chest_boat", 0.5625),
     ("squid", 0.4),
     ("stray", 1.74),
     ("sulfur_cube", 0.175),
@@ -689,7 +669,7 @@ const EYE_HEIGHTS: &[(&str, f32)] = &[
 ///   ghast and `2.0` for a happy ghast.
 ///
 /// `0.5` was never a "common case" either. It is the modal value only because
-/// the humanoids cluster there (34 of 157); the boats are `0.8` (21) and the
+/// the humanoids cluster there (34 of 157); the boats are `0.8` and the
 /// quadrupeds and minecarts `0.7` (25).
 ///
 /// # How to change it
@@ -703,20 +683,14 @@ const EYE_HEIGHTS: &[(&str, f32)] = &[
 /// rows carry the accessor default and [`EntityDraw`] would need to carry the
 /// real one before they can be right.
 const SHADOW_RADII: &[(&str, f32)] = &[
-    ("acacia_boat", 0.8),
-    ("acacia_chest_boat", 0.8),
     ("allay", 0.4),
     ("area_effect_cloud", 0.0),
     ("armadillo", 0.4),
     ("armor_stand", 0.0),
     ("arrow", 0.0),
     ("axolotl", 0.5),
-    ("bamboo_chest_raft", 0.8),
-    ("bamboo_raft", 0.8),
     ("bat", 0.25),
     ("bee", 0.4),
-    ("birch_boat", 0.8),
-    ("birch_chest_boat", 0.8),
     ("blaze", 0.5),
     ("block_display", 0.0),
     ("bogged", 0.5),
@@ -726,8 +700,6 @@ const SHADOW_RADII: &[(&str, f32)] = &[
     ("camel_husk", 0.7),
     ("cat", 0.4),
     ("cave_spider", 0.56),
-    ("cherry_boat", 0.8),
-    ("cherry_chest_boat", 0.8),
     ("chest_minecart", 0.7),
     ("chicken", 0.3),
     ("cod", 0.3),
@@ -736,8 +708,6 @@ const SHADOW_RADII: &[(&str, f32)] = &[
     ("cow", 0.7),
     ("creaking", 0.6),
     ("creeper", 0.5),
-    ("dark_oak_boat", 0.8),
-    ("dark_oak_chest_boat", 0.8),
     ("dolphin", 0.7),
     ("donkey", 0.75),
     ("dragon_fireball", 0.0),
@@ -778,28 +748,20 @@ const SHADOW_RADII: &[(&str, f32)] = &[
     ("item", 0.15),
     ("item_display", 0.0),
     ("item_frame", 0.0),
-    ("jungle_boat", 0.8),
-    ("jungle_chest_boat", 0.8),
     ("leash_knot", 0.0),
     ("lightning_bolt", 0.0),
     ("lingering_potion", 0.0),
     ("llama", 0.7),
     ("llama_spit", 0.0),
     ("magma_cube", 0.25),
-    ("mangrove_boat", 0.8),
-    ("mangrove_chest_boat", 0.8),
     ("marker", 0.0),
     ("minecart", 0.7),
     ("mooshroom", 0.7),
     ("mule", 0.75),
     ("nautilus", 0.7),
-    ("oak_boat", 0.8),
-    ("oak_chest_boat", 0.8),
     ("ocelot", 0.4),
     ("ominous_item_spawner", 0.0),
     ("painting", 0.0),
-    ("pale_oak_boat", 0.8),
-    ("pale_oak_chest_boat", 0.8),
     ("panda", 0.9),
     ("parched", 0.5),
     ("parrot", 0.3),
@@ -829,8 +791,6 @@ const SHADOW_RADII: &[(&str, f32)] = &[
     ("spectral_arrow", 0.0),
     ("spider", 0.8),
     ("splash_potion", 0.0),
-    ("spruce_boat", 0.8),
-    ("spruce_chest_boat", 0.8),
     ("squid", 0.7),
     ("stray", 0.5),
     ("strider", 0.5),
@@ -882,6 +842,9 @@ const SHADOW_STRENGTHS: &[(&str, f32)] = &[
 /// exactly the rows nobody has generated yet.
 #[must_use]
 fn shadow_radius(type_path: &str) -> f32 {
+    if lodestone_server::boat::is_boat_type_path(type_path) {
+        return BOAT_SHADOW_RADIUS;
+    }
     SHADOW_RADII
         .binary_search_by_key(&type_path, |&(name, _)| name)
         .map_or(SHADOW_RADIUS_FALLBACK, |i| SHADOW_RADII[i].1)
@@ -895,6 +858,13 @@ fn shadow_strength(type_path: &str) -> f32 {
         .binary_search_by_key(&type_path, |&(name, _)| name)
         .map_or(1.0, |i| SHADOW_STRENGTHS[i].1)
 }
+
+/// Eye height shared by every boat, chest boat, raft and chest raft; those types
+/// are recognised by [`lodestone_server::boat::is_boat_type_path`] rather than listed.
+const BOAT_EYE_HEIGHT: f32 = 0.5625;
+
+/// Shadow radius shared by the boat family, as for [`BOAT_EYE_HEIGHT`].
+const BOAT_SHADOW_RADIUS: f32 = 0.8;
 
 /// What [`shadow_radius`] returns for a type [`SHADOW_RADII`] does not list —
 /// see its doc for why this is the old flat value rather than vanilla's own
@@ -991,6 +961,9 @@ fn push_shadow_quad(
 /// future-version entity is then probed at its feet, which is where it was
 /// probed before this existed, instead of somewhere invented.
 fn eye_probe_offset(type_path: &str, age_scale: f32) -> f32 {
+    if lodestone_server::boat::is_boat_type_path(type_path) {
+        return BOAT_EYE_HEIGHT * age_scale;
+    }
     if let Ok(i) = EYE_HEIGHTS.binary_search_by(|(name, _)| (*name).cmp(type_path)) {
         return EYE_HEIGHTS[i].1 * age_scale;
     }
@@ -4015,6 +3988,35 @@ mod tests {
 
         // An unknown type probes at the feet rather than at an invented height.
         assert_eq!(eye_probe_offset("not_a_real_entity_type", 1.0), 0.0);
+    }
+
+    /// Every boat-family type, poplar included, takes the boat eye height and shadow
+    /// radius. The expected eye height is the generated 26.3 dimensions table's boat
+    /// box (1.375 x 0.5625), which no boat constant here is derived from; the set is
+    /// every non-living type with exactly that box.
+    #[test]
+    fn every_boat_family_type_takes_the_boat_eye_height_and_shadow() {
+        use lodestone_data::entity_type::EntityType;
+        let mut seen = 0;
+        let mut wrong = Vec::new();
+        for entity_type in EntityType::all() {
+            let dims = lodestone_data::entity_dimensions::base_dimensions(entity_type);
+            let boat_box = dims.width == 1.375 && dims.height == 0.5625;
+            let living = lodestone_data::entity_census::is_living(entity_type);
+            if boat_box && !living {
+                seen += 1;
+                let path = entity_type.path();
+                if !lodestone_server::boat::is_boat_type_path(path)
+                    || eye_probe_offset(path, 1.0) != dims.height
+                    || shadow_radius(path) != 0.8
+                {
+                    wrong.push(path);
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+        assert_eq!(seen, 22, "22 boat-box types in 26.3, poplar pair included");
+        assert_eq!(eye_probe_offset("poplar_chest_boat", 1.0), 0.5625);
     }
 
     /// **The probe is the eye cell, and fire forces only the block nibble.**

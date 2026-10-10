@@ -148,19 +148,10 @@ pub fn block_tag_members(tag: &str) -> Option<std::borrow::Cow<'static, [u16]>> 
         .map(|index| Cow::Borrowed(generated::BLOCK_TAGS[index].1))
 }
 
-/// Whether the built-in 26.2 block tag contains a canonical block.
+/// Whether the built-in latest-release block tag contains a canonical block.
 #[must_use]
 pub fn block_tag_contains(tag: &str, block: Block) -> bool {
-    tag_contains(tag, block.registry_id())
-}
-
-/// Whether a built-in 26.2 block tag contains `block`.
-#[must_use]
-pub fn builtin_block_tag_contains(tag: &str, block: Block) -> bool {
-    generated::BLOCK_TAGS
-        .binary_search_by_key(&tag, |&(name, _)| name)
-        .ok()
-        .is_some_and(|index| generated::BLOCK_TAGS[index].1.binary_search(&block.registry_id()).is_ok())
+    tag_contains_for(tag, block.registry_id(), GameDataVersion::V26_3, None)
 }
 
 /// The built-in `minecraft:tool` prototype of `item` (for example
@@ -353,11 +344,6 @@ fn model_rule_matches(
                 .is_some_and(|resolved| resolved.registry_id() == block)
         }),
     }
-}
-
-/// Whether a built-in 26.2 tag contains the canonical block id.
-fn tag_contains(tag: &str, block: u16) -> bool {
-    tag_contains_for(tag, block, GameDataVersion::V26_2, None)
 }
 
 fn tag_contains_for(

@@ -642,7 +642,7 @@ pub fn client_heightmap_includes(
 }
 
 pub(super) fn is_leaves(block: Block) -> bool {
-    lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", block)
+    lodestone_data::tool::block_tag_contains("minecraft:leaves", block)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

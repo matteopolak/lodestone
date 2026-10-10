@@ -317,12 +317,8 @@ pub(crate) fn canonical_model_name(type_path: &str) -> Option<&'static str> {
 /// [`canonical_model_name`]'s corpus fallback treats a newly ported mob. The
 /// ordering above is what makes that safe.
 ///
-/// The species texture is **not** resolved here: all nine wood boats draw the
-/// corpus entry's `entity/boat/oak` sheet and both rafts draw
-/// `entity/boat/bamboo`, because each corpus entry holds a single
-/// `EntityTexture::Fixed`. That is a visible-but-minor wrong-colour hull, and
-/// fixing it belongs in `lodestone-assets` (a variant texture on the four
-/// entries), not in a name mapping.
+/// The species texture is not resolved here but by [`boat_species_sheet`]; each
+/// corpus entry holds one fixed default sheet.
 pub(crate) fn boat_model_name(type_path: &str) -> Option<&'static str> {
     // Longest first: every `*_chest_boat` also ends with `_boat`.
     if type_path.ends_with("_chest_boat") {
@@ -338,6 +334,40 @@ pub(crate) fn boat_model_name(type_path: &str) -> Option<&'static str> {
         return Some("raft");
     }
     None
+}
+
+/// The sheet a boat-family entity type draws: its wood species is the texture, the
+/// class (boat, chest boat, raft, chest raft) is the rig.
+///
+/// `entity/boat/<species>` for a boat or raft, `entity/chest_boat/<species>` for a
+/// chest variant; a raft's species is `bamboo`. `None` for any non-boat path.
+/// Derived from the registry's own boat-family names, so a new species needs no entry.
+pub(crate) fn boat_species_sheet(type_path: &str) -> Option<&'static str> {
+    static SHEETS: std::sync::OnceLock<std::collections::HashMap<&'static str, &'static str>> =
+        std::sync::OnceLock::new();
+    SHEETS
+        .get_or_init(|| {
+            EntityType::all()
+                .filter_map(|entity_type| {
+                    let path = entity_type.path();
+                    let (dir, species) = if let Some(species) = path.strip_suffix("_chest_boat") {
+                        ("chest_boat", species)
+                    } else if let Some(species) = path.strip_suffix("_boat") {
+                        ("boat", species)
+                    } else if path == "bamboo_chest_raft" {
+                        ("chest_boat", "bamboo")
+                    } else if path == "bamboo_raft" {
+                        ("boat", "bamboo")
+                    } else {
+                        return None;
+                    };
+                    let reference = Box::leak(format!("entity/{dir}/{species}").into_boxed_str());
+                    Some((path, &*reference))
+                })
+                .collect()
+        })
+        .get(type_path)
+        .copied()
 }
 
 /// The [`entity_models`] entry name for a player's own body, chosen by skin
@@ -909,6 +939,9 @@ pub fn entity_appearance_sheet(
     angry: bool,
 ) -> Option<&'static str> {
     use lodestone_model::EntityVariant;
+    if let Some(sheet) = boat_species_sheet(model_name) {
+        return Some(sheet);
+    }
     let keyed = |ns_ok: bool| match variant {
         Some(EntityVariant::Keyed(id)) if ns_ok && id.namespace() == "minecraft" => Some(id.path()),
         _ => None,
@@ -1151,7 +1184,7 @@ pub fn entity_profession_layers(
 pub fn entity_extra_sheet_dirs() -> Vec<&'static str> {
     let mut dirs: Vec<&'static str> = entity_eyes_sheet_dirs();
     dirs.extend(
-        ["cat", "frog", "rabbit", "parrot", "llama", "cow", "panda", "shulker", "bee", "sheep"]
+        ["cat", "frog", "rabbit", "parrot", "llama", "cow", "panda", "shulker", "bee", "sheep", "boat", "chest_boat"]
             .map(|d| sheet_dir(&format!("entity/{d}/"))),
     );
     dirs.extend(crate::entity_gear::GEAR_SHEET_DIRS.map(|d| sheet_dir(&format!("entity/{d}/"))));

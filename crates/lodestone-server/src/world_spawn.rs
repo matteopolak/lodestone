@@ -524,27 +524,17 @@ pub(crate) async fn find_initial_spawn_yielding<S: ChunkSource + ?Sized>(source:
     result
 }
 
-/// Whether a block state belongs to the bed family.
+/// Whether a block state is a bed that can set a respawn point: a member of the
+/// `minecraft:beds` block tag. The straw bed is a bed too but never sets a spawn
+/// (see [`is_straw_bed`]).
 pub(crate) fn is_bed_block(state: BlockStateId) -> bool {
-    matches!(
-        state.block(),
-        Block::WhiteBed
-            | Block::OrangeBed
-            | Block::MagentaBed
-            | Block::LightBlueBed
-            | Block::YellowBed
-            | Block::LimeBed
-            | Block::PinkBed
-            | Block::GrayBed
-            | Block::LightGrayBed
-            | Block::CyanBed
-            | Block::PurpleBed
-            | Block::BlueBed
-            | Block::BrownBed
-            | Block::GreenBed
-            | Block::RedBed
-            | Block::BlackBed
-    )
+    lodestone_data::tool::block_tag_contains("minecraft:beds", state.block())
+}
+
+/// Whether a block state is the straw bed: it takes the sleep interaction but its
+/// bed rule forbids setting a spawn and destroys it when the sleeper leaves.
+pub(crate) fn is_straw_bed(state: BlockStateId) -> bool {
+    state.block() == Block::StrawBed
 }
 
 /// Whether right-clicking the bed at `bed` should set the player's respawn
@@ -1284,6 +1274,19 @@ mod tests {
         assert!(!is_bed_block(state("minecraft:air")));
         assert!(!is_bed_block(state("minecraft:bedrock")));
         assert!(!is_bed_block(state("minecraft:respawn_anchor")));
+    }
+
+    /// The straw bed sleeps but never sets a spawn: it is outside the `beds` tag
+    /// (the 26.3 tag file lists the sixteen dyed beds only) and is its own family.
+    #[test]
+    fn the_straw_bed_is_a_bed_that_does_not_set_a_spawn() {
+        let state = |value: &str| BlockStateId::from_state_str(value).expect("a real state");
+        for part in ["head", "foot"] {
+            let straw = state(&format!("minecraft:straw_bed[part={part},facing=north]"));
+            assert!(is_straw_bed(straw));
+            assert!(!is_bed_block(straw), "a straw bed must not set a spawn");
+        }
+        assert!(!is_straw_bed(state("minecraft:red_bed")));
     }
     /// A bed on open ground resolves to the first ordered candidate.
     #[test]

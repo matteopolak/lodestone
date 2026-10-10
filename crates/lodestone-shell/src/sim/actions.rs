@@ -182,8 +182,7 @@ fn generic_use_swings(id: &str, fall_flying: bool) -> bool {
     }
     path.ends_with("_bundle")
         || path.ends_with("_spawn_egg")
-        || path.ends_with("_boat")
-        || path.ends_with("_raft")
+        || lodestone_server::boat::is_boat_type_path(path)
         // `milk_bucket` is a consumable, not a fluid-bucket item: its use is the
         // base item's "consume" arm, which does not swing.
         || (path.ends_with("_bucket") && path != "milk_bucket")

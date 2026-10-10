@@ -128,7 +128,7 @@ fn client_heightmap_includes(type_id: u32, state: lodestone_data::block_states::
         }
         CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID => motion,
         CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID => {
-            motion && !lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", state.block())
+            motion && !lodestone_data::tool::block_tag_contains("minecraft:leaves", state.block())
         }
         _ => false,
     }
@@ -165,7 +165,7 @@ fn client_heightmap_values_at(
             }
             if remaining & 4 != 0
                 && motion
-                && !lodestone_data::tool::builtin_block_tag_contains(
+                && !lodestone_data::tool::block_tag_contains(
                     "minecraft:leaves",
                     state.block(),
                 )
@@ -594,7 +594,7 @@ impl ChunkColumn {
             column.palette.iter().copied().map(|state| {
                 let motion = lodestone_data::block_solidity::blocks_motion(state)
                     || lodestone_data::snow_support::has_fluid_state(state);
-                let no_leaves = motion && !lodestone_data::tool::builtin_block_tag_contains(
+                let no_leaves = motion && !lodestone_data::tool::block_tag_contains(
                     "minecraft:leaves", state.block(),
                 );
                 (motion, no_leaves)

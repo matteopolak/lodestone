@@ -158,3 +158,43 @@ fn every_boat_type_resolves_to_its_class_rig() {
         RIGS.len()
     );
 }
+
+/// Every boat type draws its own wood's sheet: the species is the texture, the class
+/// is the rig. Expected sheets are spelled out here, and each is checked against the
+/// reference release's texture files when the cache is present.
+#[test]
+fn every_boat_type_draws_its_own_species_sheet() {
+    use lodestone_model::{EntityVariant, MobAppearance};
+
+    let species = [
+        "acacia", "birch", "cherry", "dark_oak", "jungle", "mangrove", "oak", "pale_oak",
+        "poplar", "spruce",
+    ];
+    let mut expected: Vec<(String, String)> = Vec::new();
+    for wood in species {
+        expected.push((format!("{wood}_boat"), format!("entity/boat/{wood}")));
+        expected.push((format!("{wood}_chest_boat"), format!("entity/chest_boat/{wood}")));
+    }
+    expected.push(("bamboo_raft".into(), "entity/boat/bamboo".into()));
+    expected.push(("bamboo_chest_raft".into(), "entity/chest_boat/bamboo".into()));
+    assert_eq!(expected.len(), RIGS.len());
+
+    let textures = lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version())
+        .join("client-src/assets/minecraft/textures");
+    let mut wrong = Vec::new();
+    for (type_path, sheet) in &expected {
+        let got = lodestone_render::entity_appearance_sheet(
+            type_path,
+            None::<&EntityVariant>,
+            &MobAppearance::default(),
+            false,
+        );
+        if got != Some(sheet.as_str()) {
+            wrong.push(format!("{type_path}: got {got:?}, want {sheet}"));
+        }
+        if textures.is_dir() && !textures.join(format!("{sheet}.png")).is_file() {
+            wrong.push(format!("{sheet}.png is not in the reference assets"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}

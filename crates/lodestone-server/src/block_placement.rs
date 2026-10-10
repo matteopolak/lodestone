@@ -1125,6 +1125,56 @@ mod tests {
         assert_eq!(placed.state, state("minecraft:oak_slab[type=double]"));
     }
 
+    /// The blocks 26.3 added to the stair and slab families (wool and concrete,
+    /// read from the reference tag files) place exactly as an oak stair or slab
+    /// does, and the straw bed places as a two-part bed.
+    #[test]
+    fn the_26_3_stair_slab_and_bed_additions_place_like_their_families() {
+        let tags = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../lodestone-worldgen-data-26-3/assets/tag_block");
+        let members = |tag: &str| -> Vec<String> {
+            let raw = std::fs::read_to_string(tags.join(format!("{tag}.json"))).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            doc["values"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect()
+        };
+        let mut checked = 0;
+        for tag in ["wool_stairs", "concrete_stairs"] {
+            let blocks = members(tag);
+            assert_eq!(blocks.len(), 16, "{tag}");
+            for block in blocks {
+                assert_eq!(
+                    state_of(&block, BlockFace::Up, 0.0, 180.0),
+                    state(&format!("{block}[facing=north,half=bottom,shape=straight]")),
+                );
+                assert_eq!(
+                    state_of(&block, BlockFace::North, 0.9, 180.0),
+                    state(&format!("{block}[facing=north,half=top,shape=straight]")),
+                );
+                checked += 1;
+            }
+        }
+        for tag in ["wool_slabs", "concrete_slabs"] {
+            let blocks = members(tag);
+            assert_eq!(blocks.len(), 16, "{tag}");
+            for block in blocks {
+                assert_eq!(state_of(&block, BlockFace::Up, 0.0, 0.0), state(&format!("{block}[type=bottom]")));
+                assert_eq!(state_of(&block, BlockFace::Down, 0.0, 0.0), state(&format!("{block}[type=top]")));
+                let half = state(&format!("{block}[type=bottom]"));
+                let doubled = placement(&block, &ctx(BlockFace::Up, 0.0, 0.0), move |_| half).unwrap();
+                assert_eq!(doubled.state, state(&format!("{block}[type=double]")));
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 64);
+
+        let bed = placement("minecraft:straw_bed", &ctx(BlockFace::Up, 0.0, 180.0), air).unwrap();
+        assert_eq!(bed.state, state("minecraft:straw_bed[facing=north,part=foot]"));
+        assert_eq!(
+            bed.extra,
+            vec![(BlockPos::new(0, 64, -1), state("minecraft:straw_bed[facing=north,part=head]"))]
+        );
+    }
+
     /// Vertical-`facing` blocks split three ways, and only one of them reads
     /// the look vector.
     #[test]

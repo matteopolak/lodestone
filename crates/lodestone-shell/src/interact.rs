@@ -139,24 +139,14 @@ pub struct EntityRayTarget(pub Option<i32>);
 /// the lookup can binary-search. Companion to [`entity_type_can_be_picked`],
 /// which reads the living half out of the generated entity census instead.
 ///
-/// Every entry is one of the eight non-living override families named in that
-/// function's doc — twenty boats/rafts, seven minecarts, four block-attached
+/// Every entry is one of the non-living override families named in that
+/// function's doc — seven minecarts, four block-attached
 /// decorations, and one each of the five singleton families. The three
 /// redirectable projectiles are *not* here: they are resolved by tag in
 /// [`entity_type_can_be_picked`], next to the citation for why.
 const NON_LIVING_PICKABLE_PATHS: &[&str] = &[
-    "acacia_boat",
-    "acacia_chest_boat",
-    "bamboo_chest_raft",
-    "bamboo_raft",
-    "birch_boat",
-    "birch_chest_boat",
-    "cherry_boat",
-    "cherry_chest_boat",
     "chest_minecart",
     "command_block_minecart",
-    "dark_oak_boat",
-    "dark_oak_chest_boat",
     "end_crystal",
     "falling_block",
     "furnace_minecart",
@@ -164,21 +154,11 @@ const NON_LIVING_PICKABLE_PATHS: &[&str] = &[
     "hopper_minecart",
     "interaction",
     "item_frame",
-    "jungle_boat",
-    "jungle_chest_boat",
     "leash_knot",
-    "mangrove_boat",
-    "mangrove_chest_boat",
     "minecart",
-    "oak_boat",
-    "oak_chest_boat",
     "painting",
-    "pale_oak_boat",
-    "pale_oak_chest_boat",
     "shulker_bullet",
     "spawner_minecart",
-    "spruce_boat",
-    "spruce_chest_boat",
     "tnt",
     "tnt_minecart",
 ];
@@ -280,6 +260,7 @@ pub fn entity_type_can_be_picked(kind: &lodestone_model::ResourceKey) -> bool {
         return true;
     }
     NON_LIVING_PICKABLE_PATHS.binary_search(&path).is_ok()
+        || lodestone_server::boat::is_boat_type_path(path)
         || REDIRECTABLE_PROJECTILE_PATHS.binary_search(&path).is_ok()
 }
 
