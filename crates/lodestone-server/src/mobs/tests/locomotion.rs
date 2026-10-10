@@ -283,3 +283,88 @@ fn only_a_ticking_mob_accumulates_idle_time() {
     assert_eq!(idle_after(false), 0);
     assert_eq!(idle_after(true), 30);
 }
+
+/// A cod in a closed 16x16x6 tank wanders the water: it travels well past a
+/// stroll's first step, and every tick its body stays inside the water volume
+/// (feet cell between the floor and the surface, column inside the walls).
+#[test]
+fn a_cod_swims_around_inside_its_tank() {
+    // Water fills y 1..=6, so the surface is at 7. A fish carries its vertical
+    // velocity through its last step, so it may breach the surface briefly before
+    // gravity returns it.
+    const SURFACE: f64 = 7.0;
+    const COAST: f64 = 0.5;
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..16 {
+        for x in 0..16 {
+            world.set_block(x, 0, z, "minecraft:stone");
+            for y in 1..=6 {
+                world.set_block(x, y, z, "minecraft:water");
+            }
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    let start = Vec3::new(8.5, 1.5, 8.5);
+    let id = sim.spawn_species("minecraft:cod".parse().expect("valid key"), start).id();
+    // A player beyond the 8-block flee radius keeps the mob out of the idle
+    // throttle, which silences strolling once no player has been near for 100 ticks.
+    sim.set_players(vec![PerceivedPlayer {
+        identity: None,
+        perception: PlayerPerception {
+            position: Vec3::new(8.5, 3.5, 30.5),
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, -1.0),
+        },
+    }]);
+    let mut farthest = 0.0_f64;
+    let (mut low, mut high) = (f64::MAX, f64::MIN);
+    for t in 0..1200 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        let p = sim.get(id).expect("alive").position();
+        assert!(
+            (0..16).contains(&(p.x.floor() as i32))
+                && (0..16).contains(&(p.z.floor() as i32))
+                && (1.0..SURFACE + COAST).contains(&p.y),
+            "tick {t}: left the water at {p:?}"
+        );
+        farthest = farthest.max((p.x - start.x).hypot(p.z - start.z));
+        (low, high) = (low.min(p.y), high.max(p.y));
+    }
+    assert!(farthest >= 3.0, "the cod only got {farthest} blocks from its start");
+    // Destinations spread +-7 vertically, so a swimmer leaves the floor it
+    // started near; a body that sinks and walks does not.
+    assert!(high >= start.y + 2.0, "vertical range {low}..{high}");
+}
+
+/// A cod with a player 3 blocks away flees: within 3 seconds it is farther
+/// from the player than the 3 blocks it started at (the reference fish base
+/// flees players inside 8 blocks).
+#[test]
+fn a_cod_flees_a_nearby_player() {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..16 {
+        for x in 0..16 {
+            world.set_block(x, 0, z, "minecraft:stone");
+            for y in 1..=6 {
+                world.set_block(x, y, z, "minecraft:water");
+            }
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    let player = Vec3::new(8.5, 3.5, 5.5);
+    let id = sim.spawn_species("minecraft:cod".parse().expect("valid key"), Vec3::new(8.5, 3.5, 8.5)).id();
+    sim.set_players(vec![PerceivedPlayer {
+        identity: None,
+        perception: PlayerPerception {
+            position: player,
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
+        },
+    }]);
+    for _ in 0..60 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+    }
+    let p = sim.get(id).expect("alive").position();
+    let away = (p.x - player.x).hypot(p.z - player.z);
+    assert!(away > 4.5, "the cod is {away} blocks from the player");
+}

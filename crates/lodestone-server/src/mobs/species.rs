@@ -150,6 +150,11 @@ pub(super) fn avoided_species(species: &str) -> &'static [&'static str] {
     }
 }
 
+/// Species that flee any nearby player (the fish base registration).
+pub(super) fn flees_players(species: &str) -> bool {
+    matches!(species, "cod" | "salmon" | "tropical_fish" | "pufferfish")
+}
+
 /// Whether `entity_type` is fire-immune (`Entity.fireImmune()`, vanilla's own
 /// `EntityType.Builder.fireImmune()` registration flag) — an immune mob's
 /// burn counter is cleared outright rather than merely dealing no damage (see

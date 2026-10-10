@@ -718,7 +718,11 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
     } else {
         base.map_or((0.6, 1.95), |d| (d.width, d.height))
     };
-    let mut shape = MobShape::land(width * scale, height * scale);
+    let mut shape = if species_swims(entity_type) {
+        MobShape::swimmer(width * scale, height * scale)
+    } else {
+        MobShape::land(width * scale, height * scale)
+    };
     shape.max_up_step = step_height;
     shape.can_open_doors = species_can_open_doors(entity_type);
     shape.can_float = species_can_float(entity_type);
@@ -727,6 +731,11 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
         shape.malus_overrides.insert(kind, malus);
     }
     shape
+}
+
+/// Species whose navigation moves only through water.
+fn species_swims(entity_type: &ResourceKey) -> bool {
+    matches!(entity_type.path(), "cod" | "salmon" | "tropical_fish" | "pufferfish")
 }
 
 /// Species whose setup unconditionally enables

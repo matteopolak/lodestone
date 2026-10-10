@@ -1868,6 +1868,7 @@ impl<'w> NavigatingMob<'w> {
         const CLIMB: f64 = 0.1;
         const DRAG: f64 = 0.9;
         const BUOYANCY: f64 = 0.005;
+        const AIR_DRAG: f64 = 0.91;
         if self.in_water {
             self.swim_vy += BUOYANCY;
         }
@@ -1896,10 +1897,16 @@ impl<'w> NavigatingMob<'w> {
         self.pos.x += step.0;
         self.pos.z += step.1;
         self.pos.y += self.swim_vy;
-        self.drift = (step.0 * DRAG, step.1 * DRAG);
-        self.swim_vy *= DRAG;
-        if self.attack_target.is_none() {
-            self.swim_vy -= BUOYANCY;
+        if self.in_water {
+            self.drift = (step.0 * DRAG, step.1 * DRAG);
+            self.swim_vy *= DRAG;
+            if self.attack_target.is_none() {
+                self.swim_vy -= BUOYANCY;
+            }
+        } else {
+            // Out of the water a swimmer falls like any other body.
+            self.drift = (step.0 * AIR_DRAG, step.1 * AIR_DRAG);
+            self.swim_vy = (self.swim_vy - FALL_GRAVITY_PER_TICK) * FALL_VERTICAL_AIR_DRAG;
         }
     }
 
@@ -1960,6 +1967,89 @@ impl<'w> NavigatingMob<'w> {
 impl NavigatingMob<'_> {
     /// Moves a ground destination onto the surface: a target in the air drops to
     /// the first block below it, and one inside a solid block rises out of it.
+    /// A destination for a swimmer: the stroll search, repeated while the
+    /// chosen cell is not water.
+    fn swim_target(&mut self) -> Option<Vec3> {
+        const RETRIES: u32 = 10;
+        let mut target = self.stroll_search(None);
+        for _ in 0..RETRIES {
+            let Some(t) = target else { break };
+            let (x, y, z) = (t.x.floor() as i32, t.y.floor() as i32, t.z.floor() as i32);
+            if self.world.base_path_type(x, y, z) == PathType::Water {
+                break;
+            }
+            target = self.stroll_search(None);
+        }
+        target
+    }
+
+    /// Ten random offsets, the first acceptable one winning (every candidate
+    /// weighs the same). Without `away` the offset is uniform in a 21 by 15 by
+    /// 21 box; with it, a point up to 16 out within a quarter turn of the
+    /// direction away from `away`.
+    fn stroll_search(&mut self, away: Option<Vec3>) -> Option<Vec3> {
+        const ATTEMPTS: u32 = 10;
+        const HORIZONTAL: i32 = 10;
+        const FLEE_REACH: f64 = 16.0;
+        const VERTICAL: i32 = 7;
+        let origin = (self.pos.x.floor() as i32, self.pos.y.floor() as i32, self.pos.z.floor() as i32);
+        for _ in 0..ATTEMPTS {
+            let (dx, dy, dz) = match away {
+                None => (
+                    MobController::next_i32(self, 2 * HORIZONTAL + 1) - HORIZONTAL,
+                    MobController::next_i32(self, 2 * VERTICAL + 1) - VERTICAL,
+                    MobController::next_i32(self, 2 * HORIZONTAL + 1) - HORIZONTAL,
+                ),
+                Some(threat) => {
+                    let (fx, fz) = (self.pos.x - threat.x, self.pos.z - threat.z);
+                    let centre = fz.atan2(fx) - std::f64::consts::FRAC_PI_2;
+                    let angle = centre
+                        + (2.0 * f64::from(MobController::next_f32(self)) - 1.0) * std::f64::consts::FRAC_PI_2;
+                    let reach = MobController::next_f64(self).sqrt() * FLEE_REACH * std::f64::consts::SQRT_2;
+                    let (x, z) = (-reach * angle.sin(), reach * angle.cos());
+                    if x.abs() > FLEE_REACH || z.abs() > FLEE_REACH {
+                        continue;
+                    }
+                    (x.floor() as i32, MobController::next_i32(self, 2 * VERTICAL + 1) - VERTICAL, z.floor() as i32)
+                }
+            };
+            if let Some(found) = self.stroll_candidate(origin.0 + dx, origin.1 + dy, origin.2 + dz) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Whether the cell is an acceptable stroll destination for this body, and
+    /// where its bottom centre stands once lifted out of any solid block. A
+    /// walker needs ground under it and no penalised or watery type; a swimmer
+    /// needs open space and no penalty.
+    fn stroll_candidate(&self, x: i32, mut y: i32, z: i32) -> Option<Vec3> {
+        const MAX_LIFT: i32 = 64;
+        if y < self.world.min_y() {
+            return None;
+        }
+        let solid = |w: &dyn PathWorld, x: i32, y: i32, z: i32| w.collision_top(x, y, z) > 0.0;
+        if self.shape.nav_mode == NavMode::Swim {
+            if solid(self.world, x, y, z) || self.shape.malus(self.world.base_path_type(x, y, z)) != 0.0 {
+                return None;
+            }
+        } else {
+            if self.world.base_path_type(x, y - 1, z) == PathType::Open {
+                return None;
+            }
+            let limit = y + MAX_LIFT;
+            while solid(self.world, x, y, z) && y <= limit {
+                y += 1;
+            }
+            let kind = self.world.base_path_type(x, y, z);
+            if y > limit || kind == PathType::Water || self.shape.malus(kind) != 0.0 {
+                return None;
+            }
+        }
+        Some(Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5))
+    }
+
     fn surface_block(&self, block: BlockPos) -> BlockPos {
         if self.shape.nav_mode == NavMode::Swim {
             return block;
@@ -2402,38 +2492,17 @@ impl MobController for NavigatingMob<'_> {
     /// pathing-penalty cell; the first valid one wins (every candidate weighs
     /// the same), snapped to its cell's bottom centre.
     fn random_stroll_target(&mut self) -> Option<Vec3> {
-        const ATTEMPTS: u32 = 10;
-        const HORIZONTAL: i32 = 10;
-        const VERTICAL: i32 = 7;
-        const MAX_LIFT: i32 = 64;
-        let origin = (
-            self.pos.x.floor() as i32,
-            self.pos.y.floor() as i32,
-            self.pos.z.floor() as i32,
-        );
-        let solid = |w: &dyn PathWorld, x: i32, y: i32, z: i32| w.collision_top(x, y, z) > 0.0;
-        for _ in 0..ATTEMPTS {
-            let dx = MobController::next_i32(self, 2 * HORIZONTAL + 1) - HORIZONTAL;
-            let dy = MobController::next_i32(self, 2 * VERTICAL + 1) - VERTICAL;
-            let dz = MobController::next_i32(self, 2 * HORIZONTAL + 1) - HORIZONTAL;
-            let (x, mut y, z) = (origin.0 + dx, origin.1 + dy, origin.2 + dz);
-            if y < self.world.min_y() || self.world.base_path_type(x, y - 1, z) == PathType::Open {
-                continue;
-            }
-            let limit = y + MAX_LIFT;
-            while solid(self.world, x, y, z) && y <= limit {
-                y += 1;
-            }
-            if y > limit {
-                continue;
-            }
-            let kind = self.world.base_path_type(x, y, z);
-            if kind == PathType::Water || self.shape.malus(kind) != 0.0 {
-                continue;
-            }
-            return Some(Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5));
+        if self.shape.nav_mode == NavMode::Swim {
+            return self.swim_target();
         }
-        None
+        self.stroll_search(None)
+    }
+
+    fn flee_target(&mut self, threat: Vec3) -> Option<Vec3> {
+        let target = self.stroll_search(Some(threat))?;
+        let farther = (target.x - threat.x).powi(2) + (target.y - threat.y).powi(2) + (target.z - threat.z).powi(2)
+            >= (self.pos.x - threat.x).powi(2) + (self.pos.y - threat.y).powi(2) + (self.pos.z - threat.z).powi(2);
+        farther.then_some(target)
     }
 
     fn is_baby(&self) -> bool {
@@ -3902,6 +3971,25 @@ mod tests {
             Some(MAX_SWELL),
             "a stationary target within 3 blocks must detonate in exactly MAX_SWELL ticks"
         );
+    }
+
+    #[test]
+    fn swell_goal_holds_the_fuse_down_when_a_wall_hides_a_close_target() {
+        // A target 2 blocks away behind a full-height wall is within the start
+        // range but out of sight, so the fuse never rises. Control: the same
+        // geometry with the wall removed detonates (the test above).
+        let walls: HashSet<_> = (0..=2).map(|y| (1, y, 0)).collect();
+        let world = Arena { walls };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        mob.set_attack_target(Some(Vec3::new(2.0, 0.0, 0.0)));
+        let mut ai = GoalSelector::new();
+        ai.add(0, Box::new(SwellGoal::new()));
+        for _ in 0..MAX_SWELL {
+            mob.tick(&mut ai);
+            assert_eq!(mob.swell(), 0, "the fuse must not rise without sight");
+        }
+        assert!(!mob.take_detonated());
     }
 
     #[test]

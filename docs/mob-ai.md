@@ -66,7 +66,7 @@ Skeleton-family species register through `hostile_melee`'s shared table because 
 
 ### Goal cadence
 
-A mob's goals start, stop and tick only on its "full" parity ticks (every second tick, offset by the mob's id, and the first two ticks). On the off ticks only goals that declare `requires_update_every_tick` run (swim-float, look-around, swell, melee, the ranged attacks). Raw tick delays are halved with `reduced_tick_delay` (`ceil(n/2)`) because they count goal ticks. Two consequences for tests: draw `n` of a lone goal's RNG lands near tick `2n`, and a state change driven by a goal needs two sim ticks to be sure of including a goal tick.
+A mob's goals start, stop and tick only on its "full" parity ticks (every second tick, offset by the mob's id, and the first two ticks). On the off ticks only goals that declare `requires_update_every_tick` run (swim-float, look-around, swell, melee, the ranged attacks). The swell goal also drops its fuse when the target is out of sight. Raw tick delays are halved with `reduced_tick_delay` (`ceil(n/2)`) because they count goal ticks. Two consequences for tests: draw `n` of a lone goal's RNG lands near tick `2n`, and a state change driven by a goal needs two sim ticks to be sure of including a goal tick.
 
 ### Pathing parameters
 
@@ -79,7 +79,13 @@ A mob's goals start, stop and tick only on its "full" parity ticks (every second
 
 ### Swimming
 
-`MobShape::swimmer` selects `NavMode::Swim`: the search expands the six faces plus horizontal diagonals over cells whose whole body extent is water, and `swim_step` moves with a eased speed, a vertical push proportional to the vertical share of the heading, and a 0.9 drag. No species is registered as a swimmer yet (no fish roster, squid, wall-climb, sun-avoid, fly or amphibious navigation), so the mode is exercised only by `tests/swimming.rs`.
+`MobShape::swimmer` selects `NavMode::Swim`: the search expands the six faces plus horizontal diagonals over cells whose whole body extent is water, and `swim_step` moves with an eased speed, a vertical push proportional to the vertical share of the heading, a 0.9 drag and gravity once out of the water. A swimmer's stroll destination comes from the same ten-offset search, kept only if the cell is open water.
+
+Cod, salmon, tropical fish and pufferfish are swimmers (`species_swims` in `mobs/mod.rs`) with the `roster/aquatic.rs` goals: panic, flee players within 8 blocks (the perception feed is `flees_players`), swim stroll. Flock following and the pufferfish puff are `Missing` rows. Squid, wall-climbing spiders, sun avoidance, flying mobs and amphibious navigation are not implemented.
+
+### Fleeing
+
+`MobController::flee_target` picks the destination of an avoid goal: up to 16 blocks out within a quarter turn of the direction away from the threat, rejected if nearer the threat than the mob already is. A controller that cannot aim falls back to the plain stroll search.
 
 ### Terrain and sight
 

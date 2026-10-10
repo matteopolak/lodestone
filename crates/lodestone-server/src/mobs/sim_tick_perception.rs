@@ -757,6 +757,9 @@ impl<'w> MobSim<'w> {
                     Some((AVOID_RANGE, AVOID_RANGE_Y)),
                 );
             }
+            if species::flees_players(&species) {
+                threat[i] = nearest_by(&self.players, pos, |p| p.perception.position, |_| true, Some((8.0, 8.0)));
+            }
 
             // --- breeding partner -----------------------------------------
             // Vanilla's own generic "can mate" check: the

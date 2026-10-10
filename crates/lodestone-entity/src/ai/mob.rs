@@ -84,9 +84,18 @@ pub trait MobController {
         None
     }
 
-    /// A candidate wander destination (vanilla's own random-position search).
+    /// A candidate wander destination (vanilla's own random-position search);
+    /// a swimming mob's lies in water.
     /// Returning `None` means no valid spot was found this attempt.
     fn random_stroll_target(&mut self) -> Option<Vec3>;
+
+    /// A destination at least as far from `threat` as the mob now is, searched
+    /// within a quarter turn of the direction away from it. Defaults to the
+    /// plain stroll search for a controller that cannot aim.
+    fn flee_target(&mut self, threat: Vec3) -> Option<Vec3> {
+        let _ = threat;
+        self.random_stroll_target()
+    }
 
     /// The current attack target's position, if the mob has one.
     fn attack_target(&self) -> Option<Vec3> {

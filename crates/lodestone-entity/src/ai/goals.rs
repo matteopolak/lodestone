@@ -416,7 +416,10 @@ impl Goal for SwellGoal {
 
     fn tick(&mut self, mob: &mut dyn MobController) {
         match mob.attack_target() {
-            Some(t) if distance_sqr(t, mob.position()) <= Self::STOP_RANGE_SQR => {
+            Some(t)
+                if distance_sqr(t, mob.position()) <= Self::STOP_RANGE_SQR
+                    && mob.has_line_of_sight(t) =>
+            {
                 mob.set_swell_dir(1);
             }
             _ => mob.set_swell_dir(-1),
@@ -459,7 +462,7 @@ impl Goal for AvoidEntityGoal {
         if distance_sqr(threat, mob.position()) > self.max_distance * self.max_distance {
             return false;
         }
-        self.flee_target = mob.random_stroll_target();
+        self.flee_target = mob.flee_target(threat);
         self.flee_target.is_some()
     }
 
