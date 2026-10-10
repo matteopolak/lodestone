@@ -158,6 +158,11 @@ impl Path {
         self.nodes.last().copied()
     }
 
+    /// Keeps only the first `len` waypoints.
+    pub fn truncate(&mut self, len: usize) {
+        self.nodes.truncate(len);
+    }
+
     /// Advances to the next waypoint.
     pub fn advance(&mut self) {
         self.next_index += 1;

@@ -865,3 +865,139 @@ fn a_mob_trajectory_is_a_pure_function_of_its_spawn() {
     };
     assert!(trace() == trace(), "identical spawns diverged");
 }
+
+fn viewed(x: f64, y: f64, z: f64, entity_id: i32) -> PerceivedPlayer {
+    PerceivedPlayer {
+        identity: Some(PlayerIdentity { uuid: uuid::Uuid::from_u128(entity_id as u128), entity_id }),
+        perception: PlayerPerception {
+            position: Vec3::new(x, y, z),
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, -1.0),
+        },
+    }
+}
+
+/// The first target a phantom at (8.5, 26, 32.5) picks at night among `players`.
+fn phantom_first_target(players: Vec<PerceivedPlayer>) -> Option<Vec3> {
+    let world = bat_world(false);
+    let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
+    let id = sim.spawn_species("minecraft:phantom".parse().expect("valid key"), Vec3::new(8.5, 26.0, 32.5)).id();
+    sim.set_players(players);
+    for _ in 0..400 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        if let Some(target) = sim.get(id).expect("alive").attack_target() {
+            return Some(target);
+        }
+    }
+    None
+}
+
+/// Of two players in reach a phantom takes the higher even when the lower is
+/// nearer: the one at y 12 is 14 blocks away, the one at y 40 is 17.2.
+#[test]
+fn a_phantom_targets_the_highest_player_not_the_nearest() {
+    let target = phantom_first_target(vec![viewed(8.5, 12.0, 32.5, 1), viewed(18.5, 40.0, 32.5, 2)]);
+    assert_eq!(target.map(|t| t.y), Some(40.0));
+}
+
+/// The scan box is 16 blocks wide each way horizontally: a player 20 away is
+/// never taken, one 10 away is.
+#[test]
+fn a_phantom_ignores_players_beyond_sixteen_blocks_horizontally() {
+    assert_eq!(phantom_first_target(vec![viewed(60.5, 20.0, 32.5, 1)]), None);
+    assert!(phantom_first_target(vec![viewed(18.5, 20.0, 32.5, 1)]).is_some());
+}
+
+/// Hits a phantom lands on a player over 2400 night ticks with `cats` cats
+/// standing beside the player.
+fn phantom_hits(cats: usize) -> usize {
+    let world = bat_world(false);
+    let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
+    sim.spawn_species("minecraft:phantom".parse().expect("valid key"), Vec3::new(32.5, 26.0, 32.5));
+    for i in 0..cats {
+        sim.spawn_species("minecraft:cat".parse().expect("valid key"), Vec3::new(33.5 + i as f64, 1.0, 32.5));
+    }
+    sim.set_players(vec![viewed(32.5, 1.0, 32.5, 42)]);
+    let mut hits = 0;
+    for _ in 0..2400 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        hits += sim.take_player_hits().len();
+    }
+    hits
+}
+
+/// A cat within 16 blocks ends a swoop whenever the tick count is a multiple of
+/// twenty, so a phantom with cats about lands fewer dives.
+#[test]
+fn a_cat_near_the_player_scares_a_phantom_off_its_dives() {
+    let without = phantom_hits(0);
+    let with = phantom_hits(1);
+    assert!(without >= 3, "{without} hits without a cat");
+    assert!(with < without, "{with} hits with a cat, {without} without");
+}
+
+/// A ghast faces a target within 64 blocks: its yaw is the bearing to the
+/// target, `-atan2(dx, dz)` (south is 0, east -90), not its drift heading.
+#[test]
+fn a_ghast_turns_to_face_its_target() {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..64 {
+        for x in 0..64 {
+            world.set_block(x, 0, z, "minecraft:stone");
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    let id = sim.spawn_species("minecraft:ghast".parse().expect("valid key"), Vec3::new(8.5, 4.0, 32.5)).id();
+    sim.set_players(vec![viewed(40.5, 4.0, 32.5, 1)]);
+    for _ in 0..200 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+    }
+    let mob = sim.get(id).expect("alive");
+    assert!(mob.attack_target().is_some(), "no target acquired");
+    let (here, target) = (mob.position(), mob.attack_target().expect("target"));
+    let expected = -(target.x - here.x).atan2(target.z - here.z).to_degrees();
+    let yaw = f64::from(mob.rotation().yaw);
+    assert!((yaw - expected).abs() < 1.0, "yaw {yaw}, facing the target is {expected}");
+}
+
+/// A skeleton under a roof 4 blocks wide, in daylight, never leaves it by
+/// wandering: paths stop short of the first sunlit waypoint. At night the same
+/// skeleton does leave.
+#[test]
+fn a_skeleton_in_daylight_wanders_only_under_cover() {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..32 {
+        for x in 0..32 {
+            world.set_block(x, 0, z, "minecraft:stone");
+            if (12..20).contains(&x) && (4..28).contains(&z) {
+                world.set_block(x, 4, z, "minecraft:stone");
+            }
+        }
+    }
+    // Beyond a skeleton's 16-block follow range, inside the 32 that keep it awake.
+    let leavers = |day_time: i32| {
+        let mut sim = MobSim::new(&world);
+        sim.set_day_time(day_time);
+        sim.set_players(vec![viewed(15.5, 1.0, 40.5, 9)]);
+        let ids: Vec<i32> = (0..8)
+            .map(|i| {
+                let at = Vec3::new(15.5, 1.0, 6.5 + f64::from(i) * 2.5);
+                sim.spawn_species("minecraft:skeleton".parse().expect("valid key"), at).id()
+            })
+            .collect();
+        let mut left = [false; 8];
+        for _ in 0..3000 {
+            sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+            for (flag, &id) in left.iter_mut().zip(&ids) {
+                if let Some(m) = sim.get(id) {
+                    *flag |= !(11.5..20.5).contains(&m.position().x);
+                }
+            }
+        }
+        left.iter().filter(|&&l| l).count()
+    };
+    assert_eq!(leavers(6000), 0, "skeletons walked out into the sun");
+    assert!(leavers(18000) >= 3, "only {} of 8 left the roof at night", leavers(18000));
+}

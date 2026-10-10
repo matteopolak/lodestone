@@ -619,6 +619,7 @@ impl<'w> MobSim<'w> {
     pub(super) fn feed_perception(&mut self) {
         let n = self.mobs.len();
         let mut nearest_player = vec![None; n];
+        let mut sky_hunt: Vec<(Vec<Vec3>, bool)> = vec![(Vec::new(), false); n];
         let mut temptation = vec![None; n];
         let mut threat = vec![None; n];
         let mut partner = vec![None; n];
@@ -722,6 +723,26 @@ impl<'w> MobSim<'w> {
             // minimum of two ranges and make the goal's own parameter a lie.
             nearest_player[i] =
                 nearest_by(&self.players, pos, |p| p.perception.position, |_| true, None);
+
+            // --- phantom scan box ------------------------------------------
+            // Players within 16 blocks horizontally and 64 vertically, highest
+            // first, and any cat within 16 blocks of the body.
+            if species == "phantom" {
+                let mut high: Vec<Vec3> = self
+                    .players
+                    .iter()
+                    .map(|p| p.perception.position)
+                    .filter(|p| (p.x - pos.x).abs() <= 16.0 && (p.z - pos.z).abs() <= 16.0 && (p.y - pos.y).abs() <= 64.0)
+                    .collect();
+                high.sort_by(|a, b| b.y.total_cmp(&a.y));
+                let cat_near = self.mobs.iter().any(|o| {
+                    o.entity_type().path() == "cat"
+                        && (o.position().x - pos.x).abs() <= 16.0
+                        && (o.position().y - pos.y).abs() <= 16.0
+                        && (o.position().z - pos.z).abs() <= 16.0
+                });
+                sky_hunt[i] = (high, cat_near);
+            }
 
             // --- temptation -----------------------------------------------
             // The range *is* on the mob here (vanilla's own tempt-range attribute), so it
@@ -1010,6 +1031,8 @@ impl<'w> MobSim<'w> {
             let job_site = m.workstation.map(block_center);
             let home = m.bed.map(block_center);
             let meeting_point = m.meeting_point.map(block_center);
+            let (high, cat_near) = std::mem::take(&mut sky_hunt[i]);
+            m.mob.set_sky_hunt_inputs(high, cat_near);
             m.mob
                 .set_nearest_player(nearest_player[i])
                 .set_temptation(temptation[i])

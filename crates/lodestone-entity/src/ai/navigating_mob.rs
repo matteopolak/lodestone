@@ -371,6 +371,8 @@ pub struct MobBody {
     against_wall: bool,
     /// Whether the last step was a wall climb, which gravity does not touch.
     climbed: bool,
+    /// Whether paths are cut short of sunlit cells.
+    avoid_sun: bool,
     /// Whether the last terrain sweep blocked downward motion. The navigation
     /// snapshot answers path topology, while the server owns the live collision
     /// sweep that refreshes this after each tick.
@@ -378,6 +380,9 @@ pub struct MobBody {
     /// The mob's body yaw in degrees, derived from its horizontal movement
     /// direction and retained across idle ticks (vanilla `yBodyRot`).
     body_yaw: f32,
+    /// A body yaw a goal asked for this tick; a free flier applies it in place
+    /// of its movement heading.
+    face_override: Option<f32>,
     /// Vanilla `Animal.inLove`: remaining love-mode ticks, set to
     /// [`LOVE_TICKS`] by [`set_in_love`](Self::set_in_love) and decremented
     /// once per [`advance`](Self::advance) regardless of what any goal does
@@ -464,6 +469,10 @@ pub struct MobBody {
     /// goal still applies its own `lookDistance` cut-off on top, so a host
     /// that over-reports is merely wasteful, not wrong.
     nearest_player: Option<Vec3>,
+    /// Host-fed, phantoms only: players inside the scan box, highest first.
+    players_by_height: Vec<Vec3>,
+    /// Host-fed, phantoms only: a cat within 16 blocks of the body.
+    cat_near: bool,
     /// Host injection point, refreshed once per tick: the position of a nearby
     /// entity currently tempting this mob, or `None`. Drives
     /// [`MobController::temptation`] and therefore
@@ -826,8 +835,10 @@ impl<'w> NavigatingMob<'w> {
             sea_level,
             against_wall: false,
             climbed: false,
+            avoid_sun: false,
             on_ground: false,
             body_yaw: 0.0,
+            face_override: None,
             love_ticks: 0,
             partner_candidate: None,
             bred: false,
@@ -840,6 +851,8 @@ impl<'w> NavigatingMob<'w> {
             ignited: false,
             detonated: false,
             nearest_player: None,
+            players_by_height: Vec::new(),
+            cat_near: false,
             temptation: None,
             avoid_threat: None,
             no_action_time: 0,
@@ -1355,6 +1368,14 @@ impl<'w> NavigatingMob<'w> {
     /// tick. See the `nearest_player` field's own doc comment.
     pub fn set_nearest_player(&mut self, player: Option<Vec3>) -> &mut Self {
         self.nearest_player = player;
+        self
+    }
+
+    /// Host injection point: the players a phantom may target, highest first,
+    /// and whether a cat is near. Both are per-tick perception.
+    pub fn set_sky_hunt_inputs(&mut self, players_by_height: Vec<Vec3>, cat_near: bool) -> &mut Self {
+        self.players_by_height = players_by_height;
+        self.cat_near = cat_near;
         self
     }
 
@@ -1930,7 +1951,9 @@ impl<'w> NavigatingMob<'w> {
         if self.shape.nav_mode == NavMode::Fly {
             self.fly_step();
             self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
-            if self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z > 1e-12 {
+            if let Some(yaw) = self.face_override.take() {
+                self.body_yaw = yaw;
+            } else if self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z > 1e-12 {
                 self.body_yaw = movement_yaw(self.velocity.x, self.velocity.z);
             }
             return;
@@ -2706,6 +2729,18 @@ impl NavigatingMob<'_> {
         BlockPos::new(block.x, y, block.z)
     }
 
+    /// Cuts a path short of its first sky-lit waypoint, unless the mob already
+    /// stands under open sky.
+    fn trim_path_for_sun(&self, path: &mut crate::pathfinding::Path) {
+        let lit = |x: i32, y: i32, z: i32| self.world.sees_sky(x, y, z);
+        if lit(self.pos.x.floor() as i32, (self.pos.y + 0.5).floor() as i32, self.pos.z.floor() as i32) {
+            return;
+        }
+        if let Some(i) = path.nodes().iter().position(|n| lit(n.x, n.y, n.z)) {
+            path.truncate(i);
+        }
+    }
+
     /// Paths to `target` and starts following, stopping within `reach` blocks
     /// (Manhattan) of it.
     pub(crate) fn move_to_within(&mut self, target: Vec3, speed: f64, reach: i32) -> bool {
@@ -2757,7 +2792,13 @@ impl NavigatingMob<'_> {
             .finder
             .find_path(self.world, &self.shape, start, &[block], params)
         {
-            Some(path) => {
+            Some(mut path) => {
+                if self.avoid_sun {
+                    self.trim_path_for_sun(&mut path);
+                }
+                if path.is_empty() {
+                    return false;
+                }
                 let speed = self.goal_speed(speed);
                 self.navigator.start(path, speed);
                 self.move_calls += 1;
@@ -2771,6 +2812,10 @@ impl NavigatingMob<'_> {
 impl MobController for NavigatingMob<'_> {
     fn sea_level(&self) -> i32 {
         self.sea_level
+    }
+
+    fn set_avoid_sun(&mut self, avoid: bool) {
+        self.avoid_sun = avoid;
     }
 
     fn set_searching_for_land(&mut self, searching: bool) {
@@ -2886,6 +2931,14 @@ impl MobController for NavigatingMob<'_> {
         self.nearest_player
     }
 
+    fn players_by_height(&self) -> &[Vec3] {
+        &self.players_by_height
+    }
+
+    fn cat_near(&self) -> bool {
+        self.cat_near
+    }
+
     fn last_hurt_by(&self) -> Option<Vec3> {
         self.last_hurt_by
     }
@@ -2938,6 +2991,10 @@ impl MobController for NavigatingMob<'_> {
 
     fn look_at(&mut self, target: Vec3) {
         self.last_look = Some(target);
+    }
+
+    fn face_toward(&mut self, dx: f64, dz: f64) {
+        self.face_override = Some(movement_yaw(dx, dz));
     }
 
     fn look_toward(&mut self, dx: f64, dz: f64) {

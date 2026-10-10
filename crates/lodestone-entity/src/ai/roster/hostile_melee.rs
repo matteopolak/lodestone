@@ -340,6 +340,10 @@ fn drowned_player_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 }
 
 /// The flee-sun registration's speed multiplier, `1.0`.
+fn restrict_sun(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::goals::RestrictSunGoal)
+}
+
 fn flee_sun(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FleeSunGoal::new(ctx.speed))
 }
@@ -384,11 +388,10 @@ fn flee_sun(ctx: &SpeciesContext) -> Box<dyn Goal> {
 ///
 /// [`GoalSelector::remove`]: crate::ai::GoalSelector::remove
 pub static SKELETON: &[Registration] = &[
-    // Restrict-sun is a sky-light penalty in the path evaluator and stays
-    // missing; flee-sun heads for the first of ten random spots the sky
-    // does not light (the reference also wants a bright cell, which needs
-    // light levels this seam lacks).
-    Registration::missing(Selector::Goal, 2, "RestrictSunGoal"),
+    // Flee-sun heads for the first of ten random spots the sky does not
+    // light. The reference also wants that cell brighter than a threshold,
+    // which needs block light the mob world does not carry.
+    Registration::goal(2, "RestrictSunGoal", restrict_sun),
     Registration::goal(3, "FleeSunGoal", flee_sun),
     Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
     // Vanilla's own weapon-reassessment step's bow branch, the only one a
@@ -431,7 +434,7 @@ pub static WITHER_SKELETON: &[Registration] = &[
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(AbstractPiglin)"),
     // -- vanilla's own base registration plus the
     // -- weapon `else` branch --------------------------------------------
-    Registration::missing(Selector::Goal, 2, "RestrictSunGoal"),
+    Registration::goal(2, "RestrictSunGoal", restrict_sun),
     Registration::goal(3, "FleeSunGoal", flee_sun),
     Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
     // The `else` half of vanilla's own weapon-reassessment step — the one

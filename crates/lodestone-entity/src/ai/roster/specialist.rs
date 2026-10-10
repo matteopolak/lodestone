@@ -66,11 +66,8 @@
 //!
 //! ## Anything that reduces to "launch a projectile on an interval" belongs to the ranged-attack roster
 //!
-//! The ghast's fireball is exactly that shape — `chargeTime == 20` then a
-//! `LargeFireball`, resetting to `-40` (vanilla's own per-tick update) —
-//! so [`GHAST`]'s row for it is [`Coverage::Missing`](super::Coverage::Missing)
-//! rather than a second, competing implementation of the ranged-attack roster's
-//! goal (`super::ranged`). The drowned's
+//! The ghast's fireball is exactly that shape, so [`GHAST`]'s row for it is
+//! the ranged roster's goal (`super::ranged`), not a second implementation. The drowned's
 //! trident is the same call and **already** lives in
 //! [`super::hostile_melee::DROWNED`] as a `Missing` row at goal-priority 2
 //! (vanilla's own drowned trident-attack goal); this file must not duplicate it.
@@ -420,39 +417,46 @@ fn float_around(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(crate::ai::goals::FloatAroundGoal::new())
 }
 
-/// Vanilla's own ghast goal registration.
+fn ghast_look(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(GhastLookGoal)
+}
+
+/// Turns the ghast's whole body toward its target while the target is within 64
+/// blocks. With no target the free-flight move already faces the heading.
+#[derive(Debug)]
+struct GhastLookGoal;
+
+impl Goal for GhastLookGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Look])
+    }
+
+    fn can_use(&mut self, _mob: &mut dyn MobController) -> bool {
+        true
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        let Some(target) = mob.attack_target() else { return };
+        let here = mob.position();
+        if distance_sqr(target, here) < 4096.0 {
+            mob.face_toward(target.x - here.x, target.z - here.z);
+        }
+    }
+}
+
+/// The ghast: random float, body facing, fireball and the player target scan.
 ///
-/// **Two of four rows are `Missing`, and the table exists anyway.** That is a
-/// deliberate trade, so read this before "fixing" it:
-///
-/// Without an entry, `ghast` falls to [`FALLBACK`](super::FALLBACK) and a ghast
-/// **walks around on the ground looking for something to look at**. With this
-/// entry it acquires a target, fires on it, and otherwise holds still. Neither
-/// is fully vanilla, but only one of them is a lie about what a ghast is, and
-/// only one of them records *why* the ghast's flight is unreachable at the
-/// place the next agent will look. Losing the fallback's stroll is the price
-/// and it is worth paying: a ghast is a flying mob and ground strolling is not
-/// a degraded version of flying, it is a different animal.
-///
-/// * **Vanilla's own random-float-around goal** at 5 and **its own ghast look goal** at 7
-///   both drive vanilla's own ghast move-control, a free-flight controller with no
-///   pathfinding. `NavigatingMob` is ground-based A\*; there is no flying
-///   navigation seam at all, so these are not approximations waiting on a
-///   constant, they are waiting on a navigator.
-/// * **Vanilla's own ghast fireball-attack goal** at 7 is now real —
-///   [`super::ranged::ghast_fireball`], a port of vanilla's own per-tick update
-///   (charge to 20 ticks, launch a
-///   [`LargeFireball`](crate::ai::mob::ProjectileKind::LargeFireball), reset to
-///   `-40`) through the same launch seam
-///   ([`MobController::launch_projectile`]) the rest of the ranged-attack
-///   roster uses. Its own doc discloses what it does not model: the
-///   line-of-sight half of the range gate (no world/raycast access on
-///   `MobController`) and the charging sound/visual state.
-/// * **The target row** at 1 is the player class with a ±4-block vertical band,
-///   which ours does not model.
+/// The fireball fires through the ranged roster's launch seam
+/// ([`super::ranged::ghast_fireball`]); the line-of-sight half of its range gate
+/// is not modelled. The target row is the plain player scan without the +-4
+/// block vertical band.
 pub static GHAST: &[Registration] = &[
     Registration::goal(5, "Ghast.RandomFloatAroundGoal", float_around),
-    Registration::missing(Selector::Goal, 7, "Ghast.GhastLookGoal"),
+    Registration::goal(7, "Ghast.GhastLookGoal", ghast_look),
     Registration::goal(7, "Ghast.GhastShootFireballGoal", super::ranged::ghast_fireball),
     Registration::target(
         1,

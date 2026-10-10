@@ -580,6 +580,29 @@ impl Goal for FloatAroundGoal {
     }
 }
 
+/// While it is bright outside and the head is bare, the mob's new paths stop
+/// short of the first sunlit waypoint.
+#[derive(Debug, Default)]
+pub struct RestrictSunGoal;
+
+impl Goal for RestrictSunGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::none()
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        mob.bright_outside() && !mob.wears_helmet()
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.set_avoid_sun(true);
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.set_avoid_sun(false);
+    }
+}
+
 /// Runs for shade once the sun has set the mob alight: with no target, bright
 /// outside, burning under open sky and bareheaded, it tries ten random spots
 /// within 10 blocks horizontally and 3 vertically and heads for the first one

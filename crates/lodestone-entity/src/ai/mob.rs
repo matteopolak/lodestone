@@ -108,6 +108,9 @@ pub trait MobController {
     /// Points the look control at a world position.
     fn look_at(&mut self, target: Vec3);
 
+    /// Turns the whole body toward a horizontal offset (a free flier's facing).
+    fn face_toward(&mut self, _dx: f64, _dz: f64) {}
+
     /// Sets the desired look direction from a horizontal offset (used by the
     /// random-look goal).
     fn look_toward(&mut self, dx: f64, dz: f64);
@@ -115,6 +118,17 @@ pub trait MobController {
     /// The nearest player's position, if one is within perception range.
     fn nearest_player(&self) -> Option<Vec3> {
         None
+    }
+
+    /// Players inside a phantom's scan box (16 blocks horizontally, 64
+    /// vertically), highest first. Empty for every other species.
+    fn players_by_height(&self) -> &[Vec3] {
+        &[]
+    }
+
+    /// Whether a cat is within 16 blocks of the body (fed for phantoms only).
+    fn cat_near(&self) -> bool {
+        false
     }
 
     /// A candidate wander destination (vanilla's own random-position search);
@@ -151,6 +165,9 @@ pub trait MobController {
         let _ = at;
         false
     }
+
+    /// Makes new paths stop short of sunlit cells (a ground mob only).
+    fn set_avoid_sun(&mut self, _avoid: bool) {}
 
     /// Whether it is bright enough outside (by the sky, not the cell) for the
     /// sun to matter.

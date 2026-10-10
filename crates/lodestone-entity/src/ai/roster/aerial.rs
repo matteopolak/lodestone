@@ -21,8 +21,10 @@
 //!
 //! # How to change it
 //!
-//! Not modelled: cats frightening a swooping phantom away, picking the highest of several players (the nearest
-//! is taken), and the horizontal 16-block limit of the target scan.
+//! The target scan takes the highest player inside a box of 16 blocks
+//! horizontally and 64 vertically that the phantom can see (the host feeds
+//! [`players_by_height`](MobController::players_by_height)). Every 20 ticks a
+//! cat within 16 blocks ends a swoop. The cat's hiss is not modelled.
 
 use lodestone_model::Vec3;
 
@@ -95,8 +97,8 @@ impl Goal for AttackPlayerTargetGoal {
             return false;
         }
         self.next_scan = reduced_tick_delay(60);
-        self.found = mob.nearest_player().filter(|&p| {
-            let here = mob.position();
+        let here = mob.position();
+        self.found = mob.players_by_height().iter().copied().find(|&p| {
             (p.x - here.x).powi(2) + (p.y - here.y).powi(2) + (p.z - here.z).powi(2) <= SCAN_RANGE * SCAN_RANGE
                 && mob.has_line_of_sight(p)
         });
@@ -185,6 +187,10 @@ impl Goal for SweepAttackGoal {
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
         mob.attack_target().is_some() && mob.swoop().is_some_and(|s| s.swooping)
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        self.can_use(mob) && !(mob.tick_count().is_multiple_of(20) && mob.cat_near())
     }
 
     fn stop(&mut self, mob: &mut dyn MobController) {
