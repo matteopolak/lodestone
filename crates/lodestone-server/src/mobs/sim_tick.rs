@@ -926,16 +926,13 @@ impl<'w> MobSim<'w> {
         // fireball landed this one.
         self.tick_burning();
         self.tick_leashes();
-        #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_professions();
         // villager bed claiming — see `tick_villager_beds`'s own
         // doc for why this is a separate memory from the job site above.
-        #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_beds();
         // villager bell claiming — see `tick_villager_bells`'s
         // own doc for why this is a third, independent memory from the job
         // site and bed above.
-        #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_bells();
         // fishing bobbers. Reads `self.world` (the static
         // per-tick terrain snapshot, not the live `view` oracle the item/orb

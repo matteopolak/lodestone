@@ -510,7 +510,6 @@ impl<'w> MobSim<'w> {
         // Job-site, bed and bell claims live in the native point-of-interest
         // ledgers; without them the browser build keeps the profession and
         // searches again.
-        #[cfg(not(target_arch = "wasm32"))]
         {
             // The claim is re-acquired, not trusted: the saved job site only counts
             // if the block there still hands out this profession and a ticket is

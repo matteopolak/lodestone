@@ -14,8 +14,8 @@
 //! # How it works
 //!
 //! `crate::poi_storage` carries every profession POI type's ticket cap in
-//! [`crate::poi_storage::max_tickets`] and the claim mechanics themselves
-//! ([`crate::poi_storage::PoiRecord::acquire_ticket`]/`release_ticket`).
+//! [`crate::poi_record::max_tickets`] and the claim mechanics themselves
+//! ([`crate::poi_record::PoiRecord::acquire_ticket`]/`release_ticket`).
 //! [`WorkstationClaims`] wraps a `HashMap<BlockPos, PoiRecord>` and
 //! claims/releases through that record type rather than a parallel
 //! claimed-by-uuid table.
@@ -42,18 +42,6 @@
 //! - **Biome flavour is not derived.** Every claimed villager reports
 //!   `minecraft:plains` regardless of where it stands. This value is cosmetic;
 //!   profession and workstation claiming do not depend on it.
-//! - **[`WorkstationClaims`]/[`find_and_claim_workstation`] are native-only**,
-//!   `#[cfg(not(target_arch = "wasm32"))]` — they reuse
-//!   `crate::poi_storage::PoiRecord`, and `crate::poi_storage` itself is
-//!   gated the same way in `lib.rs` (a `std::fs` region-file module). This
-//!   crate compiles for `wasm32-unknown-unknown` (`scripts/wasm-check.sh`'s
-//!   `CRATES` list — the browser's own singleplayer path links it), so an
-//!   ungated `use crate::poi_storage::PoiRecord` here would break that build
-//!   exactly the way `crate::portal`'s POI conversion functions once did
-//!   (see `docs/point-of-interest-storage.md`'s own account of that break).
-//!   `Profession`, the block/POI/profession tables and leveling are plain
-//!   data with no such dependency and stay available on every target — only
-//!   the claim ledger itself, and the search that uses it, are narrowed.
 //!
 //! # Bed claiming ([`BedClaims`]) is a sibling of the above, not a new shape
 //!
@@ -104,10 +92,8 @@ use std::str::FromStr;
 use lodestone_data::block::Block;
 use lodestone_model::{BlockPos, ResourceKey};
 
-#[cfg(not(target_arch = "wasm32"))]
 use super::ChunkWorld;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::poi_storage::PoiRecord;
+use crate::poi_record::PoiRecord;
 
 pub mod conversion;
 pub mod gossip;
@@ -146,7 +132,7 @@ pub enum Profession {
 
 impl Profession {
     /// The registry path, e.g. `"farmer"` — matches
-    /// `crate::poi_storage::max_tickets`'s own POI-type path arms for the
+    /// `crate::poi_record::max_tickets`'s own POI-type path arms for the
     /// eleven of these that are also POI-type names.
     #[must_use]
     pub fn path(self) -> &'static str {
@@ -255,22 +241,18 @@ pub fn poi_type_for_state(state: lodestone_data::block_states::StateId) -> Optio
 
 /// The live, in-memory workstation claim ledger.
 ///
-/// Reuses [`crate::poi_storage::PoiRecord`]'s own ticket accounting rather
+/// Reuses [`crate::poi_record::PoiRecord`]'s own ticket accounting rather
 /// than a parallel claimed-by-uuid map: [`PoiRecord::acquire_ticket`]/
 /// [`PoiRecord::release_ticket`] provide the ticket accounting used by this
 /// server, and
-/// [`crate::poi_storage::max_tickets`] already carries every profession POI
+/// [`crate::poi_record::max_tickets`] already carries every profession POI
 /// type's cap (`1`, copied from the registered point-of-interest table) — this module
 /// invents no new occupancy math.
-///
-/// Native-only — see this module's own doc for why.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 pub struct WorkstationClaims {
     records: HashMap<(i32, i32, i32), PoiRecord>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl WorkstationClaims {
     #[must_use]
     pub fn new() -> Self {
@@ -365,9 +347,6 @@ impl WorkstationClaims {
 /// `O(radius^3)` per idle villager per search. A villager standing well
 /// outside a real workstation's reach simply will not find it — an honest,
 /// disclosed narrowing, not a silent one.
-///
-/// Native-only — see this module's own doc for why.
-#[cfg(not(target_arch = "wasm32"))]
 pub const SEARCH_RADIUS: i32 = 16;
 
 /// Runs one job search from `origin`: a nearest-first scan of `world` for a
@@ -379,9 +358,6 @@ pub const SEARCH_RADIUS: i32 = 16;
 /// wider disclosed gap it belongs to); nearest-first is a defensible,
 /// deterministic stand-in that a two-villager/one-workstation contention
 /// test can still observe cleanly.
-///
-/// Native-only — see this module's own doc for why.
-#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn find_and_claim_workstation(
     origin: BlockPos,
@@ -395,7 +371,6 @@ pub fn find_and_claim_workstation(
 /// `only` when it is `Some`: how a villager that already holds a profession
 /// (a restored one) re-acquires a job site without being reassigned to
 /// whichever station happens to be nearest.
-#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn find_and_claim_workstation_for(
     origin: BlockPos,
@@ -444,7 +419,6 @@ pub fn find_and_claim_workstation_for(
 /// Claims the workstation at exactly `pos` for a villager holding
 /// `profession`, if the block there is that profession's job site and a
 /// ticket is free.
-#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn claim_workstation_at(
     pos: BlockPos,
@@ -503,16 +477,11 @@ fn home_poi_type() -> ResourceKey {
 /// The live, in-memory bed claim ledger — [`WorkstationClaims`]'s sibling
 /// for the `home` point-of-interest type. See this module's own "Bed claiming" doc section for
 /// why this exists and what it deliberately does not model.
-///
-/// Native-only, for the identical reason [`WorkstationClaims`] is — see that
-/// type's own doc.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 pub struct BedClaims {
     records: HashMap<(i32, i32, i32), PoiRecord>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl BedClaims {
     #[must_use]
     pub fn new() -> Self {
@@ -589,9 +558,6 @@ impl BedClaims {
 /// Nearest-first and [`SEARCH_RADIUS`] are [`find_and_claim_workstation`]'s
 /// own disclosed narrowing, reused rather than restated — see that
 /// function's doc.
-///
-/// Native-only — see this module's own doc for why.
-#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn find_and_claim_bed(origin: BlockPos, world: &ChunkWorld, claims: &mut BedClaims) -> Option<BlockPos> {
     let mut candidates: Vec<BlockPos> = Vec::new();
@@ -641,21 +607,18 @@ fn meeting_poi_type() -> ResourceKey {
 /// The live, in-memory bell claim ledger — [`WorkstationClaims`]/[`BedClaims`]'s
 /// third sibling for meeting points. Where a workstation and a bed each
 /// hand out one ticket, a bell hands out
-/// [`crate::poi_storage::max_tickets`]'s `32` — vanilla villagers gather at a
+/// [`crate::poi_record::max_tickets`]'s `32` — vanilla villagers gather at a
 /// bell in a crowd, not a queue of one.
 ///
 /// Feeds [`crate::mobs::villager::MobSim::meeting_point`] no differently from
 /// how [`BedClaims`] feeds [`MobSim::occupied_homes_in_range`] — a claimed
 /// bell is what makes a `MEET`-activity villager (`crate::brain::roster::
-/// villager_brain`'s schedule) have anywhere to walk. Native-only, for
-/// [`WorkstationClaims`]'s own reason.
-#[cfg(not(target_arch = "wasm32"))]
+/// villager_brain`'s schedule) have anywhere to walk.
 #[derive(Debug, Default)]
 pub struct BellClaims {
     records: HashMap<(i32, i32, i32), PoiRecord>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl BellClaims {
     #[must_use]
     pub fn new() -> Self {
@@ -725,9 +688,6 @@ impl BellClaims {
 /// [`find_and_claim_bed`]'s own shape, restricted to [`is_bell_state`] and
 /// with no `validateBedPoi`-equivalent extra check (a bell has no "someone is
 /// using it right now" state the way a bed does).
-///
-/// Native-only — see this module's own doc for why.
-#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn find_and_claim_bell(origin: BlockPos, world: &ChunkWorld, claims: &mut BellClaims) -> Option<BlockPos> {
     let mut candidates: Vec<BlockPos> = Vec::new();

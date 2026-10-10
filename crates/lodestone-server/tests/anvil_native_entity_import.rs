@@ -20,10 +20,10 @@ use lodestone_storage_schema::BuiltinDimension;
 use uuid::Uuid;
 
 fn scratch(name: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock after Unix epoch")
-        .as_nanos();
+    // A counter, not the clock: macOS clocks tick in microseconds, so two tests
+    // asking for the same name in parallel could share one directory.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "lodestone-anvil-native-entity-import-{name}-{}-{unique}",
         std::process::id()

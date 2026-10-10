@@ -517,6 +517,15 @@ async fn real_protocol_nether_payload_and_restart_return_round_trip() {
             .expect("real Nether travel packet read")
             .expect("real Nether travel packet");
             match packet_id {
+                play::clientbound::KEEP_ALIVE => {
+                    // Generating a Nether column in a debug build outlasts the
+                    // server's keep-alive window, so an unanswered probe kicks
+                    // the client mid-trip.
+                    client
+                        .write_packet(play::serverbound::KEEP_ALIVE, &payload)
+                        .await
+                        .expect("answer keep-alive");
+                }
                 play::clientbound::RESPAWN => {
                     let mut reader = Reader::new(&payload);
                     let respawn = Respawn::decode(&mut reader, CTX).expect("decode Nether respawn");
@@ -631,6 +640,15 @@ async fn real_protocol_nether_payload_and_restart_return_round_trip() {
             .expect("return Overworld packet read")
             .expect("return Overworld packet");
             match packet_id {
+                play::clientbound::KEEP_ALIVE => {
+                    // Generating a Nether column in a debug build outlasts the
+                    // server's keep-alive window, so an unanswered probe kicks
+                    // the client mid-trip.
+                    client
+                        .write_packet(play::serverbound::KEEP_ALIVE, &payload)
+                        .await
+                        .expect("answer keep-alive");
+                }
                 play::clientbound::RESPAWN => {
                     let mut reader = Reader::new(&payload);
                     let respawn = Respawn::decode(&mut reader, CTX).expect("decode Overworld respawn");

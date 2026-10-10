@@ -469,6 +469,9 @@ pub mod live_save;
 pub mod entity_record;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod entity_storage;
+/// Point-of-interest records and their NBT codec, shared by the native `poi/`
+/// region set and the in-memory villager claim ledgers.
+pub mod poi_record;
 /// Per-section point-of-interest persistence — the
 /// `poi/` region set. Native only, like `entity_storage`.
 #[cfg(not(target_arch = "wasm32"))]

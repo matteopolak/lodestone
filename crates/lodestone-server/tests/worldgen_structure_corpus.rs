@@ -61,9 +61,8 @@ use sha2::{Digest, Sha256};
 /// The committed jar-derived manifest — the external anchor.
 const MANIFEST: &str = include_str!("support/worldgen_structure_corpus.txt");
 
-/// Counts measured against `.cache/mc/26.2/versions/26.2/server-26.2.jar` on
-/// 2026-08-07 by enumerating the jar's own entries, independently of the plan's
-/// audit table (which they then confirmed exactly for every registry it names).
+/// Counts of the `mc-version` release's own jar entries, enumerated
+/// independently of the manifest.
 ///
 /// `tags/worldgen/*` is **not** in the plan's table and was found by following
 /// what the structure documents actually reference: all 34 state `biomes` as a
@@ -106,7 +105,7 @@ const EXCLUSIVE_ROOTS: &[&str] = &[
 /// is the wrong assertion there; see [`noise_settings_directory_holds_only_known_files`].
 const SHARED_NOISE_SETTINGS_EXTRAS: &[&str] = &["overworld", "nether", "end"];
 
-/// Vanilla 26.2 ships this reference with no corresponding NBT file.
+/// Vanilla ships this reference with no corresponding NBT file.
 /// `template_pool/ancient_city/walls/no_corners.json` names
 /// `minecraft:ancient_city/walls/intact_horizontal_wall_stairs_5`, and the jar
 /// holds only `_1`..`_4`. It is a defect in Mojang's data, not in the
@@ -712,10 +711,11 @@ fn every_preset_reference_resolves() {
 /// `LODESTONE_REGEN=1 just regen-worldgen-structures` is the refresh path; this
 /// test is the read-only check that no refresh is needed.
 #[test]
-#[ignore = "needs .cache/mc/<ver>/versions/26.2/server-26.2.jar"]
+#[ignore = "needs .cache/mc/<ver>/versions/<ver>/server-<ver>.jar"]
 fn manifest_matches_a_fresh_jar_extraction() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let jar = lodestone_mc_cache::pinned_26_2_root().join("versions/26.2/server-26.2.jar");
+    let version = lodestone_mc_cache::current_version();
+    let jar = lodestone_mc_cache::version_root(&version).join(format!("versions/{version}/server-{version}.jar"));
     assert!(
         jar.is_file(),
         "jar not found at {} — the OUTER .cache/mc/<ver>/server.jar is a bundler \

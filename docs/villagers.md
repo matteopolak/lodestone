@@ -10,7 +10,7 @@ Villager code lives under `crates/lodestone-server/src/mobs/villager/` plus hook
 
 ### Claims
 
-`villager/mod.rs` holds the `Profession` enum, the workstation block, POI type and profession tables, and leveling. Claims are ticket accounting on `crate::poi_storage::PoiRecord`:
+`villager/mod.rs` holds the `Profession` enum, the workstation block, POI type and profession tables, and leveling. Claims are ticket accounting on `crate::poi_record::PoiRecord`:
 
 | ledger | POI | tickets | driver |
 |---|---|---|---|
@@ -109,4 +109,4 @@ Only the `spawn_wandering_traders` game rule. Constants live in `crates/lodeston
 
 ## Dependencies
 
-`crate::poi_storage`, `crate::mobs::world::ChunkWorld`, `lodestone_entity::brain`, `lodestone_entity::attribute::default_attributes`, `crate::effects`, `crate::world_state::WorldStateHandle` (day time), `MobSim::try_leash`, `lodestone_data::{villager_trades, item_prototypes}`, and `crate::protocol::{MetadataField, MerchantOfferOut, ServerProtocol::encode_merchant_offers}` (implemented by the 26.2 family's `V770ServerProtocol`). The workstation economy adds `crate::container_click`, `crate::inventory`, `crate::experience::PlayerExperience` and `crate::mob_spawn::SpawnRng`.
+`crate::poi_record` (shared with the native `poi_storage` region files; the claim ledgers run on wasm too), `crate::mobs::world::ChunkWorld`, `lodestone_entity::brain`, `lodestone_entity::attribute::default_attributes`, `crate::effects`, `crate::world_state::WorldStateHandle` (day time), `MobSim::try_leash`, `lodestone_data::{villager_trades, item_prototypes}`, and `crate::protocol::{MetadataField, MerchantOfferOut, ServerProtocol::encode_merchant_offers}` (implemented by the 26.2 family's `V770ServerProtocol`). The workstation economy adds `crate::container_click`, `crate::inventory`, `crate::experience::PlayerExperience` and `crate::mob_spawn::SpawnRng`.

@@ -1954,8 +1954,7 @@ pub struct SimMob<'w> {
     /// The bed this villager has claimed as its home point-of-interest, if any — `None`
     /// for an unclaimed villager or a non-villager. Cleared alongside a
     /// ticket release when [`MobSim::tick_villager_beds`] finds the claim
-    /// gone (destroyed, or no longer a bed). Native-only: meaningless (and
-    /// never set) on `wasm32`, where [`villager::BedClaims`] does not exist.
+    /// gone (destroyed, or no longer a bed).
     bed: Option<BlockPos>,
     /// Ticks until this mob's next bed search, decremented in
     /// [`MobSim::tick_villager_beds`] — the same throttling shape as
@@ -2705,32 +2704,19 @@ pub struct MobSim<'w> {
     pending_projectile_block_hits: Vec<ProjectileBlockHit>,
     /// The live workstation claim ledger [`tick_villager_professions`](Self::tick_villager_professions)
     /// reads and writes. See [`villager::WorkstationClaims`]'s
-    /// own doc for why this reuses `crate::poi_storage::PoiRecord` rather
+    /// own doc for why this reuses `crate::poi_record::PoiRecord` rather
     /// than a parallel claim table, and for what is deliberately not built
     /// (no on-disk persistence, no block-event hook).
-    ///
-    /// Native-only, same as [`villager::WorkstationClaims`] itself — see
-    /// that type's own doc for why (it reuses `crate::poi_storage`, which is
-    /// gated the same way, and this crate compiles for `wasm32-unknown-unknown`).
-    #[cfg(not(target_arch = "wasm32"))]
     workstation_claims: villager::WorkstationClaims,
     /// The live bed claim ledger [`tick_villager_beds`](Self::tick_villager_beds)
     /// reads and writes (the raid trigger). See
     /// [`villager::BedClaims`]'s own doc for why this reuses
-    /// `crate::poi_storage::PoiRecord` and what is deliberately not built.
-    ///
-    /// Native-only, for [`workstation_claims`](Self::workstation_claims)'s
-    /// own reason.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// `crate::poi_record::PoiRecord` and what is deliberately not built.
     bed_claims: villager::BedClaims,
     /// The live bell claim ledger [`tick_villager_bells`](Self::tick_villager_bells)
     /// reads and writes (the `MEET` schedule activity) — see
     /// [`villager::BellClaims`]'s own doc for why this exists and what it
     /// feeds.
-    ///
-    /// Native-only, for [`workstation_claims`](Self::workstation_claims)'s
-    /// own reason.
-    #[cfg(not(target_arch = "wasm32"))]
     bell_claims: villager::BellClaims,
     /// The real world time-of-day, `0..24000`, host-fed once per tick by
     /// [`set_day_time`](Self::set_day_time) — what [`feed_perception`](Self::feed_perception)

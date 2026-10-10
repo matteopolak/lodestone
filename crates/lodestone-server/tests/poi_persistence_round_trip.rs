@@ -12,7 +12,8 @@ use std::path::PathBuf;
 
 use lodestone_model::BlockPos;
 use lodestone_server::dimension::Dimension;
-use lodestone_server::poi_storage::{PoiChunk, PoiRecord, PoiSection, PoiStorage};
+use lodestone_server::poi_record::{PoiChunk, PoiRecord, PoiSection};
+use lodestone_server::poi_storage::PoiStorage;
 use lodestone_server::portal::{PortalIndex, poi_records_for_index, restore_index_from_poi};
 
 fn tempdir(name: &str) -> PathBuf {

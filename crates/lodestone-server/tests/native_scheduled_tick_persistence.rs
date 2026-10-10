@@ -7,10 +7,10 @@ use lodestone_server::world_storage::{NativeDirtyChunkRecord, WorldStorage, Worl
 use lodestone_server::{ChunkColumn, ScheduledTickHandle, ScheduledTickKind, TickPriority};
 
 fn tempdir(name: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock after Unix epoch")
-        .as_nanos();
+    // A counter, not the clock: macOS clocks tick in microseconds, so two tests
+    // asking for the same name in parallel could share one directory.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
         "lodestone-native-scheduled-ticks-{name}-{}-{unique}",
         std::process::id()

@@ -142,6 +142,18 @@ def main() -> int:
             rows.append((rel, hashlib.sha256(body).hexdigest(), len(body)))
             total += len(body)
 
+    # A file the release no longer ships must not linger: the drift gate fails on
+    # an unlisted file, and a stale one would feed the generator data the
+    # reference server does not have. Only roots this script owns outright are
+    # pruned (`noise_settings/` is shared).
+    planned = {rel for rel, _ in plan}
+    roots = [f"worldgen/{reg}" for reg in FULL_REGISTRIES] + ["worldgen/tags/worldgen", "structure"]
+    for root in roots:
+        for f in sorted((ASSETS / root).rglob("*")):
+            if f.is_file() and f.relative_to(ASSETS).as_posix() not in planned:
+                print(f"removed stale {f.relative_to(ASSETS).as_posix()}")
+                f.unlink()
+
     rows.sort()
     counts: dict[str, int] = {}
     for rel, _, _ in rows:

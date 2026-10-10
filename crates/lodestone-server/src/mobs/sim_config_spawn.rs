@@ -90,11 +90,8 @@ impl<'w> MobSim<'w> {
             lightning_bolts: HashMap::new(),
             pending_lightning_fires: Vec::new(),
             pending_projectile_block_hits: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             workstation_claims: villager::WorkstationClaims::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             bed_claims: villager::BedClaims::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             bell_claims: villager::BellClaims::new(),
             day_time: 0,
             sky: sunlight::Sky::clear(),

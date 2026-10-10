@@ -772,15 +772,7 @@ pub fn largest_rectangle_around<S: ChunkSource + ?Sized>(
 /// [`restore_index_from_poi`] and [`poi_chunks_for_index`] are the three
 /// conversions, proven by a real round trip through
 /// [`crate::poi_storage::PoiStorage`] in `tests/poi_persistence_round_trip.rs`
-/// and by a full restart in `tests/portal_persistence_restart.rs`. All three
-/// are native-only (`#[cfg(not(target_arch = "wasm32"))]`), matching
-/// [`crate::poi_storage`] itself, which does not exist on `wasm32` at all —
-/// this module is *not* gated (portals work in a browser singleplayer world
-/// too), so leaving these three ungated was a real, if quiet, wasm32 compile
-/// break: `crate::poi_storage::PoiRecord`/`PoiSection` are configured out of
-/// that target entirely, and nothing in `just check`/`just health` builds for
-/// it — only `just wasm-check` (or `cargo check --target wasm32-unknown-unknown`)
-/// would have caught it.
+/// and by a full restart in `tests/portal_persistence_restart.rs`.
 #[derive(Debug, Clone, Default)]
 pub struct PortalIndex(Arc<Mutex<HashMap<Dimension, Vec<BlockPos>>>>);
 
@@ -841,23 +833,22 @@ pub const NETHER_PORTAL_POI_TYPE: &str = "minecraft:nether_portal";
 /// Every cell recorded for `dimension`, as `nether_portal` POI records ready for
 /// [`crate::poi_storage::PoiStorage::save`].
 ///
-/// A fresh [`crate::poi_storage::PoiRecord`] for this type starts at
+/// A fresh [`crate::poi_record::PoiRecord`] for this type starts at
 /// `free_tickets: 0` (the real POI-type bootstrap registers the nether-portal type
 /// with zero max tickets), matching vanilla exactly: a portal is indexed for
 /// lookup, never claimed the way a workstation is.
 ///
 /// Native only — see [`PortalIndex`]'s own doc for why.
-#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn poi_records_for_index(
     index: &PortalIndex,
     dimension: Dimension,
-) -> Vec<crate::poi_storage::PoiRecord> {
+) -> Vec<crate::poi_record::PoiRecord> {
     index
         .cells(dimension)
         .into_iter()
         .map(|pos| {
-            crate::poi_storage::PoiRecord::new(
+            crate::poi_record::PoiRecord::new(
                 pos,
                 NETHER_PORTAL_POI_TYPE
                     .parse()
@@ -868,7 +859,7 @@ pub fn poi_records_for_index(
 }
 
 /// Rebuilds a [`PortalIndex`] from persisted POI sections — the read half of the
-/// gap [`PortalIndex`]'s own doc names. `sections` is every [`crate::poi_storage::PoiSection`]
+/// gap [`PortalIndex`]'s own doc names. `sections` is every [`crate::poi_record::PoiSection`]
 /// covering the loaded area, for whichever dimension `sections` was read from;
 /// the caller (world open, once wired) is responsible for calling this once per
 /// dimension with that dimension's own POI store.
@@ -877,11 +868,10 @@ pub fn poi_records_for_index(
 /// or bed records too, none of which this index tracks.
 ///
 /// Native only — see [`PortalIndex`]'s own doc for why.
-#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn restore_index_from_poi<'a>(
     dimension: Dimension,
-    sections: impl IntoIterator<Item = &'a crate::poi_storage::PoiSection>,
+    sections: impl IntoIterator<Item = &'a crate::poi_record::PoiSection>,
 ) -> PortalIndex {
     let index = PortalIndex::new();
     for section in sections {
@@ -895,12 +885,12 @@ pub fn restore_index_from_poi<'a>(
 }
 
 /// Groups [`poi_records_for_index`]'s output into the `(chunk_x, chunk_z)` →
-/// [`crate::poi_storage::PoiChunk`] map [`crate::poi_storage::PoiStorage::save`]
+/// [`crate::poi_record::PoiChunk`] map [`crate::poi_storage::PoiStorage::save`]
 /// wants — the write half of the wire [`restore_index_from_poi`] is the read
 /// half of.
 ///
-/// [`insert_record`](crate::poi_storage::PoiSection::insert_record), not
-/// [`add`](crate::poi_storage::PoiSection::add): every cell here came from a
+/// [`insert_record`](crate::poi_record::PoiSection::insert_record), not
+/// [`add`](crate::poi_record::PoiSection::add): every cell here came from a
 /// live index or a previous reload, not a block just discovered, so its
 /// `free_tickets` (always `0` for a portal — see [`poi_records_for_index`])
 /// must be kept rather than reset. Using `add` here would compile, save, and
@@ -908,13 +898,12 @@ pub fn restore_index_from_poi<'a>(
 /// claimable type.
 ///
 /// Native only — see [`PortalIndex`]'s own doc for why.
-#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn poi_chunks_for_index(
     index: &PortalIndex,
     dimension: Dimension,
-) -> HashMap<(i32, i32), crate::poi_storage::PoiChunk> {
-    let mut out: HashMap<(i32, i32), crate::poi_storage::PoiChunk> = HashMap::new();
+) -> HashMap<(i32, i32), crate::poi_record::PoiChunk> {
+    let mut out: HashMap<(i32, i32), crate::poi_record::PoiChunk> = HashMap::new();
     for record in poi_records_for_index(index, dimension) {
         let chunk_pos = record.pos.chunk_pos();
         let section_y = record.pos.section_pos().y;
@@ -922,7 +911,7 @@ pub fn poi_chunks_for_index(
         chunk
             .sections
             .entry(section_y)
-            .or_insert_with(crate::poi_storage::PoiSection::new)
+            .or_insert_with(crate::poi_record::PoiSection::new)
             .insert_record(record);
     }
     out

@@ -23,7 +23,6 @@ impl<'w> MobSim<'w> {
     /// that function's own doc for the cost it is bounding). 100 ticks is a
     /// scope choice, not a transcribed vanilla constant: nothing in this
     /// codebase ports `AssignProfessionFromJobSite`'s own interval.
-    #[cfg(not(target_arch = "wasm32"))]
     const JOB_SEARCH_INTERVAL_TICKS: i32 = 100;
 
     /// One villager-profession pass: throttled job search for
@@ -36,12 +35,6 @@ impl<'w> MobSim<'w> {
     /// claimed under (destroyed, or replaced with a different workstation
     /// type) releases its ticket and goes back to unemployed on the very
     /// next call.
-    ///
-    /// Native-only (the wasm32 scope note) — see
-    /// [`villager::WorkstationClaims`]'s own doc. A villager spawned in a
-    /// `wasm32` (browser singleplayer) world keeps whatever profession it
-    /// already had and simply never claims a new one.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn tick_villager_professions(&mut self) {
         let world = self.world;
         let claims = &mut self.workstation_claims;
@@ -124,7 +117,6 @@ impl<'w> MobSim<'w> {
     /// Bed search interval — [`JOB_SEARCH_INTERVAL_TICKS`](Self::JOB_SEARCH_INTERVAL_TICKS)'s
     /// own scope choice, reused for the identical reason: nothing in this
     /// codebase ports `AcquirePoi`'s own per-behavior scheduling.
-    #[cfg(not(target_arch = "wasm32"))]
     const BED_SEARCH_INTERVAL_TICKS: i32 = 100;
 
     /// One villager-bed pass (the raid trigger): throttled bed
@@ -140,7 +132,6 @@ impl<'w> MobSim<'w> {
     ///
     /// Native-only, for [`tick_villager_professions`](Self::tick_villager_professions)'s
     /// own reason.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn tick_villager_beds(&mut self) {
         let world = self.world;
         let claims = &mut self.bed_claims;
@@ -188,7 +179,6 @@ impl<'w> MobSim<'w> {
     ///
     /// Native-only, for [`tick_villager_beds`](Self::tick_villager_beds)'s
     /// own reason.
-    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     #[cfg(test)]
     pub fn occupied_homes_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
@@ -212,7 +202,6 @@ impl<'w> MobSim<'w> {
     ///
     /// Native-only, for [`occupied_homes_in_range`](Self::occupied_homes_in_range)'s
     /// own reason.
-    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn occupied_village_pois_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
         let mut found = self.bed_claims.occupied_in_range(center, radius);
@@ -223,7 +212,6 @@ impl<'w> MobSim<'w> {
 
     /// Bell search interval — [`JOB_SEARCH_INTERVAL_TICKS`](Self::JOB_SEARCH_INTERVAL_TICKS)'s
     /// own scope choice, reused for the identical reason.
-    #[cfg(not(target_arch = "wasm32"))]
     const BELL_SEARCH_INTERVAL_TICKS: i32 = 100;
 
     /// One villager-bell pass (the `MEET` schedule activity):
@@ -244,7 +232,6 @@ impl<'w> MobSim<'w> {
     ///
     /// Native-only, for [`tick_villager_professions`](Self::tick_villager_professions)'s
     /// own reason.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn tick_villager_bells(&mut self) {
         let world = self.world;
         let claims = &mut self.bell_claims;
