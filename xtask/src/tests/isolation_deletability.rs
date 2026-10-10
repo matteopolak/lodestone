@@ -1591,7 +1591,8 @@ live-v1 = ["lodestone-registry/v1"]
         };
 
         let source = generate_packet_ids_source(&report)?;
-        let test_dir = Path::new("xtask/target/generated-packet-id-tests");
+        let test_dir = &std::env::temp_dir()
+            .join(format!("lodestone-packet-id-tests-{}", std::process::id()));
         std::fs::create_dir_all(test_dir)?;
         let test_source = test_dir.join("packet_ids_roundtrip.rs");
         let test_binary = test_dir.join("packet_ids_roundtrip");
