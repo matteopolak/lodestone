@@ -784,6 +784,7 @@ fn shoot(
         .get(sim.selected_slot())
         .and_then(|record| record.as_ref())
         .map(|record| lodestone::gpu::MainHandItem {
+            map_id: None,
             item: record.item.clone(),
             foil: record.enchanted,
             custom_model_data: record.custom_model_data,

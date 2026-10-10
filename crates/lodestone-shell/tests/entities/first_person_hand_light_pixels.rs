@@ -246,6 +246,7 @@ fn the_first_person_held_item_dims_with_the_world_at_night() {
     // pass would add emission that the darken sweep below would read as light.
     state.set_main_hand_source(move || {
         Some(lodestone::gpu::MainHandItem {
+            map_id: None,
             item: item.clone(),
             foil: false,
             custom_model_data: None,

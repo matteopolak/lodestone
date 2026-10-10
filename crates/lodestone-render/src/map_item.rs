@@ -35,13 +35,110 @@
 //! authoritative; do not "fix" a colour against a screenshot. `MAP_COLOR_BASE`
 //! is indexed by id, so a new vanilla entry appends and nothing shifts.
 //!
-//! Icons (`MapDecoration`) and vanilla's `map_background` frame sprite are **not**
-//! drawn — the map image itself is. Both want the map-decorations atlas, which the
-//! asset layer does not stitch yet.
+//! ## Decorations
+//!
+//! A decoration (player arrow, banner, structure icon) is a second textured quad
+//! per icon, sampling the stitched decoration sheet
+//! ([`lodestone_assets::map_decoration_atlas`]) at group 1 in place of the map
+//! texture. [`MAP_DECORATION_TYPES`] maps a decoration type key to its sprite id
+//! and whether an item frame shows it; the sprites themselves come from the pack.
+//! [`map_decoration_mesh`] places each in the map's pixel space exactly as the
+//! map image is: wire units are half pixels, the sprite is 8x8 pixels centred a
+//! half pixel up-left of the point, rotation is sixteenths of a turn clockwise.
+//! The vanilla `map_background` frame sprite is still not drawn.
 
 use glam::{Mat4, Vec3};
 
 use crate::models::{ModelMesh, ModelVertex};
+
+/// One decoration type: registry key path, sprite id (a bare path in the
+/// `minecraft` namespace, as the decoration sheet names it), and whether an
+/// item frame draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapDecorationType {
+    /// Path of the `minecraft:map_decoration_type` key the wire resolves to.
+    pub key: &'static str,
+    /// Sprite id on the decoration sheet, in the `minecraft` namespace.
+    pub sprite: &'static str,
+    /// Whether the icon is drawn when the map hangs in an item frame.
+    pub show_on_item_frame: bool,
+}
+
+const fn decoration(key: &'static str, sprite: &'static str, show_on_item_frame: bool) -> MapDecorationType {
+    MapDecorationType { key, sprite, show_on_item_frame }
+}
+
+/// Every 26.3 decoration type, in registry order.
+pub const MAP_DECORATION_TYPES: [MapDecorationType; 40] = [
+    decoration("player", "player", false),
+    decoration("frame", "frame", true),
+    decoration("red_marker", "red_marker", false),
+    decoration("blue_marker", "blue_marker", false),
+    decoration("target_x", "target_x", true),
+    decoration("target_point", "target_point", true),
+    decoration("player_off_map", "player_off_map", false),
+    decoration("player_off_limits", "player_off_limits", false),
+    decoration("mansion", "woodland_mansion", true),
+    decoration("monument", "ocean_monument", true),
+    decoration("banner_white", "white_banner", true),
+    decoration("banner_orange", "orange_banner", true),
+    decoration("banner_magenta", "magenta_banner", true),
+    decoration("banner_light_blue", "light_blue_banner", true),
+    decoration("banner_yellow", "yellow_banner", true),
+    decoration("banner_lime", "lime_banner", true),
+    decoration("banner_pink", "pink_banner", true),
+    decoration("banner_gray", "gray_banner", true),
+    decoration("banner_light_gray", "light_gray_banner", true),
+    decoration("banner_cyan", "cyan_banner", true),
+    decoration("banner_purple", "purple_banner", true),
+    decoration("banner_blue", "blue_banner", true),
+    decoration("banner_brown", "brown_banner", true),
+    decoration("banner_green", "green_banner", true),
+    decoration("banner_red", "red_banner", true),
+    decoration("banner_black", "black_banner", true),
+    decoration("red_x", "red_x", true),
+    decoration("village_desert", "desert_village", true),
+    decoration("village_plains", "plains_village", true),
+    decoration("village_savanna", "savanna_village", true),
+    decoration("village_snowy", "snowy_village", true),
+    decoration("village_taiga", "taiga_village", true),
+    decoration("jungle_temple", "jungle_temple", true),
+    decoration("swamp_hut", "swamp_hut", true),
+    decoration("trial_chambers", "trial_chambers", true),
+    decoration("abandoned_camp", "abandoned_camp", true),
+    decoration("ancient_city", "ancient_city", true),
+    decoration("desert_pyramid", "desert_pyramid", true),
+    decoration("mineshaft", "mineshaft", true),
+    decoration("ocean_ruin_warm", "warm_ocean_ruins", true),
+];
+
+/// The decoration type whose registry key path is `key`.
+#[must_use]
+pub fn map_decoration_type(key: &str) -> Option<&'static MapDecorationType> {
+    MAP_DECORATION_TYPES.iter().find(|ty| ty.key == key)
+}
+
+/// Where one decoration sprite goes on a map and which sheet region it samples.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MapDecorationPlacement {
+    /// Top-left UV of the sprite on the decoration sheet.
+    pub uv_min: [f32; 2],
+    /// Bottom-right UV of the sprite on the decoration sheet.
+    pub uv_max: [f32; 2],
+    /// Wire x: half map pixels from the map's centre.
+    pub x: i8,
+    /// Wire y: half map pixels from the map's centre.
+    pub y: i8,
+    /// Sixteenths of a clockwise turn, `0..=15`.
+    pub rotation: u8,
+}
+
+/// Distance in front of the map picture of the first decoration, in map pixels,
+/// and the extra distance for each later one. Large enough to survive the
+/// forward depth buffer at several blocks; the reference's thousandth-of-a-pixel
+/// steps do not.
+const DECORATION_LIFT_PIXELS: f32 = 0.5;
+const DECORATION_STACK_PIXELS: f32 = 0.1;
 
 /// Side length of a map's colour grid, mirroring
 /// [`lodestone_game::maps::MAP_SIZE`].
@@ -193,6 +290,57 @@ pub fn map_quad_mesh(pose: Mat4, light: u8) -> ModelMesh {
     }
 }
 
+/// The quads for `placements`, on the plane of a [`map_quad_mesh`] posed by
+/// `pose`. `None` when there is nothing to draw.
+///
+/// Each sprite spans 8x8 map pixels. Its centre sits at the wire point
+/// (`x / 2 + 64`, `y / 2 + 64`) offset half a pixel left and down in map space,
+/// rotated clockwise about that point, and its top texel row faces the lower map
+/// edge: the sprite is vertically flipped against the map image, as the
+/// reference's vertex order makes it. Later placements sit slightly further
+/// out so overlapping icons keep their order.
+#[must_use]
+pub fn map_decoration_mesh(pose: Mat4, light: u8, placements: &[MapDecorationPlacement]) -> Option<ModelMesh> {
+    if placements.is_empty() {
+        return None;
+    }
+    let mut vertices = Vec::with_capacity(placements.len() * 4);
+    let mut indices = Vec::with_capacity(placements.len() * 6);
+    for (n, placement) in placements.iter().enumerate() {
+        let angle = f32::from(placement.rotation) * std::f32::consts::TAU / 16.0;
+        let (sin, cos) = angle.sin_cos();
+        let centre = [f32::from(placement.x) / 2.0 + 64.0, f32::from(placement.y) / 2.0 + 64.0];
+        let lift = (DECORATION_LIFT_PIXELS + DECORATION_STACK_PIXELS * n as f32) / MAP_SIZE as f32;
+        // Corners in map-pixel space (x right, y down) before the half-pixel
+        // shift, paired with the sprite corner each samples.
+        let corners = [
+            ([-4.0, 4.0], [placement.uv_min[0], placement.uv_min[1]]),
+            ([4.0, 4.0], [placement.uv_max[0], placement.uv_min[1]]),
+            ([4.0, -4.0], [placement.uv_max[0], placement.uv_max[1]]),
+            ([-4.0, -4.0], [placement.uv_min[0], placement.uv_max[1]]),
+        ];
+        let base = u32::try_from(vertices.len()).expect("a decoration mesh stays far below u32::MAX vertices");
+        for (corner, uv) in corners {
+            let (px, py) = (corner[0] - 0.5, corner[1] + 0.5);
+            let (rx, ry) = (px * cos - py * sin, px * sin + py * cos);
+            let map = [centre[0] + rx, centre[1] + ry];
+            let local = Vec3::new(map[0] / MAP_SIZE as f32 - 0.5, 0.5 - map[1] / MAP_SIZE as f32, lift);
+            vertices.push(ModelVertex {
+                position: pose.transform_point3(local).to_array(),
+                uv,
+                ao: 1.0,
+                light,
+                tint: 255,
+                anim: 0,
+                cutout_bypass: 0,
+                tint_rgb_override: [0, 0, 0, 0],
+            });
+        }
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Some(ModelMesh { vertices, indices })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +434,74 @@ mod tests {
         assert!(top.iter().all(|v| v.uv[1] == 0.0));
         assert!(mesh.vertices.iter().all(|v| v.tint == 255));
         assert_eq!(mesh.quad_count(), 1);
+    }
+
+    fn placement(x: i8, y: i8, rotation: u8) -> MapDecorationPlacement {
+        MapDecorationPlacement { uv_min: [0.0, 0.0], uv_max: [1.0, 1.0], x, y, rotation }
+    }
+
+    fn corner(mesh: &ModelMesh, index: usize) -> ([f32; 3], [f32; 2]) {
+        (mesh.vertices[index].position, mesh.vertices[index].uv)
+    }
+
+    /// A centred upright icon: the sprite spans 8 map pixels, centred half a
+    /// pixel up-left of the map centre, so on the unit quad (128 pixels wide)
+    /// its corners sit at `59.5/128 - 0.5` and `67.5/128 - 0.5` across and
+    /// `0.5 - 60.5/128` and `0.5 - 68.5/128` down, and the sprite's top row
+    /// is at the lower edge.
+    #[test]
+    fn an_upright_decoration_spans_eight_pixels_at_the_reference_offset() {
+        let mesh = map_decoration_mesh(Mat4::IDENTITY, 15, &[placement(0, 0, 0)]).unwrap();
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.0e-6);
+        let (left, right) = (-0.035_156_25, 0.027_343_75);
+        let (low, high) = (-0.035_156_25, 0.027_343_75);
+        let lift = 0.5 / 128.0;
+        let (p, uv) = corner(&mesh, 0);
+        assert!(near(p, [left, low, lift]) && uv == [0.0, 0.0], "{p:?} {uv:?}");
+        let (p, uv) = corner(&mesh, 1);
+        assert!(near(p, [right, low, lift]) && uv == [1.0, 0.0], "{p:?} {uv:?}");
+        let (p, uv) = corner(&mesh, 2);
+        assert!(near(p, [right, high, lift]) && uv == [1.0, 1.0], "{p:?} {uv:?}");
+        let (p, uv) = corner(&mesh, 3);
+        assert!(near(p, [left, high, lift]) && uv == [0.0, 1.0], "{p:?} {uv:?}");
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+    }
+
+    /// Wire units are half pixels, and rotation 4 is a quarter turn clockwise
+    /// on the picture: the sprite's lower-right corner `(3.5, 4.5)` pixels from
+    /// the point lands at `(-4.5, 3.5)`.
+    #[test]
+    fn position_is_half_pixels_and_rotation_is_clockwise_sixteenths() {
+        let mesh = map_decoration_mesh(Mat4::IDENTITY, 15, &[placement(20, -10, 4)]).unwrap();
+        // Centre (74, 59); corner index 1 is the sprite's lower-right.
+        let (p, _) = corner(&mesh, 1);
+        let expected_x = (74.0 - 4.5) / 128.0 - 0.5;
+        let expected_y = 0.5 - (59.0 + 3.5) / 128.0;
+        assert!((p[0] - expected_x).abs() < 1.0e-6 && (p[1] - expected_y).abs() < 1.0e-6, "{p:?}");
+    }
+
+    /// Later icons sit further out, so overlapping icons keep their order.
+    #[test]
+    fn later_decorations_lie_in_front_of_earlier_ones() {
+        let mesh = map_decoration_mesh(Mat4::IDENTITY, 15, &[placement(0, 0, 0), placement(0, 0, 0)]).unwrap();
+        assert!(mesh.vertices[4].position[2] > mesh.vertices[0].position[2]);
+        assert!(map_decoration_mesh(Mat4::IDENTITY, 15, &[]).is_none());
+    }
+
+    /// Only the five markers a player or map-maker places are hidden on an item
+    /// frame, per the reference's registrations.
+    #[test]
+    fn only_player_style_markers_are_hidden_on_item_frames() {
+        let hidden: Vec<&str> = MAP_DECORATION_TYPES
+            .iter()
+            .filter(|ty| !ty.show_on_item_frame)
+            .map(|ty| ty.key)
+            .collect();
+        assert_eq!(
+            hidden,
+            ["player", "red_marker", "blue_marker", "player_off_map", "player_off_limits"]
+        );
+        assert_eq!(map_decoration_type("mansion").unwrap().sprite, "woodland_mansion");
+        assert!(map_decoration_type("not_a_marker").is_none());
     }
 }

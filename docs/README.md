@@ -418,6 +418,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Feature state transitions](./feature-state-transitions.md) — Sculk vein placement
   changes typed block states through numeric boolean offsets. The hot spread and
   discharge paths avoid rebuilding property sets or scanning every state of the block.
+- [Filled map rendering](./filled-map-rendering.md) — How a filled map and the icons
+  on it get from `MAP_ITEM_DATA` to pixels, held in either hand in first person or
+  hanging in an item frame.
 - [Flat world generation](./flat-worldgen.md) — The flat generator expands a
   preset's layer stack into one immutable row per height position. Layer blocks are
   resolved to canonical `StateId` values while the preset is parsed, so generated

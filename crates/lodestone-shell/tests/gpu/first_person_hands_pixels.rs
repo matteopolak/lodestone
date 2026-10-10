@@ -46,6 +46,7 @@ fn camera() -> Camera {
 
 fn held(id: &str) -> MainHandItem {
     MainHandItem {
+        map_id: None,
         item: id.parse::<ResourceLocation>().expect("valid item id"),
         foil: false,
         custom_model_data: None,

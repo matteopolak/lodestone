@@ -142,6 +142,74 @@ fn vision_obscuration_from_effects(
     blindness.max(darkness)
 }
 
+/// The picture for the map named by `id`, or by the item frame `frame_entity`
+/// through `frame_ids`, with its icons. `None` when neither names a map or the
+/// server has sent nothing for it.
+fn map_picture(
+    store: &lodestone_game::maps::MapStore,
+    frame_ids: &std::collections::HashMap<lodestone_model::EntityNetworkId, i32>,
+    id: Option<i32>,
+    frame_entity: Option<i32>,
+) -> Option<crate::gpu::MapPicture> {
+    let raw = id.or_else(|| {
+        frame_entity
+            .and_then(|entity| frame_ids.get(&lodestone_model::EntityNetworkId::from_raw(entity)).copied())
+    })?;
+    let id = lodestone_game::maps::MapId::new(raw)?;
+    let map = store.get(id)?;
+    Some(
+        crate::gpu::MapPicture::new(id, map.color_revision, std::sync::Arc::clone(&map.colors))
+            .with_decorations(map.decoration_revision, std::sync::Arc::clone(&map.decorations)),
+    )
+}
+
+#[cfg(test)]
+mod map_picture_tests {
+    use super::*;
+    use lodestone_model::{ClientEvent, EntityNetworkId, MapDecoration};
+
+    fn store_with(map_id: i32, kind: &str) -> lodestone_game::maps::MapStore {
+        let mut store = lodestone_game::maps::MapStore::default();
+        store.apply(&ClientEvent::MapItemData {
+            map_id,
+            scale: 0,
+            locked: false,
+            decorations: Some(vec![MapDecoration {
+                kind: kind.parse().unwrap(),
+                x: 3,
+                y: -4,
+                rotation: 5,
+                name: None,
+            }]),
+            color_patch: None,
+        });
+        store
+    }
+
+    /// A held map names its map; an item frame names it through its entity; a map
+    /// with neither, or one the server has not sent, is nothing, never some other
+    /// map. The icons ride along with the picture.
+    #[test]
+    fn a_picture_carries_its_icons_and_is_found_by_hand_id_or_frame_entity() {
+        let store = store_with(17, "minecraft:banner_red");
+        let frames = std::collections::HashMap::from([(EntityNetworkId::from_raw(900), 17)]);
+
+        let held = map_picture(&store, &frames, Some(17), None).expect("a held map names its picture");
+        assert_eq!(held.map_id.raw(), 17);
+        assert_eq!(held.decorations.len(), 1);
+        assert_eq!(held.decorations[0].kind.to_string(), "minecraft:banner_red");
+        assert_eq!(held.decoration_revision, 1);
+
+        let framed = map_picture(&store, &frames, None, Some(900)).expect("a frame finds its map");
+        assert_eq!(framed.map_id.raw(), 17);
+
+        assert!(map_picture(&store, &frames, None, None).is_none(), "no id is no map");
+        assert!(map_picture(&store, &frames, Some(18), None).is_none(), "another map is not served in its place");
+        assert!(map_picture(&store, &frames, None, Some(901)).is_none(), "an unknown frame names nothing");
+        assert!(map_picture(&store, &frames, Some(-1), None).is_none());
+    }
+}
+
 #[cfg(test)]
 mod status_particle_tests {
     use super::*;
@@ -1014,22 +1082,12 @@ impl Sim {
     /// [`RenderState::set_map_source`](crate::gpu::RenderState::set_map_source).
     ///
     /// Takes an optional explicit map id plus an optional item-frame entity id
-    /// and yields that map's raw 128×128 packed colour grid, cloned out of
-    /// [`SessionMaps`](lodestone_ecs::session::SessionMaps).
+    /// and yields that map's raw 128×128 packed colour grid and decorations,
+    /// cloned out of [`SessionMaps`](lodestone_ecs::session::SessionMaps).
     ///
-    /// # Why the id is optional, and what to change when it stops being
-    ///
-    /// `minecraft:map_id` **is** decoded — v770's component-patch reader fills
-    /// `ItemComponents::map_id` from the VarInt `MapId`. `EntityDraw` still
-    /// intentionally carries only a bare item id, but entity extraction retains
-    /// the map id beside it in `EntityMapIds`; an item-frame caller supplies its
-    /// entity id so this closure can recover the exact map. The held-item path
-    /// remains id-less, because the hand's draw record carries no map id.
-    ///
-    /// With neither id available, `None` still means "the lowest-numbered map
-    /// the server has sent". That is an intentional compatibility fallback for
-    /// the held-item path, not the framed-map path: the latter groups its quads
-    /// by the resolved picture and binds each distinct map texture separately.
+    /// A held map passes its stack's `minecraft:map_id`; an item frame passes its
+    /// entity id and the id is recovered from `EntityMapIds`. With neither there
+    /// is no map to name, so the answer is `None` rather than some other map.
     #[must_use]
     pub fn map_source(
         &self,
@@ -1042,24 +1100,7 @@ impl Sim {
         let store = self.maps();
         let frame_ids = self.read(crate::entities::entity_map_ids);
         Some(move |id: Option<i32>, frame_entity: Option<i32>| {
-            let id = match id
-                .or_else(|| {
-                    frame_entity.and_then(|entity| {
-                        frame_ids
-                            .get(&lodestone_model::EntityNetworkId::from_raw(entity))
-                            .copied()
-                    })
-                })
-            {
-                Some(raw) => lodestone_game::maps::MapId::new(raw)?,
-                None => store.ids().next()?,
-            };
-            let map = store.get(id)?;
-            Some(crate::gpu::MapPicture::new(
-                id,
-                map.color_revision,
-                std::sync::Arc::clone(&map.colors),
-            ))
+            map_picture(&store, &frame_ids, id, frame_entity)
         })
     }
 

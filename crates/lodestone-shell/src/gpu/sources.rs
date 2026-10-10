@@ -772,6 +772,9 @@ pub struct MainHandItem {
     /// identical head drew its own face once placed in the world. Fill it from
     /// `hud::item_icon::stack_skin_url`, which also starts the fetch.
     pub skin: Option<std::sync::Arc<str>>,
+    /// The stack's `minecraft:map_id`, which saved map a held `filled_map`
+    /// shows. `None` for every other item and for a map stack without one.
+    pub map_id: Option<i32>,
 }
 
 /// One first-person hand for one frame: what it shows, how far it is lowered,
@@ -1250,6 +1253,11 @@ pub struct MapPicture {
     pub color_revision: u64,
     /// Raw 128×128 map-palette bytes shared with the session snapshot.
     pub colors: Arc<Vec<u8>>,
+    /// The icons drawn over the picture, in server order.
+    pub decorations: Arc<Vec<lodestone_model::MapDecoration>>,
+    /// The changed-on-list-change identity from
+    /// [`lodestone_game::maps::MapState::decoration_revision`].
+    pub decoration_revision: u64,
 }
 
 impl MapPicture {
@@ -1265,7 +1273,22 @@ impl MapPicture {
             map_id,
             color_revision,
             colors,
+            decorations: Arc::default(),
+            decoration_revision: 0,
         }
+    }
+
+    /// This picture with its decorations. The revision identifies the list the
+    /// way [`Self::color_revision`] identifies the pixels.
+    #[must_use]
+    pub fn with_decorations(
+        mut self,
+        decoration_revision: u64,
+        decorations: Arc<Vec<lodestone_model::MapDecoration>>,
+    ) -> Self {
+        self.decorations = decorations;
+        self.decoration_revision = decoration_revision;
+        self
     }
 }
 

@@ -56,6 +56,9 @@ use lodestone_render::{AnimInput, Camera, GpuContext, HeadlessTarget, RenderTarg
 const W: u32 = 320;
 const H: u32 = 240;
 
+#[path = "../support/map_decoration_probe.rs"]
+mod probe;
+
 const ITEM: &str = "minecraft:filled_map";
 const SUBJECT_ID: i32 = 9201;
 const TEST_MAP_ID: i32 = 17;
@@ -1422,4 +1425,124 @@ fn a_board_of_framed_maps_survives_the_depth_test_while_the_camera_turns() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A camera `distance` blocks out along the frame's own facing, looking back at it.
+fn close_camera_for(frame_yaw: f32, distance: f32) -> Camera {
+    Camera { position: subject_centre() + lodestone_render::entity::item_frame_facing_step(frame_yaw, 0.0) * distance, ..camera_for(frame_yaw) }
+}
+
+/// Icons on a framed map draw where the map's placement rules put them, on every
+/// wall, and an item frame hides the types the reference hides there.
+///
+/// The picture is a solid opaque grid, so the diff of a render with the
+/// picture against the bare frame is the picture's screen box; the diff of a
+/// render with icons against the picture alone is the icons. The frame faces the
+/// camera head-on, so map pixels scale to screen pixels affinely and the
+/// prediction is the sprite's own opaque texels pushed through the placement
+/// rules into that box.
+///
+/// The map carries a red banner (shown on a frame) and the player marker (not):
+/// the banner's box and overlay must match, and no pixel may change where the
+/// player marker would have drawn.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn framed_map_icons_draw_where_the_rules_place_them_and_player_markers_stay_hidden() {
+    use probe::{Target, assert_box, assert_orientation, changed, expected_map_rect, sprite, to_screen};
+    let target = Target { w: W, h: H };
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!("GPU gate opted in but the vanilla pack did not load; Banner: {:?}", resources.banner)
+    });
+    let item: ResourceLocation = ITEM.parse().expect("valid item id");
+    let mut headless = HeadlessTarget::new(device, W, H, format);
+    let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
+    let mut shoot = |state: &RenderState, cam: &Camera, draws: &[EntityDraw]| -> Vec<u8> {
+        let frame = headless.acquire().expect("headless acquire");
+        state.render(device, queue, frame.view(), cam, None, draws);
+        headless.read_texels(device, queue)
+    };
+
+    let icons = vec![
+        lodestone_model::MapDecoration {
+            kind: "minecraft:banner_red".parse().expect("valid type"),
+            x: 40,
+            y: -30,
+            rotation: 8,
+            name: None,
+        },
+        lodestone_model::MapDecoration {
+            kind: "minecraft:player".parse().expect("valid type"),
+            x: -30,
+            y: 20,
+            rotation: 0,
+            name: None,
+        },
+    ];
+    let colors = std::sync::Arc::new(grass_grid());
+    let mut failures = Vec::new();
+    for yaw in YAWS {
+        let mut draw = blank_draw(SUBJECT_ID, "item_frame", yaw);
+        draw.item = Some(item.clone());
+        let cam = close_camera_for(yaw, 1.0);
+        let bare = {
+            let fresh = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
+            shoot(&fresh, &cam, std::slice::from_ref(&draw))
+        };
+        let colors_a = std::sync::Arc::clone(&colors);
+        state.set_map_source(move |_, _| {
+            Some(MapPicture::new(test_map_id(), 100, std::sync::Arc::clone(&colors_a)))
+        });
+        let plain = shoot(&state, &cam, std::slice::from_ref(&draw));
+        let colors_b = std::sync::Arc::clone(&colors);
+        let listed = std::sync::Arc::new(icons.clone());
+        state.set_map_source(move |_, _| {
+            Some(
+                MapPicture::new(test_map_id(), 100, std::sync::Arc::clone(&colors_b))
+                    .with_decorations(1, std::sync::Arc::clone(&listed)),
+            )
+        });
+        let decorated = shoot(&state, &cam, std::slice::from_ref(&draw));
+
+        let Some(picture) = changed(target, &plain, &bare, |_, _| true) else {
+            failures.push(format!("yaw {yaw}: the picture did not draw at all"));
+            continue;
+        };
+        let Some(banner) = changed(target, &decorated, &plain, |_, _| true) else {
+            failures.push(format!("yaw {yaw}: no icon drew on the framed map (picture box {picture:?})"));
+            continue;
+        };
+        eprintln!("yaw {yaw}: picture {picture:?} icons {banner:?}");
+        let want = to_screen(picture, expected_map_rect(&sprite("red_banner"), 40, -30, 8));
+        let player_rect = to_screen(picture, expected_map_rect(&sprite("player"), -30, 20, 0));
+        let in_player = changed(target, &decorated, &plain, |x, y| {
+            (x as f32) >= player_rect[0] - 1.0
+                && (x as f32) <= player_rect[2] + 1.0
+                && (y as f32) >= player_rect[1] - 1.0
+                && (y as f32) <= player_rect[3] + 1.0
+        });
+        if let Some(hidden) = in_player {
+            failures.push(format!("yaw {yaw}: the player marker drew on an item frame: {hidden:?}"));
+        }
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_box(&format!("yaw {yaw} banner"), banner, want);
+            assert_orientation(target, &format!("yaw {yaw} banner"), "red_banner", (40, -30, 8), picture, &decorated, &plain);
+        }));
+        if let Err(payload) = outcome {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_string()))
+                .unwrap_or_default();
+            failures.push(message);
+        }
+    }
+    assert!(failures.is_empty(), "{} framed icon arms failed:\n  {}", failures.len(), failures.join("\n  "));
 }

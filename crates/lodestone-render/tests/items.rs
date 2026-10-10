@@ -15,6 +15,8 @@ mod item_geometry_gate;
 mod item_tint_pixels;
 #[path = "items/item_variant_gate.rs"]
 mod item_variant_gate;
+#[path = "items/map_decoration_sheet_gate.rs"]
+mod map_decoration_sheet_gate;
 #[path = "items/special_item_hand_rig_resolution.rs"]
 mod special_item_hand_rig_resolution;
 #[path = "items/sprite_drop_pixels.rs"]

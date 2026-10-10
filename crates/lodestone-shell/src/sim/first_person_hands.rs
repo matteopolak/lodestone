@@ -244,11 +244,13 @@ pub(crate) fn hands_to_render(main: Option<&ItemStack>, using: bool) -> (bool, b
 #[must_use]
 pub(crate) fn hands_frame(sample: &FirstPersonHandsSample) -> crate::gpu::FirstPersonHandsFrame {
     let hand = |hand: &HandSample, drawn: bool| crate::gpu::HandFrame {
-        item: hand
-            .shown
-            .as_ref()
-            .and_then(crate::hud::item_icon::stack_icon)
-            .map(|icon| crate::hud::item_icon::held_item_record(&icon)),
+        item: hand.shown.as_ref().and_then(|stack| {
+            let icon = crate::hud::item_icon::stack_icon(stack)?;
+            Some(crate::gpu::MainHandItem {
+                map_id: stack.map_id(),
+                ..crate::hud::item_icon::held_item_record(&icon)
+            })
+        }),
         inverse_arm_height: hand.inverse_arm_height,
         drawn,
     };

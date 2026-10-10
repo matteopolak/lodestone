@@ -1712,6 +1712,7 @@ impl RenderState {
                 }
 
                 let framed_map_instances_submitted = framed_maps
+                    .pictures
                     .iter()
                     .map(|(mesh, _)| mesh.index_count as usize / 6)
                     .sum();
@@ -1726,7 +1727,7 @@ impl RenderState {
                     (false, true) => &model.map_surface_no_depth_pipeline,
                     (true, true) => &model.map_surface_no_cull_no_depth_pipeline,
                 };
-                for (mesh, texture) in &framed_maps {
+                for (mesh, texture) in &framed_maps.pictures {
                     // Keep vanilla's physical `1.01 / 128` separation and add
                     // the equivalent finite-precision ordering for Lodestone's
                     // forward-depth wgpu projection. Without this dedicated
@@ -1750,10 +1751,31 @@ impl RenderState {
                     stats.draw_calls += 1;
                     stats.filled_maps_drawn += mesh.index_count as usize / 6;
                 }
+                // Icons over the pictures: the same pipeline and depth state with
+                // group 1 on the decoration sheet. They lie a fraction of a map
+                // pixel in front of their picture, so the picture's depth write
+                // does not hide them.
+                if let Some((mesh, sheet)) = &framed_maps.decorations {
+                    pass.set_pipeline(&map_pipeline.pipeline);
+                    bind_terrain_camera(
+                        &mut pass,
+                        &model.cam_bind_group,
+                        model.origin_arena.zero_offset(),
+                        &mut terrain_cam_group_last,
+                        &mut stats,
+                    );
+                    pass.set_bind_group(1, &**sheet, &[]);
+                    pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                    pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
+                }
                 super::maps::note_framed_map_draw(
                     camera,
                     framed_map_instances_submitted,
-                    framed_maps.len(),
+                    framed_maps.pictures.len(),
                     stats.filled_maps_drawn - framed_map_instances_before,
                 );
 

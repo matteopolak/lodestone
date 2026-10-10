@@ -109,6 +109,7 @@ fn a_held_player_head_reaches_pixels_and_a_held_chest_still_does_too() {
         let item: ResourceLocation = item_id.parse().expect("valid item id");
         state.set_main_hand_source(move || {
             Some(MainHandItem {
+                map_id: None,
                 item: item.clone(),
                 foil: false,
                 custom_model_data: None,
@@ -233,6 +234,7 @@ fn a_held_custom_head_draws_its_own_skin_rather_than_the_default_sheet() {
         let skin = skin.map(std::sync::Arc::<str>::from);
         state.set_main_hand_source(move || {
             Some(MainHandItem {
+                map_id: None,
                 item: item.clone(),
                 foil: false,
                 custom_model_data: None,

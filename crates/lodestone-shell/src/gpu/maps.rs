@@ -19,18 +19,28 @@
 //! latest held/framed mesh signatures, all behind a `RefCell` because the render
 //! path itself takes `&self`. A new render state owns a new device/session cache.
 //!
+//! # Decorations
+//!
+//! Icons (player arrow, banners, structure markers) are a second mesh per map,
+//! drawn after the picture through the same pipeline with group 1 swapped to the
+//! stitched decoration sheet ([`lodestone_assets::map_decoration_atlas`]). The
+//! sheet loads lazily on the first map draw and is retained for the device.
+//! [`lodestone_render::map_item::map_decoration_mesh`] places each sprite; an
+//! item frame draws only the types flagged for frames.
+//!
 //! # What is not drawn
 //!
-//! Vanilla's `map_background` frame sprite and the `MapDecoration` icons (the
-//! player arrow, banner markers) — both want the map-decorations atlas, which the
-//! asset layer does not stitch. `SessionMaps` carries the decorations already, so
-//! this is an asset job rather than a wiring one.
+//! The `map_background` paper behind a held map, the player's arms around it,
+//! and a decoration's custom name label.
 
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use glam::{Mat4, Vec3};
 use lodestone_game::maps::MapId;
-use lodestone_render::map_item::{MAP_SIZE, map_quad_mesh, map_texture_rgba};
+use lodestone_render::map_item::{
+    MAP_SIZE, MapDecorationPlacement, map_decoration_mesh, map_decoration_type, map_quad_mesh,
+    map_texture_rgba,
+};
 use lodestone_render::texture::GpuAtlas;
 use lodestone_render::model_pipeline::MapDepthDiagnostic;
 use lodestone_render::{ENTITY_FULLBRIGHT, GpuModelMesh, ModelMesh, ModelPipeline};
@@ -43,6 +53,35 @@ use super::{MapPicture, RenderState};
 /// GPU resources that stay valid for this [`RenderState`] and are shared by a
 /// held or framed map draw.
 pub(super) type PreparedMap = (Arc<GpuModelMesh>, Arc<wgpu::BindGroup>);
+
+/// A held map ready to record: its picture quad with the map texture, and the
+/// icon mesh (when any icon draws) with the decoration sheet.
+pub(super) struct HeldMap {
+    held: Arc<CachedHeld>,
+    texture: Arc<wgpu::BindGroup>,
+    decorations: Option<Arc<wgpu::BindGroup>>,
+}
+
+impl HeldMap {
+    /// The picture quad and the map texture it samples.
+    pub(super) fn picture(&self) -> (&GpuModelMesh, &wgpu::BindGroup) {
+        (&self.held.picture, &self.texture)
+    }
+
+    /// The icon mesh and the decoration sheet it samples, when any icon draws.
+    pub(super) fn decorations(&self) -> Option<(&GpuModelMesh, &wgpu::BindGroup)> {
+        Some((self.held.decorations.as_ref()?, self.decorations.as_deref()?))
+    }
+}
+
+/// Everything an item frame's maps need this frame.
+#[derive(Default)]
+pub(super) struct FramedMaps {
+    /// One picture batch per distinct map.
+    pub(super) pictures: Vec<PreparedMap>,
+    /// Every visible frame's icons, merged, with the decoration sheet.
+    pub(super) decorations: Option<PreparedMap>,
+}
 
 /// A map texture's exact content identity. The id scopes the revision: two
 /// unrelated maps naturally both start at revision zero.
@@ -78,6 +117,7 @@ struct FramedMapInput {
     rotation: u8,
     invisible: bool,
     light: u8,
+    decoration_revision: u64,
 }
 
 impl FramedMapInput {
@@ -90,6 +130,7 @@ impl FramedMapInput {
         rotation: u8,
         invisible: bool,
         light: u8,
+        decoration_revision: u64,
     ) -> Self {
         Self {
             entity_id,
@@ -100,6 +141,7 @@ impl FramedMapInput {
             rotation,
             invisible,
             light,
+            decoration_revision,
         }
     }
 
@@ -187,21 +229,52 @@ struct CachedFramedBatch {
     mesh: Arc<GpuModelMesh>,
 }
 
+/// One prepared framed-map frame: a picture batch per distinct map, plus every
+/// visible frame's decorations merged into one mesh.
+struct CachedFramed {
+    batches: Vec<CachedFramedBatch>,
+    decorations: Option<Arc<GpuModelMesh>>,
+}
+
+/// The stitched decoration sprites and their bind group for group 1.
+pub(super) struct DecorationSheet {
+    atlas: lodestone_assets::Atlas,
+    bind_group: Arc<wgpu::BindGroup>,
+}
+
+/// Everything that can change a held map's meshes: where it is, which map and
+/// icon list it shows, and which hand it is in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HeldMapKey {
+    pose: [u32; 16],
+    map_id: MapId,
+    decoration_revision: u64,
+}
+
+struct CachedHeld {
+    picture: GpuModelMesh,
+    decorations: Option<GpuModelMesh>,
+}
+
 /// Per-device retained map resources. This is intentionally owned by
 /// [`RenderState`]: a device or colour-format/session rebuild creates a new
 /// state and therefore cannot reuse stale wgpu handles.
 pub(super) struct MapRenderCache {
     textures: RetainedMapEntries<MapTextureKey, wgpu::BindGroup>,
-    held_mesh: RetainedLast<u32, GpuModelMesh>,
-    framed_batches: RetainedLast<FramedMapsKey, Vec<CachedFramedBatch>>,
+    /// Indexed main hand, off hand.
+    held: [RetainedLast<HeldMapKey, CachedHeld>; 2],
+    framed_batches: RetainedLast<FramedMapsKey, CachedFramed>,
+    /// `None` until the first map draw; `Some(None)` when the pack has no sheet.
+    decoration_sheet: Option<Option<Arc<DecorationSheet>>>,
 }
 
 impl Default for MapRenderCache {
     fn default() -> Self {
         Self {
             textures: RetainedMapEntries::default(),
-            held_mesh: RetainedLast::default(),
+            held: [RetainedLast::default(), RetainedLast::default()],
             framed_batches: RetainedLast::default(),
+            decoration_sheet: None,
         }
     }
 }
@@ -210,13 +283,26 @@ impl std::fmt::Debug for MapRenderCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MapRenderCache")
             .field("textures", &self.textures.entries.len())
-            .field("held_mesh", &self.held_mesh.entry.is_some())
+            .field("held_meshes", &self.held.iter().filter(|slot| slot.entry.is_some()).count())
             .field("framed_batches", &self.framed_batches.entry.is_some())
             .finish()
     }
 }
 
 impl MapRenderCache {
+    /// The decoration sheet, loaded from the vanilla pack on first use. `None`
+    /// when no pack provides one, in which case maps draw without icons.
+    fn decoration_sheet(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &ModelPipeline,
+    ) -> Option<Arc<DecorationSheet>> {
+        self.decoration_sheet
+            .get_or_insert_with(|| load_decoration_sheet(device, queue, pipeline).map(Arc::new))
+            .clone()
+    }
+
     fn texture(
         &mut self,
         device: &wgpu::Device,
@@ -953,14 +1039,9 @@ pub(super) fn note_framed_map_draw(
     );
 }
 
-/// Vanilla's `renderMap` scale (ItemInHandRenderer's render map: `scale(0.38f)`
-/// around a `[-0.5, -0.5]`-centred unit quad).
+/// The held map's base scale: `0.38` around a `[-0.5, -0.5]`-centred unit quad,
+/// doubled again for the two-handed stance.
 const HELD_MAP_SCALE: f32 = 0.38;
-
-/// `renderTwoHandedMap`'s resting translation, `translate(0, 0.04, -0.72)`.
-/// Camera space here is the same right-handed space `first_person_item_mesh`
-/// meshes into, so `-z` is into the screen.
-const HELD_MAP_OFFSET: Vec3 = Vec3::new(0.0, -0.1, -0.72);
 
 /// Build a bind group over one map's colour grid, ready for group 1 of the model
 /// pipeline.
@@ -1031,17 +1112,121 @@ pub(super) fn map_texture_bind_group(
     )
 }
 
-/// The camera-space pose for a map held in the first-person hand.
+/// Loads the decoration sprites from the vanilla pack and uploads them as one
+/// texture bound at group 1.
+fn load_decoration_sheet(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &ModelPipeline,
+) -> Option<DecorationSheet> {
+    let manager = crate::resources::vanilla_manager()?;
+    let atlas = match lodestone_assets::map_decoration_atlas::load_map_decoration_atlas(&manager) {
+        Ok(atlas) => atlas,
+        Err(error) => {
+            tracing::warn!(target: "assets", "map decoration sheet: {error}");
+            return None;
+        }
+    };
+    let gpu = GpuAtlas::from_atlas(device, queue, &atlas);
+    let bind_group = Arc::new(pipeline.atlas_bind_group(device, &gpu));
+    Some(DecorationSheet { atlas, bind_group })
+}
+
+/// The placements for `decorations` on `sheet`. A decoration of an unknown
+/// type or without a sprite on the sheet is skipped; `frame_only` further drops
+/// the types an item frame does not show.
+fn decoration_placements(
+    sheet: &lodestone_assets::Atlas,
+    decorations: &[lodestone_model::MapDecoration],
+    frame_only: bool,
+) -> Vec<MapDecorationPlacement> {
+    decorations
+        .iter()
+        .filter_map(|decoration| {
+            if decoration.kind.namespace() != "minecraft" {
+                return None;
+            }
+            let ty = map_decoration_type(decoration.kind.path())?;
+            if frame_only && !ty.show_on_item_frame {
+                return None;
+            }
+            let sprite = sheet.sprite(&lodestone_assets::ResourceLocation::new("minecraft", ty.sprite).ok()?)?;
+            Some(MapDecorationPlacement {
+                uv_min: sprite.uv_min,
+                uv_max: sprite.uv_max,
+                x: decoration.x,
+                y: decoration.y,
+                rotation: decoration.rotation,
+            })
+        })
+        .collect()
+}
+
+/// How a held map is posed: centred in both hands, or off to one side in one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum HeldMapStance {
+    /// The main hand's map with the off hand empty: held in front of the chest
+    /// and tilted flat as the view pitches level.
+    TwoHanded { pitch_degrees: f32 },
+    /// A map in one hand, with the other occupied or the map in the off hand.
+    OneHanded { right_arm: bool },
+}
+
+/// How far the two-handed map tips toward horizontal: `1` at a level view or
+/// above, falling to `0` as the view pitches down by 45 degrees and more.
+fn held_map_tilt(pitch_degrees: f32) -> f32 {
+    let tilt = (1.0 - pitch_degrees / 45.0 + 0.1).clamp(0.0, 1.0);
+    -(tilt * std::f32::consts::PI).cos() * 0.5 + 0.5
+}
+
+/// The camera-space pose of a held map's unit quad (one map width is one unit).
 ///
-/// `inverse_arm_height` is the equip/swap dip every held item takes, and it is
-/// read here for the same reason `prepare_first_person_hands` reads it for both of
-/// its other branches: swapping a map in must lower and raise as one motion rather
-/// than have the map pop into place.
+/// `attack` is the swing progress of the hand and `inverse_arm_height` the
+/// equip dip, `0..=1`. The quad is a [`map_quad_mesh`] quad, so the rotation
+/// about Y and Z that turns the map face toward the player is already part of
+/// its construction and only the translations, tilt, swing and scale appear.
 #[must_use]
-fn held_map_pose(inverse_arm_height: f32) -> Mat4 {
-    Mat4::from_translation(
-        HELD_MAP_OFFSET + Vec3::new(0.0, inverse_arm_height * -0.6, 0.0),
-    ) * Mat4::from_scale(Vec3::splat(HELD_MAP_SCALE))
+pub(super) fn held_map_pose(stance: HeldMapStance, attack: f32, inverse_arm_height: f32) -> Mat4 {
+    use std::f32::consts::PI;
+    let sqrt_attack = attack.sqrt();
+    match stance {
+        HeldMapStance::TwoHanded { pitch_degrees } => {
+            let y_swing = -0.2 * (attack * PI).sin();
+            let z_swing = -0.4 * (sqrt_attack * PI).sin();
+            let tilt = held_map_tilt(pitch_degrees);
+            let swing_rotation = (sqrt_attack * PI).sin();
+            Mat4::from_translation(Vec3::new(0.0, -y_swing / 2.0, z_swing))
+                * Mat4::from_translation(Vec3::new(
+                    0.0,
+                    0.04 + inverse_arm_height * -1.2 + tilt * -0.5,
+                    -0.72,
+                ))
+                * Mat4::from_rotation_x((tilt * -85.0).to_radians())
+                * Mat4::from_rotation_x((swing_rotation * 20.0).to_radians())
+                * Mat4::from_scale(Vec3::splat(2.0 * HELD_MAP_SCALE))
+        }
+        HeldMapStance::OneHanded { right_arm } => {
+            let invert = if right_arm { 1.0 } else { -1.0 };
+            let x_swing = (sqrt_attack * PI).sin();
+            let x_swing_position = -0.5 * x_swing;
+            let y_swing_position = 0.4 * (sqrt_attack * 2.0 * PI).sin();
+            let z_swing_position = -0.3 * (attack * PI).sin();
+            Mat4::from_translation(Vec3::new(invert * 0.125, -0.125, 0.0))
+                * Mat4::from_translation(Vec3::new(
+                    invert * 0.51,
+                    -0.08 + inverse_arm_height * -1.2,
+                    -0.75,
+                ))
+                * Mat4::from_translation(Vec3::new(
+                    invert * x_swing_position,
+                    y_swing_position - 0.3 * x_swing,
+                    z_swing_position,
+                ))
+                * Mat4::from_rotation_x((x_swing * -45.0).to_radians())
+                * Mat4::from_rotation_y((invert * x_swing * -30.0).to_radians())
+                * Mat4::from_scale(Vec3::splat(HELD_MAP_SCALE))
+        }
+    }
 }
 
 /// The block-light level a **glow** frame lights its map picture at.
@@ -1230,19 +1415,23 @@ fn note_map_drawn() {
 }
 
 impl RenderState {
-    /// This frame's held filled map, or `None` when the hand holds anything else.
+    /// One hand's held filled map, or `None` when that hand holds anything else.
     ///
-    /// Returns the quad *and* its texture bind group together: the two are
-    /// meaningless apart, and pairing them is what stops a later frame drawing one
-    /// map's geometry with another map's pixels.
+    /// Returns the picture quad *and* its texture bind group together: the two
+    /// are meaningless apart, and pairing them is what stops a later frame
+    /// drawing one map's geometry with another map's pixels. The decorations come
+    /// back as a second mesh with the decoration sheet bound.
     pub(super) fn prepare_held_map(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        item: &super::MainHandItem,
+        is_main: bool,
+        stance: HeldMapStance,
+        attack: f32,
         inverse_arm_height: f32,
-    ) -> Option<PreparedMap> {
-        let item = &self.hands.main.item.as_ref()?.item;
-        if item.path() != FILLED_MAP_ITEM {
+    ) -> Option<HeldMap> {
+        if item.item.path() != FILLED_MAP_ITEM && item.map_id.is_none() {
             // Not a decline: the hand is holding something else, which is not a
             // map that failed to draw.
             return None;
@@ -1254,22 +1443,39 @@ impl RenderState {
         if !self.map_source.is_installed() {
             return note_map_skip(SITE, MapSkip::NoSource, None);
         }
-        let Some(picture) = self.map_source.picture(None, None) else {
-            return note_map_skip(SITE, MapSkip::NoContents, None);
+        let Some(picture) = self.map_source.picture(item.map_id, None) else {
+            return note_map_skip(SITE, MapSkip::NoContents, item.map_id);
         };
+        let pose = held_map_pose(stance, attack, inverse_arm_height);
+        let key = HeldMapKey {
+            pose: pose.to_cols_array().map(f32::to_bits),
+            map_id: picture.map_id,
+            decoration_revision: picture.decoration_revision,
+        };
+        let mut cache = self.map_cache.borrow_mut();
+        let sheet = cache.decoration_sheet(device, queue, &model.pipeline);
         // Full bright, as the GUI item path nails every vertex: the map is drawn
         // in its own camera-space pass with no world position to sample.
-        let mut cache = self.map_cache.borrow_mut();
-        let gpu = cache.held_mesh.get_or_insert_with(inverse_arm_height.to_bits(), || {
-            let mesh = map_quad_mesh(held_map_pose(inverse_arm_height), ENTITY_FULLBRIGHT);
+        let held = cache.held[usize::from(!is_main)].get_or_insert_with(key, || {
+            let mesh = map_quad_mesh(pose, ENTITY_FULLBRIGHT);
             // A map quad is structurally non-empty. Keeping this assertion beside
             // the retained build avoids an `Option` cache entry whose only valid
             // state would permanently re-run a failed upload every frame.
-            GpuModelMesh::upload(device, &mesh).expect("a map quad has six indices")
+            let picture_mesh = GpuModelMesh::upload(device, &mesh).expect("a map quad has six indices");
+            let decorations = sheet.as_ref().and_then(|sheet| {
+                let placements = decoration_placements(&sheet.atlas, &picture.decorations, false);
+                let mesh = map_decoration_mesh(pose, ENTITY_FULLBRIGHT, &placements)?;
+                GpuModelMesh::upload(device, &mesh)
+            });
+            CachedHeld { picture: picture_mesh, decorations }
         });
         let texture = cache.texture(device, queue, &model.pipeline, &picture);
         note_map_drawn();
-        Some((gpu, texture))
+        let decorations = match (&held.decorations, &sheet) {
+            (Some(_), Some(sheet)) => Some(Arc::clone(&sheet.bind_group)),
+            _ => None,
+        };
+        Some(HeldMap { held, texture, decorations })
     }
 
     /// Every filled map hanging in an item frame this frame, grouped into
@@ -1297,7 +1503,7 @@ impl RenderState {
         entities: &[EntityDraw],
         map_view_projection: Mat4,
         frame_view_projection: Mat4,
-    ) -> Vec<PreparedMap> {
+    ) -> FramedMaps {
         const SITE: &str = "item frame";
         let frustum = camera.frustum();
         let diagnostic_switches = map_diagnostic_switches();
@@ -1355,12 +1561,12 @@ impl RenderState {
             // diagnostic does record a transition from a visible candidate, so
             // a live repro can distinguish gather disappearance from culling.
             note_framed_map_gather(camera, diagnostic);
-            return Vec::new();
+            return FramedMaps::default();
         }
         let Some(model) = self.model.as_ref() else {
             note_framed_map_gather(camera, diagnostic);
             let _ = note_map_skip::<()>(SITE, MapSkip::NoModels, None);
-            return Vec::new();
+            return FramedMaps::default();
         };
         if !self.map_source.is_installed() {
             if let Some(frame) = &mut diagnostic.selected {
@@ -1368,7 +1574,7 @@ impl RenderState {
             }
             note_framed_map_gather(camera, diagnostic);
             let _ = note_map_skip::<()>(SITE, MapSkip::NoSource, None);
-            return Vec::new();
+            return FramedMaps::default();
         }
         // A frame's item type decides the full-size frame body, but only this
         // lookup proves that its corresponding MAP_ITEM_DATA has arrived. Group
@@ -1406,6 +1612,7 @@ impl RenderState {
                     ),
                     draw.type_path.as_ref() == GLOW_ITEM_FRAME_TYPE_PATH,
                 ),
+                picture.decoration_revision,
             );
             if should_trace_candidate("framed_map", draw.id, draw.feet, camera.position) {
                 // `map_quad_mesh` is centred at local `(-.5, -.5, 0)` rather
@@ -1450,8 +1657,10 @@ impl RenderState {
         let key = FramedMapsKey::new(inputs);
         let batch_inputs = key.0.clone();
         let mut cache = self.map_cache.borrow_mut();
-        let batches = cache.framed_batches.get_or_insert_with(key, || {
+        let sheet = cache.decoration_sheet(device, queue, &model.pipeline);
+        let cached = cache.framed_batches.get_or_insert_with(key, || {
             let mut merged: Vec<(MapId, ModelMesh)> = Vec::new();
+            let mut icons: Option<ModelMesh> = None;
             for input in &batch_inputs {
                 let mesh = map_quad_mesh(input.pose(), input.light);
                 if let Some((_, batch)) = merged
@@ -1462,21 +1671,33 @@ impl RenderState {
                 } else {
                     merged.push((input.map_id, mesh));
                 }
+                if let (Some(sheet), Some(picture)) = (&sheet, pictures.get(&input.map_id)) {
+                    let placements = decoration_placements(&sheet.atlas, &picture.decorations, true);
+                    if let Some(mesh) = map_decoration_mesh(input.pose(), input.light, &placements) {
+                        match &mut icons {
+                            Some(all) => all.merge(&mesh),
+                            None => icons = Some(mesh),
+                        }
+                    }
+                }
             }
-            merged
-                .into_iter()
-                .map(|(map_id, mesh)| CachedFramedBatch {
-                    map_id,
-                    mesh: Arc::new(
-                        GpuModelMesh::upload(device, &mesh)
-                            .expect("a framed map batch has at least one quad"),
-                    ),
-                })
-                .collect()
+            CachedFramed {
+                batches: merged
+                    .into_iter()
+                    .map(|(map_id, mesh)| CachedFramedBatch {
+                        map_id,
+                        mesh: Arc::new(
+                            GpuModelMesh::upload(device, &mesh)
+                                .expect("a framed map batch has at least one quad"),
+                        ),
+                    })
+                    .collect(),
+                decorations: icons.and_then(|mesh| GpuModelMesh::upload(device, &mesh)).map(Arc::new),
+            }
         });
-        diagnostic.submitted_batches = batches.len();
-        let mut prepared = Vec::with_capacity(batches.len());
-        for batch in batches.iter() {
+        diagnostic.submitted_batches = cached.batches.len();
+        let mut prepared = Vec::with_capacity(cached.batches.len());
+        for batch in cached.batches.iter() {
             let Some(picture) = pictures.get(&batch.map_id) else {
                 // The cache key and picture collection are built together, so
                 // this is defensive rather than a normal decline.
@@ -1490,7 +1711,11 @@ impl RenderState {
             note_map_drawn();
         }
         note_framed_map_gather(camera, diagnostic);
-        prepared
+        let decorations = match (&cached.decorations, &sheet) {
+            (Some(mesh), Some(sheet)) => Some((Arc::clone(mesh), Arc::clone(&sheet.bind_group))),
+            _ => None,
+        };
+        FramedMaps { pictures: prepared, decorations }
     }
 }
 
@@ -2046,11 +2271,11 @@ mod tests {
     fn retained_last_batch_reuses_an_unchanged_frame_and_rebuilds_on_pose_or_light_change() {
         let map_id = MapId::new(17).expect("fixed map id is valid");
         let stable =
-            FramedMapInput::new(9, map_id, [4.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0);
+            FramedMapInput::new(9, map_id, [4.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0, 0);
         let moved =
-            FramedMapInput::new(9, map_id, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0);
+            FramedMapInput::new(9, map_id, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0, 0);
         let relit =
-            FramedMapInput::new(9, map_id, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xE0);
+            FramedMapInput::new(9, map_id, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xE0, 0);
         let mut cache = RetainedLast::<FramedMapsKey, usize>::default();
         let mut builds = 0;
 
@@ -2084,9 +2309,9 @@ mod tests {
     fn invisible_framed_map_has_its_own_lift_and_cache_key() {
         let map_id = MapId::new(17).expect("fixed map id is valid");
         let visible =
-            FramedMapInput::new(9, map_id, [4.0, 65.0, -9.0], 90.0, 0.0, 0, false, 0xF0);
+            FramedMapInput::new(9, map_id, [4.0, 65.0, -9.0], 90.0, 0.0, 0, false, 0xF0, 0);
         let invisible =
-            FramedMapInput::new(9, map_id, [4.0, 65.0, -9.0], 90.0, 0.0, 0, true, 0xF0);
+            FramedMapInput::new(9, map_id, [4.0, 65.0, -9.0], 90.0, 0.0, 0, true, 0xF0, 0);
         assert_ne!(visible, invisible, "invisibility changes framed-map vertex positions");
 
         let facing = lodestone_render::entity::item_frame_facing_step(90.0, 0.0);
@@ -2253,11 +2478,48 @@ mod tests {
     /// the near plane and draw nothing at all.
     #[test]
     fn a_held_map_is_in_front_of_the_camera() {
-        let mesh = map_quad_mesh(held_map_pose(0.0), 15);
-        assert!(mesh.vertices.iter().all(|v| v.position[2] < 0.0));
-        // The dip lowers it and never raises it.
-        let rested = map_quad_mesh(held_map_pose(0.0), 15).vertices[0].position[1];
-        let dipped = map_quad_mesh(held_map_pose(1.0), 15).vertices[0].position[1];
-        assert!(dipped < rested);
+        for stance in [
+            HeldMapStance::TwoHanded { pitch_degrees: 0.0 },
+            HeldMapStance::OneHanded { right_arm: true },
+            HeldMapStance::OneHanded { right_arm: false },
+        ] {
+            let mesh = map_quad_mesh(held_map_pose(stance, 0.0, 0.0), 15);
+            assert!(mesh.vertices.iter().all(|v| v.position[2] < 0.0), "{stance:?}");
+            // The dip lowers it and never raises it.
+            let rested = map_quad_mesh(held_map_pose(stance, 0.0, 0.0), 15).vertices[0].position[1];
+            let dipped = map_quad_mesh(held_map_pose(stance, 0.0, 1.0), 15).vertices[0].position[1];
+            assert!(dipped < rested, "{stance:?}");
+        }
+    }
+
+    /// The pose at rest, against arithmetic done from the reference rules: the
+    /// two-handed map is the quad scaled to 0.76 wide, turned `85` degrees about
+    /// X when the view is level (tilt `1`), at `y = 0.04 - 0.5`, `z = -0.72`; the
+    /// one-handed map is 0.38 wide at `x = +-(0.125 + 0.51)`, `y = -0.205`,
+    /// `z = -0.75`, upright.
+    #[test]
+    fn held_map_poses_match_the_reference_arithmetic() {
+        let centre = |pose: Mat4| pose.transform_point3(Vec3::ZERO);
+        let two = centre(held_map_pose(HeldMapStance::TwoHanded { pitch_degrees: 0.0 }, 0.0, 0.0));
+        assert!((two - Vec3::new(0.0, -0.46, -0.72)).length() < 1.0e-5, "{two:?}");
+        let right = centre(held_map_pose(HeldMapStance::OneHanded { right_arm: true }, 0.0, 0.0));
+        assert!((right - Vec3::new(0.635, -0.205, -0.75)).length() < 1.0e-5, "{right:?}");
+        let left = centre(held_map_pose(HeldMapStance::OneHanded { right_arm: false }, 0.0, 0.0));
+        assert!((left - Vec3::new(-0.635, -0.205, -0.75)).length() < 1.0e-5, "{left:?}");
+
+        // Width: the unit quad's x extent.
+        let width = |pose: Mat4| {
+            (pose.transform_point3(Vec3::new(0.5, 0.0, 0.0)) - pose.transform_point3(Vec3::new(-0.5, 0.0, 0.0)))
+                .length()
+        };
+        assert!((width(held_map_pose(HeldMapStance::TwoHanded { pitch_degrees: 0.0 }, 0.0, 0.0)) - 0.76).abs() < 1.0e-5);
+        assert!((width(held_map_pose(HeldMapStance::OneHanded { right_arm: true }, 0.0, 0.0)) - 0.38).abs() < 1.0e-5);
+
+        // Tilt: level view is fully tipped, looking 45 degrees down is upright.
+        assert!((held_map_tilt(0.0) - 1.0).abs() < 1.0e-6);
+        assert!(held_map_tilt(45.0) < 0.1);
+        let upright = held_map_pose(HeldMapStance::TwoHanded { pitch_degrees: 90.0 }, 0.0, 0.0);
+        let normal = upright.transform_vector3(Vec3::Z).normalize();
+        assert!((normal - Vec3::Z).length() < 1.0e-5, "a map held upright faces the player: {normal:?}");
     }
 }

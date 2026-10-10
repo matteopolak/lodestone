@@ -167,9 +167,10 @@ pub(super) enum FirstPersonHand<'a> {
     Item(GpuModelMesh, bool),
     /// A held **filled map**: one quad drawn through the same model
     /// pipeline as [`Self::Item`], with group 1 swapped from the block atlas to the
-    /// map's own 128×128 texture. The bind group travels with the mesh because the
+    /// map's own 128×128 texture, then its decoration quads with group 1 swapped
+    /// to the decoration sheet. Each bind group travels with its mesh because the
     /// two are meaningless apart — see `super::maps`.
-    Map(std::sync::Arc<GpuModelMesh>, std::sync::Arc<wgpu::BindGroup>),
+    Map(super::maps::HeldMap),
     /// A held **block-entity rig** — a chest, a shulker box, a skull/head: an item
     /// whose definition resolves to a `minecraft:special` node and whose geometry is
     /// therefore a block-entity renderer rather than any baked model.
@@ -421,13 +422,20 @@ impl RenderState {
         } = pose;
 
         // A held filled map draws as a textured quad, not as the item's flat
-        // sprite (which has no terrain on it). Main hand only: the one-handed
-        // map pose an off-hand map takes is not ported, and drawing the bare
-        // sprite there would look like a working map with nothing on it.
-        if is_main
-            && let Some((mesh, texture)) = self.prepare_held_map(device, queue, inverse_arm_height)
-        {
-            return Some(FirstPersonHand::Map(mesh, texture));
+        // sprite (which has no terrain on it). Centred in two hands when it is
+        // the main hand's and the off hand is empty, else off to the side of
+        // whichever hand holds it.
+        if let Some(held) = item {
+            let stance = if is_main && self.hands.off.item.is_none() {
+                super::maps::HeldMapStance::TwoHanded { pitch_degrees: camera.pitch }
+            } else {
+                super::maps::HeldMapStance::OneHanded { right_arm: arm == Arm::Right }
+            };
+            if let Some(map) =
+                self.prepare_held_map(device, queue, held, is_main, stance, attack_anim, inverse_arm_height)
+            {
+                return Some(FirstPersonHand::Map(map));
+            }
         }
 
         // The use state belongs to the main hand alone: it is the only hand
@@ -1277,7 +1285,7 @@ impl RenderState {
             // A filled map: the same four bind groups as the item branch with
             // **group 1 swapped** to the map's own texture. No glint second pass —
             // vanilla's own map-render path draws no foil, and a map is not enchantable.
-            FirstPersonHand::Map(mesh, texture) => {
+            FirstPersonHand::Map(map) => {
                 if let Some(model) = self.model.as_ref() {
                     pass.set_pipeline(&model.pipeline.pipeline);
                     pass.set_bind_group(
@@ -1285,14 +1293,22 @@ impl RenderState {
                         &model.hand_cam_bind_group,
                         &[model.origin_arena.zero_offset()],
                     );
-                    pass.set_bind_group(1, &**texture, &[]);
                     pass.set_bind_group(2, &model.palette_bind_group, &[]);
                     pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                    let (mesh, texture) = map.picture();
+                    pass.set_bind_group(1, texture, &[]);
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                     stats.draw_calls += 1;
                     stats.filled_maps_drawn += 1;
+                    if let Some((mesh, sheet)) = map.decorations() {
+                        pass.set_bind_group(1, sheet, &[]);
+                        pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                        stats.draw_calls += 1;
+                    }
                 }
             }
             // A held block-entity rig: the **block-entity pass's** pipeline and its
@@ -1456,6 +1472,7 @@ mod tests {
 
     fn held(path: &str) -> MainHandItem {
         MainHandItem {
+            map_id: None,
             item: ResourceLocation::new("minecraft", path).unwrap(),
             foil: false,
             custom_model_data: None,

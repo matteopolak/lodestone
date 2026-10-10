@@ -429,3 +429,26 @@ fn an_empty_hand_and_a_held_map_reach_the_renderer_at_rest() {
     assert_eq!(hands[0].0.inverse_arm_height, 0.0);
     assert!(hands[1].1.is_none());
 }
+
+/// Each hand's draw record carries its own stack's `minecraft:map_id`, which is
+/// what lets the renderer show two different maps at once.
+#[test]
+fn each_held_map_reaches_the_renderer_with_its_own_map_id() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    settle(&mut sim);
+    let local = sim.local;
+    for (slot, map_id) in [(0, 17), (40, 23)] {
+        sim.write(|w| {
+            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+                let mut stack = lodestone_model::ItemStack::new("minecraft:filled_map".parse().unwrap(), 1);
+                stack.components.map_id = Some(map_id);
+                menus.0.apply(&lodestone_model::ClientEvent::InventorySlotChanged { slot, item: Some(stack) });
+            }
+        });
+    }
+    settle(&mut sim);
+    let frame = crate::sim::first_person_hands::hands_frame(&sim.first_person_hands_sample());
+    assert_eq!(frame.main.item.as_ref().and_then(|held| held.map_id), Some(17));
+    assert_eq!(frame.off.item.as_ref().and_then(|held| held.map_id), Some(23));
+}

@@ -9,6 +9,8 @@ mod capture_screenshots;
 mod first_person_hands_pixels;
 #[path = "gpu/frame_benchmark_showcase_fixture.rs"]
 mod frame_benchmark_showcase_fixture;
+#[path = "gpu/held_map_decoration_pixels.rs"]
+mod held_map_decoration_pixels;
 #[path = "gpu/hud_scene_fixture.rs"]
 mod hud_scene_fixture;
 #[path = "gpu/mesh_fill_rate.rs"]

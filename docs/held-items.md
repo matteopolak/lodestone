@@ -36,7 +36,7 @@ Per hand per tick: save last height; if the shown stack matches the held one (sa
 
 **Hands busy.** Controlling a boat with a movement key held (`ControlledVehicle` is a boat and `MovementIntent` has forward or strafe, the bits the paddle input uses) lowers both hands by `0.4` a tick to `0` and makes `begin_attack_live` and `use_item_live` return early; releasing raises them. Passengers and land mounts are never busy.
 
-Gaps: a block interaction consuming the held stack without placing (bone meal, bucket) does not snap (the later count change dips it as a swap); the off hand never snaps; an off-hand filled map draws nothing and a main-hand map always takes the two-handed pose; per-item swap-animation scale and opt-out are not read (scale `1`).
+Gaps: a block interaction consuming the held stack without placing (bone meal, bucket) does not snap (the later count change dips it as a swap); the off hand never snaps; a held map draws no arms or paper background ([filled-map-rendering](./filled-map-rendering.md)); per-item swap-animation scale and opt-out are not read (scale `1`).
 
 ### Item-use arm poses
 

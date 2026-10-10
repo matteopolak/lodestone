@@ -74,10 +74,13 @@ pub struct MapState {
     /// Monotonically increasing identity of the colour grid. Renderers use this
     /// with the stable map id to retain a GPU texture without hashing 16 KiB of
     /// pixels every frame. Decoration-only packets deliberately do not change
-    /// it because this client does not render map decorations yet.
+    /// it: the decorations are separate quads, not part of the texture.
     pub color_revision: u64,
     /// Icons, in the order the server sent them.
-    pub decorations: Vec<MapDecoration>,
+    pub decorations: Arc<Vec<MapDecoration>>,
+    /// Monotonically increasing identity of [`Self::decorations`], bumped when a
+    /// packet's list differs from the one held.
+    pub decoration_revision: u64,
 }
 
 impl Default for MapState {
@@ -87,7 +90,8 @@ impl Default for MapState {
             locked: false,
             colors: Arc::new(vec![0; MAP_SIZE * MAP_SIZE]),
             color_revision: 0,
-            decorations: Vec::new(),
+            decorations: Arc::new(Vec::new()),
+            decoration_revision: 0,
         }
     }
 }
@@ -158,9 +162,11 @@ impl MapStore {
         let state = Arc::make_mut(&mut self.maps).entry(map_id).or_default();
         state.scale = *scale;
         state.locked = *locked;
-        if let Some(decorations) = decorations {
-            state.decorations.clear();
-            state.decorations.extend(decorations.iter().cloned());
+        if let Some(decorations) = decorations
+            && state.decorations.as_slice() != decorations.as_slice()
+        {
+            state.decorations = Arc::new(decorations.clone());
+            state.decoration_revision = state.decoration_revision.saturating_add(1);
         }
         if let Some(patch) = color_patch {
             state.apply_patch(patch);
@@ -269,12 +275,20 @@ mod tests {
         store.apply(&event(1, Some(vec![marker.clone()]), None));
         store.apply(&event(1, None, Some(patch(0, 0, 2, 2, 1))));
         assert_eq!(
-            store.get(map_id(1)).unwrap().decorations,
-            vec![marker],
+            *store.get(map_id(1)).unwrap().decorations,
+            vec![marker.clone()],
             "a pixel-only update must leave the icons alone"
+        );
+        assert_eq!(store.get(map_id(1)).unwrap().decoration_revision, 1);
+        store.apply(&event(1, Some(vec![marker.clone()]), None));
+        assert_eq!(
+            store.get(map_id(1)).unwrap().decoration_revision,
+            1,
+            "an identical list is not a change"
         );
         store.apply(&event(1, Some(Vec::new()), None));
         assert!(store.get(map_id(1)).unwrap().decorations.is_empty());
+        assert_eq!(store.get(map_id(1)).unwrap().decoration_revision, 2);
     }
 
     #[test]

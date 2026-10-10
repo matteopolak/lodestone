@@ -233,6 +233,7 @@ fn a_held_shield_shows_its_back_so_every_dye_renders_identically() {
         let base_color = base_color.map(str::to_string);
         state.set_main_hand_source(move || {
             Some(MainHandItem {
+                map_id: None,
             item: item.clone(),
             foil: false,
             custom_model_data: None,

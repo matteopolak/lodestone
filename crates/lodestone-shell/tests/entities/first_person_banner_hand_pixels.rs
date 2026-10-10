@@ -162,6 +162,7 @@ fn a_held_banner_draws_its_own_dye_colour_not_nothing() {
         let item: ResourceLocation = item_id.parse().expect("valid item id");
         state.set_main_hand_source(move || {
             Some(MainHandItem {
+                map_id: None,
                 item: item.clone(),
                 foil: false,
                 custom_model_data: None,
@@ -330,6 +331,7 @@ fn a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour() {
         let item: ResourceLocation = "minecraft:red_banner".parse().expect("valid item id");
         state.set_main_hand_source(move || {
             Some(MainHandItem {
+                map_id: None,
                 item: item.clone(),
                 foil: false,
                 custom_model_data: None,

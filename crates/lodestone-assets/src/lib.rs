@@ -91,6 +91,7 @@ pub mod item_model;
 pub mod item_tint;
 pub mod keyframe;
 pub mod lang;
+pub mod map_decoration_atlas;
 mod location;
 mod manager;
 mod meta;

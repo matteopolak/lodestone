@@ -346,6 +346,9 @@ pub(crate) fn stack_icon(st: &lodestone_game::item::ItemStack) -> Option<ItemIco
 /// so `stack_skin_url`'s fetch is requested once.
 pub(crate) fn held_item_record(record: &ItemIcon) -> crate::gpu::MainHandItem {
     crate::gpu::MainHandItem {
+        // The record is built from the icon alone; `hands_frame` fills the id
+        // from the stack.
+        map_id: None,
         item: record.item.clone(),
         foil: record.enchanted,
         custom_model_data: record.custom_model_data,
