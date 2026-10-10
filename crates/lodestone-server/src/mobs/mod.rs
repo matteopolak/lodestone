@@ -441,7 +441,7 @@ mod sim_spawning;
 mod sim_entities;
 mod sim_persistence;
 mod sim_persistence_state;
-mod appearance;
+pub(crate) mod appearance;
 mod sim_effects;
 mod sim_events;
 mod sim_snapshots;
@@ -474,6 +474,7 @@ pub(crate) use falling_blocks::merge_falling_block_tick_effect_batches;
 // `VehicleCollision` stays private, used only within this file's own
 // `tick_vehicles`.
 mod vehicles;
+mod cushion;
 
 // No re-export: every `impl MobSim` method in each is already `pub`. See
 // `mobs::dragon`/`mobs::end_crystal`'s own module docs for the pure
@@ -2667,6 +2668,8 @@ pub struct MobSim<'w> {
     /// the motion is [`lodestone_physics::vehicle`]'s, shared with the client so
     /// a boat we *watch* and a boat we *ride* cannot disagree about a slab.
     vehicles: HashMap<i32, TrackedVehicle>,
+    /// Live cushions, keyed by network entity id; see `mobs::cushion`.
+    cushions: HashMap<i32, TrackedCushion>,
     /// Live primed TNT, keyed by network entity id — see [`TrackedTnt`] for
     /// why this is a plain map beside [`vehicles`](Self::vehicles) rather than
     /// a [`SimMob`].
@@ -2895,6 +2898,22 @@ struct TrackedVehicle {
     /// Vanilla's own shared vehicle "damage" metadata field — accumulated damage x 10, decayed by
     /// `1.0` per tick. It is the amplitude of the rock.
     damage: f32,
+}
+
+/// One live cushion: a stationary, block-attached seat with a dye colour.
+#[derive(Debug, Clone)]
+struct TrackedCushion {
+    uuid: Uuid,
+    /// Feet position: the centre of its cell at the height it was placed.
+    position: Vec3,
+    /// Yaw in degrees, snapped to a quarter turn at placement.
+    yaw: f32,
+    /// Dye ordinal, `0..=15`.
+    color: u8,
+    /// The player entity id seated on it.
+    rider: Option<i32>,
+    /// Ticks since the last support check.
+    ticks_since_check: u32,
 }
 
 /// One live primed-tnt entity — wire identity, motion and the fuse countdown.

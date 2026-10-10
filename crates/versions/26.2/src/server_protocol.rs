@@ -306,6 +306,11 @@ const METADATA_IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
 /// `lodestone_server::MetadataField::TamableFlags`.
 const METADATA_IDX_TAMABLE_FLAGS: u8 = 18;
 const METADATA_SER_BYTE: i32 = 0;
+
+/// The cushion class's colour accessor: index 8, serializer 43 (`DYE_COLOR`, a
+/// dye ordinal as a VarInt). Appended in 26.3; absent from the 776 index dump.
+const METADATA_IDX_CUSHION_COLOR: u8 = 8;
+const METADATA_SER_DYE_COLOR: i32 = 43;
 const METADATA_IDX_SHARED_FLAGS: u8 = 0;
 
 /// the abstract-horse class's own flags accessor's metadata index — **also 18**, also `BYTE`.
@@ -4689,6 +4694,11 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_CRYSTAL_SHOW_BOTTOM);
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*show);
+                }
+                MetadataField::CushionColor(color) => {
+                    w.u8(METADATA_IDX_CUSHION_COLOR);
+                    w.var_i32(METADATA_SER_DYE_COLOR);
+                    w.var_i32(i32::from(*color & 0x0F));
                 }
                 MetadataField::SheepWool { color, sheared } => {
                     w.u8(METADATA_IDX_SHEEP_WOOL);

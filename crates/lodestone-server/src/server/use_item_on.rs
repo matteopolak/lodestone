@@ -363,7 +363,10 @@ where
         usize::from(inventory.selected_hotbar_slot())
     };
     let holding_block_item = selected_placement_item(inventory, hand_native_for_use)
-        .is_some_and(|item| block_items::block_placed_by(item).is_some());
+        .is_some_and(|item| block_items::block_placed_by(item).is_some())
+        || inventory
+            .native(hand_native_for_use)
+            .is_some_and(|stack| crate::cushion::color_for_stack(stack).is_some());
     let existing_menu = block_entities.with(|reg| reg.get(pos).and_then(BlockEntity::menu_name));
     if let Some(menu) = existing_menu.filter(|_| !sneaking || !holding_block_item) {
         return open_container_screen(
@@ -859,6 +862,41 @@ where
                 }
             }
             return Ok(());
+        }
+    }
+
+    // A cushion item places an entity against the top face of the clicked block.
+    // It is not a block item, so the placement branch below cannot reach it; a
+    // refused placement keeps the stack and ends the click.
+    if let Some(stack) = inventory.native(hand_native).cloned() {
+        let eye = player_pos.map(|feet| Vec3::new(feet.x, feet.y + EYE_HEIGHT, feet.z));
+        match crate::cushion::apply_cushion_item(
+            &stack,
+            pos,
+            face,
+            cursor,
+            eye,
+            player_yaw.unwrap_or(0.0),
+            &|x, y, z| source.block_state_id(x, y, z),
+            mobs,
+        ) {
+            crate::cushion::CushionApplied::NotACushion => {}
+            crate::cushion::CushionApplied::Refused => return Ok(()),
+            crate::cushion::CushionApplied::Placed { .. } => {
+                let native = hand_native;
+                if consume_one(inventory, native, game_mode) && game_mode != GameMode::Creative {
+                    let remainder = inventory.native(native).cloned();
+                    if let Some(menu_slot) = window_zero_menu_slot(native) {
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                        )
+                        .await?;
+                    }
+                }
+                return Ok(());
+            }
         }
     }
 

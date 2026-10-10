@@ -15,6 +15,7 @@ impl<'w> MobSim<'w> {
                 vehicle.rider = None;
             }
         }
+        self.clear_disconnected_cushion_riders(connected);
         for cart in self.minecarts.values_mut() {
             if cart.rider.is_some_and(|rider| !connected.contains(&rider)) {
                 cart.rider = None;

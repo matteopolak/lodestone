@@ -357,6 +357,11 @@ pub fn non_living_vehicle_placement(model_name: &str) -> Option<(f32, f32)> {
         // no mask at all.
         "boat" | "chest_boat" | "raft" | "chest_raft" | "boat_water_patch" => Some((0.375, 90.0)),
         "minecart" => Some((0.375, 0.0)),
+        // The cushion's renderer turns the model upright (a half turn about X)
+        // and drops it by its own 0.25 height. The half turn equals the usual
+        // flip followed by a half turn about Y, and the drop becomes a 0.25 lift
+        // ahead of the flip.
+        "cushion" => Some((0.25, 180.0)),
         // A leash knot's renderer flips the model and submits it, and does
         // nothing else — no bob, no yaw, and (because it is not a living-entity
         // renderer) no 1.501 feet lift. So it belongs in this table rather than

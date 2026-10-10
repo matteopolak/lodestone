@@ -147,6 +147,7 @@ pub struct EntityRayTarget(pub Option<i32>);
 const NON_LIVING_PICKABLE_PATHS: &[&str] = &[
     "chest_minecart",
     "command_block_minecart",
+    "cushion",
     "end_crystal",
     "falling_block",
     "furnace_minecart",

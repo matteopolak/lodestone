@@ -552,6 +552,20 @@ mod tests {
         );
     }
 
+    /// A cushion declares no attachment points and is `sized(1.0, 0.25)`, so the
+    /// seat is the default point at the top of its box, 0.25 above its feet, and
+    /// the rider's feet sit 0.6 below that: 0.35 under the cushion's own height
+    /// origin. A yaw turn moves nothing, the point has no horizontal part.
+    #[test]
+    fn a_cushion_seats_the_player_a_third_of_a_block_below_its_feet() {
+        for yaw in [0.0, 90.0, 180.0, 270.0] {
+            let seat = player_seat_position(Vec3d::new(10.5, 65.0, -3.5), yaw, "cushion", 0.25, 0, None);
+            assert!((seat.y - (65.0 + 0.25 - 0.6)).abs() < 1e-9, "yaw {yaw}: seat y {}", seat.y);
+            assert!((seat.x - 10.5).abs() < 1e-9 && (seat.z + 3.5).abs() < 1e-9, "yaw {yaw}: {seat:?}");
+        }
+        assert!((passenger_attachment_local("cushion", 0.25, 0, None).y - 0.25).abs() < 1e-9);
+    }
+
     /// A seat index past the end clamps rather than panicking or wrapping —
     /// vanilla's own clamped attachment lookup.
     #[test]

@@ -297,6 +297,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   (`Screen::Credits`) shown when the server announces the win after the player first
   leaves the End. Its text comes from the active resource pack at runtime; none is
   stored in this repository.
+- [Cushions](./cushions.md) — The 26.3 cushion: a dyed, block-attached entity (1 x
+  0.25 slab) placed on the top face of a block, seating one player. Server rules live
+  in `lodestone_server::cushion` (pure) and `lodestone_server::mobs::MobSim` (state);
+  drawing is a corpus model plus a per-dye texture sheet.
 - [Versioned Behavior Generation](./data-behavior-codegen.md) — The offline
   behaviour emitter installs the complete append-only identity and behaviour union for
   26.2 and 26.3, preserving every original value and making measured shared-identity

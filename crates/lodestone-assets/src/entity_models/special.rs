@@ -40,6 +40,23 @@ pub fn end_crystal_model() -> EntityModelDef {
         root,
     }
 }
+/// The cushion's body layer: one 16 x 4 x 16 slab, shrunk by 0.005 so it does not
+/// z-fight with the block under it. The part's pivot sits at the slab's far
+/// corner, so the box spans -8..8 on x and z and 0..4 on y in the entity frame.
+/// Sheet 64x64.
+pub fn cushion_model() -> EntityModelDef {
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root: PartDef::new(PartPose::ZERO).with_child(
+            "cushion",
+            PartDef::new(PartPose::offset(23.0, 4.0, -7.0)).with_cube(
+                cube([-31.0, -4.0, -1.0], [16.0, 4.0, 16.0], [0.0, 0.0]).grown(-0.005),
+            ),
+        ),
+    }
+}
+
 /// vanilla's own armor stand model's body-layer construction: starts from vanilla's own humanoid model's mesh construction
 /// but overrides head/body/arms/legs entirely with armor-stand-specific boxes
 /// and adds `right_body_stick`/`left_body_stick`/`shoulder_stick`/`base_plate`.

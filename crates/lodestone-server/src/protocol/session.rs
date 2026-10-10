@@ -608,6 +608,10 @@ pub enum MetadataField {
     /// own doc) — a real field, pushed unconditionally, whose value simply
     /// never varies yet.
     CrystalShowBottom(bool),
+    /// A cushion's dye colour (index 8, the `DYE_COLOR` serializer that 26.3
+    /// appended). Only cushions push it, and only on protocol 777 does the
+    /// serializer exist.
+    CushionColor(u8),
     /// Vanilla's own base-entity pose synced-data field — index **6**, the one and only `POSE`-serializer
     /// claimant in the jar dump (`entity_data_index_jvm.txt`), so no species
     /// switch is needed to disambiguate it the way index 8 or 18 need one.

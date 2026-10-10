@@ -370,6 +370,29 @@ pub(crate) fn boat_species_sheet(type_path: &str) -> Option<&'static str> {
         .copied()
 }
 
+/// The sheet a cushion of dye ordinal `color` draws, `None` for an ordinal past 15.
+fn cushion_sheet(color: u8) -> Option<&'static str> {
+    const SHEETS: [&str; 16] = [
+        "entity/cushion/white_cushion",
+        "entity/cushion/orange_cushion",
+        "entity/cushion/magenta_cushion",
+        "entity/cushion/light_blue_cushion",
+        "entity/cushion/yellow_cushion",
+        "entity/cushion/lime_cushion",
+        "entity/cushion/pink_cushion",
+        "entity/cushion/gray_cushion",
+        "entity/cushion/light_gray_cushion",
+        "entity/cushion/cyan_cushion",
+        "entity/cushion/purple_cushion",
+        "entity/cushion/blue_cushion",
+        "entity/cushion/brown_cushion",
+        "entity/cushion/green_cushion",
+        "entity/cushion/red_cushion",
+        "entity/cushion/black_cushion",
+    ];
+    SHEETS.get(usize::from(color)).copied()
+}
+
 /// The [`entity_models`] entry name for a player's own body, chosen by skin
 /// model rather than the `"player"`-type-path default [`canonical_model_name`]
 /// falls back to.
@@ -942,6 +965,12 @@ pub fn entity_appearance_sheet(
     if let Some(sheet) = boat_species_sheet(model_name) {
         return Some(sheet);
     }
+    if model_name == "cushion" {
+        return match variant {
+            Some(EntityVariant::Dyed { color, .. }) => cushion_sheet(*color),
+            _ => None,
+        };
+    }
     let keyed = |ns_ok: bool| match variant {
         Some(EntityVariant::Keyed(id)) if ns_ok && id.namespace() == "minecraft" => Some(id.path()),
         _ => None,
@@ -1184,7 +1213,7 @@ pub fn entity_profession_layers(
 pub fn entity_extra_sheet_dirs() -> Vec<&'static str> {
     let mut dirs: Vec<&'static str> = entity_eyes_sheet_dirs();
     dirs.extend(
-        ["cat", "frog", "rabbit", "parrot", "llama", "cow", "panda", "shulker", "bee", "sheep", "boat", "chest_boat"]
+        ["cat", "frog", "rabbit", "parrot", "llama", "cow", "panda", "shulker", "bee", "sheep", "boat", "chest_boat", "cushion"]
             .map(|d| sheet_dir(&format!("entity/{d}/"))),
     );
     dirs.extend(crate::entity_gear::GEAR_SHEET_DIRS.map(|d| sheet_dir(&format!("entity/{d}/"))));

@@ -708,6 +708,7 @@ const SHADOW_RADII: &[(&str, f32)] = &[
     ("cow", 0.7),
     ("creaking", 0.6),
     ("creeper", 0.5),
+    ("cushion", 0.0),
     ("dolphin", 0.7),
     ("donkey", 0.75),
     ("dragon_fireball", 0.0),

@@ -4567,7 +4567,7 @@ mod cosmetic_metadata_tests {
         METADATA_IDX_LLAMA_VARIANT, METADATA_IDX_MOOSHROOM_TYPE, METADATA_IDX_PARROT_VARIANT,
         METADATA_IDX_RABBIT_TYPE, METADATA_IDX_SHEEP_WOOL, METADATA_IDX_WOLF_COLLAR, METADATA_IDX_WOLF_INTERESTED, METADATA_IDX_ENDERMAN_CARRIED, METADATA_IDX_RAIDER_CELEBRATING, METADATA_IDX_LIVING_FLAGS, METADATA_SER_OPTIONAL_BLOCK_STATE, METADATA_SER_BOOLEAN,
         METADATA_SER_BYTE, METADATA_SER_INT, METADATA_SER_OPTIONAL_COMPONENT, V770ServerProtocol,
-        holder_variant_slot,
+        holder_variant_slot, METADATA_IDX_CUSHION_COLOR, METADATA_SER_DYE_COLOR,
     };
     use crate::packets::metadata::{MetadataClass, TrackedEntity, read_entity_metadata};
 
@@ -4615,6 +4615,37 @@ mod cosmetic_metadata_tests {
         let removed: Vec<_> = old.difference(&new).collect();
         assert_eq!(added, ["8 Cushion.DATA_COLOR 43 DYE_COLOR"], "added rows");
         assert!(removed.is_empty(), "rows only in 776: {removed:?}");
+    }
+
+    /// The colour field sits at the row the 26.3 jar dump lists, and the bytes
+    /// are that row's index, serializer and the dye ordinal, read back by the
+    /// 26.3 client decode as the cushion's colour.
+    #[test]
+    fn cushion_colour_encodes_at_the_26_3_dump_row() {
+        use crate::adapter::StackCodecContext;
+        use crate::dialect::ProtocolDialect;
+        use crate::packets::metadata::read_entity_metadata_with;
+        use crate::packets::registry::ClientRegistries;
+
+        assert_eq!(
+            dump_row(INDEX_DUMP_777, "Cushion.DATA_COLOR"),
+            (METADATA_IDX_CUSHION_COLOR, METADATA_SER_DYE_COLOR)
+        );
+        let ServerDirective::Send { payload, .. } =
+            V770ServerProtocol.encode_set_entity_data(7, &[MetadataField::CushionColor(13)])
+        else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        assert_eq!(payload, [7, 8, 43, 13, 0xFF]);
+
+        let registries = ClientRegistries::default();
+        let latest = ProtocolDialect::v26_2().with_game_data_version(lodestone_data::GameDataVersion::V26_3);
+        let tracked = TrackedEntity { class: Some(MetadataClass::Cushion), ..TrackedEntity::default() };
+        let mut reader = Reader::new(&payload);
+        assert_eq!(reader.var_i32().unwrap(), 7);
+        let decoded =
+            read_entity_metadata_with(&mut reader, tracked, &StackCodecContext::new(latest, &registries)).unwrap();
+        assert_eq!(decoded.metadata.variant, Some(EntityVariant::Dyed { color: 13, sheared: false }));
     }
 
     fn check_constants(dump: &str) {

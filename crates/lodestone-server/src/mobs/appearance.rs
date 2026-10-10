@@ -31,7 +31,7 @@ use uuid::Uuid;
 use crate::mob_spawn::SpawnRng;
 
 /// The sixteen dye names in vanilla's ordinal order.
-pub(super) const DYE_NAMES: [&str; 16] = [
+pub(crate) const DYE_NAMES: [&str; 16] = [
     "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray",
     "cyan", "purple", "blue", "brown", "green", "red", "black",
 ];

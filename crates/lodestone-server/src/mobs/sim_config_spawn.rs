@@ -76,6 +76,7 @@ impl<'w> MobSim<'w> {
             difficulty: lodestone_model::Difficulty::Normal,
             universal_anger: false,
             vehicles: HashMap::new(),
+            cushions: HashMap::new(),
             tnt: HashMap::new(),
             eyes: HashMap::new(),
             eye_rng: SpawnRng::new(eye_of_ender::EYE_SEED),

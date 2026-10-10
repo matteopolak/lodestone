@@ -489,6 +489,13 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
             texture: EntityTexture::Fixed("entity/minecart/minecart"),
             build: minecart_model,
         },
+        // The cushion's sheet is per dye colour, picked from the synced colour by
+        // `entity_appearance_sheet`; white is the base.
+        EntityModelEntry {
+            name: "cushion",
+            texture: EntityTexture::Fixed("entity/cushion/white_cushion"),
+            build: cushion_model,
+        },
         EntityModelEntry {
             name: "end_crystal",
             texture: EntityTexture::Fixed("entity/end_crystal/end_crystal"),

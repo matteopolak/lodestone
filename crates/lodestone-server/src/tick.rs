@@ -4702,6 +4702,21 @@ async fn run_tick_loop_with_weather_impl<W>(
             mobs.with(|sim| sim.apply_minecart_tick_owner_batches(minecart_batches));
         }
 
+        // Cushions check their support every 101st tick. The check only decides;
+        // the break is applied when the world read was complete, so a chunk that
+        // was not resident never reads as air under a cushion.
+        let cushion_world = ResidentTickSource::new(&*world);
+        let broken_cushions = mobs.with(|sim| {
+            sim.plan_cushion_checks(&|x, y, z| cushion_world.block_state_id(x, y, z))
+        });
+        if !cushion_world.had_cold_read() && !broken_cushions.is_empty() {
+            mobs.with(|sim| {
+                for id in broken_cushions {
+                    sim.break_cushion(id, true);
+                }
+            });
+        }
+
         // The ender dragon's phase machine and its crystals' healing proc.
         // Unlike its neighbours above this needs no block reads: every input
         // the phase machine consumes — the live crystal count and the nearest

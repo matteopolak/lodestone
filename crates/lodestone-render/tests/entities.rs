@@ -11,6 +11,8 @@ mod baby_armour_oracle;
 mod block_entity_rotation_noise_pixels;
 #[path = "entities/boat_model_resolution.rs"]
 mod boat_model_resolution;
+#[path = "entities/cushion_model_resolution.rs"]
+mod cushion_model_resolution;
 #[path = "entities/bow_draw_pose_pixels.rs"]
 mod bow_draw_pose_pixels;
 #[path = "entities/creeper_swell_pixels.rs"]

@@ -236,6 +236,7 @@ fn use_on_block_swings(id: &str) -> bool {
         return true;
     }
     path.ends_with("_axe")
+        || path.ends_with("_cushion")
         || path.ends_with("_hoe")
         || path.ends_with("_shovel")
         || path.ends_with("_minecart")

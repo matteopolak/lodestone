@@ -129,6 +129,7 @@ pub mod bone_meal;
 /// because the producer is a `USE_ITEM` handler outside the tick loop, exactly as
 /// [`bone_meal`] and [`spawn_egg`] are.
 pub mod boat;
+pub mod cushion;
 mod border;
 /// A wasm32-only periodic driver (`BrowserInterval`) for `server::serve_play`'s
 /// browser build — see that module's own doc for why `tokio::time` cannot be

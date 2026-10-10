@@ -1141,6 +1141,19 @@ where
             // Record it even when the target is unknown: the wire action is a
             // swing first, while damage validation is a separate concern.
             record_attack_swing(players, player_entity_id);
+            // A cushion breaks to its coloured item (none in creative); a seated
+            // player is lifted off first so the client drops the seat pose.
+            // Adventure and spectator players cannot build, so cannot break one.
+            if mobs.with(|sim| sim.is_cushion(entity_id)) {
+                if matches!(*game_mode, GameMode::Survival | GameMode::Creative)
+                    && let Some(broken) =
+                        mobs.with(|sim| sim.break_cushion(entity_id, *game_mode != GameMode::Creative))
+                    && broken.rider == Some(player_entity_id)
+                {
+                    apply(conn, state, proto.encode_set_passengers(entity_id, &[])).await?;
+                }
+                return Ok(());
+            }
             apply_attack(
                 mobs,
                 *player_pos,
@@ -1202,6 +1215,22 @@ where
                     // Boarding consumes no item, and a refused board must not fall
                     // through to the taming chain — a boat is not tameable and the
                     // fall-through would only cost a wasted roll.
+                    return Ok(());
+                }
+                // A cushion is a seat, not a mob: a sneaking click or an
+                // occupied cushion does nothing, otherwise the player sits.
+                if mobs.with(|sim| sim.is_cushion(entity_id)) {
+                    let seated = mobs.with(|sim| {
+                        sim.mount_cushion(entity_id, player_entity_id, using_secondary_action)
+                    });
+                    if seated {
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_set_passengers(entity_id, &[LOCAL_PLAYER_ENTITY_ID]),
+                        )
+                        .await?;
+                    }
                     return Ok(());
                 }
                 // Minecarts are vehicles rather than tamable mobs, so handle
@@ -1657,6 +1686,7 @@ where
                             .map(|id| (id, position))
                     } else {
                         sim.dismount_minecart_rider(player_entity_id)
+                            .or_else(|| sim.dismount_cushion_rider(player_entity_id))
                             .or_else(|| sim.dismount_mob(player_entity_id))
                             .map(|id| (id, None))
                     }
