@@ -263,6 +263,10 @@ impl Goal for GuardianBeamGoal {
 
     /// Vanilla's own eligibility check: a target exists and is alive. This seam's
     /// target is a bare [`Vec3`], so there is no liveness to check.
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
         mob.attack_target().is_some()
     }
@@ -758,9 +762,10 @@ mod tests {
         // guardian in this sim can never re-acquire on its own. Exactly one beam
         // per acquisition is therefore the correct observation, not a shortfall.
         let second = run(&mut mob, &mut ai);
-        assert_eq!(
-            second,
-            Some(90),
+        // A goal starts only on a full tick, so a run that begins on the off
+        // phase starts one tick later.
+        assert!(
+            matches!(second, Some(90 | 91)),
             "a re-acquired target must charge the full 90 ticks again, got \
              {second:?}. `1` means `start` is not resetting attack_time and the \
              beam fires on contact"

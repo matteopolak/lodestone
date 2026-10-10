@@ -64,6 +64,23 @@ Skeleton-family species register through `hostile_melee`'s shared table because 
 
 `LiveMobSource` holds the entity list and a monotonic revision under one mutex; every publication advances it, even an empty list, and the producer never compares snapshots. `EntitySource::snapshots_if_changed` reads both together. Each connection remembers its own last revision (new connections start with none), so repeated passes skip the clone and diff. Sources without a counter use the unconditional default; sources with a `PlayerRegistry` always merge and diff players; boss bars are diffed every pass. `net.rs` uses a small fixed chunk radius around join spawn for singleplayer.
 
+### Goal cadence
+
+A mob's goals start, stop and tick only on its "full" parity ticks (every second tick, offset by the mob's id, and the first two ticks). On the off ticks only goals that declare `requires_update_every_tick` run (swim-float, look-around, swell, melee, the ranged attacks). Raw tick delays are halved with `reduced_tick_delay` (`ceil(n/2)`) because they count goal ticks. Two consequences for tests: draw `n` of a lone goal's RNG lands near tick `2n`, and a state change driven by a goal needs two sim ticks to be sure of including a goal tick.
+
+### Pathing parameters
+
+- **Fall budget**: `max_fall_distance` is 3 with no target; with a target it adds the health above a third of max health, less four per difficulty step below normal. The sim refreshes it each tick (`SimMob::set_difficulty` feeds the difficulty).
+- **Stroll target**: ten candidates within 10 horizontal and 7 vertical, rejecting unstable footing, water and any non-zero malus; the first survivor wins and the result is the cell's bottom centre. A ground navigator snaps an air target down to the first block below and lifts a solid target out of it.
+- **Path length and reach**: maximum length is `max(follow range, 16)`; an entity target reaches 0, a position reaches 1.
+- **Melee re-path**: `MeleeAttackGoal` waits `4 + rand(7)` ticks between paths (+5 beyond 16 blocks, +10 beyond 32, +15 on failure) and only re-paths with sight and either a target that moved a block or a 5% roll.
+- **Waypoint timeout**: a node is dropped when the time spent exceeds three times `distance / speed * 20`; the timer is not reset per node, so a long path must be re-created.
+- **Malus**: per-species path-type overrides live in `crates/lodestone-entity/data/path_malus.json`, keyed by `PathType` variant name and generated from the reference by `just regen-path-malus` (`scripts/extract-path-malus.py`). `species_malus_overrides` reads it.
+
+### Swimming
+
+`MobShape::swimmer` selects `NavMode::Swim`: the search expands the six faces plus horizontal diagonals over cells whose whole body extent is water, and `swim_step` moves with a eased speed, a vertical push proportional to the vertical share of the heading, and a 0.9 drag. No species is registered as a swimmer yet (no fish roster, squid, wall-climb, sun-avoid, fly or amphibious navigation), so the mode is exercised only by `tests/swimming.rs`.
+
 ### Terrain and sight
 
 Mobs tick against the live terrain (`tick_in`): an absent column is blocked for pathing, collision and sight, so a mob never enters unloaded ground. Target acquisition needs a ray between the two eyes clear of collision shapes (`PathWorld::has_line_of_sight`); a held target out of sight is dropped after 60 consecutive ticks.

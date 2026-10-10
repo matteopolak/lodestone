@@ -55,6 +55,17 @@ pub trait MobController {
     /// Whether the navigation has finished or has no path.
     fn navigation_done(&self) -> bool;
 
+    /// Paths straight at a moving target, stopping only on its block (reach 0),
+    /// where [`move_to`](Self::move_to) stops within a block of a fixed point.
+    fn chase(&mut self, target: Vec3, speed: f64) -> bool {
+        self.move_to(target, speed)
+    }
+
+    /// Game ticks this mob has lived, for goals that rate-limit themselves.
+    fn tick_count(&self) -> u64 {
+        0
+    }
+
     /// Stops the navigation.
     fn stop_navigation(&mut self);
 

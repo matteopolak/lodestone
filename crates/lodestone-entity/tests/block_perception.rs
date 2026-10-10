@@ -390,8 +390,8 @@ fn a_grazing_sheep_holds_still_for_the_whole_animation() {
 ///
 /// | hypothesis | baby interval | expected eats in 20 000 ticks |
 /// |---|---|---|
-/// | halved (correct) | 25 | ≈ 444 |
-/// | jar literal, unhalved | 50 | ≈ 285 |
+/// | halved (correct) | 25 | ≈ 222 |
+/// | jar literal, unhalved | 50 | ≈ 143 |
 ///
 /// A ±25% band around the correct figure excludes the wrong one, which a test
 /// asserting only "the baby ate more often" could never do.
@@ -403,8 +403,9 @@ fn the_grazing_interval_is_the_halved_delay_and_not_the_jar_literal() {
     let baby = graze(&world, true, ticks, false);
 
     let cycle = |interval: i32| (interval + EatBlockGoal::EAT_ANIMATION_TICKS) as f64;
-    let predicted = ticks as f64 / cycle(EatBlockGoal::BABY_INTERVAL);
-    let unhalved = ticks as f64 / cycle(EatBlockGoal::BABY_INTERVAL * 2);
+    let goal_ticks = ticks as f64 / 2.0;
+    let predicted = goal_ticks / cycle(EatBlockGoal::BABY_INTERVAL);
+    let unhalved = goal_ticks / cycle(EatBlockGoal::BABY_INTERVAL * 2);
     let got = baby.eaten.len() as f64;
 
     assert!(
@@ -425,7 +426,7 @@ fn the_grazing_interval_is_the_halved_delay_and_not_the_jar_literal() {
     // world, the same seed, 20× the interval.
     let adult_world = GrassWorld::new(Block::Grass);
     let adult = graze(&adult_world, false, ticks, false);
-    let adult_predicted = ticks as f64 / cycle(EatBlockGoal::ADULT_INTERVAL);
+    let adult_predicted = goal_ticks / cycle(EatBlockGoal::ADULT_INTERVAL);
     assert!(
         (adult.eaten.len() as f64 - adult_predicted).abs() < 0.5 * adult_predicted,
         "an adult sheep grazed {} times where {adult_predicted:.0} was predicted \

@@ -1323,9 +1323,12 @@ fn an_ordered_sit_streams_the_sitting_bit_and_standing_clears_it() {
         sim.set_players(vec![seen(alice(), Vec3::new(3.0, 0.0, 0.0))]);
         assert_eq!(sim.interact(id, alice(), Some(&rk(&format!("minecraft:{item}")))), InteractOutcome::Tamed);
         // Taming leaves the pet ordered to sit; the goal puts it in the pose.
+        // Goals start and stop only on a mob's every-second-tick parity.
+        sim.tick();
         sim.tick();
         assert_eq!(sitting_bit(&sim, id), Some(true), "{species}: an ordered sit streams sitting");
         assert_eq!(sim.interact(id, alice(), None), InteractOutcome::SitToggled { sitting: false });
+        sim.tick();
         sim.tick();
         assert_eq!(sitting_bit(&sim, id), Some(false), "{species}: standing up streams the cleared bit");
     }

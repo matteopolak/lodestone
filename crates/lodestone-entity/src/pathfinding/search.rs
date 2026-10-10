@@ -15,7 +15,7 @@
 
 use super::heap::BinaryHeap;
 use super::node::{NO_PARENT, Node, PathType};
-use super::world::{Aabb, MobShape, PathWorld};
+use super::world::{Aabb, MobShape, NavMode, PathWorld};
 use lodestone_model::BlockPos;
 use std::collections::HashMap;
 
@@ -454,6 +454,19 @@ impl<'a> Search<'a> {
         self.mob_x = start.x;
         self.mob_y = start.y;
         self.mob_z = start.z;
+        if self.mob.nav_mode == NavMode::Swim {
+            let half = f64::from(self.mob.width) / 2.0;
+            let (x, y, z) = (
+                (start.x - half).floor() as i32,
+                (start.y + 0.5).floor() as i32,
+                (start.z - half).floor() as i32,
+            );
+            self.mob_block = BlockPos::new(x, y, z);
+            let idx = self.get_node(x, y, z);
+            self.arena[idx].kind = PathType::Water;
+            self.arena[idx].cost_malus = self.mob.malus(PathType::Water);
+            return Some(idx);
+        }
         let block_x = start.x.floor() as i32;
         let block_z = start.z.floor() as i32;
         let mut start_y = start.y.floor() as i32;
@@ -695,8 +708,70 @@ impl<'a> Search<'a> {
         true
     }
 
+    /// The swimmer's classification of the cell block at (`x`,`y`,`z`): water
+    /// when every cell the body would occupy there holds water, else blocked.
+    fn swim_type(&self, x: i32, y: i32, z: i32) -> PathType {
+        let (w, h) = (self.mob.cell_width(), self.mob.cell_height());
+        let all_water = (x..x + w)
+            .all(|cx| (y..y + h).all(|cy| (z..z + w).all(|cz| self.world.is_water(cx, cy, cz))));
+        if all_water { PathType::Water } else { PathType::Blocked }
+    }
+
+    fn swim_node(&mut self, x: i32, y: i32, z: i32) -> Option<usize> {
+        let key = pack(x, y, z);
+        let kind = match self.type_cache.get(&key) {
+            Some(&kind) => kind,
+            None => {
+                let kind = self.swim_type(x, y, z);
+                self.type_cache.insert(key, kind);
+                kind
+            }
+        };
+        if kind != PathType::Water {
+            return None;
+        }
+        let cost = self.mob.malus(kind);
+        (cost >= 0.0).then(|| self.node_and_update_cost_to_max(x, y, z, kind, cost))
+    }
+
+    /// The six face neighbours of a water cell, plus each horizontal diagonal
+    /// whose two adjoining faces are both open.
+    fn swim_neighbors(&mut self, pos: usize) -> Vec<usize> {
+        const FACES: [(i32, i32, i32); 6] =
+            [(0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)];
+        const HORIZONTAL: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+        let (px, py, pz) = self.coords(pos);
+        let mut found: [Option<usize>; 6] = [None; 6];
+        let mut result = Vec::with_capacity(10);
+        for (i, &(dx, dy, dz)) in FACES.iter().enumerate() {
+            found[i] = self.swim_node(px + dx, py + dy, pz + dz);
+            if let Some(n) = found[i]
+                && !self.arena[n].closed
+            {
+                result.push(n);
+            }
+        }
+        let face_of = |dx: i32, dz: i32| FACES.iter().position(|&f| f == (dx, 0, dz));
+        for (i, &(dx, dz)) in HORIZONTAL.iter().enumerate() {
+            let (cx, cz) = HORIZONTAL[(i + 1) % 4];
+            let open = |at: Option<usize>| at.is_some_and(|n| self.arena[n].cost_malus >= 0.0);
+            let a = face_of(dx, dz).and_then(|f| found[f]);
+            let b = face_of(cx, cz).and_then(|f| found[f]);
+            if open(a) && open(b)
+                && let Some(d) = self.swim_node(px + dx + cx, py, pz + dz + cz)
+                && !self.arena[d].closed
+            {
+                result.push(d);
+            }
+        }
+        result
+    }
+
     /// Returns up to 8 neighbour arena indices for `pos`.
     fn get_neighbors(&mut self, pos: usize) -> Vec<usize> {
+        if self.mob.nav_mode == NavMode::Swim {
+            return self.swim_neighbors(pos);
+        }
         let (px, py, pz) = self.coords(pos);
         let mut result = Vec::with_capacity(8);
         let above = self.cached_path_type(px, py + 1, pz);

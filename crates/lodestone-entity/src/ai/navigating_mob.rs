@@ -33,7 +33,7 @@ use super::locomotion;
 use super::mob::{EatenBlock, MobController, ProjectileLaunch, distance_sqr};
 use crate::brain::BrainMob;
 use crate::pathfinding::{
-    Aabb, BlockCues, MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType,
+    Aabb, BlockCues, MobShape, NavMode, PathFinder, PathNavigator, PathParams, PathStart, PathType,
     PathWorld,
 };
 
@@ -145,6 +145,10 @@ pub const FALL_GRAVITY_PER_TICK: f64 = 0.08;
 const MOB_EYE_FRACTION: f64 = 0.85;
 /// A standing player's eye height.
 const PLAYER_EYE_HEIGHT: f64 = 1.62;
+/// How far above or below a waypoint a swimmer may be and still have reached it.
+const SWIM_VERTICAL_REACH: f64 = 0.5;
+/// A path search reaches at least this far however short the mob's follow range.
+const MIN_PATH_LENGTH: f64 = 16.0;
 const DRIFT_FLOOR: f64 = 0.003;
 
 /// How far below the feet the block that sets slipperiness is sampled.
@@ -298,6 +302,8 @@ pub struct MobBody {
     /// Monotonic tick counter (advanced once per [`advance`]/[`tick`]), used to
     /// throttle recomputation the way vanilla's game clock does.
     tick_count: u64,
+    /// Offsets this mob's goal cadence (its entity id, so neighbours alternate).
+    ai_phase: u64,
     /// The tick a same-destination re-search last ran, so a wedged mob does not
     /// recompute A\* every tick (vanilla `PathNavigation.recomputePath` refuses
     /// to recompute within 20 ticks — `MAX_TIME_RECOMPUTE`).
@@ -324,6 +330,10 @@ pub struct MobBody {
     /// follower's gravity is always downward, unlike vanilla's single
     /// signed `deltaMovement.y` which also carries jump/knockback).
     fall_speed: f64,
+    /// A swimmer's forward speed, eased toward the path's speed, and its vertical
+    /// velocity (the horizontal part is [`drift`](Self::drift)).
+    swim_speed: f64,
+    swim_vy: f64,
     /// Whether the last terrain sweep blocked downward motion. The navigation
     /// snapshot answers path topology, while the server owns the live collision
     /// sweep that refreshes this after each tick.
@@ -683,12 +693,17 @@ impl<'w> NavigatingMob<'w> {
         seed: u64,
     ) -> Self {
         let width = shape.width;
+        let swims = shape.nav_mode == NavMode::Swim;
         Self {
             world,
             body: Some(Box::new(MobBody {
             shape,
             finder: PathFinder::new(visited_budget),
-            navigator: PathNavigator::new(width),
+            navigator: if swims {
+                PathNavigator::new(width).with_vertical_limit(SWIM_VERTICAL_REACH)
+            } else {
+                PathNavigator::new(width)
+            },
             pos,
             movement_speed,
             goal_basis: movement_speed,
@@ -715,11 +730,14 @@ impl<'w> NavigatingMob<'w> {
             move_calls: 0,
             path_searches: 0,
             tick_count: 0,
+            ai_phase: 0,
             last_search_tick: None,
             velocity: Vec3::new(0.0, 0.0, 0.0),
             live_collision_origin: pos,
             needs_live_unembed: true,
             fall_speed: 0.0,
+            swim_speed: 0.0,
+            swim_vy: 0.0,
             on_ground: false,
             body_yaw: 0.0,
             love_ticks: 0,
@@ -821,6 +839,16 @@ impl<'w> NavigatingMob<'w> {
     /// drop any path already in flight, a worse behavioural change than a
     /// baby's slightly-too-wide navigator width. Disclosed rather than
     /// silently traded off.
+    /// Sets the entity id that staggers this mob's goal evaluation.
+    pub fn set_ai_phase(&mut self, id: u64) {
+        self.ai_phase = id;
+    }
+
+    /// Sets how far down a drop the next path search may route.
+    pub fn set_max_fall_distance(&mut self, blocks: i32) {
+        self.shape.max_fall_distance = blocks;
+    }
+
     pub fn set_shape(&mut self, shape: MobShape) -> &mut Self {
         self.shape = shape;
         self
@@ -1011,6 +1039,7 @@ impl<'w> NavigatingMob<'w> {
         self.on_ground = on_ground;
         if vertical_collision {
             self.fall_speed = 0.0;
+            self.swim_vy = 0.0;
         }
     }
 
@@ -1025,7 +1054,7 @@ impl<'w> NavigatingMob<'w> {
     /// the same gravity and drag sequence instead of inventing a server-side
     /// teleport-down correction.
     pub fn begin_live_fall_from_unsupported_surface(&mut self) {
-        if self.fall_speed < 0.0 {
+        if self.fall_speed < 0.0 || self.shape.nav_mode == NavMode::Swim {
             return;
         }
         let displacement = self.fall_speed + FALL_GRAVITY_PER_TICK;
@@ -1039,6 +1068,9 @@ impl<'w> NavigatingMob<'w> {
     /// launches the body into the jump/fall integrator.
     pub fn apply_knockback(&mut self, velocity: Vec3) {
         self.drift = (velocity.x, velocity.z);
+        // Reported at once: the impulse is the mob's velocity from this moment,
+        // which the hit's velocity packet carries before the next tick moves it.
+        self.velocity = velocity;
         if velocity.y > 0.0 {
             self.fall_speed = -velocity.y;
         }
@@ -1079,6 +1111,19 @@ impl<'w> NavigatingMob<'w> {
     #[must_use]
     pub fn is_jumping(&self) -> bool {
         self.jumping
+    }
+
+    /// The last cell of the path being followed, if any.
+    #[must_use]
+    pub fn path_end(&self) -> Option<BlockPos> {
+        self.navigator.path().and_then(|p| p.end_node()).map(|n| n.block_pos())
+    }
+
+    /// Whether the path being followed actually reaches its destination, as
+    /// opposed to ending at the closest point the search found.
+    #[must_use]
+    pub fn path_reaches_target(&self) -> bool {
+        self.navigator.path().is_some_and(|p| p.reached())
     }
 
     /// Whether a path is currently being followed.
@@ -1569,7 +1614,15 @@ impl<'w> NavigatingMob<'w> {
     /// [`MobController`] seam) followed by one locomotion step.
     pub fn tick(&mut self, ai: &mut GoalSelector) {
         self.sense_fluids();
-        ai.tick(self);
+        // Goals are evaluated on every second tick, offset per mob so a herd
+        // does not think in lockstep; the off ticks run only the goals that
+        // need every tick.
+        let off_phase = (self.tick_count + 1 + self.ai_phase) % 2 != 0 && self.tick_count + 1 > 1;
+        if off_phase {
+            ai.tick_every_tick_goals(self);
+        } else {
+            ai.tick(self);
+        }
         self.advance();
     }
 
@@ -1741,6 +1794,14 @@ impl<'w> NavigatingMob<'w> {
         let old = self.pos;
         let pos = self.pos;
         let waypoint = self.navigator.tick(pos);
+        if self.shape.nav_mode == NavMode::Swim {
+            self.swim_step(waypoint);
+            self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
+            if self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z > 1e-12 {
+                self.body_yaw = movement_yaw(self.velocity.x, self.velocity.z);
+            }
+            return;
+        }
         let medium = self.medium();
         if self.drift.0.abs() < DRIFT_FLOOR {
             self.drift.0 = 0.0;
@@ -1796,6 +1857,52 @@ impl<'w> NavigatingMob<'w> {
         }
     }
 
+    /// One tick of swimming: the speed eases toward the path's, thrust is a
+    /// hundredth of it along the horizontal heading while the vertical pull
+    /// scales with the climb ratio; everything then keeps 0.9 of its velocity,
+    /// and a mob with no target sinks slowly. Cruise is `0.1 * speed` blocks per
+    /// tick.
+    fn swim_step(&mut self, waypoint: Option<Vec3>) {
+        const SPEED_EASING: f64 = 0.125;
+        const THRUST: f64 = 0.01;
+        const CLIMB: f64 = 0.1;
+        const DRAG: f64 = 0.9;
+        const BUOYANCY: f64 = 0.005;
+        if self.in_water {
+            self.swim_vy += BUOYANCY;
+        }
+        let mut thrust = (0.0, 0.0);
+        match waypoint {
+            Some(w) => {
+                let target = self.navigator.speed();
+                self.swim_speed += (target - self.swim_speed) * SPEED_EASING;
+                let (xd, yd, zd) = (w.x - self.pos.x, w.y - self.pos.y, w.z - self.pos.z);
+                let reach = (xd * xd + yd * yd + zd * zd).sqrt();
+                if yd != 0.0 {
+                    self.swim_vy += self.swim_speed * (yd / reach) * CLIMB;
+                }
+                let flat = xd.hypot(zd);
+                if flat > 0.0 {
+                    let push = THRUST * self.swim_speed / flat;
+                    thrust = (xd * push, zd * push);
+                }
+            }
+            None => self.swim_speed = 0.0,
+        }
+        let floor = |v: f64| if v.abs() < DRIFT_FLOOR { 0.0 } else { v };
+        self.drift = (floor(self.drift.0), floor(self.drift.1));
+        self.swim_vy = floor(self.swim_vy);
+        let step = (self.drift.0 + thrust.0, self.drift.1 + thrust.1);
+        self.pos.x += step.0;
+        self.pos.z += step.1;
+        self.pos.y += self.swim_vy;
+        self.drift = (step.0 * DRAG, step.1 * DRAG);
+        self.swim_vy *= DRAG;
+        if self.attack_target.is_none() {
+            self.swim_vy -= BUOYANCY;
+        }
+    }
+
     /// Whether the body is close enough to `waypoint` for its vertical move to
     /// begin: a jump starts within a block, a step or a drop only once the body
     /// is at (or past) the waypoint's centre line.
@@ -1847,6 +1954,97 @@ impl<'w> NavigatingMob<'w> {
         }
         let here = self.world.footing(x, y, z).speed_factor;
         if here == 1.0 { self.world.footing(x, self.support_y(), z).speed_factor } else { here }
+    }
+}
+
+impl NavigatingMob<'_> {
+    /// Moves a ground destination onto the surface: a target in the air drops to
+    /// the first block below it, and one inside a solid block rises out of it.
+    fn surface_block(&self, block: BlockPos) -> BlockPos {
+        if self.shape.nav_mode == NavMode::Swim {
+            return block;
+        }
+        const SEARCH_UP: i32 = 64;
+        let world = self.world;
+        let is_air = |y: i32| world.base_path_type(block.x, y, block.z) == PathType::Open;
+        let is_solid = |y: i32| world.collision_top(block.x, y, block.z) > 0.0;
+        let mut y = block.y;
+        if is_air(y) {
+            let mut below = y - 1;
+            while below >= world.min_y() && is_air(below) {
+                below -= 1;
+            }
+            if below >= world.min_y() {
+                return BlockPos::new(block.x, below + 1, block.z);
+            }
+            let limit = y + SEARCH_UP;
+            y += 1;
+            while y <= limit && is_air(y) {
+                y += 1;
+            }
+        }
+        while is_solid(y) && y <= block.y + SEARCH_UP {
+            y += 1;
+        }
+        BlockPos::new(block.x, y, block.z)
+    }
+
+    /// Paths to `target` and starts following, stopping within `reach` blocks
+    /// (Manhattan) of it.
+    pub(crate) fn move_to_within(&mut self, target: Vec3, speed: f64, reach: i32) -> bool {
+        let block = self.surface_block(BlockPos::new(
+            target.x.floor() as i32,
+            target.y.floor() as i32,
+            target.z.floor() as i32,
+        ));
+        // Reuse the active path unless it finished or the goal now wants a
+        // different destination block (vanilla `PathNavigation.moveTo` reuse).
+        let same_target = self.active_target_block == Some(block);
+        let recompute = self.navigator.is_done() || !same_target;
+        if !recompute {
+            let speed = self.goal_speed(speed);
+            self.navigator.set_speed(speed);
+            self.move_calls += 1;
+            return true;
+        }
+
+        // Vanilla `recomputePath` refuses to re-search the *same* destination
+        // within `MAX_TIME_RECOMPUTE` (20) ticks. Only a genuinely new target
+        // block bypasses the throttle; a wedged mob whose path finished stands
+        // still until the cooldown elapses instead of hammering A\* every tick.
+        if same_target
+            && self
+                .last_search_tick
+                .is_some_and(|last| self.tick_count.saturating_sub(last) < 20)
+        {
+            // Report whether we still hold a followable path.
+            return !self.navigator.is_done();
+        }
+
+        self.path_searches += 1;
+        self.last_search_tick = Some(self.tick_count);
+        // Remember the block we searched toward *regardless of success*, so an
+        // unreachable target throttles re-search the same as a reachable one
+        // (otherwise a wedged mob resets `same_target` every tick and hammers A*).
+        self.active_target_block = Some(block);
+        let start = PathStart::grounded(self.pos.x, self.pos.y, self.pos.z);
+        let params = PathParams {
+            max_path_length: self.follow_range.max(MIN_PATH_LENGTH) as f32,
+            reach_range: reach,
+            visited_multiplier: 1.0,
+        };
+        match self
+            .finder
+            .find_path(self.world, &self.shape, start, &[block], params)
+        {
+            Some(path) => {
+                let speed = self.goal_speed(speed);
+                self.navigator.start(path, speed);
+                self.move_calls += 1;
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -1930,59 +2128,15 @@ impl MobController for NavigatingMob<'_> {
     }
 
     fn move_to(&mut self, target: Vec3, speed: f64) -> bool {
-        let block = BlockPos::new(
-            target.x.floor() as i32,
-            target.y.floor() as i32,
-            target.z.floor() as i32,
-        );
-        // Reuse the active path unless it finished or the goal now wants a
-        // different destination block (vanilla `PathNavigation.moveTo` reuse).
-        let same_target = self.active_target_block == Some(block);
-        let recompute = self.navigator.is_done() || !same_target;
-        if !recompute {
-            let speed = self.goal_speed(speed);
-            self.navigator.set_speed(speed);
-            self.move_calls += 1;
-            return true;
-        }
+        self.move_to_within(target, speed, 1)
+    }
 
-        // Vanilla `recomputePath` refuses to re-search the *same* destination
-        // within `MAX_TIME_RECOMPUTE` (20) ticks. Only a genuinely new target
-        // block bypasses the throttle; a wedged mob whose path finished stands
-        // still until the cooldown elapses instead of hammering A\* every tick.
-        if same_target
-            && self
-                .last_search_tick
-                .is_some_and(|last| self.tick_count.saturating_sub(last) < 20)
-        {
-            // Report whether we still hold a followable path.
-            return !self.navigator.is_done();
-        }
+    fn chase(&mut self, target: Vec3, speed: f64) -> bool {
+        self.move_to_within(target, speed, 0)
+    }
 
-        self.path_searches += 1;
-        self.last_search_tick = Some(self.tick_count);
-        // Remember the block we searched toward *regardless of success*, so an
-        // unreachable target throttles re-search the same as a reachable one
-        // (otherwise a wedged mob resets `same_target` every tick and hammers A*).
-        self.active_target_block = Some(block);
-        let start = PathStart::grounded(self.pos.x, self.pos.y, self.pos.z);
-        let params = PathParams {
-            max_path_length: 200.0,
-            reach_range: 1,
-            visited_multiplier: 1.0,
-        };
-        match self
-            .finder
-            .find_path(self.world, &self.shape, start, &[block], params)
-        {
-            Some(path) => {
-                let speed = self.goal_speed(speed);
-                self.navigator.start(path, speed);
-                self.move_calls += 1;
-                true
-            }
-            None => false,
-        }
+    fn tick_count(&self) -> u64 {
+        self.tick_count
     }
 
     fn navigation_done(&self) -> bool {
@@ -2243,12 +2397,43 @@ impl MobController for NavigatingMob<'_> {
         self.launches.push(launch);
     }
 
+    /// Ten random offsets in a 21 x 15 x 21 box, each kept only if it stands on
+    /// something, is lifted out of any solid block, and is not water or a
+    /// pathing-penalty cell; the first valid one wins (every candidate weighs
+    /// the same), snapped to its cell's bottom centre.
     fn random_stroll_target(&mut self) -> Option<Vec3> {
-        // A random destination in a 10-block box around the mob, matching
-        // `RandomStroll`'s ±7 horizontal reach closely enough for the seam.
-        let dx = (self.rng.next_unit() * 20.0 - 10.0).round();
-        let dz = (self.rng.next_unit() * 20.0 - 10.0).round();
-        Some(Vec3::new(self.pos.x + dx, self.pos.y, self.pos.z + dz))
+        const ATTEMPTS: u32 = 10;
+        const HORIZONTAL: i32 = 10;
+        const VERTICAL: i32 = 7;
+        const MAX_LIFT: i32 = 64;
+        let origin = (
+            self.pos.x.floor() as i32,
+            self.pos.y.floor() as i32,
+            self.pos.z.floor() as i32,
+        );
+        let solid = |w: &dyn PathWorld, x: i32, y: i32, z: i32| w.collision_top(x, y, z) > 0.0;
+        for _ in 0..ATTEMPTS {
+            let dx = MobController::next_i32(self, 2 * HORIZONTAL + 1) - HORIZONTAL;
+            let dy = MobController::next_i32(self, 2 * VERTICAL + 1) - VERTICAL;
+            let dz = MobController::next_i32(self, 2 * HORIZONTAL + 1) - HORIZONTAL;
+            let (x, mut y, z) = (origin.0 + dx, origin.1 + dy, origin.2 + dz);
+            if y < self.world.min_y() || self.world.base_path_type(x, y - 1, z) == PathType::Open {
+                continue;
+            }
+            let limit = y + MAX_LIFT;
+            while solid(self.world, x, y, z) && y <= limit {
+                y += 1;
+            }
+            if y > limit {
+                continue;
+            }
+            let kind = self.world.base_path_type(x, y, z);
+            if kind == PathType::Water || self.shape.malus(kind) != 0.0 {
+                continue;
+            }
+            return Some(Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5));
+        }
+        None
     }
 
     fn is_baby(&self) -> bool {
@@ -2940,14 +3125,10 @@ mod tests {
     fn breed_goal_drives_two_navigating_mobs_to_a_predicted_tick() {
         // Two in-love animals, 2 blocks apart (distSqr=4 < BreedGoal's 9.0
         // range) on open ground, each running the production `BreedGoal`.
-        // Vanilla's own timer (`BreedGoal::tick`, `loveTime >=
-        // adjustedTickDelay(60)`) is exactly `BreedGoal::BREED_TIME` (60) in
-        // `goals.rs` — so this predicts the *tick*, not just "eventually":
-        // both `can_use` on tick 1 (already in range, no travel needed), so
-        // `GoalSelector::tick`'s own start-then-tick-same-call semantics
-        // (`goal.rs`'s `update`/`tick_running`) put `love_time` at exactly
-        // `N` after the Nth call — bred must be false through tick 59 and
-        // true from tick 60, on both mobs simultaneously.
+        // The goal times 60 ticks as 30 goal ticks, and a goal ticks on game
+        // ticks 1, 2 and then every even tick. Its 30th tick is therefore game
+        // tick 2 * (30 - 1) = 58: bred must be false through tick 57 and
+        // true from tick 58, on both mobs simultaneously.
         let world = Arena {
             walls: HashSet::new(),
         };
@@ -2962,23 +3143,23 @@ mod tests {
         let mut ai_b = GoalSelector::new();
         ai_b.add(0, Box::new(BreedGoal::new(1.0)));
 
-        for tick in 1..=60 {
+        for tick in 1..=58 {
             refresh_partner_candidates(&mut a, &mut b);
             a.tick(&mut ai_a);
             b.tick(&mut ai_b);
-            if tick < 60 {
+            if tick < 58 {
                 assert!(
                     !a.take_bred() && !b.take_bred(),
-                    "bred before the predicted tick 60 (at tick {tick})"
+                    "bred before the predicted tick 58 (at tick {tick})"
                 );
             } else {
                 assert!(
                     a.take_bred(),
-                    "mob a must breed on the predicted tick (60)"
+                    "mob a must breed on the predicted tick (58)"
                 );
                 assert!(
                     b.take_bred(),
-                    "mob b must breed on the predicted tick (60)"
+                    "mob b must breed on the predicted tick (58)"
                 );
             }
         }

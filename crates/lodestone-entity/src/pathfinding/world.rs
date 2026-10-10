@@ -260,9 +260,78 @@ pub trait PathWorld: Send + Sync {
     }
 }
 
+/// How far a mob will path down a drop: 3 blocks while it has no target, and
+/// with one, 3 plus the health it is willing to spend, `health - 33% of max`
+/// less 4 per difficulty step below Hard. A creeper spends `health - 1`.
+#[must_use]
+pub fn max_fall_distance(
+    has_target: bool,
+    health: f32,
+    max_health: f32,
+    difficulty: lodestone_model::Difficulty,
+    spends_all_but_one: bool,
+) -> i32 {
+    const COMFORTABLE: f32 = 3.0;
+    if !has_target {
+        return COMFORTABLE as i32;
+    }
+    let spare = if spends_all_but_one {
+        health - 1.0
+    } else {
+        let hard_step = match difficulty {
+            lodestone_model::Difficulty::Peaceful => 0,
+            lodestone_model::Difficulty::Easy => 1,
+            lodestone_model::Difficulty::Normal => 2,
+            lodestone_model::Difficulty::Hard => 3,
+        };
+        let sacrifice = (health - max_health * 0.33) as i32 - (3 - hard_step) * 4;
+        sacrifice.max(0) as f32
+    };
+    (spare + COMFORTABLE).floor() as i32
+}
+
+/// The pathfinding-malus overrides a species sets on itself, from
+/// `data/path_malus.json` (regenerate with `just regen-path-malus`). A species
+/// not listed keeps the default table.
+#[must_use]
+pub fn species_malus_overrides(species: &str) -> &'static [(PathType, f32)] {
+    static TABLE: std::sync::OnceLock<HashMap<String, Vec<(PathType, f32)>>> =
+        std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let raw: HashMap<String, HashMap<String, f32>> =
+            serde_json::from_str(include_str!("../../data/path_malus.json"))
+                .expect("path_malus.json is generated and well-formed");
+        raw.into_iter()
+            .map(|(species, costs)| {
+                let costs = costs
+                    .into_iter()
+                    .map(|(kind, cost)| {
+                        (PathType::from_name(&kind).expect("path_malus.json names a known type"), cost)
+                    })
+                    .collect();
+                (species, costs)
+            })
+            .collect()
+    });
+    table.get(species).map_or(&[], Vec::as_slice)
+}
+
+/// How a mob moves through the world, which picks its node evaluator and its
+/// locomotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NavMode {
+    /// Walks, jumps and falls on solid ground.
+    #[default]
+    Ground,
+    /// Swims through water cells in all six directions and never leaves it.
+    Swim,
+}
+
 /// Per-mob parameters that make traversability mob-specific.
 #[derive(Debug, Clone)]
 pub struct MobShape {
+    /// The evaluator and locomotion this mob uses.
+    pub nav_mode: NavMode,
     /// Bounding-box width (`getBbWidth`).
     pub width: f32,
     /// Bounding-box height (`getBbHeight`).
@@ -289,6 +358,7 @@ impl MobShape {
     #[must_use]
     pub fn land(width: f32, height: f32) -> Self {
         Self {
+            nav_mode: NavMode::Ground,
             width,
             height,
             max_up_step: 0.6,
@@ -299,6 +369,17 @@ impl MobShape {
             can_open_doors: false,
             malus_overrides: HashMap::new(),
         }
+    }
+
+    /// A swimming mob of the given size: it moves only through water and treats
+    /// water as free.
+    #[must_use]
+    pub fn swimmer(width: f32, height: f32) -> Self {
+        let mut shape = Self::land(width, height);
+        shape.nav_mode = NavMode::Swim;
+        shape.can_float = true;
+        shape.malus_overrides.insert(PathType::Water, 0.0);
+        shape
     }
 
     /// The mob's malus for a path type (`Mob.getPathfindingMalus`).

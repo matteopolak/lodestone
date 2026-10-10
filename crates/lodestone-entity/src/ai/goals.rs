@@ -6,7 +6,7 @@
 //! actual movement is delegated through [`MobController`]. The aim is to prove
 //! the architecture, not to port every goal.
 
-use super::goal::{Flag, FlagSet, Goal};
+use super::goal::{Flag, FlagSet, Goal, reduced_tick_delay};
 use super::mob::{EatenBlock, MobController, distance_sqr};
 use lodestone_model::Vec3;
 
@@ -29,6 +29,10 @@ impl Goal for FloatGoal {
         if mob.next_f32() < 0.8 {
             mob.set_jumping(true);
         }
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
     }
 }
 
@@ -75,7 +79,7 @@ impl Goal for RandomStrollGoal {
         if self.check_no_action && mob.no_action_time() >= 100 {
             return false;
         }
-        if mob.next_i32(self.interval) != 0 {
+        if mob.next_i32(reduced_tick_delay(self.interval)) != 0 {
             return false;
         }
         self.target = mob.random_stroll_target();
@@ -155,7 +159,7 @@ impl Goal for LookAtPlayerGoal {
     }
 
     fn start(&mut self, mob: &mut dyn MobController) {
-        self.look_time = 40 + mob.next_i32(40);
+        self.look_time = reduced_tick_delay(40 + mob.next_i32(40));
     }
 
     fn stop(&mut self, _mob: &mut dyn MobController) {
@@ -203,6 +207,10 @@ impl Goal for RandomLookAroundGoal {
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
 
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
         mob.next_f32() < 0.02
     }
@@ -224,19 +232,35 @@ impl Goal for RandomLookAroundGoal {
     }
 }
 
-/// Walks to and attacks the current target.
+/// Chases its attack target and strikes in reach.
 ///
-/// Vanilla's own melee-attack goal (flag MOVE), simplified: it re-paths toward the
-/// target and attacks when within reach.
+/// Flag MOVE, ticks every game tick. Between re-paths it follows the path it
+/// has; it re-paths only once its countdown (4 to 10 ticks, plus 5 beyond 16
+/// blocks, 10 beyond 32, 15 after a failed search) has run out, only while it
+/// can see the target, and only if the target has moved a block since the last
+/// path or on a 5% roll.
 #[derive(Debug)]
 pub struct MeleeAttackGoal {
     speed: f64,
     reach_sqr: f64,
     cooldown: i32,
     target: Option<Vec3>,
+    recalc: i32,
+    pathed_target: Option<Vec3>,
+    last_checked: Option<u64>,
 }
 
 impl MeleeAttackGoal {
+    /// Game ticks between eligibility checks.
+    const CHECK_INTERVAL: u64 = 20;
+    /// Squared target movement that forces a fresh path.
+    const REPATH_MOVE_SQR: f64 = 1.0;
+    const REPATH_ROLL: f32 = 0.05;
+    const FAR_SQR: f64 = 256.0;
+    const VERY_FAR_SQR: f64 = 1024.0;
+    const FAILED_SEARCH_DELAY: i32 = 15;
+    const ATTACK_COOLDOWN: i32 = 20;
+
     /// Creates the goal with movement `speed` and a melee `reach` (blocks).
     #[must_use]
     pub fn new(speed: f64, reach: f64) -> Self {
@@ -245,6 +269,9 @@ impl MeleeAttackGoal {
             reach_sqr: reach * reach,
             cooldown: 0,
             target: None,
+            recalc: 0,
+            pathed_target: None,
+            last_checked: None,
         }
     }
 }
@@ -254,7 +281,16 @@ impl Goal for MeleeAttackGoal {
         FlagSet::of(&[Flag::Move])
     }
 
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        let now = mob.tick_count();
+        if self.last_checked.is_some_and(|last| now.saturating_sub(last) < Self::CHECK_INTERVAL) {
+            return false;
+        }
+        self.last_checked = Some(now);
         self.target = mob.attack_target();
         self.target.is_some()
     }
@@ -265,8 +301,10 @@ impl Goal for MeleeAttackGoal {
 
     fn start(&mut self, mob: &mut dyn MobController) {
         self.cooldown = 0;
+        self.recalc = 0;
+        self.pathed_target = None;
         if let Some(t) = self.target {
-            mob.move_to(t, self.speed);
+            mob.chase(t, self.speed);
         }
     }
 
@@ -281,11 +319,33 @@ impl Goal for MeleeAttackGoal {
         };
         self.target = Some(target);
         mob.look_at(target);
-        mob.move_to(target, self.speed);
+        self.recalc = (self.recalc - 1).max(0);
+        let moved = self
+            .pathed_target
+            .is_none_or(|p| distance_sqr(target, p) >= Self::REPATH_MOVE_SQR);
+        if self.recalc == 0
+            && mob.has_line_of_sight(target)
+            && (moved || mob.next_f32() < Self::REPATH_ROLL)
+        {
+            self.pathed_target = Some(target);
+            self.recalc = 4 + mob.next_i32(7);
+            let gap_sqr = distance_sqr(target, mob.position());
+            if gap_sqr > Self::VERY_FAR_SQR {
+                self.recalc += 10;
+            } else if gap_sqr > Self::FAR_SQR {
+                self.recalc += 5;
+            }
+            if !mob.chase(target, self.speed) {
+                self.recalc += Self::FAILED_SEARCH_DELAY;
+            }
+        }
         self.cooldown = (self.cooldown - 1).max(0);
-        if self.cooldown == 0 && distance_sqr(target, mob.position()) <= self.reach_sqr {
+        if self.cooldown == 0
+            && distance_sqr(target, mob.position()) <= self.reach_sqr
+            && mob.has_line_of_sight(target)
+        {
             mob.attack(target);
-            self.cooldown = 20;
+            self.cooldown = Self::ATTACK_COOLDOWN;
         }
     }
 }
@@ -334,6 +394,10 @@ impl SwellGoal {
 impl Goal for SwellGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move])
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
@@ -780,7 +844,7 @@ pub struct NearestAttackableTargetGoal {
 }
 
 /// Ticks a held target may stay out of sight before the goal drops it.
-const UNSEEN_MEMORY_TICKS: i32 = 60;
+const UNSEEN_MEMORY_TICKS: i32 = reduced_tick_delay(60);
 
 impl Default for NearestAttackableTargetGoal {
     fn default() -> Self {
@@ -793,7 +857,7 @@ impl NearestAttackableTargetGoal {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            random_interval: 10,
+            random_interval: reduced_tick_delay(10),
             target: None,
             anger_gated: false,
             unseen_ticks: 0,
@@ -834,7 +898,7 @@ impl NearestAttackableTargetGoal {
     /// Overrides the search throttle (`1` scans every tick).
     #[must_use]
     pub fn with_interval(mut self, interval: i32) -> Self {
-        self.random_interval = interval.max(1);
+        self.random_interval = reduced_tick_delay(interval.max(1));
         self
     }
 }
@@ -1113,7 +1177,7 @@ impl Goal for TemptGoal {
     fn stop(&mut self, mob: &mut dyn MobController) {
         self.target = None;
         mob.stop_navigation();
-        self.calm_down = 100;
+        self.calm_down = reduced_tick_delay(100);
     }
 }
 
@@ -1188,7 +1252,7 @@ impl Goal for FollowParentGoal {
         if self.time_to_recalc <= 0
             && let Some(parent) = self.parent
         {
-            self.time_to_recalc = 10;
+            self.time_to_recalc = reduced_tick_delay(10);
             mob.move_to(parent, self.speed);
         }
     }
@@ -1213,7 +1277,7 @@ pub struct BreedGoal {
 
 impl BreedGoal {
     /// Ticks the pair must stay together before a child spawns (vanilla's 60).
-    const BREED_TIME: i32 = 60;
+    const BREED_TIME: i32 = reduced_tick_delay(60);
     /// Squared distance within which breeding completes (vanilla's `9.0`).
     const BREED_RANGE_SQR: f64 = 9.0;
 
@@ -1495,6 +1559,10 @@ impl Goal for CatSitOnBlockGoal {
         FlagSet::of(&[Flag::Move, Flag::Jump])
     }
 
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
         if self.next_start_tick > 0 {
             self.next_start_tick -= 1;
@@ -1576,6 +1644,10 @@ impl CatLieOnBedGoal {
 impl Goal for CatLieOnBedGoal {
     fn flags(&self) -> FlagSet {
         FlagSet::of(&[Flag::Move, Flag::Jump])
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
@@ -2941,7 +3013,7 @@ mod tests {
     }
 
     #[test]
-    fn breed_spawns_a_child_after_sixty_ticks_in_range() {
+    fn breed_spawns_a_child_after_thirty_goal_ticks_in_range() {
         let mut goal = BreedGoal::new(1.0);
         let mut mob = ScriptMob {
             pos: Vec3::new(0.0, 64.0, 0.0),
@@ -2951,13 +3023,13 @@ mod tests {
         };
         assert!(goal.can_use(&mut mob));
         goal.start(&mut mob);
-        // No child before the 60-tick timer elapses.
-        for _ in 0..59 {
+        // No child before the timer (60 ticks at half rate) elapses.
+        for _ in 0..29 {
             assert!(goal.can_continue_to_use(&mut mob));
             goal.tick(&mut mob);
         }
         assert_eq!(mob.bred, 0);
-        // The 60th tick breeds exactly once and clears love mode.
+        // The 30th goal tick breeds exactly once and clears love mode.
         goal.tick(&mut mob);
         assert_eq!(mob.bred, 1);
         assert!(!mob.in_love);

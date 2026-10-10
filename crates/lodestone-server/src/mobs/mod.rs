@@ -77,7 +77,7 @@ use lodestone_entity::vibration::{
     is_vibration_listener, nearest_listenable, nearest_note_block_play,
 };
 use lodestone_entity::item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion};
-use lodestone_entity::pathfinding::{MobShape, PathType};
+use lodestone_entity::pathfinding::MobShape;
 use lodestone_entity::projectile::{Projectile, ProjectileRegistry};
 use lodestone_entity::spawn_equipment::{self, EquipRandom};
 use lodestone_entity::{
@@ -723,7 +723,7 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
     shape.can_open_doors = species_can_open_doors(entity_type);
     shape.can_float = species_can_float(entity_type);
     shape.can_walk_over_fences = species_can_walk_over_fences(entity_type);
-    for &(kind, malus) in species_malus_overrides(entity_type) {
+    for &(kind, malus) in lodestone_entity::pathfinding::species_malus_overrides(entity_type.path()) {
         shape.malus_overrides.insert(kind, malus);
     }
     shape
@@ -788,76 +788,6 @@ fn species_can_float(entity_type: &ResourceKey) -> bool {
             | "vindicator"
             | "villager"
     )
-}
-
-/// Per-species pathfinding-malus overrides, folded onto
-/// [`PathType::malus`]'s default table by [`species_shape`]. A species not
-/// listed carries no overrides, so the default table applies
-/// unchanged — that is the correct answer for most species, not a gap.
-///
-/// Every entry comes from the species' setup data, including the base animal
-/// `FIRE_IN_NEIGHBOR`/`FIRE` overrides folded into each animal-derived
-/// species' arm below (this function has no separate "is an Animal" pass to
-/// apply them in, so they are duplicated per arm exactly as each species'
-/// setup chain applies them. See `docs/mob-species-spawning.md` for the full
-/// measurement table.
-fn species_malus_overrides(entity_type: &ResourceKey) -> &'static [(PathType, f32)] {
-    match entity_type.path() {
-        "bee" => &[
-            (PathType::Fire, -1.0),
-            (PathType::Water, -1.0),
-            (PathType::WaterBorder, 16.0),
-            (PathType::Cocoa, -1.0),
-            (PathType::Fence, -1.0),
-        ],
-        "cat" | "cow" | "mooshroom" | "horse" | "donkey" | "mule" | "pig" | "rabbit"
-        | "sheep" => &[(PathType::FireInNeighbor, 16.0), (PathType::Fire, -1.0)],
-        "wolf" => &[
-            (PathType::FireInNeighbor, 16.0),
-            (PathType::Fire, -1.0),
-            (PathType::PowderSnow, -1.0),
-            (PathType::OnTopOfPowderSnow, -1.0),
-        ],
-        "chicken" => &[
-            (PathType::FireInNeighbor, 16.0),
-            (PathType::Fire, -1.0),
-            (PathType::Water, 0.0),
-        ],
-        "parrot" => &[
-            (PathType::FireInNeighbor, -1.0),
-            (PathType::Fire, -1.0),
-            (PathType::Cocoa, -1.0),
-        ],
-        "blaze" => &[
-            (PathType::Water, -1.0),
-            (PathType::Lava, 8.0),
-            (PathType::FireInNeighbor, 0.0),
-            (PathType::Fire, 0.0),
-        ],
-        "strider" => &[
-            (PathType::Water, -1.0),
-            (PathType::Lava, 0.0),
-            (PathType::FireInNeighbor, 0.0),
-            (PathType::Fire, 0.0),
-        ],
-        "guardian" | "elder_guardian" => &[(PathType::Water, 0.0)],
-        "enderman" => &[(PathType::Water, -1.0)],
-        "wither_skeleton" => &[(PathType::Lava, 8.0)],
-        "drowned" => &[(PathType::Water, 0.0)],
-        "zombified_piglin" => &[(PathType::Lava, 8.0)],
-        "piglin" | "piglin_brute" | "villager" => {
-            &[(PathType::FireInNeighbor, 16.0), (PathType::Fire, -1.0)]
-        }
-        "warden" => &[
-            (PathType::UnpassableRail, 0.0),
-            (PathType::Damaging, 8.0),
-            (PathType::PowderSnow, 8.0),
-            (PathType::Lava, 8.0),
-            (PathType::Fire, 0.0),
-            (PathType::FireInNeighbor, 0.0),
-        ],
-        _ => &[],
-    }
 }
 
 /// Distance past which a lead snaps.
@@ -2626,6 +2556,8 @@ pub struct MobSim<'w> {
     /// [`set_piglin_safe`](Self::set_piglin_safe). `true` by default so a sim
     /// nobody told about its dimension never zombifies anything.
     piglin_safe: bool,
+    /// World difficulty, which scales how far a hunting mob will path down a drop.
+    difficulty: lodestone_model::Difficulty,
     /// Live rideable **vehicles** — every `AbstractBoat` a player has placed,
     /// keyed by network entity id.
     ///

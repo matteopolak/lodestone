@@ -211,6 +211,10 @@ impl Goal for RangedBowAttackGoal {
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
 
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
         // Vanilla's own eligibility check: a live target and holding a bow, minus the
         // inventory half — see the type's own doc.
@@ -362,6 +366,10 @@ impl Goal for RangedAttackGoal {
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
 
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
         // Vanilla's own eligibility check — a live target, nothing more — plus, for
         // callers that set one (only the drowned's trident today), the
@@ -467,6 +475,10 @@ impl Goal for BlazeFireballGoal {
     fn flags(&self) -> FlagSet {
         // Vanilla's own constructor.
         FlagSet::of(&[Flag::Move, Flag::Look])
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
@@ -588,6 +600,10 @@ impl Goal for GhastFireballGoal {
     fn flags(&self) -> FlagSet {
         // See this struct's own doc — vanilla genuinely registers none.
         FlagSet::none()
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {

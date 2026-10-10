@@ -421,6 +421,8 @@ mod live_mob_collision_tests {
                     Vec3::new(0.5, 4.0, 0.5),
                 )
                 .id();
+            // No goals: a wandering cow would leave the block under test.
+            sim.get_mut(id).expect("spawned").goals = lodestone_entity::ai::GoalSelector::new();
             let live = |x: i32, y: i32, z: i32| {
                 if x == 0 && y == 0 && z == 0 {
                     state(state_name)

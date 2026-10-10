@@ -436,8 +436,8 @@ mod tests {
     /// radius, with a player-sized clearing above.
     fn diggable_world() -> ChunkWorld {
         let mut world = ChunkWorld::new(-64, 384);
-        for x in -16..=16 {
-            for z in -16..=16 {
+        for x in -96..=96 {
+            for z in -96..=96 {
                 world.set_block(x, 0, z, "minecraft:grass_block");
             }
         }
@@ -448,8 +448,8 @@ mod tests {
     /// control for [`a_sniffer_left_alone_eventually_starts_sniffing_and_finds_a_dig_target`].
     fn undiggable_world() -> ChunkWorld {
         let mut world = ChunkWorld::new(-64, 384);
-        for x in -16..=16 {
-            for z in -16..=16 {
+        for x in -96..=96 {
+            for z in -96..=96 {
                 world.set_solid(x, 0, z, true);
             }
         }

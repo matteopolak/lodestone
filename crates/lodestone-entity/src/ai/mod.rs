@@ -14,7 +14,7 @@ pub mod mob;
 pub mod navigating_mob;
 pub mod roster;
 
-pub use goal::{Flag, FlagSet, Goal, GoalId, GoalSelector, MobAi};
+pub use goal::{Flag, FlagSet, Goal, GoalId, GoalSelector, MobAi, reduced_tick_delay};
 pub use roster::{SpeciesContext, goals_for};
 pub use mob::{MobController, ProjectileKind, ProjectileLaunch};
 pub use navigating_mob::{

@@ -64,6 +64,7 @@ impl<'w> MobSim<'w> {
             pending_attacker: None,
             mob_drops: true,
             piglin_safe: true,
+            difficulty: lodestone_model::Difficulty::Normal,
             vehicles: HashMap::new(),
             tnt: HashMap::new(),
             eyes: HashMap::new(),
@@ -124,6 +125,13 @@ impl<'w> MobSim<'w> {
         self.tame_rng = rng;
         self
     }
+
+    /// Sets the world difficulty, which scales how far a hunting mob paths down a drop.
+    pub fn set_difficulty(&mut self, difficulty: lodestone_model::Difficulty) -> &mut Self {
+        self.difficulty = difficulty;
+        self
+    }
+
 
     /// Sets the `DifficultyInstance` inputs every subsequent
     /// [`spawn_species`](Self::spawn_species) call feeds to
@@ -466,7 +474,12 @@ impl<'w> MobSim<'w> {
         let is_warden = entity_type.path() == "warden";
         self.mobs.push(SimMob {
             id,
-            mob: NavigatingMob::new(&world::UNLOADED, shape, pos, movement_speed, visited_budget, id as u64),
+            mob: {
+                let mut mob =
+                    NavigatingMob::new(&world::UNLOADED, shape, pos, movement_speed, visited_budget, id as u64);
+                mob.set_ai_phase(id as u64);
+                mob
+            },
             goals: GoalSelector::new(),
             category: MobCategory::Monster,
             no_action_time: 0,

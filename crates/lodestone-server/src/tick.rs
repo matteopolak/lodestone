@@ -2105,6 +2105,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // `level.isSpawningMonsters()` — `Zombie.hurtServer`'s other
             // reinforcement-roll gate alongside the `hard` flag just above.
             sim.set_spawn_monsters_enabled(world_state.spawn_mobs());
+            sim.set_difficulty(world_state.difficulty().0);
         });
         let players: Vec<lodestone_model::Vec3> =
             mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());

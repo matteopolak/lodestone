@@ -175,7 +175,7 @@ fn a_wall_stops_the_arrow_before_it_reaches_the_mob() {
     walled.set_solid(1, 1, 0, true);
     let mut sim = MobSim::new(&walled);
     let target = spawn_cow(&mut sim, Vec3::new(2.0, 0.0, 0.0));
-    sim.spawn_projectile(
+    let arrow = sim.spawn_projectile(
         rk("minecraft:arrow"),
         Projectile::arrow(Vec3::new(0.0, 1.0, 0.0), Vec3::new(3.0, 0.0, 0.0)),
     );
@@ -185,11 +185,10 @@ fn a_wall_stops_the_arrow_before_it_reaches_the_mob() {
         (shielded - COW_MAX_HEALTH).abs() < 1e-6,
         "the wall must shield the mob: health {shielded}"
     );
-    assert_eq!(
-        sim.projectile_count(),
-        0,
-        "the arrow is spent on the block"
-    );
+    // An arrow that strikes a block stays embedded in it rather than vanishing.
+    assert_eq!(sim.projectile_count(), 1, "the arrow embeds in the block");
+    let stuck = sim.projectile_position(arrow).expect("embedded arrow is still tracked");
+    assert!(stuck.x <= 2.0, "the embedded arrow must be at the wall, not past it: {stuck:?}");
 
     // Control: same geometry, no wall.
     let open = empty_world();

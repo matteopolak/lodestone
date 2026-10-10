@@ -1179,7 +1179,9 @@ fn a_player_attack_makes_a_mob_retaliate_through_the_production_path() {
     );
 
     // Now the observable retaliation: run the real tick and assert the
-    // scheduler moved the mob's attack target onto the attacker.
+    // scheduler moved the mob's attack target onto the attacker. Goals run on
+    // every second tick, so two ticks always include one goal tick.
+    sim.tick();
     sim.tick();
     assert_eq!(
         sim.get(zombie).expect("alive").attack_target(),

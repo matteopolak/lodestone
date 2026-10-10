@@ -1,4 +1,5 @@
 use super::*;
+use lodestone_entity::pathfinding::PathType;
 
 /// A real floor — see `leash_tests::flat_world`'s own doc comment for
 /// why a bare void `ChunkWorld` stopped being safe once idle mobs fall.

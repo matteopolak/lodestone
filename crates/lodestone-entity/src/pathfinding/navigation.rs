@@ -22,10 +22,17 @@ pub struct PathNavigator {
     width: f32,
     speed: f64,
     max_distance_to_waypoint: f32,
+    /// How far above or below a waypoint the mob may be and still reach it.
+    vertical_limit: f64,
     tick: i32,
     last_stuck_check: i32,
     last_stuck_pos: Vec3,
     is_stuck: bool,
+    /// The waypoint the timeout is timing, how long the mob has pursued it, and
+    /// the ticks it was expected to take.
+    timeout_node: Option<(i32, i32, i32)>,
+    timeout_ticks: f64,
+    timeout_limit: f64,
 }
 
 impl PathNavigator {
@@ -37,11 +44,22 @@ impl PathNavigator {
             width,
             speed: 1.0,
             max_distance_to_waypoint: 0.5,
+            vertical_limit: 1.0,
             tick: 0,
             last_stuck_check: 0,
             last_stuck_pos: Vec3::default(),
             is_stuck: false,
+            timeout_node: None,
+            timeout_ticks: 0.0,
+            timeout_limit: 0.0,
         }
+    }
+
+    /// Tightens the vertical reach of a waypoint, as swimmers need.
+    #[must_use]
+    pub fn with_vertical_limit(mut self, limit: f64) -> Self {
+        self.vertical_limit = limit;
+        self
     }
 
     /// Begins following `path` at the given movement speed.
@@ -50,6 +68,9 @@ impl PathNavigator {
         self.speed = speed;
         self.is_stuck = false;
         self.last_stuck_check = self.tick;
+        self.timeout_node = None;
+        self.timeout_ticks = 0.0;
+        self.timeout_limit = 0.0;
     }
 
     #[must_use]
@@ -126,7 +147,7 @@ impl PathNavigator {
         };
         let close = dx < horizontal_limit
             && dz < horizontal_limit
-            && dy < 1.0;
+            && dy < self.vertical_limit;
         if close {
             path.advance();
         }
@@ -152,6 +173,36 @@ impl PathNavigator {
             }
             self.last_stuck_check = self.tick;
             self.last_stuck_pos = mob_pos;
+        }
+        self.detect_timeout(mob_pos);
+    }
+
+    /// Drops the path when the mob has spent more than three times the time
+    /// the current waypoint should take at its speed. The clock keeps running
+    /// across waypoints and resets only with a new path.
+    fn detect_timeout(&mut self, mob_pos: Vec3) {
+        const TICKS_PER_SECOND: f64 = 20.0;
+        const PATIENCE: f64 = 3.0;
+        let Some(node) = self.path.as_ref().and_then(Path::next_node) else {
+            return;
+        };
+        let key = (node.x, node.y, node.z);
+        if self.timeout_node == Some(key) {
+            self.timeout_ticks += 1.0;
+        } else {
+            self.timeout_node = Some(key);
+            let to_node = Vec3::new(f64::from(node.x) + 0.5, f64::from(node.y), f64::from(node.z) + 0.5) - mob_pos;
+            self.timeout_limit = if self.speed > 0.0 {
+                to_node.length() / self.speed * TICKS_PER_SECOND
+            } else {
+                0.0
+            };
+        }
+        if self.timeout_limit > 0.0 && self.timeout_ticks > self.timeout_limit * PATIENCE {
+            self.stop();
+            self.timeout_node = None;
+            self.timeout_ticks = 0.0;
+            self.timeout_limit = 0.0;
         }
     }
 }
@@ -184,6 +235,32 @@ mod tests {
         assert_eq!(target, Vec3::new(1.5, 64.0, 0.5));
     }
 
+    /// A mob that never reaches its first waypoint loses the path after three
+    /// times the expected time: 2 blocks at speed 0.25 is 2 / 0.25 * 20 = 160
+    /// ticks, so the timer first exceeds 480 on tick 482 (the first tick only names the
+    /// waypoint) and the path is not dropped before then.
+    #[test]
+    fn a_waypoint_not_reached_in_three_times_the_expected_time_drops_the_path() {
+        let nodes = vec![
+            PathNode { x: 0, y: 0, z: 0, kind: super::super::PathType::Walkable },
+            PathNode { x: 2, y: 0, z: 0, kind: super::super::PathType::Walkable },
+        ];
+        let mut nav = PathNavigator::new(0.6);
+        nav.start(Path::new(nodes, BlockPos::new(2, 0, 0), true), 0.25);
+        // Parked 2 blocks from the waypoint with the stuck check pushed out.
+        nav.last_stuck_pos = Vec3::new(0.5, 0.0, 0.5);
+        let pos = Vec3::new(0.5, 0.0, 0.5);
+        let mut dropped_at = None;
+        for tick in 1..=600 {
+            nav.last_stuck_check = nav.tick;
+            nav.tick(pos);
+            if nav.is_done() && dropped_at.is_none() {
+                dropped_at = Some(tick);
+            }
+        }
+        assert_eq!(dropped_at, Some(482));
+    }
+
     #[test]
     fn reaches_end() {
         let mut nav = PathNavigator::new(0.6);
@@ -201,7 +278,7 @@ mod tests {
     #[test]
     fn stuck_when_not_progressing() {
         let mut nav = PathNavigator::new(0.6);
-        nav.start(straight_path(), 1.0);
+        nav.start(straight_path(), 0.25);
         // Never move; after >100 ticks stuck detection fires.
         let stuck_pos = Vec3::new(0.2, 64.0, 0.2);
         nav.last_stuck_pos = stuck_pos;

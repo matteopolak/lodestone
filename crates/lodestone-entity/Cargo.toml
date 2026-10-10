@@ -18,10 +18,11 @@ lodestone-model = { workspace = true }
 # lodestone-model.
 lodestone-data = { workspace = true }
 uuid = { workspace = true }
+# Reads the generated per-species pathfinding-malus table.
+serde_json = { workspace = true }
 
 [dev-dependencies]
 lodestone-mc-cache.workspace = true
-serde_json = { workspace = true }
 lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # Direct dependency (not a workspace alias), per the harness decision in
 # `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion

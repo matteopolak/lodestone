@@ -1,0 +1,248 @@
+{
+ "armadillo": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "axolotl": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "Water": 0.0
+ },
+ "bee": {
+  "Cocoa": -1.0,
+  "Fence": -1.0,
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "Water": -1.0,
+  "WaterBorder": 16.0
+ },
+ "blaze": {
+  "Fire": 0.0,
+  "FireInNeighbor": 0.0,
+  "Lava": 8.0,
+  "Water": -1.0
+ },
+ "breeze": {
+  "Fire": -1.0,
+  "OnTopOfTrapdoor": -1.0
+ },
+ "camel": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "camel_husk": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "cat": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "chicken": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "Water": 0.0
+ },
+ "cod": {
+  "Water": 0.0
+ },
+ "copper_golem": {
+  "DamagingInNeighbor": 16.0,
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "cow": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "dolphin": {
+  "Water": 0.0
+ },
+ "donkey": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "drowned": {
+  "Water": 0.0
+ },
+ "elder_guardian": {
+  "Water": 0.0
+ },
+ "enderman": {
+  "Water": -1.0
+ },
+ "fox": {
+  "Damaging": 0.0,
+  "DamagingInNeighbor": 0.0,
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "frog": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "Trapdoor": -1.0,
+  "Water": 4.0
+ },
+ "glow_squid": {
+  "Water": 0.0
+ },
+ "goat": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "OnTopOfPowderSnow": -1.0,
+  "PowderSnow": -1.0
+ },
+ "guardian": {
+  "Water": 0.0
+ },
+ "happy_ghast": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "hoglin": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "horse": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "llama": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "mooshroom": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "mule": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "nautilus": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "Water": 0.0
+ },
+ "ocelot": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "panda": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "parrot": {
+  "Cocoa": -1.0,
+  "Fire": -1.0,
+  "FireInNeighbor": -1.0
+ },
+ "pig": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "piglin": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "piglin_brute": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "polar_bear": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "pufferfish": {
+  "Water": 0.0
+ },
+ "rabbit": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "ravager": {
+  "Leaves": 0.0
+ },
+ "salmon": {
+  "Water": 0.0
+ },
+ "sheep": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "skeleton_horse": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "sniffer": {
+  "DamageCautious": -1.0,
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "OnTopOfPowderSnow": -1.0,
+  "Water": -1.0
+ },
+ "squid": {
+  "Water": 0.0
+ },
+ "strider": {
+  "Fire": 0.0,
+  "FireInNeighbor": 0.0,
+  "Lava": 0.0,
+  "Water": -1.0
+ },
+ "tadpole": {
+  "Water": 0.0
+ },
+ "trader_llama": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "tropical_fish": {
+  "Water": 0.0
+ },
+ "turtle": {
+  "DoorIronClosed": -1.0,
+  "DoorOpen": -1.0,
+  "DoorWoodClosed": -1.0,
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "Water": 0.0
+ },
+ "villager": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "wandering_trader": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "warden": {
+  "Damaging": 8.0,
+  "Fire": 0.0,
+  "FireInNeighbor": 0.0,
+  "Lava": 8.0,
+  "PowderSnow": 8.0,
+  "UnpassableRail": 0.0
+ },
+ "wither_skeleton": {
+  "Lava": 8.0
+ },
+ "wolf": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "OnTopOfPowderSnow": -1.0,
+  "PowderSnow": -1.0
+ },
+ "zombie_horse": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0
+ },
+ "zombie_nautilus": {
+  "Fire": -1.0,
+  "FireInNeighbor": 16.0,
+  "Water": 0.0
+ },
+ "zombified_piglin": {
+  "Lava": 8.0
+ }
+}

@@ -130,6 +130,25 @@ pub trait Goal: Send {
     fn tick(&mut self, mob: &mut dyn MobController) {
         let _ = mob;
     }
+
+    /// Whether the goal ticks on every game tick. Other goals are evaluated
+    /// and ticked only on every second tick (see [`GoalSelector::tick_every_tick_goals`]),
+    /// so any delay they count in goal ticks is halved with [`reduced_tick_delay`].
+    fn requires_update_every_tick(&self) -> bool {
+        false
+    }
+
+    /// A delay in game ticks, expressed in this goal's own tick rate.
+    fn adjusted_tick_delay(&self, ticks: i32) -> i32 {
+        if self.requires_update_every_tick() { ticks } else { reduced_tick_delay(ticks) }
+    }
+}
+
+/// Half of a tick delay, rounded up: the delay as counted by a goal that runs
+/// on every second game tick.
+#[must_use]
+pub const fn reduced_tick_delay(ticks: i32) -> i32 {
+    (ticks + 1) / 2
 }
 
 /// A stable handle to a goal registered with a [`GoalSelector`].
@@ -324,11 +343,17 @@ impl GoalSelector {
         })
     }
 
-    /// Advances all goals by one tick.
+    /// Advances all goals by one tick: stop, start, then tick every running goal.
     pub fn tick(&mut self, mob: &mut dyn MobController) {
         self.cleanup(mob);
         self.update(mob);
-        self.tick_running(mob);
+        self.tick_running(mob, true);
+    }
+
+    /// The off-phase tick: no starts or stops, and only the running goals that
+    /// need every tick are ticked. A mob alternates this with [`tick`](Self::tick).
+    pub fn tick_every_tick_goals(&mut self, mob: &mut dyn MobController) {
+        self.tick_running(mob, false);
     }
 
     /// Stops running goals that can no longer continue, freeing their flags.
@@ -369,10 +394,11 @@ impl GoalSelector {
         }
     }
 
-    /// Ticks every running goal (vanilla forces an update each tick).
-    fn tick_running(&mut self, mob: &mut dyn MobController) {
+    /// Ticks the running goals: all of them on a full tick, only the
+    /// every-tick ones otherwise.
+    fn tick_running(&mut self, mob: &mut dyn MobController, all: bool) {
         for i in 0..self.goals.len() {
-            if self.goals[i].running {
+            if self.goals[i].running && (all || self.goals[i].goal.requires_update_every_tick()) {
                 self.goals[i].goal.tick(mob);
             }
         }
@@ -442,6 +468,12 @@ impl MobAi {
     pub fn tick(&mut self, mob: &mut dyn MobController) {
         self.target_selector.tick(mob);
         self.goal_selector.tick(mob);
+    }
+
+    /// The off-phase tick of both selectors.
+    pub fn tick_every_tick_goals(&mut self, mob: &mut dyn MobController) {
+        self.target_selector.tick_every_tick_goals(mob);
+        self.goal_selector.tick_every_tick_goals(mob);
     }
 }
 

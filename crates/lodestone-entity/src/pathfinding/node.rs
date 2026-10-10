@@ -76,6 +76,41 @@ pub enum PathType {
 }
 
 impl PathType {
+    /// The variant named `name` (its identifier, as the malus data spells it).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "Blocked" => Self::Blocked,
+            "Open" => Self::Open,
+            "Walkable" => Self::Walkable,
+            "WalkableDoor" => Self::WalkableDoor,
+            "Trapdoor" => Self::Trapdoor,
+            "PowderSnow" => Self::PowderSnow,
+            "OnTopOfPowderSnow" => Self::OnTopOfPowderSnow,
+            "Fence" => Self::Fence,
+            "Lava" => Self::Lava,
+            "Water" => Self::Water,
+            "WaterBorder" => Self::WaterBorder,
+            "Rail" => Self::Rail,
+            "UnpassableRail" => Self::UnpassableRail,
+            "FireInNeighbor" => Self::FireInNeighbor,
+            "Fire" => Self::Fire,
+            "DamagingInNeighbor" => Self::DamagingInNeighbor,
+            "Damaging" => Self::Damaging,
+            "DoorOpen" => Self::DoorOpen,
+            "DoorWoodClosed" => Self::DoorWoodClosed,
+            "DoorIronClosed" => Self::DoorIronClosed,
+            "Breach" => Self::Breach,
+            "Leaves" => Self::Leaves,
+            "StickyHoney" => Self::StickyHoney,
+            "Cocoa" => Self::Cocoa,
+            "DamageCautious" => Self::DamageCautious,
+            "OnTopOfTrapdoor" => Self::OnTopOfTrapdoor,
+            "BigMobsCloseToDanger" => Self::BigMobsCloseToDanger,
+            _ => return None,
+        })
+    }
+
     /// The default danger malus for this type (`PathType.getMalus`). A negative
     /// malus means impassable.
     #[must_use]

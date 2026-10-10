@@ -16,38 +16,34 @@
 //!
 //! # Why the throttle was fatal rather than merely slow
 //!
-//! `RandomStrollGoal::can_use` needs `next_i32(120) == 0`, so the tick a lone
-//! stroll first fires is the first draw of that mob's stream where
-//! `next_u64() % 120 == 0`. If that draw lands past the throttle at 100, a mob
-//! with no player nearby can **never** stroll — total and deterministic rather
-//! than a rare unlucky roll, which is what makes [`no_player_is_the_control`]
-//! able to assert a hard `None`.
+//! A mob's goals only run on its own half-rate parity ticks, and
+//! `RandomStrollGoal::can_use` needs `next_i32(60) == 0` there (the 120 interval
+//! halved). So the first tick a lone stroll fires is the first *goal-tick* draw
+//! of that mob's stream where `next_u64() % 60 == 0`. If that draw lands past
+//! the throttle at 100 ticks, a mob with no player nearby can **never**
+//! stroll -- total and deterministic rather than a rare unlucky roll, which is
+//! what makes [`no_player_is_the_control`] able to assert a hard `None`.
 //!
 //! # RNG stream selection
 //!
-//! Each mob's RNG stream is seeded from its id. A fresh simulation normally
-//! starts at id `1`, whose first draw satisfying `next_u64() % 120 == 0` is
-//! draw **9**, inside the throttle. A control using that subject is therefore
-//! **structurally void**: the stroll fires before tick 100, so its outcome
-//! cannot distinguish a working throttle from a missing one.
-//!
-//! [`STROLL_MOB_ID`] selects a stream whose first successful draw is still past
-//! the throttle, and a compile-time assertion makes a void control a build
-//! failure instead of a silent pass.
+//! Each mob's RNG stream is seeded from its id. Seeds `1` and `3` fire on goal
+//! draws 9 and 11, inside the throttle, so a control using them is
+//! **structurally void**. [`STROLL_MOB_ID`] selects a stream whose first
+//! successful draw is past the throttle, and a compile-time assertion makes a
+//! void control a build failure instead of a silent pass.
 //!
 //! Every draw index below is computed **outside the code under test**, by a
-//! standalone program over the documented SplitMix64 recurrence
-//! (`navigating_mob.rs:116-123`). The calculation is independent of the
-//! producer and provides the expected first-hit positions below:
+//! standalone program over the documented SplitMix64 recurrence. The first
+//! goal-tick draw with `% 60 == 0`:
 //!
-//! | seed | first draw with `% 120 == 0` |
+//! | seed | first draw |
 //! |---|---|
-//! | `0x1234_5678_9ABC_DEF0` (reference stream) | 130 |
-//! | `1` (the default first mob id) | **9** |
-//! | `2` | 48 |
-//! | `3` | **147** |
+//! | `1` | 9 |
+//! | `3` | 11 |
+//! | `9` | 103 |
+//! | `12` | **73** |
 //!
-//! Hermetic and deterministic, so these always run — no skip path.
+//! Hermetic and deterministic, so these always run -- no skip path.
 
 use lodestone_entity::ai::goals::RandomStrollGoal;
 use lodestone_entity::pathfinding::MobShape;
@@ -62,13 +58,14 @@ use lodestone_server::{ChunkWorld, MobSim, PlayerPerception, StoneFloorSource};
 /// working throttle from an absent one — see the module doc's table. `3` is the
 /// lowest id that satisfies that; the default `1` does not, which is what broke
 /// these gates.
-const STROLL_MOB_ID: i32 = 3;
+const STROLL_MOB_ID: i32 = 12;
 
 /// The tick a lone stroll goal first reaches `move_to`, once the throttle stops
-/// blocking it: draw 147 of `SplitMix64(STROLL_MOB_ID)` (see the module doc's
-/// table). `can_use` draws exactly once per tick for a mob whose only goal is the
-/// stroll, so the draw index *is* the tick number.
-const EXPECTED_FIRST_STROLL_TICK: usize = 147;
+/// blocking it: goal-tick draw 73 of `SplitMix64(STROLL_MOB_ID)` (see the module
+/// doc's table). The draw happens once per goal tick, so with the first two
+/// ticks both being goal ticks and every second tick after, draw `n` lands on
+/// tick `2n - 2`.
+const EXPECTED_FIRST_STROLL_TICK: usize = 144;
 
 /// `RandomStrollGoal`'s idle throttle: `goals.rs` returns early when
 /// `no_action_time() >= 100`. Restated here because it is the number the

@@ -282,6 +282,7 @@ impl<'w> MobSim<'w> {
             &loaded_block_state;
         let floor_y = self.world.min_y;
         let path_world = world::LivePathWorld::new(terrain, floor_y);
+        let difficulty = self.difficulty;
         let live_collision = LiveBlockCollision {
             block_state,
             probe_count: std::cell::Cell::new(0),
@@ -350,7 +351,10 @@ impl<'w> MobSim<'w> {
             if reset {
                 m.no_action_time = 0;
             }
-            m.no_action_time = m.no_action_time.saturating_add(1);
+            // Only a mob in a ticking column runs its AI step, so only it idles.
+            if terrain(pos.x.floor() as i32, floor_y, pos.z.floor() as i32).is_some() {
+                m.no_action_time = m.no_action_time.saturating_add(1);
+            }
             // Vanilla's own shoulder-riding per-tick update's own unconditional
             // ride-cooldown-counter increment, mirrored the same way `no_action_time`
             // is above.
@@ -430,6 +434,13 @@ impl<'w> MobSim<'w> {
                 terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some()
             };
             if m.rider.is_none() && column_loaded {
+                m.mob.set_max_fall_distance(lodestone_entity::pathfinding::max_fall_distance(
+                    m.mob.attack_target().is_some(),
+                    m.health,
+                    m.max_health(),
+                    difficulty,
+                    m.entity_type().path() == "creeper",
+                ));
                 m.mob.tick_in(&path_world, &mut m.goals);
                 // Navigation integrates the body; the live shapes then clip it,
                 // so a block placed or mined since the last tick is respected.

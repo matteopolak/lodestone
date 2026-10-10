@@ -185,6 +185,11 @@ regen-hardness:
 # .cache/mc/{{mc_version}}/server.jar is a bundler and contains none of them. Test:
 # crates/lodestone-data/tests/damage_types.rs :: committed_table_matches_dump
 # (#[ignore]d).
+# Re-extract the per-species pathfinding-malus overrides from the reference source
+# into crates/lodestone-entity/data/path_malus.json.
+regen-path-malus:
+    python3 scripts/extract-path-malus.py
+
 regen-damage-types:
     python3 scripts/extract-damage-types.py .cache/mc/{{mc_version}}/versions/{{mc_version}}/server-{{mc_version}}.jar crates/lodestone-data/tests/support/damage_types_jar.txt
     LODESTONE_REGEN=1 cargo test -p lodestone-data --test damage_types committed_table_matches_dump -- --ignored --nocapture
