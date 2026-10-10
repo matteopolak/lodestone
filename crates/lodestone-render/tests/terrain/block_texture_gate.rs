@@ -194,6 +194,14 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
     assert_eq!(log_down.path(), "block/oak_log_top", "oak_log bottom face");
     assert_eq!(log_side.path(), "block/oak_log", "oak_log side face");
 
+    // --- poplar_log[axis=y], appended after the 26.2 prefix: same model shape. --
+    let poplar = state_with(&registry, "minecraft:poplar_log", "axis", "y")
+        .expect("poplar_log axis=y in registry");
+    let poplar_up = sprite_location_for(&atlas, poplar, Face::PosY).expect("poplar up sprite");
+    let poplar_side = sprite_location_for(&atlas, poplar, Face::PosX).expect("poplar side sprite");
+    assert_eq!(poplar_up.path(), "block/poplar_log_top", "poplar_log top face");
+    assert_eq!(poplar_side.path(), "block/poplar_log", "poplar_log side face");
+
     // --- PROVENANCE: forward name→id (`state_id_of`) agrees with the report's own
     // independent blocks.json inversion (`first_state_of`/`state_with`), which is
     // never derived from the atlas under test. This is the seam impl-shell's
@@ -342,9 +350,29 @@ fn the_live_mipmap_levels_setting_changes_the_built_atlas_mip_count() {
 
 // --- Test B: the real atlas reaches pixels (GPU, fail-closed) -----------------
 
-#[test]
-#[ignore = "requires a fetched vanilla client.jar and a GPU adapter"]
-fn real_vanilla_block_textures_reach_pixels() {
+/// The average colour of `minecraft:block/<texture>.png`, decoded straight from
+/// the jar and never through the atlas under test.
+fn texture_average(manager: &ResourceManager, texture: &str) -> [u8; 3] {
+    let png = Image::decode_png(
+        &manager
+            .read_asset(&ResourceLocation::parse(&format!("minecraft:block/{texture}")).unwrap(), "textures", "png")
+            .unwrap_or_else(|| panic!("read block/{texture}.png")),
+    )
+    .expect("decode texture");
+    let mut sum = [0u64; 3];
+    let px = u64::from(png.width * png.height);
+    for p in png.rgba.chunks_exact(4) {
+        sum[0] += u64::from(p[0]);
+        sum[1] += u64::from(p[1]);
+        sum[2] += u64::from(p[2]);
+    }
+    [(sum[0] / px) as u8, (sum[1] / px) as u8, (sum[2] / px) as u8]
+}
+
+/// Meshes a slab of `state` through the real atlas, draws its −Z wall headlessly
+/// and returns the wall's average colour. Fails closed without a GPU adapter, and
+/// when the wall or the sky does not cover a meaningful share of the frame.
+fn render_wall_average(manager: &ResourceManager, registry: &CanonicalBlocksJsonRegistry, state: u32) -> [u8; 3] {
     use lodestone_render::block::{shared_camera_buffer, sprite_uv_buffer};
     use lodestone_render::{
         BlockPipeline, Camera, Cell, ChunkSectionView, DepthBuffer, GpuAtlas,
@@ -353,20 +381,16 @@ fn real_vanilla_block_textures_reach_pixels() {
     };
     use lodestone_world::{ChunkSection, PaletteKind};
 
-    let manager = manager();
-    let registry = blocks_report();
-    let atlas = BlockAtlas::build(&manager, &registry).expect("build block atlas from real jar");
+    let atlas = BlockAtlas::build(manager, registry).expect("build block atlas from real jar");
+    let air = first_state_of(registry, "minecraft:air").expect("air in registry");
 
-    let air = first_state_of(&registry, "minecraft:air").expect("air in registry");
-    let stone = first_state_of(&registry, "minecraft:stone").expect("stone in registry");
-
-    // A solid stone slab inset from the section boundaries so its exposed faces
+    // A solid slab inset from the section boundaries so its exposed faces
     // border lit in-section air, mirroring gpu.rs::real_chunk_section_renders.
     let mut section = ChunkSection::new(PaletteKind::block_states(), PaletteKind::biomes(), air, 0);
     for y in 0..8 {
         for z in 4..12 {
             for x in 0..16 {
-                section.set_block(x, y, z, stone);
+                section.set_block(x, y, z, state);
             }
         }
     }
@@ -402,36 +426,9 @@ fn real_vanilla_block_textures_reach_pixels() {
     let mesh = mesh_greedy(&hood);
     assert!(
         mesh.quad_count() >= 6,
-        "the stone slab shell should mesh to at least its 6 outer faces, got {}",
+        "the slab shell should mesh to at least its 6 outer faces, got {}",
         mesh.quad_count()
     );
-
-    // Independent expected colour: the real stone.png average, computed outside
-    // the render path. The rendered wall is shaded by AO/light so we compare
-    // hue/relative-channel structure, not an exact byte match.
-    let stone_png = Image::decode_png(
-        &manager
-            .read_asset(
-                &ResourceLocation::parse("minecraft:block/stone").unwrap(),
-                "textures",
-                "png",
-            )
-            .expect("read block/stone.png"),
-    )
-    .expect("decode stone.png");
-    let mut sum = [0u64; 3];
-    let px = (stone_png.width * stone_png.height) as u64;
-    for p in stone_png.rgba.chunks_exact(4) {
-        sum[0] += p[0] as u64;
-        sum[1] += p[1] as u64;
-        sum[2] += p[2] as u64;
-    }
-    let src_avg = [
-        (sum[0] / px) as u8,
-        (sum[1] / px) as u8,
-        (sum[2] / px) as u8,
-    ];
-    eprintln!("source stone.png average = {src_avg:?}");
 
     // GPU — the one legitimate environmental limit, but still fail *closed*.
     let ctx = GpuContext::new_headless_blocking().unwrap_or_else(|e| {
@@ -487,7 +484,7 @@ fn real_vanilla_block_textures_reach_pixels() {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     // Distinct magenta-ish "sky" so a failure to draw is obvious
-                    // and can never be mistaken for the grey stone wall.
+                    // and can never be mistaken for the wall.
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.60,
                         g: 0.05,
@@ -556,7 +553,7 @@ fn real_vanilla_block_textures_reach_pixels() {
     );
     assert!(
         wall_px > total / 20,
-        "stone wall covers <5% of the frame ({wall_px}/{total}) — geometry not in view"
+        "wall covers <5% of the frame ({wall_px}/{total}) — geometry not in view"
     );
     assert!(
         sky_px > total / 100,
@@ -569,6 +566,18 @@ fn real_vanilla_block_textures_reach_pixels() {
         (sum[2] / wall_px as u64) as u8,
     ];
     eprintln!("rendered wall average = {avg:?}");
+
+    avg
+}
+
+#[test]
+#[ignore = "requires a fetched vanilla client.jar and a GPU adapter"]
+fn real_vanilla_block_textures_reach_pixels() {
+    let manager = manager();
+    let registry = blocks_report();
+    let stone = first_state_of(&registry, "minecraft:stone").expect("stone in registry");
+    eprintln!("source stone.png average = {:?}", texture_average(&manager, "stone"));
+    let avg = render_wall_average(&manager, &registry, stone);
 
     // The wall must not be black (atlas/lighting failure) and must not be the
     // magenta sky. Real stone is a near-neutral grey: its channels sit close
@@ -592,5 +601,36 @@ fn real_vanilla_block_textures_reach_pixels() {
     );
 
     eprintln!("=== BLOCK TEXTURE GATE (real jar → pixels) PASSED ===");
-    eprintln!("stone state id = {stone}, quads = {}", mesh.quad_count());
+}
+
+/// A block appended after the 26.2 identity prefix reaches pixels with its own
+/// texture: the rendered wall's channel ratios track `poplar_planks.png`, which
+/// a fallback or missing-texture sprite would not.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar and a GPU adapter"]
+fn an_appended_block_reaches_pixels_with_its_own_texture() {
+    let manager = manager();
+    let registry = blocks_report();
+    let planks = first_state_of(&registry, "minecraft:poplar_planks").expect("poplar_planks in registry");
+    assert!(planks >= 32_366, "poplar_planks state {planks} should sit after the 26.2 prefix");
+    let src = texture_average(&manager, "poplar_planks");
+    let avg = render_wall_average(&manager, &registry, planks);
+    eprintln!("poplar_planks.png average = {src:?}, rendered wall = {avg:?}");
+    // Lighting scales all channels alike, so each channel's rendered/source
+    // ratio must agree with the others.
+    let ratios: Vec<f64> = (0..3).map(|c| f64::from(avg[c]) / f64::from(src[c].max(1))).collect();
+    let mean = ratios.iter().sum::<f64>() / 3.0;
+    for (c, r) in ratios.iter().enumerate() {
+        assert!(
+            (r - mean).abs() < 0.25 * mean,
+            "channel {c} ratio {r:.2} departs from mean {mean:.2}: rendered {avg:?} vs source {src:?}"
+        );
+    }
+    // The planks are warm (red above blue); a grey fallback such as stone has
+    // equal ratios too, but no red lead.
+    let src_lead = i32::from(src[0]) - i32::from(src[2]);
+    assert!(
+        i32::from(avg[0]) - i32::from(avg[2]) >= src_lead / 3,
+        "rendered wall {avg:?} lacks the source's red-over-blue lead of {src_lead}"
+    );
 }
