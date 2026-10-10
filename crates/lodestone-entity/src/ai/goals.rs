@@ -519,6 +519,109 @@ impl Goal for DriftFleeGoal {
     }
 }
 
+/// A floating mob's wandering: whenever it has nothing wanted, or is within a
+/// block of it, or is over 60 blocks from it, it wants a random spot within 16
+/// blocks on each axis.
+#[derive(Debug, Default)]
+pub struct FloatAroundGoal;
+
+impl FloatAroundGoal {
+    /// Creates the goal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Goal for FloatAroundGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        match mob.float_wanted() {
+            None => true,
+            Some(w) => {
+                let d = distance_sqr(w, mob.position());
+                !(1.0..=3600.0).contains(&d)
+            }
+        }
+    }
+
+    fn can_continue_to_use(&mut self, _mob: &mut dyn MobController) -> bool {
+        false
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        let here = mob.position();
+        let mut offset = || (f64::from(mob.next_f32()) * 2.0 - 1.0) * 16.0;
+        let (dx, dy, dz) = (offset(), offset(), offset());
+        mob.float_to(Vec3::new(here.x + dx, here.y + dy, here.z + dz));
+    }
+}
+
+/// Runs for shade once the sun has set the mob alight: with no target, bright
+/// outside, burning under open sky and bareheaded, it tries ten random spots
+/// within 10 blocks horizontally and 3 vertically and heads for the first one
+/// the sky does not light.
+#[derive(Debug)]
+pub struct FleeSunGoal {
+    speed: f64,
+    hide: Option<Vec3>,
+}
+
+impl FleeSunGoal {
+    /// Creates the goal at `speed`.
+    #[must_use]
+    pub fn new(speed: f64) -> Self {
+        Self { speed, hide: None }
+    }
+}
+
+impl Goal for FleeSunGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if mob.attack_target().is_some()
+            || !mob.bright_outside()
+            || !mob.is_burning()
+            || !mob.sees_sky_at(mob.position())
+            || mob.wears_helmet()
+        {
+            return false;
+        }
+        let here = mob.position();
+        let (bx, by, bz) = (here.x.floor(), here.y.floor(), here.z.floor());
+        for _ in 0..10 {
+            let dx = f64::from(mob.next_i32(20) - 10);
+            let dy = f64::from(mob.next_i32(6) - 3);
+            let dz = f64::from(mob.next_i32(20) - 10);
+            let spot = Vec3::new(bx + dx + 0.5, by + dy, bz + dz + 0.5);
+            if !mob.sees_sky_at(spot) {
+                self.hide = Some(spot);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        !mob.navigation_done()
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        if let Some(spot) = self.hide {
+            mob.move_to(spot, self.speed);
+        }
+    }
+
+    fn stop(&mut self, _mob: &mut dyn MobController) {
+        self.hide = None;
+    }
+}
+
 /// Flees from a nearby avoided entity.
 ///
 /// Vanilla's own avoid-entity goal (flag MOVE), simplified to: when a threat is close,

@@ -908,27 +908,7 @@ impl NaturalSpawner {
     }
 
     fn sky_darkening(&self) -> u8 {
-        if self.dimension != Dimension::Overworld {
-            return if self.dimension == Dimension::Nether { 11 } else { 0 };
-        }
-        let tick = self.day_time.rem_euclid(24_000) as f32;
-        let night_factor = 0.26666668;
-        let factor = if (133.0..=11_867.0).contains(&tick) {
-            1.0
-        } else if tick < 13_670.0 && tick > 11_867.0 {
-            1.0 + (night_factor - 1.0) * ((tick - 11_867.0) / 1_803.0)
-        } else if (13_670.0..=22_330.0).contains(&tick) {
-            night_factor
-        } else {
-            let dawn_tick = if tick < 133.0 { tick + 24_000.0 } else { tick };
-            night_factor + (1.0 - night_factor) * ((dawn_tick - 22_330.0) / 1_803.0)
-        };
-        let mut level = 15.0 * factor;
-        let thunder = self.effective_thunder();
-        let rain = self.rain_level - thunder;
-        level += rain * 0.3125 * (4.0 - level);
-        level += thunder * 0.52734375 * (4.0 - level);
-        (15.0 - level) as u8
+        sky_darkening_for(self.dimension, self.day_time, self.rain_level, self.effective_thunder())
     }
 
     fn local_brightness(&self, sky: u8, block: u8) -> u8 {
@@ -1438,6 +1418,31 @@ fn is_valid_empty_spawn_block_id(state: StateId) -> bool {
             | Block::Comparator
             | Block::Repeater
     )
+}
+
+/// How much the sky's light is reduced: 0 at full day to 11 at night, from the
+/// clock and the weather (`thunder` is the effective thunder level).
+pub(crate) fn sky_darkening_for(dimension: Dimension, day_time: i64, rain_level: f32, thunder: f32) -> u8 {
+    if dimension != Dimension::Overworld {
+        return if dimension == Dimension::Nether { 11 } else { 0 };
+    }
+    let tick = day_time.rem_euclid(24_000) as f32;
+    let night_factor = 0.26666668;
+    let factor = if (133.0..=11_867.0).contains(&tick) {
+        1.0
+    } else if tick < 13_670.0 && tick > 11_867.0 {
+        1.0 + (night_factor - 1.0) * ((tick - 11_867.0) / 1_803.0)
+    } else if (13_670.0..=22_330.0).contains(&tick) {
+        night_factor
+    } else {
+        let dawn_tick = if tick < 133.0 { tick + 24_000.0 } else { tick };
+        night_factor + (1.0 - night_factor) * ((dawn_tick - 22_330.0) / 1_803.0)
+    };
+    let mut level = 15.0 * factor;
+    let rain = rain_level - thunder;
+    level += rain * 0.3125 * (4.0 - level);
+    level += thunder * 0.52734375 * (4.0 - level);
+    (15.0 - level) as u8
 }
 
 #[cfg(test)]

@@ -342,9 +342,17 @@ pub struct MobBody {
     drift_velocity: Vec3,
     pulse: f64,
     pulse_rate: f64,
+    /// A floater's wanted position, the ticks until its next push, its velocity
+    /// and its flying speed.
+    float_wanted: Option<Vec3>,
+    float_duration: i32,
+    fly_velocity: Vec3,
+    flying_speed: f64,
     /// A climber's destination, kept after its ground path ends so it keeps
     /// heading straight at it, and whether it pressed against a wall last tick.
     climb_goal: Option<(Vec3, f64)>,
+    /// Host-fed daylight state: bright outside, on fire, wearing a helmet.
+    sun: (bool, bool, bool),
     against_wall: bool,
     /// Whether the last step was a wall climb, which gravity does not touch.
     climbed: bool,
@@ -756,7 +764,12 @@ impl<'w> NavigatingMob<'w> {
             drift_velocity: Vec3::new(0.0, 0.0, 0.0),
             pulse: 0.0,
             pulse_rate: 0.0,
+            float_wanted: None,
+            float_duration: 0,
+            fly_velocity: Vec3::new(0.0, 0.0, 0.0),
+            flying_speed: 0.0,
             climb_goal: None,
+            sun: (false, false, false),
             against_wall: false,
             climbed: false,
             on_ground: false,
@@ -1045,6 +1058,15 @@ impl<'w> NavigatingMob<'w> {
         }
         // A blocked axis kills the velocity carried along it.
         if (resolved.x - self.pos.x).abs() > 1e-9 {
+            self.fly_velocity.x = 0.0;
+        }
+        if (resolved.y - self.pos.y).abs() > 1e-9 {
+            self.fly_velocity.y = 0.0;
+        }
+        if (resolved.z - self.pos.z).abs() > 1e-9 {
+            self.fly_velocity.z = 0.0;
+        }
+        if (resolved.x - self.pos.x).abs() > 1e-9 {
             self.drift.0 = 0.0;
         }
         if (resolved.z - self.pos.z).abs() > 1e-9 {
@@ -1078,7 +1100,7 @@ impl<'w> NavigatingMob<'w> {
     /// the same gravity and drag sequence instead of inventing a server-side
     /// teleport-down correction.
     pub fn begin_live_fall_from_unsupported_surface(&mut self) {
-        if self.fall_speed < 0.0 || self.climbed || self.shape.nav_mode == NavMode::Swim {
+        if self.fall_speed < 0.0 || self.climbed || matches!(self.shape.nav_mode, NavMode::Swim | NavMode::Fly) {
             return;
         }
         let displacement = self.fall_speed + FALL_GRAVITY_PER_TICK;
@@ -1823,6 +1845,14 @@ impl<'w> NavigatingMob<'w> {
             waypoint = self.climb_waypoint();
             heading_only = waypoint.is_some();
         }
+        if self.shape.nav_mode == NavMode::Fly {
+            self.fly_step();
+            self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
+            if self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z > 1e-12 {
+                self.body_yaw = movement_yaw(self.velocity.x, self.velocity.z);
+            }
+            return;
+        }
         if self.shape.nav_mode == NavMode::Drift {
             self.drift_step();
             self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
@@ -1901,6 +1931,12 @@ impl<'w> NavigatingMob<'w> {
         }
     }
 
+    /// Feeds the daylight state the sun goals read: whether it is bright
+    /// outside, whether the mob is on fire, and whether it wears a helmet.
+    pub fn set_sun_state(&mut self, bright_outside: bool, burning: bool, helmeted: bool) {
+        self.sun = (bright_outside, burning, helmeted);
+    }
+
     /// Where a climber heads once its ground path has ended: straight at its
     /// destination until the body is within its own width of it, or above it and
     /// within that width horizontally.
@@ -1916,6 +1952,55 @@ impl<'w> NavigatingMob<'w> {
         self.navigator.set_speed(speed);
         
         Some(goal)
+    }
+
+    /// Sets the speed a floater accelerates at (the `flying_speed` attribute).
+    pub fn set_flying_speed(&mut self, speed: f64) {
+        self.flying_speed = speed;
+    }
+
+    /// One tick of floating. Every two to six ticks the mob accelerates toward
+    /// its wanted position by five thirds of its flying speed, or gives the
+    /// position up when the body could not get there; air keeps 0.91 of the
+    /// velocity each tick.
+    fn fly_step(&mut self) {
+        const AIR_DRAG: f64 = 0.91;
+        if let Some(wanted) = self.float_wanted {
+            let ready = self.float_duration <= 0;
+            self.float_duration -= 1;
+            if ready {
+                self.float_duration += MobController::next_i32(self, 5) + 2;
+                let travel = Vec3::new(wanted.x - self.pos.x, wanted.y - self.pos.y, wanted.z - self.pos.z);
+                if self.can_reach(travel) {
+                    let length = travel.length();
+                    if length > 0.0 {
+                        let push = self.flying_speed * 5.0 / 3.0 / length;
+                        let v = self.fly_velocity;
+                        self.fly_velocity = Vec3::new(v.x + travel.x * push, v.y + travel.y * push, v.z + travel.z * push);
+                    }
+                } else {
+                    self.float_wanted = None;
+                }
+            }
+        }
+        let v = self.fly_velocity;
+        self.pos.x += v.x;
+        self.pos.y += v.y;
+        self.pos.z += v.z;
+        self.fly_velocity = Vec3::new(v.x * AIR_DRAG, v.y * AIR_DRAG, v.z * AIR_DRAG);
+    }
+
+    /// Whether the body, swept along `travel` in half-block steps, stays clear
+    /// of solid blocks.
+    fn can_reach(&self, travel: Vec3) -> bool {
+        let half = f64::from(self.shape.width) / 2.0;
+        let height = f64::from(self.shape.height);
+        let steps = (travel.length() * 2.0).ceil().max(1.0) as u32;
+        (0..=steps).all(|i| {
+            let f = f64::from(i) / f64::from(steps);
+            let (x, y, z) = (self.pos.x + travel.x * f, self.pos.y + travel.y * f, self.pos.z + travel.z * f);
+            !self.world.collides(Aabb::new(x - half, y, z - half, x + half, y + height, z + half))
+        })
     }
 
     /// One tick of pulsed drifting. A pulse cycle runs a phase from 0 to a full
@@ -2239,6 +2324,30 @@ impl NavigatingMob<'_> {
 }
 
 impl MobController for NavigatingMob<'_> {
+    fn float_to(&mut self, target: Vec3) {
+        self.float_wanted = Some(target);
+    }
+
+    fn float_wanted(&self) -> Option<Vec3> {
+        self.float_wanted
+    }
+
+    fn bright_outside(&self) -> bool {
+        self.sun.0
+    }
+
+    fn is_burning(&self) -> bool {
+        self.sun.1
+    }
+
+    fn wears_helmet(&self) -> bool {
+        self.sun.2
+    }
+
+    fn sees_sky_at(&self, at: Vec3) -> bool {
+        self.world.sees_sky(at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32)
+    }
+
     fn drift_vector(&self) -> Vec3 {
         self.drift_vector
     }
@@ -4845,5 +4954,37 @@ mod tests {
         assert!((flee_vector(-7.5).x - 0.96).abs() < 1e-9);
         // 10 or more blocks away it does not flee at all.
         assert_eq!(flee_vector(-9.5).x, 0.0);
+    }
+
+    fn floater<'w>(world: &'w dyn PathWorld) -> NavigatingMob<'w> {
+        let mut mob = NavigatingMob::new(world, MobShape::flier(4.0, 4.0), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0);
+        mob.set_flying_speed(0.06);
+        mob
+    }
+
+    #[test]
+    fn a_floater_accelerates_by_five_thirds_of_its_flying_speed_then_coasts() {
+        // 0.06 * 5 / 3 = 0.1 along the unit direction on the first push, which
+        // applies the same tick; the next push is at least one tick away, so the
+        // second tick keeps 0.91 of it.
+        let mut mob = floater(&Sea);
+        mob.float_to(Vec3::new(10.5, 20.0, 0.5));
+        let mut ai = GoalSelector::new();
+        mob.tick(&mut ai);
+        assert!((mob.velocity().x - 0.1).abs() < 1e-12 && mob.velocity().y == 0.0);
+        mob.tick(&mut ai);
+        assert!((mob.velocity().x - 0.091).abs() < 1e-12, "{}", mob.velocity().x);
+    }
+
+    #[test]
+    fn a_floater_gives_up_a_wanted_position_behind_a_wall() {
+        let walls: HashSet<_> = (15..=25).flat_map(|y| (-3..=3).flat_map(move |z| [(3, y, z)])).collect();
+        let world = Arena { walls };
+        let mut mob = floater(&world);
+        mob.float_to(Vec3::new(10.5, 20.0, 0.5));
+        let mut ai = GoalSelector::new();
+        mob.tick(&mut ai);
+        assert_eq!(mob.float_wanted(), None);
+        assert_eq!(mob.velocity().x, 0.0);
     }
 }

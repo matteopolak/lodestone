@@ -214,6 +214,13 @@ pub trait PathWorld: Send + Sync {
         matches!(self.base_path_type(x, y, z), PathType::Water)
     }
 
+    /// Whether the cell is lit by the open sky: nothing above it dims light.
+    /// Defaults to `false` for a world with no sky.
+    fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
+        let _ = (x, y, z);
+        false
+    }
+
     /// The block-identity [`BlockCues`] at this position — the goal-facing
     /// counterpart to [`base_path_type`](PathWorld::base_path_type), which
     /// cannot tell `grass_block` from `stone`.
@@ -327,6 +334,8 @@ pub enum NavMode {
     Swim,
     /// Moves by pushing a velocity chosen by its goals in pulses, with no path.
     Drift,
+    /// Floats through open air toward a wanted position, with no path or gravity.
+    Fly,
 }
 
 /// Per-mob parameters that make traversability mob-specific.
@@ -392,6 +401,14 @@ impl MobShape {
     pub fn drifter(width: f32, height: f32) -> Self {
         let mut shape = Self::swimmer(width, height);
         shape.nav_mode = NavMode::Drift;
+        shape
+    }
+
+    /// A body that floats toward wanted positions under no gravity.
+    #[must_use]
+    pub fn flier(width: f32, height: f32) -> Self {
+        let mut shape = Self::land(width, height);
+        shape.nav_mode = NavMode::Fly;
         shape
     }
 

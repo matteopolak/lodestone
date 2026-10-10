@@ -419,6 +419,9 @@ impl<'w> MobSim<'w> {
                 self.reconcile_player_riders(&connected);
             }
         }
+        let sky_darkening = sunlight::darkening(self.day_time);
+        let sun_bright = sunlight::bright_outside(self.day_time);
+        let sun_chance = sunlight::ignite_chance(sky_darkening);
         for m in &mut self.mobs {
             let before_live_collision = m.mob.live_collision_origin();
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
@@ -434,6 +437,21 @@ impl<'w> MobSim<'w> {
                 terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some()
             };
             if m.rider.is_none() && column_loaded {
+                let helmeted = m.equipment.head.is_some();
+                m.mob.set_sun_state(sun_bright, m.burn.is_on_fire(), helmeted);
+                if sun_bright
+                    && !helmeted
+                    && m.health > 0.0
+                    && sunlight::burns_in_sunlight(&m.entity_type)
+                    && !m.in_water()
+                    && lodestone_entity::ai::MobController::next_f32(&mut m.mob) < sun_chance
+                {
+                    let at = m.position();
+                    let eye = at.y + f64::from(m.mob.shape().height) * 0.9;
+                    if lodestone_entity::pathfinding::PathWorld::sees_sky(&path_world, at.x.floor() as i32, eye.floor() as i32, at.z.floor() as i32) {
+                        m.ignite_for_seconds(8.0);
+                    }
+                }
                 m.mob.set_max_fall_distance(lodestone_entity::pathfinding::max_fall_distance(
                     m.mob.attack_target().is_some(),
                     m.health,

@@ -162,6 +162,7 @@ fn a_dead_mob_never_rolls_an_ambient_sound() {
 fn a_hostile_mob_vocalises_on_the_hostile_category() {
     let world = flat_world();
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     sim.spawn_species("minecraft:zombie".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0));
 
     let mut fired = Vec::new();

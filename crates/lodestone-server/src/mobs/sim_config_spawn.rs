@@ -683,6 +683,7 @@ impl<'w> MobSim<'w> {
             0.0
         };
 
+        let flying_speed = attr(&attrs, "flying_speed");
         let biome = self
             .world
             .biome_at(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32)
@@ -694,6 +695,7 @@ impl<'w> MobSim<'w> {
             visited_budget,
             entity_type,
         );
+        mob.mob.set_flying_speed(flying_speed);
         mob.has_left_horn = has_left_horn;
         mob.has_right_horn = has_right_horn;
         mob.reinforcement_chance = reinforcement_chance;

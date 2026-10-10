@@ -26,6 +26,7 @@ fn run(sim: &mut MobSim<'_>, world: &ChunkWorld, id: i32, ticks: usize) -> Vec<f
 fn chase(floor: &str, y: f64, species: &str, ticks: usize) -> Vec<f64> {
     let world = strip(floor);
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let id = sim
         .spawn_species(species.parse().expect("valid key"), Vec3::new(2.5, y, 8.5))
         .id();
@@ -127,6 +128,7 @@ fn a_zombie_ignores_a_walled_player_then_paths_around_a_fence_it_sees_over() {
     };
 
     let mut sim = MobSim::new(&base);
+    sim.set_day_time(18000);
     let id = sim
         .spawn_species("minecraft:zombie".parse().expect("valid key"), Vec3::new(2.5, 1.0, 8.5))
         .id();
@@ -446,4 +448,94 @@ fn a_spider_climbs_a_wall_to_reach_a_player() {
     }
     assert!((fastest_rise - 0.2).abs() < 1e-6, "fastest rise {fastest_rise}");
     assert!(highest >= 4.0, "the spider only reached y {highest}");
+}
+
+/// How many of 400 zombies are on fire after one tick on a stone floor.
+fn zombies_alight(day_time: i32, roof: bool) -> usize {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..32 {
+        for x in 0..32 {
+            world.set_block(x, 0, z, "minecraft:stone");
+            if roof {
+                world.set_block(x, 4, z, "minecraft:stone");
+            }
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    sim.set_day_time(day_time);
+    let ids: Vec<i32> = (0..400)
+        .map(|i| {
+            let at = Vec3::new(f64::from(i % 20) * 1.5 + 1.5, 1.0, f64::from(i / 20) * 1.5 + 1.5);
+            sim.spawn_species("minecraft:zombie".parse().expect("valid key"), at).id()
+        })
+        .collect();
+    sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+    ids.iter().filter(|&&id| sim.get(id).is_some_and(|m| m.is_on_fire())).count()
+}
+
+/// At noon under open sky each zombie ignites with probability
+/// `(1 - 0.4) * 2 / 30 = 0.04` per tick, so 400 of them average 16 alight
+/// (standard deviation 3.9). Night, a roof and a helmet each remove it.
+#[test]
+fn zombies_catch_fire_only_in_open_daylight() {
+    let open = zombies_alight(6000, false);
+    assert!((6..=28).contains(&open), "{open} of 400 alight at noon");
+    assert_eq!(zombies_alight(18000, false), 0, "none should burn at night");
+    assert_eq!(zombies_alight(6000, true), 0, "none should burn under a roof");
+}
+
+/// A burning skeleton in daylight with no target heads for the first spot the
+/// sky does not light: here a 4-wide roofed patch within 10 blocks. Standing
+/// still or wandering would leave it in the open; it must reach the roof.
+#[test]
+fn a_burning_skeleton_runs_for_shade() {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..32 {
+        for x in 0..32 {
+            world.set_block(x, 0, z, "minecraft:stone");
+            if (16..20).contains(&x) && (4..28).contains(&z) {
+                world.set_block(x, 4, z, "minecraft:stone");
+            }
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    sim.set_day_time(6000);
+    let id = sim.spawn_species("minecraft:skeleton".parse().expect("valid key"), Vec3::new(12.5, 1.0, 14.5)).id();
+    sim.get_mut(id).expect("alive").ignite_for_seconds(8.0);
+    let mut sheltered = false;
+    for _ in 0..120 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        sheltered |= (16.0..20.0).contains(&sim.get(id).expect("alive").position().x);
+    }
+    assert!(sheltered, "the skeleton never reached the roof");
+}
+
+/// A ghast floats: with a floor 30 blocks below it never settles onto it, and its
+/// random wandering carries it away from where it started. A push is at most
+/// `0.06 * 5 / 3 = 0.1` blocks per tick of velocity, so no tick moves it more
+/// than a few tenths of a block.
+#[test]
+fn a_ghast_floats_and_wanders() {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..64 {
+        for x in 0..64 {
+            world.set_block(x, 0, z, "minecraft:stone");
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    let start = Vec3::new(32.5, 30.0, 32.5);
+    let id = sim.spawn_species("minecraft:ghast".parse().expect("valid key"), start).id();
+    let (mut lowest, mut farthest, mut fastest) = (f64::MAX, 0.0_f64, 0.0_f64);
+    let mut last = start;
+    for _ in 0..600 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        let p = sim.get(id).expect("alive").position();
+        lowest = lowest.min(p.y);
+        farthest = farthest.max(((p.x - start.x).powi(2) + (p.z - start.z).powi(2)).sqrt());
+        fastest = fastest.max(((p.x - last.x).powi(2) + (p.y - last.y).powi(2) + (p.z - last.z).powi(2)).sqrt());
+        last = p;
+    }
+    assert!(lowest > 2.0, "the ghast sank to y {lowest}");
+    assert!(farthest >= 4.0, "only {farthest} blocks from its start");
+    assert!(fastest > 0.0 && fastest < 0.5, "fastest step {fastest}");
 }

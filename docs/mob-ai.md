@@ -81,13 +81,19 @@ A mob's goals start, stop and tick only on its "full" parity ticks (every second
 
 `MobShape::swimmer` selects `NavMode::Swim`: the search expands the six faces plus horizontal diagonals over cells whose whole body extent is water, and `swim_step` moves with an eased speed, a vertical push proportional to the vertical share of the heading, a 0.9 drag and gravity once out of the water. A swimmer's stroll destination comes from the same ten-offset search, kept only if the cell is open water.
 
-Cod, salmon, tropical fish and pufferfish are swimmers (`species_swims` in `mobs/mod.rs`) with the `roster/aquatic.rs` goals: panic, flee players within 8 blocks (the perception feed is `flees_players`), swim stroll. Flock following and the pufferfish puff are `Missing` rows. Sun avoidance, flying mobs and amphibious navigation are not implemented.
+Cod, salmon, tropical fish and pufferfish are swimmers (`species_swims` in `mobs/mod.rs`) with the `roster/aquatic.rs` goals: panic, flee players within 8 blocks (the perception feed is `flees_players`), swim stroll. Flock following and the pufferfish puff are `Missing` rows. Bats, bees, phantoms and amphibious navigation are not implemented.
 
 ### Drifting and climbing
 
 `NavMode::Drift` (squid, glow squid) has no path: `DriftGoal` chooses a velocity vector and `drift_step` applies it in pulses (full vector while the pulse phase is in the last quarter of its first half-turn, 0.9 glide after, only falling out of water); `DriftFleeGoal` aims the vector away from whoever hurt it, scaled by distance. Both are goals with no flags, so they run beside each other.
 
 A mob with `MobShape::can_climb` (spiders) keeps the target of its last move and, when its ground path ends, heads straight at it. Pressing into a wall (reported by the live collision sweep) raises it 0.2 blocks per tick with gravity suspended; the attack goal stopping navigation ends the climb.
+
+### Daylight and floating
+
+`mobs/sunlight.rs` ignites sun-sensitive undead (zombie, zombie villager, skeletons, phantom) in bright daylight: each tick, with probability `2 * (brightness - 0.4) / 30` where brightness is `v / (4 - 3v)` for sky light `v = (15 - darkening) / 15` (darkening from `natural_spawn::sky_darkening_for`), and only with open sky over the eye (`PathWorld::sees_sky`, every cell above has zero light dampening), no helmet and not in water. Rain and block light are not modelled. The skeleton's `FleeSunGoal` heads for the first of ten random spots the sky does not light; the avoid-sun path restriction is missing.
+
+`NavMode::Fly` (ghast) has no path or gravity: `FloatAroundGoal` picks a wanted spot within 16 blocks per axis, and every two to six ticks the body adds `flying_speed * 5/3` along the direction to it, or drops the wish if the swept body would hit a block; air keeps 0.91 of the velocity per tick. The reference's height-map clamp on the wanted spot is not modelled.
 
 ### Fleeing
 

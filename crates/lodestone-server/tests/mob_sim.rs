@@ -52,6 +52,8 @@ fn goal_driven_mob_walks_to_its_target_over_server_terrain() {
     );
 
     let mut sim = MobSim::new(&world);
+
+    sim.set_day_time(18000);
     let start = Vec3::new(0.5, 0.0, 0.5);
     let target = Vec3::new(8.5, 0.0, 0.5);
     let id = {
@@ -121,6 +123,8 @@ fn mob_detours_a_two_tall_wall_and_holds_the_recompute_throttle() {
     );
 
     let mut sim = MobSim::new(&world);
+
+    sim.set_day_time(18000);
     let start = Vec3::new(0.5, 0.0, 0.5);
     let target = Vec3::new(0.5, 0.0, 8.5); // directly across the wall
     let id = {
@@ -180,6 +184,8 @@ fn identity_and_motion_accessors_expose_real_derived_state() {
     let world = ChunkWorld::from_source(&source, -1..=1, -1..=1);
 
     let mut sim = MobSim::new(&world);
+
+    sim.set_day_time(18000);
     let start = Vec3::new(0.5, 0.0, 0.5);
     let target = Vec3::new(8.5, 0.0, 0.5); // due east of the start
     let (id_a, uuid_a) = {
@@ -441,6 +447,7 @@ fn census_height_decides_whether_a_mob_fits_a_two_high_tunnel() {
 
     let run = |shape: MobShape| -> f64 {
         let mut sim = MobSim::new(&world);
+        sim.set_day_time(18000);
         let id = {
             let m = sim.spawn(start, shape, 0.15, 600);
             m.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
@@ -486,6 +493,7 @@ fn census_height_decides_whether_a_mob_fits_a_two_high_tunnel() {
 fn spawned_mob_combat_stats_are_the_real_zombie_attributes() {
     let world = ChunkWorld::new(-4, 24);
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let m = sim.spawn(Vec3::new(0.5, 0.0, 0.5), MobShape::land(0.6, 1.95), 0.15, 100);
     assert_eq!(m.health(), 20.0, "zombie max_health is 20");
     assert_eq!(m.attack_damage(), 3.0, "zombie attack_damage override is 3.0");
@@ -510,6 +518,8 @@ fn melee_attack_reduces_target_health_and_a_lethal_hit_removes_the_mob() {
     }
 
     let mut sim = MobSim::new(&world);
+
+    sim.set_day_time(18000);
     let attacker_pos = Vec3::new(0.5, 0.0, 0.5);
     let defender_pos = Vec3::new(4.5, 0.0, 0.5);
 
@@ -584,6 +594,7 @@ fn two_attackers_hitting_the_same_tick_only_land_one_full_hit() {
         }
     }
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let defender_pos = Vec3::new(2.5, 0.0, 0.5);
     let defender_id = {
         let d = sim.spawn(defender_pos, MobShape::land(0.6, 1.95), 0.0, 100);
@@ -624,6 +635,7 @@ fn explosion_damages_exposed_mobs_more_up_close_and_kills_at_ground_zero() {
     // distance/exposure falloff from any wall effects (that is the next test).
     let world = ChunkWorld::new(-8, 32);
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let centre = Vec3::new(0.0, 0.0, 0.0);
 
     let near_id = {
@@ -682,6 +694,7 @@ fn explosion_exposure_is_ray_sampled_a_wall_fully_shields_a_mob() {
         }
     }
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let centre = Vec3::new(0.0, 0.0, 0.0);
 
     let shielded_id = {
@@ -735,6 +748,7 @@ fn rk(name: &str) -> ResourceKey {
 fn spawn_species_resolves_real_per_species_shape_speed_and_combat_stats() {
     let world = ChunkWorld::new(-4, 24);
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
 
     let zombie_height = {
         let zombie = sim.spawn_species(rk("minecraft:zombie"), Vec3::new(0.5, 0.0, 0.5));
@@ -779,6 +793,7 @@ fn spawn_species_only_the_hostile_species_can_ever_land_a_melee_hit() {
         }
     }
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
 
     let zombie_pos = Vec3::new(0.5, 0.0, 0.5);
     let target_pos = Vec3::new(4.5, 0.0, 0.5);
@@ -804,6 +819,7 @@ fn spawn_species_only_the_hostile_species_can_ever_land_a_melee_hit() {
     let control_zombie_health = {
         let control_world = ChunkWorld::new(-4, 24);
         let mut control_sim = MobSim::new(&control_world);
+        control_sim.set_day_time(18000);
         let z = control_sim.spawn_species(rk("minecraft:zombie"), zombie_pos);
         let z_id = z.id();
         let p = control_sim.spawn_species(rk("minecraft:pig"), target_pos);
@@ -849,6 +865,7 @@ fn spawn_species_only_the_hostile_species_can_ever_land_a_melee_hit() {
 fn ignited_creeper_climbs_by_exactly_one_per_tick_and_detonates_at_tick_30() {
     let world = ChunkWorld::new(-4, 24);
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
 
     let creeper_id = {
         let creeper = sim.spawn_species(rk("minecraft:creeper"), Vec3::new(0.0, 0.0, 0.0));
@@ -897,6 +914,7 @@ fn ignited_creeper_climbs_by_exactly_one_per_tick_and_detonates_at_tick_30() {
 fn creeper_with_a_close_stationary_target_primes_from_proximity_alone() {
     let world = ChunkWorld::new(-4, 24);
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
 
     let creeper_id = {
         let creeper = sim.spawn_species(rk("minecraft:creeper"), Vec3::new(0.0, 0.0, 0.0));
@@ -928,6 +946,7 @@ fn creeper_with_a_close_stationary_target_primes_from_proximity_alone() {
 fn creeper_with_no_target_and_never_ignited_never_primes_or_detonates() {
     let world = ChunkWorld::new(-4, 24);
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
 
     let creeper_id = {
         let creeper = sim.spawn_species(rk("minecraft:creeper"), Vec3::new(0.0, 0.0, 0.0));
@@ -984,6 +1003,7 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
     // flag. A birth is meaningful only when a third mob exists.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
 
     // Two blocks apart: inside `BreedGoal`'s 8.0 partner search and inside the
     // 9.0 squared distance at
@@ -1065,6 +1085,7 @@ fn cows_beyond_breed_range_never_produce_a_child() {
     // spawns something per tick.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
 
     let a = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
     let b = sim.spawn_species(rk("minecraft:cow"), Vec3::new(12.0, 0.0, 0.0)).id();
@@ -1100,6 +1121,7 @@ fn a_baby_cow_is_fed_its_parent_and_an_orphan_is_not() {
     // 8.0 horizontally and 4.0 vertically, and adults have `age() >= 0`.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
 
     let adult = sim.spawn_species(rk("minecraft:cow"), Vec3::new(5.0, 0.0, 0.0)).id();
     let baby = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
@@ -1125,6 +1147,7 @@ fn a_baby_cow_is_fed_its_parent_and_an_orphan_is_not() {
 
     // Control 2: species must matter. A baby cow beside a pig has no parent.
     let mut sim2 = MobSim::new(&world);
+    sim2.set_day_time(18000);
     let pig = sim2.spawn_species(rk("minecraft:pig"), Vec3::new(1.0, 0.0, 0.0)).id();
     let calf = sim2.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
     sim2.get_mut(calf)
@@ -1148,6 +1171,7 @@ fn a_player_attack_makes_a_mob_retaliate_through_the_production_path() {
     // the hit records an attacker for `HurtByTargetGoal`.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let zombie = sim.spawn_species(rk("minecraft:zombie"), Vec3::new(0.0, 0.0, 0.0)).id();
     sim.get_mut(zombie)
         .expect("just spawned")
@@ -1206,6 +1230,8 @@ fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
     );
 
     let mut sim = MobSim::new(&world);
+
+    sim.set_day_time(18000);
     let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.5, 0.0, 0.5)).id();
     sim.tick();
 
@@ -1243,6 +1269,7 @@ fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
     // "is_jumping became true" could come from anything.
     let dry = breeding_pen();
     let mut dry_sim = MobSim::new(&dry);
+    dry_sim.set_day_time(18000);
     let dry_id = dry_sim
         .spawn_species(rk("minecraft:cow"), Vec3::new(0.5, 0.0, 0.5))
         .id();
@@ -1268,6 +1295,7 @@ fn no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record() {
     // disconnected record from silently passing.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
 
     for _ in 0..150 {
@@ -1318,6 +1346,7 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
     // position the goal actually chose to look at — not `can_use`.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
     // Use priority 6 and probability 1.0 so the pre-roll cannot make this
     // gate flaky; the roll is not what is under test.
@@ -1366,6 +1395,7 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
     // and the goal applies its own range — if the feed were also range-gating,
     // the two cuts would silently take the minimum.
     let mut far_sim = MobSim::new(&world);
+    far_sim.set_day_time(18000);
     let far_id = far_sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
     far_sim.get_mut(far_id).expect("just spawned").add_goal(
         6,
@@ -1398,6 +1428,7 @@ fn a_pig_follows_a_player_holding_a_potato_and_ignores_an_empty_hand() {
     // not show that the goal's `move_to` reached the navigator.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let id = sim.spawn_species(rk("minecraft:pig"), Vec3::new(0.0, 0.0, 0.0)).id();
     // Priority 4 and speed 1.2 make the item-driven movement deterministic for
     // this focused goal test.
@@ -1479,6 +1510,7 @@ fn the_tempt_table_is_per_species_and_matches_the_jar_not_folklore() {
 
     for (species, item, should_tempt, why) in cases {
         let mut sim = MobSim::new(&world);
+        sim.set_day_time(18000);
         let id = sim
             .spawn_species(rk(&format!("minecraft:{species}")), Vec3::new(0.0, 0.0, 0.0))
             .id();

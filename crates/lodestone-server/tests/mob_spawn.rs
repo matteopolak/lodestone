@@ -88,6 +88,7 @@ fn spawn_cycles_fill_to_cap_and_never_exceed_across_seeds() {
     for seed in [1u64, 7, 42, 1000, 999_999] {
         let world = ChunkWorld::new(-64, 128);
         let mut sim = MobSim::new(&world);
+        sim.set_day_time(18000);
         let mut source = AlwaysSpawns {
             next_x: f64::from(u32::try_from(seed % 4096).unwrap()),
         };
@@ -140,6 +141,7 @@ fn middle_band_mob_despawns_over_time_while_immune_mob_is_immortal() {
         }
     }
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     let player = Vec3::new(0.0, 0.0, 0.0);
 
     // Three monsters at three bands relative to the player.
@@ -219,6 +221,7 @@ fn middle_band_mob_despawns_over_time_while_immune_mob_is_immortal() {
 fn no_player_means_no_despawn() {
     let world = ChunkWorld::new(-64, 128);
     let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
     sim.spawn(
         Vec3::new(500.0, 0.0, 0.0),
         MobShape::land(0.6, 1.95),

@@ -115,6 +115,8 @@ fn observe(persistent: bool, players: Vec<PlayerPerception>) -> Observed {
     assert!(!world.is_solid(8, 0, 8), "expected air at the y=0 surface");
 
     let mut sim = MobSim::new(&world);
+
+    sim.set_day_time(18000);
     // The mob's RNG seed is its id, so this call selects the stroll stream — see
     // `STROLL_MOB_ID`. The default id `1` strolls at tick 9, inside the
     // throttle, which would void the control.

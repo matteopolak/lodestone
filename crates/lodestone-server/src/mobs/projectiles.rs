@@ -1674,6 +1674,7 @@ mod tests {
     fn an_ignited_mob_burns_for_exactly_its_duration_and_loses_health() {
         let world = ChunkWorld::new(-4, 24);
         let mut sim = MobSim::new(&world);
+        sim.set_day_time(18000);
         let target = spawn_target(&mut sim, Vec3::new(3.0, 1.0, 0.0));
         let before = sim.get_mut(target).expect("just spawned").health();
         sim.get_mut(target).expect("just spawned").ignite_for_seconds(5.0);

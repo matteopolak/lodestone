@@ -355,6 +355,16 @@ impl PathWorld for LivePathWorld<'_> {
         (self.terrain)(x, y, z).map_or(PathType::Blocked, path_type_of)
     }
 
+    fn sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
+        const SCAN_LIMIT: i32 = 2048;
+        if (self.terrain)(x, y, z).is_none() {
+            return false;
+        }
+        (y..y + SCAN_LIMIT).all(|yy| {
+            (self.terrain)(x, yy, z).is_none_or(|state| lodestone_data::light_props::light_props(state).0 == 0)
+        })
+    }
+
     fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
         (self.terrain)(x, y, z).map_or(1.0, collision_top_of)
     }

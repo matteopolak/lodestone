@@ -424,6 +424,7 @@ pub mod villager;
 // Species helpers stay private to this module tree; `pub(super)` exposes them
 // to descendant simulation modules without adding an external API path.
 mod species;
+mod sunlight;
 mod sim_mob;
 mod handle;
 pub use handle::{LiveMobSource, MobHandle};
@@ -718,7 +719,9 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
     } else {
         base.map_or((0.6, 1.95), |d| (d.width, d.height))
     };
-    let mut shape = if species_drifts(entity_type) {
+    let mut shape = if entity_type.path() == "ghast" {
+        MobShape::flier(width * scale, height * scale)
+    } else if species_drifts(entity_type) {
         MobShape::drifter(width * scale, height * scale)
     } else if species_swims(entity_type) {
         MobShape::swimmer(width * scale, height * scale)

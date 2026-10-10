@@ -415,6 +415,11 @@ pub static ELDER_GUARDIAN: &[Registration] = &[
     ),
 ];
 
+/// The ghast's wander: a fresh random spot whenever it has arrived.
+fn float_around(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::goals::FloatAroundGoal::new())
+}
+
 /// Vanilla's own ghast goal registration.
 ///
 /// **Two of four rows are `Missing`, and the table exists anyway.** That is a
@@ -446,7 +451,7 @@ pub static ELDER_GUARDIAN: &[Registration] = &[
 /// * **The target row** at 1 is the player class with a ±4-block vertical band,
 ///   which ours does not model.
 pub static GHAST: &[Registration] = &[
-    Registration::missing(Selector::Goal, 5, "Ghast.RandomFloatAroundGoal"),
+    Registration::goal(5, "Ghast.RandomFloatAroundGoal", float_around),
     Registration::missing(Selector::Goal, 7, "Ghast.GhastLookGoal"),
     Registration::goal(7, "Ghast.GhastShootFireballGoal", super::ranged::ghast_fireball),
     Registration::target(

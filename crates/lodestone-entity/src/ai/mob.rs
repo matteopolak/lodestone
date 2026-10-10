@@ -119,6 +119,38 @@ pub trait MobController {
         false
     }
 
+    /// Whether it is bright enough outside (by the sky, not the cell) for the
+    /// sun to matter.
+    fn bright_outside(&self) -> bool {
+        false
+    }
+
+    /// Whether the mob is on fire.
+    fn is_burning(&self) -> bool {
+        false
+    }
+
+    /// Whether the mob wears something on its head.
+    fn wears_helmet(&self) -> bool {
+        false
+    }
+
+    /// Whether the cell containing `at` is lit by the open sky.
+    fn sees_sky_at(&self, at: Vec3) -> bool {
+        let _ = at;
+        false
+    }
+
+    /// Sets the position a floating mob drifts toward.
+    fn float_to(&mut self, target: Vec3) {
+        let _ = target;
+    }
+
+    /// The position a floating mob is still drifting toward, if any.
+    fn float_wanted(&self) -> Option<Vec3> {
+        None
+    }
+
     /// The current attack target's position, if the mob has one.
     fn attack_target(&self) -> Option<Vec3> {
         None

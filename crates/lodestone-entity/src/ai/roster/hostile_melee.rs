@@ -122,7 +122,7 @@
 //! a mob can acquire through a wall.
 
 use crate::ai::goal::Goal;
-use crate::ai::goals::{MeleeAttackGoal, RandomStrollGoal};
+use crate::ai::goals::{FleeSunGoal, MeleeAttackGoal, RandomStrollGoal};
 
 use super::{
     Registration, Selector, SpeciesContext, avoid_entity, float_goal, hurt_by_target,
@@ -346,6 +346,11 @@ pub static DROWNED: &[Registration] = &[
     Registration::missing(Selector::Target, 5, "NearestAttackableTargetGoal(Turtle)"),
 ];
 
+/// The flee-sun registration's speed multiplier, `1.0`.
+fn flee_sun(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(FleeSunGoal::new(ctx.speed))
+}
+
 /// Vanilla's own abstract-skeleton goal registration, plus the priority-4
 /// weapon goal that
 /// its own weapon-reassessment step installs rather than in the main
@@ -386,16 +391,12 @@ pub static DROWNED: &[Registration] = &[
 ///
 /// [`GoalSelector::remove`]: crate::ai::GoalSelector::remove
 pub static SKELETON: &[Registration] = &[
-    // Vanilla's own restrict-sun and flee-sun goals — two different
-    // mechanisms, both absent. The restrict-sun goal reads no block: its gate is a
-    // daytime query plus an empty HEAD slot, and its *effect* is
-    // vanilla's own avoid-sun pathfinding flag — a sky-light penalty in the
-    // path evaluator, a pathfinder feature. The flee-sun goal needs a host-computed
-    // shaded position (its own hide-position search probes ten spots). So a
-    // skeleton does not seek shade. Daylight *burning* is modelled separately,
-    // not by this table.
+    // Restrict-sun is a sky-light penalty in the path evaluator and stays
+    // missing; flee-sun heads for the first of ten random spots the sky
+    // does not light (the reference also wants a bright cell, which needs
+    // light levels this seam lacks).
     Registration::missing(Selector::Goal, 2, "RestrictSunGoal"),
-    Registration::missing(Selector::Goal, 3, "FleeSunGoal"),
+    Registration::goal(3, "FleeSunGoal", flee_sun),
     Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
     // Vanilla's own weapon-reassessment step's bow branch, the only one a
     // normally-spawned skeleton takes. Vanilla's own bow-goal field is
@@ -438,7 +439,7 @@ pub static WITHER_SKELETON: &[Registration] = &[
     // -- vanilla's own base registration plus the
     // -- weapon `else` branch --------------------------------------------
     Registration::missing(Selector::Goal, 2, "RestrictSunGoal"),
-    Registration::missing(Selector::Goal, 3, "FleeSunGoal"),
+    Registration::goal(3, "FleeSunGoal", flee_sun),
     Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
     // The `else` half of vanilla's own weapon-reassessment step — the one
     // branch of this family
