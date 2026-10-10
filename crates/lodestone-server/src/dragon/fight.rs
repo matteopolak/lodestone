@@ -7,7 +7,7 @@
 //!
 //! # What this does not attempt
 //!
-//! **Obsidian pillars (`EndSpikeFeature`) are not placed by this module, or
+//! **Obsidian pillars (the end spike feature) are not placed by this module, or
 //! anywhere in this repo.** `lodestone-worldgen`'s own End module doc says so
 //! explicitly: the pillars, like the exit portal, are "structure/entity
 //! work" with "a gameplay placer" rather than terrain generation, and that
@@ -17,7 +17,7 @@
 //!   pillars to exist — crystals in this world are floating wherever a
 //!   caller puts them, not standing on spikes 40-80 blocks up.
 //! * Whether a crystal is caged or uncaged
-//!   (`EndSpikeFeature`'s `guarded` flag wraps a *short* pillar's crystal in
+//!   (the end spike feature's `guarded` flag wraps a *short* pillar's crystal in
 //!   iron bars) has no pillars to attach cages to, so it is not modelled.
 //!   There is nothing to cage.
 //! * [`RespawnStage::SummoningPillars`]'s pillar-summoning sub-steps are
@@ -36,32 +36,32 @@
 
 use lodestone_model::BlockPos;
 
-/// `EnderDragonFight.DRAGON_SPAWN_Y` — the fixed height respawn beams target,
+/// The ender dragon fight's dragon spawn y — the fixed height respawn beams target,
 /// and the height a freshly created dragon spawns at above the fight origin.
 pub const DRAGON_SPAWN_Y: i32 = 128;
 
-/// The boss-bar value this fight wants shown — `ServerBossEvent`'s two
-/// fields `EnderDragonFight.tick`/`updateDragon`/`setDragonKilled` actually
+/// The boss-bar value this fight wants shown — the server boss event's two
+/// fields ender dragon fight's tick/`updateDragon`/`setDragonKilled` actually
 /// touch (`setProgress`, `setVisible`). Color (`PINK`) and overlay
 /// (`PROGRESS`) never change in vanilla, so they are not modelled as fields
 /// here — a caller wiring the real `BOSS_EVENT` packet hardcodes them once,
-/// same as `EnderDragonFight.init` does.
+/// same as the ender dragon fight's init does.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BossBarValue {
-    /// `dragon.getHealth() / dragon.getMaxHealth()`, clamped to `[0.0, 1.0]`
-    /// the same way `ServerBossEvent.setProgress` does (vanilla's own setter
+    /// `dragon.get_health() / dragon.get_max_health()`, clamped to `[0.0, 1.0]`
+    /// the same way server boss event's set progress does (vanilla's own setter
     /// clamps; a health desync that briefly reports slightly over 100% must
     /// not draw past a full bar).
     pub progress: f32,
-    /// `false` once `setDragonKilled` fires (`dragonEvent.setVisible(false)`),
+    /// `false` once `setDragonKilled` fires (dragon event's set visible),
     /// and re-asserted `!dragonKilled` every tick by
-    /// `EnderDragonFight.tick`'s first line — so a caller can compute this
+    /// The ender dragon fight's tick's first line — so a caller can compute this
     /// once per tick from [`FightState::dragon_killed`] alone rather than
     /// tracking a separate "was it just killed" edge.
     pub visible: bool,
 }
 
-/// `EnderDragonFight.updateDragon`/`tick`'s progress line, plus the
+/// The ender dragon fight's update dragon/`tick`'s progress line, plus the
 /// `!this.dragonKilled` visibility line — folded into one function since
 /// both read only [`FightState::dragon_killed`] and the live health pair.
 #[must_use]
@@ -70,8 +70,8 @@ pub fn boss_bar_value(dragon_killed: bool, health: f32, max_health: f32) -> Boss
     BossBarValue { progress, visible: !dragon_killed }
 }
 
-/// Persisted per-world fight state — the fields of `EnderDragonFight` that
-/// survive a save/load round trip (`EnderDragonFight.CODEC`), minus two this
+/// Persisted per-world fight state — the fields of the ender dragon fight that
+/// survive a save/load round trip (the ender dragon fight's codec), minus two this
 /// struct does not carry: `respawn_crystals` (the four crystal ids a live
 /// respawn is tracking — [`try_respawn`]'s return value is the same
 /// information) and `gateways` (now [`GatewayPool`], a real, separate type —
@@ -80,25 +80,25 @@ pub fn boss_bar_value(dragon_killed: bool, health: f32, max_health: f32) -> Boss
 /// ownership" split this module already draws elsewhere).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FightState {
-    /// `EnderDragonFight.needsStateScanning` — `true` for a fresh
+    /// The ender dragon fight's needs state scanning — `true` for a fresh
     /// [`FightState::new`], and for any world saved before this flag existed
     /// (vanilla's codec default is `true`, matching "assume legacy and
     /// rescan" — the same default this constructor uses).
     pub needs_state_scanning: bool,
-    /// `EnderDragonFight.dragonKilled` — **not** "has the dragon ever been
+    /// The ender dragon fight's dragon killed — **not** "has the dragon ever been
     /// killed"; see [`has_previously_killed_dragon`](Self::has_previously_killed_dragon)
     /// for that. `true` means "no dragon should currently exist in the
     /// world"; a respawn in progress clears it only at [`RespawnStage::End`].
     pub dragon_killed: bool,
-    /// `EnderDragonFight.hasPreviouslyKilledDragon` — persists forever once
+    /// The ender dragon fight's has previously killed dragon — persists forever once
     /// set; gates the one-time dragon-egg placement (`setDragonKilled`) and
-    /// the 12000-vs-500 XP split (`EnderDragon.tickDeath`, not ported here —
+    /// the 12000-vs-500 XP split (EnderDragon's tick death, not ported here —
     /// see [`crate::dragon`]'s module doc).
     pub has_previously_killed_dragon: bool,
 }
 
 impl FightState {
-    /// A brand-new fight, matching `EnderDragonFight.createDefault()`.
+    /// A brand-new fight, matching ender dragon fight's create default.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -121,7 +121,7 @@ impl Default for FightState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanOutcome {
     /// Whether a legacy/existing dragon entity found in the world should be
-    /// discarded — `EnderDragonFight.scanState`'s
+    /// discarded — the ender dragon fight's scan state's
     /// `"But we didn't have a portal, let's remove it."` branch: a live
     /// dragon with **no** active exit portal nearby is legacy garbage (the
     /// fight state was lost, e.g. from an old save format) and gets
@@ -129,7 +129,7 @@ pub struct ScanOutcome {
     pub discard_existing_dragon: bool,
 }
 
-/// `EnderDragonFight.scanState` — run once (gated by
+/// The ender dragon fight's scan state — run once (gated by
 /// [`FightState::needs_state_scanning`]) the first time a world with an
 /// unscanned fight loads a chunk in the arena. Mutates `state` in place and
 /// returns what the caller must additionally do to the world (which this
@@ -137,13 +137,13 @@ pub struct ScanOutcome {
 ///
 /// # Clauses, matching `scanState` line for line
 ///
-/// 1. `activePortalExists = hasActiveExitPortal()` — caller-supplied
+/// 1. `activePortalExists = has_active_exit_portal()` — caller-supplied
 ///    (`active_portal_exists`), since it requires scanning real chunk block
 ///    entities this module has no access to.
 /// 2. If a portal exists: `hasPreviouslyKilledDragon = true` (the dragon was
 ///    already beaten in this world, portal already active).
 /// 3. If not: `hasPreviouslyKilledDragon = false`, and if no portal pattern
-///    can be found anywhere (`findExitPortal() == null`), spawn one
+///    can be found anywhere (`find_exit_portal() == null`), spawn one
 ///    (inactive) — the caller does the actual placement via
 ///    [`exit_portal_blocks`] with `active = false` when this function
 ///    returns `needs_portal_spawn = true` in the outcome... **not modelled
@@ -151,9 +151,9 @@ pub struct ScanOutcome {
 ///    anywhere" from "found one already" without the caller's own scan; the
 ///    caller is expected to call [`exit_portal_blocks`] itself exactly when
 ///    its own `find_exit_portal` returned nothing, mirroring vanilla's own
-///    `if (this.findExitPortal() == null) { this.spawnExitPortal(false); }`.
+///    `if (this.find_exit_portal() == null) { this.spawn_exit_portal(false); }`.
 /// 4. `dragonKilled = entities.isEmpty()` — `existing_dragon_alive` stands in
-///    for `!level.getDragons().isEmpty()`.
+///    for `!level.get_dragons().isEmpty()`.
 /// 5. If a dragon exists but there was no active portal, discard it
 ///    (`discard_existing_dragon` in the outcome) and forget its uuid.
 /// 6. The final `if (!hasPreviouslyKilledDragon && dragonKilled) {
@@ -161,7 +161,7 @@ pub struct ScanOutcome {
 ///    dragon killed but also has no dragon (e.g. a freshly created End) is
 ///    NOT "dragon killed" (which would suppress boss-bar visibility and
 ///    respawn logic); it just has no dragon yet, and [`FightState::dragon_killed`]
-///    staying `false` is what lets `EnderDragonFight.tick`'s
+///    staying `false` is what lets ender dragon fight's tick's
 ///    `findOrCreateDragon` spawn one.
 #[cfg(test)]
 pub fn scan_state(state: &mut FightState, active_portal_exists: bool, existing_dragon_alive: bool) -> ScanOutcome {
@@ -279,8 +279,8 @@ pub fn exit_portal_blocks(origin: BlockPos, active: bool) -> Vec<(BlockPos, &'st
     out
 }
 
-/// `EnderDragonFight.init`'s gateway pool size — the pie is always cut into
-/// twenty slices, `Range.closedOpen(0, 20)`.
+/// The ender dragon fight's init's gateway pool size — the pie is always cut into
+/// twenty slices, Range's closed open.
 pub const GATEWAY_COUNT: i32 = 20;
 
 /// The pool of unused gateway pie-slice indices
@@ -302,7 +302,7 @@ pub const GATEWAY_COUNT: i32 = 20;
 pub struct GatewayPool(Vec<i32>);
 
 impl GatewayPool {
-    /// `EnderDragonFight.init`'s `if (this.gateways.isEmpty())` branch —
+    /// The ender dragon fight's init's `if (this.gateways.isEmpty())` branch —
     /// `Util.shuffle` ported clause for clause (`for (i = size; i > 1; i--) {
     /// swapTo = random.nextInt(i); swap(i - 1, swapTo); }`), against
     /// `0..GATEWAY_COUNT`. See this struct's own doc for why the RNG itself
@@ -319,7 +319,7 @@ impl GatewayPool {
         Self(slots)
     }
 
-    /// `EnderDragonFight.spawnNewGateway`'s pop — `this.gateways.remove
+    /// The ender dragon fight's spawn new gateway's pop — `this.gateways.remove
     /// (this.gateways.size() - 1)`, or `None` once every slice has been used
     /// (vanilla's own `if (!this.gateways.isEmpty())` guard: a dragon killed
     /// more than twenty times spawns no further gateway).
@@ -335,7 +335,7 @@ impl GatewayPool {
     }
 }
 
-/// `EnderDragonFight.spawnNewGateway`'s position formula — `gateway` is the
+/// The ender dragon fight's spawn new gateway's position formula — `gateway` is the
 /// pie-slice index [`GatewayPool::pop`] returned (`0..GATEWAY_COUNT`).
 /// Vanilla writes this as absolute world coordinates with **no offset by the
 /// fight's own origin** (`new BlockPos(x, 75, z)`, not `origin.offset(x, 75,
@@ -393,7 +393,7 @@ pub fn gateway_blocks(pos: BlockPos) -> Vec<(BlockPos, &'static str)> {
     out
 }
 
-/// `EnderDragonFight.tryRespawn`'s crystal-position check — the four cells a
+/// The ender dragon fight's try respawn's crystal-position check — the four cells a
 /// player must have an end crystal standing in
 /// (`center.relative(direction, 3)` for each horizontal `Direction`, where
 /// `center = exitPortalLocation.above(1)`) before a respawn can start.
@@ -408,7 +408,7 @@ pub fn respawn_crystal_positions(exit_portal_location: BlockPos) -> [BlockPos; 4
     ]
 }
 
-/// `EnderDragonFight.tryRespawn` — given a lookup for "is there a live end
+/// The ender dragon fight's try respawn — given a lookup for "is there a live end
 /// crystal occupying this cell", returns the four found crystals (in the
 /// same N/S/E/W order as [`respawn_crystal_positions`]) if **all four** are
 /// present, or `None` if any is missing (vanilla's early `return` on the
@@ -426,7 +426,7 @@ pub fn try_respawn(exit_portal_location: BlockPos, crystal_at: impl Fn(BlockPos)
     Some(found)
 }
 
-/// `DragonRespawnStage` — the five-stage respawn spectacle. Order matches
+/// The dragon respawn stage — the five-stage respawn spectacle. Order matches
 /// the Java enum's declaration order (`START, PREPARING_TO_SUMMON_PILLARS,
 /// SUMMONING_PILLARS, SUMMONING_DRAGON, END`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,12 +443,12 @@ pub enum RespawnStage {
 /// [`ScanOutcome`]/[`DeathOutcome`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RespawnEvent {
-    /// `level.levelEvent(3001, pos, 0)` — the ambient "pillar beam" sound/
+    /// level's level event — the ambient "pillar beam" sound/
     /// particle cue, at the fixed point `origin + (0, DRAGON_SPAWN_Y, 0)`.
     LevelEvent3001 { pos: BlockPos },
     /// Point every live respawn crystal's beam at `pos`.
     SetBeamTarget { pos: BlockPos },
-    /// Clear every live respawn crystal's beam target (`setBeamTarget(null)`).
+    /// Clear every live respawn crystal's beam target (set beam target).
     ClearBeamTarget,
     /// Aim a pillar-summon beam at spike `index`'s top
     /// (`SetBeamTarget`-equivalent, but only known once the caller resolves
@@ -467,12 +467,12 @@ pub enum RespawnEvent {
     FinishAndDiscardCrystals,
 }
 
-/// `DragonRespawnStage.tick`, dispatched by current stage. `time` is
-/// `EnderDragonFight.respawnTime`, reset to `0` by the caller on every stage
+/// The dragon respawn stage's tick, dispatched by current stage. `time` is
+/// The ender dragon fight's respawn time, reset to `0` by the caller on every stage
 /// change (matching `setRespawnStage`'s unconditional `this.respawnTime =
 /// 0;`) — this function does not reset it itself, since it has no mutable
 /// access to the caller's counter. `spike_count` is
-/// `EndSpikeFeature.getSpikesForLevel(level).size()` — always `0` in this
+/// The end spike feature's get spikes for level.size() — always `0` in this
 /// repo today (see the module doc); kept as a parameter rather than hardcoded
 /// so the state machine stays correct if pillar placement lands later.
 ///
@@ -536,7 +536,7 @@ pub fn tick_respawn(stage: RespawnStage, time: i32, spike_count: usize, origin: 
     }
 }
 
-/// `EnderDragonFight.onCrystalDestroyed`'s respawn-abort clause: destroying
+/// The ender dragon fight's on crystal destroyed's respawn-abort clause: destroying
 /// one of the four active respawn crystals aborts the whole sequence
 /// (`abortRespawnSequence`), rather than just reducing the alive count as it
 /// would outside a respawn. `respawn_crystals` is the four ids

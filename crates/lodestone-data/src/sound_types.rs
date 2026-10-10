@@ -35,7 +35,7 @@
 //!
 //! Pure rodata, zero heap, O(1) by id, the same shape as [`crate::hardness`].
 //! Measured on the dump: the 32,366 states carry only **126** distinct
-//! seven-tuples (and 126 distinct `SoundType` *objects*, so value-dedup collapses
+//! seven-tuples (and 126 distinct sound-type *objects*, so value-dedup collapses
 //! nothing), while 124 of those 126 are `volume = 1.0, pitch = 1.0` — only
 //! `ANVIL` (`volume = 0.3`) and `METAL` (`pitch = 1.5`) differ. So:
 //!
@@ -162,7 +162,7 @@ impl BlockSoundType {
     }
 }
 
-/// The `SoundType` for validated block-state `id`.
+/// The sound type for validated block-state `id`.
 ///
 /// Zero-heap: two rodata reads, no search. Note that this answers for **air**
 /// too (see the module gotchas) — the caller decides whether a sound is

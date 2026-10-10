@@ -102,7 +102,7 @@ pub fn rabbit_model() -> EntityModelDef {
 }
 
 /// vanilla's own adult fox model's body-layer construction: head(+ears+nose), body(+tail), and 4 legs.
-/// `leftLeg`/`rightLeg` are each a single vanilla `CubeListBuilder` reused
+/// `leftLeg`/`rightLeg` are each a single vanilla cube-list builder reused
 /// across the hind and front leg *on the same side* (identical box, distinct
 /// per-side texOffs); the sides are not related by `mirror()` at all. Sheet
 /// 48×32.
@@ -184,7 +184,7 @@ pub fn fox_model() -> EntityModelDef {
 }
 
 /// Vanilla's own panda-model body-layer construction (a quadruped model): head(+nose+2 ears), body,
-/// and 4 legs sharing one vanilla `CubeListBuilder` (no mirroring, identical
+/// and 4 legs sharing one vanilla cube-list builder (no mirroring, identical
 /// box on all four). Sheet 64×64.
 pub fn panda_model() -> EntityModelDef {
     let leg = || cube([-3.0, 0.0, -3.0], [6.0, 9.0, 6.0], [40.0, 0.0]);
@@ -233,8 +233,8 @@ pub fn panda_model() -> EntityModelDef {
 }
 
 /// Vanilla's own goat-model body-layer construction (a quadruped model): head builds 3 boxes on one
-/// `CubeListBuilder` — `right_ear` (no mirror), `left_ear` (`.mirror()`), then
-/// `goatee` — and vanilla's `mirror()` flag is sticky per-builder with no
+/// cube-list builder — `right_ear` (no mirror), `left_ear` (mirrored), then
+/// `goatee` — and vanilla's mirror flag is sticky per-builder with no
 /// reset, so `goatee` inherits `mirror=true` too. It's a zero-width box so
 /// this is visually inert, but transcribed faithfully rather than "corrected"
 /// away. Head also carries left_horn/right_horn/nose children (each

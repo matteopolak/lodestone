@@ -2,8 +2,8 @@
 //! `update_advancements` (id 130).
 //!
 //! Byte vectors are hand-built from the 26.2 decompiled record definitions
-//! (`ClientboundMapItemDataPacket`, `vanilla's own map item saved data's own map patch`,
-//! `ClientboundUpdateAdvancementsPacket`, `Advancement`, `DisplayInfo`), never
+//! (map-item-data packet, its map patch,
+//! Update-advancements packet, advancement, display info), never
 //! round-tripped through anything of ours — this crate has no encoder for either
 //! packet, so there is nothing symmetric available to be wrong in both
 //! directions.
@@ -13,10 +13,10 @@
 //!
 //! * `MapPatch` writes **width, height, startX, startY** — not its declaration
 //!   order — and spells "absent" as a zero *width* byte with no boolean tag.
-//! * `DisplayInfo`'s flag word is a raw big-endian `int`, and `announceChat` is
-//!   not on the wire, so the bits are `1 = background`, `2 = showToast`,
+//! * The display info's flag word is a raw big-endian `int`, and the announce-chat flag is
+//!   not on the wire, so the bits are `1 = background`, `2 = show toast`,
 //!   `4 = hidden`.
-//! * `AdvancementType`'s ordinals are `TASK, CHALLENGE, GOAL`.
+//! * The advancement type's ordinals are `TASK, CHALLENGE, GOAL`.
 
 use lodestone_model::{
     AdvancementFrame, ClientEvent, ConnectionState, Directive, VersionAdapter,
@@ -50,7 +50,7 @@ fn utf(value: &str) -> Vec<u8> {
 }
 
 /// A network-NBT string component, which is how `TRUSTED_STREAM_CODEC` writes a
-/// `vanilla's own component's own literal`: TAG_String (0x08) with no name, then a big-endian u16
+/// literal component: TAG_String (0x08) with no name, then a big-endian u16
 /// length and the bytes.
 fn nbt_string(value: &str) -> Vec<u8> {
     let mut out = vec![0x08];
@@ -177,29 +177,29 @@ fn a_patch_whose_colour_array_disagrees_with_its_geometry_is_refused() {
 
 /// One advancement with full display info plus a progress entry, exercising the
 /// flag word, the frame ordinal, the optional background, and the nullable
-/// `Instant` inside `CriterionProgress`.
+/// instant inside the criterion progress.
 #[test]
 fn update_advancements_decodes_display_flags_frame_and_progress() {
     let mut payload = vec![1u8]; // reset
-    payload.extend_from_slice(&var_i32(1)); // one AdvancementHolder
+    payload.extend_from_slice(&var_i32(1)); // one advancement holder
     payload.extend_from_slice(&utf("minecraft:story/root"));
     payload.push(0u8); // no parent
     payload.push(1u8); // display present
     payload.extend_from_slice(&nbt_string("Minecraft"));
     payload.extend_from_slice(&nbt_string("The heart and story of the game"));
-    // ItemStackTemplate: item holder id, count, then an empty component patch.
+    // Item-stack template: item holder id, count, then an empty component patch.
     // Item id 1 rather than 0: 0 is `minecraft:air`, which the template's own
     // constructor rejects.
     payload.extend_from_slice(&var_i32(1));
     payload.extend_from_slice(&var_i32(1));
     payload.extend_from_slice(&var_i32(0)); // components added
     payload.extend_from_slice(&var_i32(0)); // components removed
-    payload.extend_from_slice(&var_i32(1)); // AdvancementType ordinal 1 = CHALLENGE
+    payload.extend_from_slice(&var_i32(1)); // advancement type ordinal 1 = CHALLENGE
     payload.extend_from_slice(&3i32.to_be_bytes()); // flags: 1 background | 2 showToast
     payload.extend_from_slice(&utf("minecraft:textures/gui/advancements/backgrounds/stone.png"));
     payload.extend_from_slice(&0.5f32.to_be_bytes()); // x
     payload.extend_from_slice(&2.25f32.to_be_bytes()); // y
-    // AdvancementRequirements: one group of two names (an anyOf).
+    // Advancement requirements: one group of two names (an any-of).
     payload.extend_from_slice(&var_i32(1));
     payload.extend_from_slice(&var_i32(2));
     payload.extend_from_slice(&utf("crafting_table"));

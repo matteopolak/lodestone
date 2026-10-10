@@ -7,13 +7,13 @@
 //! back side of a stair)". *Should not show the water at all* is the whole bug:
 //! the fix is not an inset, it is that the face is never emitted.
 //!
-//! **The mechanism.** `FluidRenderer.shouldRenderFace` is
-//! `!isNeighborSameFluid(self, neighbourFluid) && !isFaceOccludedBySelf(ownState,
+//! **The mechanism.** fluid renderer's should render face is
+//! `!is_neighbor_same_fluid(self, neighbourFluid) && !is face occluded by self(ownState,
 //! dir)`. `mesh_fluids` had only the first conjunct plus the *neighbour*-facing
 //! `isFaceOccludedByNeighbor`; nothing anywhere asked about the block sharing the
 //! fluid's own cell. A waterlogged stair shares its cell with the water, so the
 //! water's face on the stair's solid side landed coplanar with the stair's own
-//! face — 1 mm apart after `FluidRenderer`'s `0.001` inset, which is exactly the
+//! face — 1 mm apart after the fluid renderer's `0.001` inset, which is exactly the
 //! distance that reads as z-fighting at range.
 //!
 //! # Why the fixture is a stair and not a full block
@@ -253,7 +253,7 @@ fn render(counts: &BTreeMap<&'static str, usize>) -> String {
 ///
 /// **The counts are not symmetric, and predicting the round number is how this
 /// gate failed on its first run.** A side face and the top face each carry
-/// `FluidRenderer.addFace`'s reversed copy, so they count **2**; the bottom face
+/// The fluid renderer's add face's reversed copy, so they count **2**; the bottom face
 /// is the one `tesselate` passes `addBackFace = false` for, so it counts **1**.
 /// A fully open water cell is therefore **11** quads, not 12.
 fn expect_faces(up: usize, down: usize, north: usize, south: usize, east: usize, west: usize) -> BTreeMap<&'static str, usize> {
@@ -344,8 +344,8 @@ fn face_fully_covered_or_panic(boxes: &[BlockAabb], face: Direction) -> bool {
     lodestone_assets::fluid::face_fully_covered(boxes, face)
 }
 
-/// **`up` is deliberately absent from `SelfOcclusion`.** `FluidRenderer.tesselate`
-/// computes `renderUp` as bare `!isNeighborSameFluid(self, above)` — the only one
+/// **`up` is deliberately absent from `SelfOcclusion`.** fluid renderer's tesselate
+/// computes `renderUp` as bare `!is_neighbor_same_fluid(self, above)` — the only one
 /// of the six faces that never reaches `shouldRenderFace`. A full cube therefore
 /// self-occludes five faces, not six, and this pins that asymmetry against a
 /// future "tidy-up" adding the sixth.

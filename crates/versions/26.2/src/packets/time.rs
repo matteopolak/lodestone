@@ -2,37 +2,37 @@
 //!
 //! In 26.2 `set_time` changed shape: it is no longer a pair of longs
 //! (`gameTime`, `dayTime`). It now carries the world's `gameTime` followed by a
-//! **map** of per-world-clock updates — `Map<Holder<WorldClock>,
-//! ClockNetworkState>`. Each clock update contributes its own running tick
+//! **map** of per-world-clock updates — a map from world-clock holder to
+//! clock network state. Each clock update contributes its own running tick
 //! count, so "the" time of day is no longer a single wire field.
 //!
 //! The map cannot be expressed with the derive macros: there is no generic
 //! `Vec<T>`/map codec in `lodestone-core` (only `Vec<u8>`), and the key is a
 //! registry `Holder` (a VarInt id, `id + 1`, with `0` meaning an inline direct
 //! value). The decoder is therefore hand-written against the wire format of
-//! `ClientboundSetTimePacket` (behavioural reference only) and reported as the
+//! the set-time packet (behavioural reference only) and reported as the
 //! signal for a future generic-collection codec.
 
 use lodestone_core::{Ctx, Decode, Reader, Result};
 
 /// A single world-clock update from a `set_time` packet.
 ///
-/// Wire layout (`ClockNetworkState`): a VarLong running tick count, then two
+/// Wire layout (clock network state): a VarLong running tick count, then two
 /// big-endian `f32`s — the partial tick and the clock rate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClockUpdate {
     /// Registry holder id of the world clock — a **plain** VarInt registry id.
     ///
-    /// The key codec is `vanilla's own byte buf codecs's own holder registry(vanilla's own registries's own world clock)`,
-    /// which is `registry(key, Registry::asHolderIdMap)`: a bare
-    /// `vanilla's own var int's own write(id)` with **no `+1` offset and no inline-direct path**. The
+    /// The key codec is a holder-registry codec over the world-clock registry,
+    /// which is `registry(key, Registry::as_holder_id_map)`: a bare
+    /// a plain VarInt write of the id with **no `+1` offset and no inline-direct path**. The
     /// `id + 1` / `0 = inline` convention belongs to the *other* codec,
-    /// `vanilla's own byte buf codecs's own holder(key, directCodec)`, which `set_time` does not use.
+    /// the plain holder codec, which `set_time` does not use.
     /// (This comment previously said otherwise; the decode was always right, the
     /// record was not.)
     ///
     /// 26.2 registers two clocks, in this order: `minecraft:overworld` = `0`,
-    /// `minecraft:the_end` = `1` (`WorldClocks::bootstrap`). The overworld clock
+    /// `minecraft:the_end` = `1` (the world-clock bootstrap). The overworld clock
     /// is the day/night one; see [`SetTime::day_clock`].
     pub holder_id: i32,
     /// Total ticks elapsed on this clock. Modulo `24000` this is the clock's
@@ -41,7 +41,7 @@ pub struct ClockUpdate {
     /// Fractional progress into the current tick.
     pub partial_tick: f32,
     /// Rate at which the clock advances. **`0.0` when the clock is paused** —
-    /// `vanilla's own server clock manager's own clock instance's own pack network state` sends
+    /// The clock instance's packed network state sends
     /// `paused || !advance_time ? 0.0 : rate`, so `/gamerule advanceTime false`
     /// arrives as a rate of zero rather than as a flag.
     pub rate: f32,
@@ -70,10 +70,10 @@ impl SetTime {
     /// a live 26.2 server, that fallback **is** the value the client ends up
     /// using, essentially always:
     ///
-    /// * `MinecraftServer::forceGameTimeSynchronization` broadcasts
+    /// * The server's forced game-time synchronisation broadcasts
     ///   `SetTime(gameTime, an empty/literal map())` — an **empty** clock map — roughly once a
     ///   second, forever.
-    /// * `ServerClockManager::modifyClock` sends a *one-entry* map only when a
+    /// * The clock manager's modify step sends a *one-entry* map only when a
     ///   clock actually changes (`/time set`, rate, pause), and
     ///   `createFullSyncPacket` sends the full map once, at join.
     ///
@@ -94,7 +94,7 @@ impl SetTime {
     ///
     /// # Which clock
     ///
-    /// 26.2 has two (`WorldClocks::bootstrap`): `minecraft:overworld` (id `0`)
+    /// 26.2 has two (the world-clock bootstrap): `minecraft:overworld` (id `0`)
     /// and `minecraft:the_end` (id `1`). The map is a Java `HashMap`, so **wire
     /// order is not registry order** and `clocks.first()` cannot be trusted on
     /// the full-sync packet. This selects the lowest holder id present, which is

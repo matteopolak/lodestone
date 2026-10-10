@@ -137,7 +137,7 @@ impl<'a> TerrainDraw<'a> {
 /// Squared distance from `camera` to the centre of the section at `coord`.
 ///
 /// The centre, not the near corner: vanilla sorts its translucent sections on
-/// `RenderSection`'s own centre distance, and a near-corner metric flips the order
+/// The render section's own centre distance, and a near-corner metric flips the order
 /// of two sections whose corners and centres disagree — which is a visible seam
 /// rather than a subtle one, since the two draws blend into each other.
 #[must_use]
@@ -475,14 +475,14 @@ pub(super) struct ModelRenderer {
     /// fresh fade `build_time` — when the coord has no entry in
     /// [`Self::sections`], which is equally true of "never seen before" and
     /// "seen before, currently empty". Consulting this set is what tells the
-    /// two apart, mirroring vanilla's `RenderSection.wasPreviouslyEmpty`
-    /// (`SectionOcclusionGraph.updateEmptySections`): a section is a fresh
+    /// two apart, mirroring vanilla's render section's was previously empty
+    /// (the section occlusion graph's update empty sections): a section is a fresh
     /// arrival only the *first* time this coord is ever populated, not every
     /// time it goes empty and comes back.
     ///
     /// Cleared for a coord only by [`RenderState::remove_section`] (a genuine
     /// unload — the chunk left view distance), so walking away and back does
-    /// still fade, exactly like a real vanilla `RenderSection` slot recycled
+    /// still fade, exactly like a real vanilla render section slot recycled
     /// by a different chunk address.
     pub(super) seen: std::collections::HashSet<SectionKey>,
 }

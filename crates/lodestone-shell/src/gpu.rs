@@ -153,7 +153,7 @@ pub const SKY_COLOR: [f32; 3] = [0.242_867, 0.462_361, 0.827_571];
 ///
 /// **This is vanilla's span expressed as a fraction, not a taste knob** (issue
 /// That fix). Vanilla does not use a fraction at all:
-/// `FogRenderer.setupFog` fades over an absolute
+/// The fog renderer's setup fog fades over an absolute
 /// band of `clamp(renderDistanceInBlocks / 10, 4, 64)` blocks ending at the view
 /// distance — see [`lodestone_render::fog::render_distance_fade_span`], which is
 /// the authoritative form and the one
@@ -212,7 +212,7 @@ pub struct RenderState {
     eye_bob: glam::Mat4,
     /// Vanilla's Damage Tilt accessibility option, for the **first-person hand**
     /// pass, which applies `bobHurt` a second time independently of the world's
-    /// copy (`GameRenderer.renderItemInHand`).
+    /// copy (the game renderer's render item in hand).
     ///
     /// A strength rather than a matrix, unlike [`Self::eye_bob`], because the hand
     /// composes `bobHurt` and `bobView` together in one
@@ -427,8 +427,8 @@ pub struct RenderState {
     /// is what keeps mouse movement off the walk.
     occlusion: std::cell::RefCell<occlusion::OcclusionCache>,
     /// The camera's block position as of the most recent [`RenderState::render`]
-    /// call — vanilla's `LevelRenderer.compileSections`'s `BlockPos
-    /// cameraPosition = camera.blockPos`, cached here so `upload_section` can
+    /// call — vanilla's level renderer's compile sections's `BlockPos
+    /// cameraPosition = camera.block_pos`, cached here so `upload_section` can
     /// read it without a signature change threading a camera argument through
     /// every one of its several call sites (issue tracked in `docs/`: the
     /// near-distance fade skip).
@@ -492,7 +492,7 @@ pub struct RenderState {
     /// resting main hand (the bare arm) and an empty off hand (nothing).
     hands: FirstPersonHandsFrame,
     /// Vanilla bobs the hand with a *second, independent* application of
-    /// `bobView` — `GameRenderer.renderItemInHand` seeds a fresh `PoseStack`
+    /// `bobView` — the game renderer's render item in hand seeds a fresh pose stack
     /// with the **unbobbed** inverted model-view and re-applies the bob to that
     ///, rather than inheriting the world's already
     /// bobbed matrix. Unset reads as `BobFrame::default`, i.e. the pre-existing
@@ -622,7 +622,7 @@ pub struct RenderState {
     /// Where this frame's vault display-item clusters come from. Same
     /// odd-one-out shape as [`Self::campfire_source`]: consumed by the item
     /// geometry pass, not `prepare_block_entities`, because a vault's cage is
-    /// real block-model geometry and `VaultRenderer` draws only the floating
+    /// real block-model geometry and the vault renderer draws only the floating
     /// reward on top of it. An unset source leaves a complete vault showing no
     /// reward, never a hole.
     vault_source: VaultSource,
@@ -630,7 +630,7 @@ pub struct RenderState {
     /// odd-one-out shape as [`Self::campfire_source`]: consumed by the item
     /// geometry pass, not `prepare_block_entities`, because a suspicious
     /// sand/gravel block's appearance is entirely its own real block model —
-    /// `BrushableBlockRenderer` draws only the revealed item on top of it. An
+    /// The brushable block renderer draws only the revealed item on top of it. An
     /// unset source leaves a complete, correctly-dusted block with no item
     /// floating above it, never a hole.
     brushable_source: BrushableSource,
@@ -789,7 +789,7 @@ struct CapeDrawBatch {
 /// `"right_wing"`, which carry different geometry and so cannot share one
 /// instanced draw), and its texture is *usually* the fixed jar sheet but is
 /// the wearer's own cape sheet when they have one — see
-/// `RenderState::prepare_elytra` for the `WingsLayer.getPlayerElytraTexture`
+/// `RenderState::prepare_elytra` for the wings layer's get player elytra texture
 /// preference order this implements.
 struct ElytraDrawBatch {
     /// The cape texture URL this batch's instances share, looked up in
@@ -1011,7 +1011,7 @@ struct ArmourPartAccum {
 ///   the chest slot was removed from the item census for exactly this reason
 ///   (`docs/item-prototypes.md`), and reintroducing it here would put a horse's
 ///   diamond barding on a player's torso.
-/// * **`EquipmentSlot::isArmor` is the wrong predicate** even though it sounds
+/// * **EquipmentSlot's is armor is the wrong predicate** even though it sounds
 ///   right: it is the *union* of humanoid and animal armour
 ///  .
 /// * `MainHand`/`OffHand` are held items and go through `merge_held_items`.

@@ -1132,7 +1132,7 @@ fn parse_has_joined_response(
 /// the server-side half of the online-mode handshake, mirroring
 /// [`join_server`] from the other role. A real client's [`join_server`] call
 /// always precedes a well-behaved server's call here with the identical
-/// hash; vanilla's own `ServerLoginPacketListenerImpl.handleKey` is the
+/// hash; the game's own server-side key handler is the
 /// reference for the ordering.
 ///
 /// Returns `Ok(None)` when the session server says this player never joined

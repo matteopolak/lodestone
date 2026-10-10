@@ -45,7 +45,7 @@ use super::*;
     /// takes its velocity directly with no jitter (the same vanilla totem-particle
     /// shape [`totem_of_undying_lifetime_is_bounded_and_velocity_is_unjittered`]
     /// pins), and — unlike totem — leaves colour at the base white and sets
-    /// `alpha = 0.99` (vanilla's own firework spark provider's own line), never `1.0`.
+    /// `alpha = 0.99` (vanilla's firework spark provider's line), never `1.0`.
     #[test]
     fn firework_lifetime_is_bounded_velocity_is_unjittered_and_alpha_is_099() {
         let mut engine = ParticleEngine::seeded(7);

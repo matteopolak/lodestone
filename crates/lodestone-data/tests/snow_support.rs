@@ -561,7 +561,7 @@ fn face_full_up_disagrees_with_a_unit_box_derivation() {
 /// top is `powder_snow` (snowy slopes, groves, frozen peaks), and its `U` bit is
 /// **false** — so a snow layer does not survive on powder snow.
 ///
-/// That is not a limitation of this dump: vanilla's own snow-layer block's own
+/// That is not a limitation of this dump: vanilla's snow-layer block's
 /// "can survive" check reads the block-below's collision shape through the
 /// two-argument overload of its collision-shape accessor, which supplies an
 /// empty collision context. The oracle
@@ -648,7 +648,7 @@ fn powder_snow_is_the_only_dynamic_shape_block_worldgen_exposes() {
 /// oracle ran, and each produces visibly wrong terrain on its own:
 ///
 /// * **`snow[layers=8]` has `U == false`.** All eight snow states do. That is
-///   why vanilla's own snow-layer block's own "can survive" check carries an explicit
+///   why vanilla's snow-layer block's "can survive" check carries an explicit
 ///   `|| belowState.is(this) && belowState.getValue(LAYERS) == 8` clause — the
 ///   geometry alone never satisfies it, because
 ///   a full snow layer is 14/16 tall.

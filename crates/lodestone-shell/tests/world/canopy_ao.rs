@@ -7,10 +7,10 @@
 //! **The cause:** `quad_corner_sample` asked
 //! `ModelSectionView::occludes_at` — a *face-culling* predicate (do opaque quads
 //! cover all six boundary faces) — where vanilla asks
-//! `BlockBehaviour.getShadeBrightness`, i.e.
-//! `state.isCollisionShapeFullBlock(..) ? 0.2F : 1.0F` with seven class
-//! overrides (`BlockBehaviour`'s own decompiled source, consumed at
-//! `BlockModelLighter`'s own decompiled source). Leaves are a **full collision cube whose
+//! The block behaviour's get shade brightness, i.e.
+//! `state.is_collision_shape_full_block(..) ? 0.2F : 1.0F` with seven class
+//! overrides (the block behaviour's own decompiled source, consumed at
+//! The block model lighter's own decompiled source). Leaves are a **full collision cube whose
 //! cutout sprite does not occlude for culling**, so every AO corner beside a leaf
 //! contributed `1.0` instead of `0.2`.
 //!
@@ -44,14 +44,14 @@
 //! | the bug (`occludes_at`) | `(1+1+1+1)/4 = 1.0` | `0.5` | `0.50` |
 //!
 //! Both numbers are derived from constants that originate outside this codebase
-//! (vanilla's `0.2F` shade sample and `CardinalLighting.DEFAULT`'s `down 0.5`), and
+//! (vanilla's `0.2F` shade sample and the cardinal lighting's default's `down 0.5`), and
 //! they are far enough apart that no predicate can satisfy both — the *magnitude*
 //! species of vacuous test cannot hide here.
 //!
 //! # Controls, all executed
 //!
 //! * **Glass.** `minecraft:glass` is a full collision cube *and* vanilla-exempt
-//!   (`TransparentBlock.getShadeBrightness` returns `1.0`), so its interior `Down`
+//!   (the transparent block's get shade brightness returns `1.0`), so its interior `Down`
 //!   quad must stay at `0.50`. This is the control that fires if the predicate is
 //!   ever "simplified" to a `collision_shapes`-derived `isCollisionShapeFullBlock`,
 //!   which would darken glass too.
@@ -90,7 +90,7 @@ const SECTIONS: usize = 1;
 /// measurement never depends on how an absent neighbour snapshot answers.
 const SUBJECT: [usize; 3] = [8, 8, 8];
 
-/// `face_shade(Down)` — `CardinalLighting.DEFAULT`'s `down` component. Mirrored
+/// `face_shade(Down)` — the cardinal lighting's default's `down` component. Mirrored
 /// here as a documented prediction, not imported: the point is that the expected
 /// bytes come from vanilla's own table.
 const DOWN_SHADE: f32 = 0.5;

@@ -165,7 +165,7 @@ mod tests {
     }
 
     /// `click`/`hover` inherit into children exactly like colour —
-    /// `Style.applyTo`'s rule extended to these two fields. A child with no
+    /// Style's apply to's rule extended to these two fields. A child with no
     /// click/hover of its own still carries the parent's; a child that sets
     /// its own overrides rather than merges.
     #[test]

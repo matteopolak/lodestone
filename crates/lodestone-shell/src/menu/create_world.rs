@@ -84,14 +84,14 @@
 //!
 //! ## What is and is not vanilla geometry
 //!
-//! `WorldCreationUiState` (326 lines) tracks a world-type preset list, data
+//! The world creation ui state (326 lines) tracks a world-type preset list, data
 //! packs, game rules and a temp save folder on disk that this client has no
 //! model for at all — see the per-tab breakdown above for exactly which
 //! fields that leaves out. The fields that *do* get real menu-side support
 //! (name, seed, game mode, difficulty, structures, bonus chest, cheats) are
 //! hand-placed within each tab's own flat column — the same legitimate move
 //! [`super::key_binds`] and [`super::social`] already make for their own
-//! non-`OptionsList` screens, extended to *within-tab* layout rather than to
+//! non-the options list screens, extended to *within-tab* layout rather than to
 //! widget shape.
 //!
 //! ## Wired vs. decorative
@@ -159,7 +159,7 @@
 //!   `ClientAction` this client already had a producer and consumer for. See
 //!   [`DataPacksEditor`]'s own module doc.
 //! - **Decorative — the world name and the "will be saved in" folder.**
-//!   There is still no `LevelStorageSource` (`world_select`'s own module
+//!   There is still no level storage source (`world_select`'s own module
 //!   docs, unchanged by this issue), so a name is collected and shown but
 //!   nothing is ever written to a folder of that name.
 //!
@@ -214,7 +214,7 @@ pub const DIFFICULTY_LABEL: &str = "Difficulty";
 pub const STRUCTURES_LABEL: &str = "Generate Structures";
 pub const BONUS_CHEST_LABEL: &str = "Bonus Chest";
 pub const ALLOW_CHEATS_LABEL: &str = "Allow Cheats";
-/// Not a vanilla caption — there is no vanilla `CreateWorldScreen` control for
+/// Not a vanilla caption — there is no vanilla create world screen control for
 /// this, because real Minecraft ties online-mode to the account you are
 /// signed in with rather than to a per-world creation setting. See
 /// [`WorldCreationConfig::online_mode`] for what this actually does.
@@ -242,13 +242,13 @@ pub const CANCEL_LABEL: &str = "Cancel";
 /// button.
 pub const WORLD_TYPE_LABEL: &str = "World Type";
 /// `createWorld.customize.gameRules.title`-adjacent — vanilla's More tab
-/// button that opens `WorldCreationGameRulesScreen`.
+/// button that opens world creation game rules screen.
 pub const GAME_RULES_BUTTON_LABEL: &str = "Game Rules...";
 /// `dataPack.title`-adjacent — vanilla's More tab button that opens a
-/// `PackSelectionScreen` scoped to data packs.
+/// The pack selection screen scoped to data packs.
 pub const DATA_PACKS_BUTTON_LABEL: &str = "Data Packs...";
 /// `selectWorld.experiments`, verbatim from `en_us.json` — vanilla's More tab
-/// button that opens `ExperimentsScreen`.
+/// button that opens experiments screen.
 pub const EXPERIMENTS_BUTTON_LABEL: &str = "Experiments...";
 /// `selectWorld.customizeType`, verbatim from `en_us.json` — vanilla's World
 /// tab button that opens the preset editor. See [`CustomizeEditor`].
@@ -1091,7 +1091,7 @@ impl CreateWorldNav {
 
     /// Customize Type is active only while the World tab is showing **and**
     /// the selected world type has a preset editor — vanilla's own rule
-    /// (`!data.isDebug() && data.getPresetEditor() != null`, narrowed here to
+    /// (`!data.is_debug() && data.get_preset_editor() != null`, narrowed here to
     /// naming the two presets directly since this client's preset list is
     /// fixed rather than a registry lookup). Mirrors
     /// [`Self::apply_hardcore_lock`]'s own shape: a second gate combined with
@@ -1194,7 +1194,7 @@ impl CreateWorldNav {
     /// A field row (`NAME_FIELD`/`SEED_FIELD`) does nothing here either —
     /// mirrors [`super::nav::EditForm::hover_row`] exactly, including its
     /// reason: hovering the Seed field while typing in Name cannot steal the
-    /// caret out from under the player (vanilla's `ContainerEventHandler`
+    /// caret out from under the player (vanilla's container event handler
     /// moves focus only from a *click* or Tab traversal, never from hover —
     /// `EditBox` itself has no hover highlight at all). Every other row
     /// records only [`Self::hovered`], which is what lets the mouse travel to
@@ -1612,9 +1612,9 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
 
 // -- Game Rules sub-screen (More tab) ---------------------------
 //
-// Vanilla's `WorldCreationGameRulesScreen` is a per-type widget (a checkbox
+// Vanilla's world creation game rules screen is a per-type widget (a checkbox
 // for a boolean rule, a free-text `EditBox` for an integer one) over a
-// two-column `AbstractSelectionList`. This is a narrower shape: **every** row,
+// two-column abstract selection list. This is a narrower shape: **every** row,
 // boolean or integer, is a `-`/`+` step pair plus a `"name: value"` label —
 // one geometry for both types rather than two, and a real, working control
 // for each (an integer rule needs to go *down* from its default as often as
@@ -1815,7 +1815,7 @@ const STEP_BUTTON_W: f32 = 20.0;
 const STEP_GAP: f32 = 4.0;
 /// The rule list's row band, centred like [`super::key_binds::ROW_WIDTH`] but
 /// narrower — this screen has one label and two small buttons per row, not
-/// `KeyBindsList`'s name-plus-two-75/50-px-buttons.
+/// The key binds list's name-plus-two-75/50-px-buttons.
 pub const GAME_RULE_ROW_WIDTH: f32 = 280.0;
 pub const GAME_RULE_ROW_H: f32 = 20.0;
 
@@ -2018,7 +2018,7 @@ fn game_rules_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
 
 // -- Data Packs sub-screen (More tab) ---------------------------
 //
-// Vanilla's Data Packs button opens the same `PackSelectionScreen` widget as
+// Vanilla's Data Packs button opens the same pack selection screen widget as
 // the standalone Resource Packs screen (`super::packs`), pointed at a
 // world-scoped pack repository instead of the global one. This module does
 // not reuse `super::packs::PacksNav` directly: that type is wired straight to
@@ -2403,7 +2403,7 @@ impl ExperimentFlag {
     }
 
     /// `dataPack.<id>.name`, verbatim from `en_us.json` — vanilla's real
-    /// `ExperimentsScreen` is a `PackSelectionScreen` over these three
+    /// The experiments screen is a pack selection screen over these three
     /// specifically as "feature flag" packs, so it borrows the data-pack
     /// translation keys rather than having its own.
     #[must_use]
@@ -2779,7 +2779,7 @@ impl CustomizeBiome {
 /// Holds **both** a Flat cursor and a Single Biome cursor at once rather than
 /// one shared cursor, because switching [`WORLD_TYPE_ROW`] away and back must
 /// not lose whichever one the player was mid-customizing — vanilla's own
-/// `WorldCreationUiState` keeps the same "last editor's choice survives a
+/// The world creation ui state keeps the same "last editor's choice survives a
 /// preset switch" property by never destroying the editor screens it built.
 /// [`CreateWorldNav::click_row`] reads [`CreateWorldNav::config`]'s current
 /// [`WorldTypePreset`] to know which cursor a click on the one shared Cycle
@@ -2970,7 +2970,7 @@ mod tests {
         assert_eq!(nav.widgets.name.value(), "My World");
 
         // Tab from Name must **not** land on Seed — the two are on different
-        // tabs now (a real vanilla divergence: `GameTab` and `WorldTab` are
+        // tabs now (a real vanilla divergence: the game tab and the world tab are
         // different `Screen` children in the real client too, so a keyboard
         // Tab never crossed between them there either). It lands on this
         // tab's next control instead.

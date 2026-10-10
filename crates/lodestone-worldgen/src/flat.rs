@@ -13,8 +13,8 @@
 //!
 //! # What is ported, and what is a documented gap
 //!
-//! **Ported**: the layer stack (`FlatLayerInfo`/`FlatLevelGeneratorSettings`,
-//! same package as `FlatLevelSource`) and the block field it produces, which
+//! **Ported**: the layer stack (flat layer info and flat-world settings)
+//! and the block field it produces, which
 //! is a flat world's entire defining behaviour — vanilla's own fill and
 //! base-column queries place exactly this stack and nothing else generates the
 //! raw terrain. A flat world is therefore **fully determined** by its
@@ -88,7 +88,7 @@ pub enum StructureOverrides {
 /// `lodestone_server::worldgen_data`'s callers).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatLevelGeneratorSettings {
-    /// Fallback/decoration biome — `FlatLevelGeneratorSettings::getBiome`.
+    /// Fallback/decoration biome — FlatLevelGeneratorSettings's get biome.
     pub biome: String,
     /// `FlatLevelGeneratorSettings::decoration` — see the module doc's "not
     /// ported" section.
@@ -98,7 +98,7 @@ pub struct FlatLevelGeneratorSettings {
     pub lakes: bool,
     /// `FlatLevelGeneratorSettings::layersInfo`, in bottom-to-top order.
     pub layers: Vec<FlatLayer>,
-    /// `FlatLevelGeneratorSettings::structureOverrides`.
+    /// FlatLevelGeneratorSettings's structure overrides.
     pub structure_overrides: StructureOverrides,
 }
 
@@ -219,8 +219,8 @@ impl FlatColumn {
     }
 
     /// The preset's biome id, uniform across the whole column — a flat world
-    /// has one fixed biome by construction (`FixedBiomeSource`, wrapped by
-    /// `FlatLevelSource`'s constructor around `settings.getBiome()`).
+    /// has one fixed biome by construction (a fixed biome source built from
+    /// the settings' biome).
     #[must_use]
     pub fn biome(&self) -> &str {
         &self.biome
@@ -273,7 +273,7 @@ pub struct FlatLevelSource {
     settings: FlatLevelGeneratorSettings,
     /// [`Self::settings`]'s layers expanded to one canonical state per row —
     /// computed once at construction (`FlatLevelGeneratorSettings
-    /// ::updateLayers`'s equivalent) rather than per [`Self::column`] call,
+    /// ::update layers`'s equivalent) rather than per [`Self::column`] call,
     /// since every column is identical.
     rows: std::sync::Arc<[StateId]>,
     min_y: i32,

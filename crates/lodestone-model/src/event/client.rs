@@ -233,11 +233,11 @@ pub enum ClientEvent {
     /// [`FallingBlockState`](Self::FallingBlockState) reads, under the reading
     /// `Projectile.getAddEntityPacket` gives it.
     ///
-    /// `Projectile` writes `owner == null ? 0 : owner.getId()` there, and
-    /// `FishingHook` overrides that to `owner == null ? this.getId() : owner.getId()`
+    /// A projectile writes `0` there when it has no owner, and
+    /// a fishing hook overrides that to write its own id when it has none,
     /// so the field is never `0` for a hook. Like the falling block's state, this
-    /// is the **only** channel it travels on: neither `Projectile` nor
-    /// `FishingHook.defineSynchedData` registers an owner accessor, so no
+    /// is the **only** channel it travels on: neither a projectile nor
+    /// a fishing hook registers an owner accessor, so no
     /// `SET_ENTITY_DATA` packet ever carries it and a consumer that ignores this
     /// event can never learn who cast the rod.
     ///
@@ -1353,10 +1353,10 @@ pub enum ClientEvent {
     },
     /// A reply to a serverbound `command_suggestion` request
     /// (`minecraft:command_suggestions`, clientbound id 15):
-    /// `ClientboundCommandSuggestionsPacket(int id, int start, int length,
-    /// List<Entry>)`. The transaction id lets the chat box discard a stale
-    /// reply to a request it has since superseded, matching vanilla's own
-    /// `ClientSuggestionProvider::completeCustomSuggestions` id check.
+    /// the clientbound command-suggestions packet (`int id, int start, int length,
+    /// List<Entry>`). The transaction id lets the chat box discard a stale
+    /// reply to a request it has since superseded, matching the game's own
+    /// custom-suggestion id check.
     CommandSuggestionsReceived {
         /// Transaction id, echoing the request's.
         id: i32,
@@ -1508,7 +1508,7 @@ pub enum ClientEvent {
     /// The server is running low on disk space
     /// (the low disk space warning packet).
     ///
-    /// A zero-byte packet — `StreamCodec.unit` — so this variant carries nothing,
+    /// A zero-byte packet — a unit codec — so this variant carries nothing,
     /// like [`Self::WinGame`].
     LowDiskSpaceWarning,
     /// The server sent crash/report metadata for the client to attach to a report
@@ -1576,7 +1576,7 @@ pub enum ClientEvent {
     ///
     /// The wire is a `Holder<Dialog>`: either a registry id, or an inline dialog
     /// as a network-NBT blob. `Dialog` is an NBT `Codec` union of six types with
-    /// nested body/input/action trees — a *schema*, not a `StreamCodec` — so the
+    /// nested body/input/action trees — a *schema*, not a stream codec — so the
     /// inline form is carried here as raw NBT bytes. A screen that renders
     /// dialogs parses them; nothing before that point needs to.
     DialogShown {
@@ -1588,7 +1588,7 @@ pub enum ClientEvent {
     },
     /// The server closed any open dialog (the clear dialog packet).
     ///
-    /// Another zero-byte `StreamCodec.unit` packet.
+    /// Another zero-byte unit-codec packet.
     DialogCleared,
 
     // ---- the recipe/trade tranche --------------------------------------------
@@ -1616,7 +1616,7 @@ pub enum ClientEvent {
     /// The server un-learned recipes (the recipe book remove packet),
     /// e.g. after a datapack reload.
     RecipeBookRemoved {
-        /// `RecipeDisplayId`s to forget.
+        /// Recipe display ids to forget.
         display_ids: Vec<i32>,
     },
     /// The server is showing a ghost recipe in an open crafting grid

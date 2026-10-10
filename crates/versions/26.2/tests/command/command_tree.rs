@@ -8,7 +8,7 @@
 //! so a single wrong payload width silently reinterprets every following node
 //! rather than erroring. `Reader::ensure_empty` landing exactly on the last byte
 //! of a 30 kB, 2000-node stream is therefore a strong end-to-end check that
-//! every one of the thirteen payload-carrying `ArgumentTypeInfo`s was read at
+//! every one of the thirteen payload-carrying argument-type infos was read at
 //! the right width.
 //!
 //! The *completion behaviour* this decode exists to feed is gated separately, in
@@ -86,7 +86,7 @@ fn a_real_servers_command_tree_decodes_with_no_trailing_bytes() {
     }
 }
 
-/// The load-bearing width check. Every payload-carrying `ArgumentTypeInfo` must
+/// The load-bearing width check. Every payload-carrying argument-type info must
 /// have been read at exactly the right width for the stream to stay aligned, and
 /// the *evidence* that they were is that these specific, independently-known
 /// values came out the far end of a 2000-node walk.
@@ -106,7 +106,7 @@ fn the_payload_carrying_parsers_decode_to_their_known_vanilla_values() {
         parsers.len()
     );
 
-    // `/time set <time>` uses `vanilla's own time argument's own time()` — a plain `int` minimum of
+    // `/time set <time>` uses the time argument — a plain `int` minimum of
     // 0, with no flags byte. Reading it as a flags-byte-prefixed pair (the shape
     // every *other* numeric parser has) would consume the wrong width and
     // desync; this asserts the exact value, not merely that a `Time` exists.
@@ -312,7 +312,7 @@ fn an_unmodeled_parser_id_degrades_to_one_unrecognized_node_and_keeps_the_rest()
 /// everything.
 #[test]
 fn the_same_layout_with_a_modeled_parser_id_is_not_unrecognized() {
-    // 0 is `brigadier:bool`, a `SingletonArgumentInfo` — same zero-payload
+    // 0 is `brigadier:bool`, a singleton argument info — same zero-payload
     // shape as the unmodeled case, so the only difference is recognition.
     let tree = decode_tree(&tree_with_parser(0));
 

@@ -3,11 +3,11 @@
 //! # What it is
 //!
 //! `bake_fluid` insets every fluid side face 0.001 blocks off its block
-//! boundary, exactly where vanilla's `FluidRenderer.tesselate` does, so that the
+//! boundary, exactly where vanilla's fluid renderer tesselation does, so that the
 //! water face on a **partially** covered side sits behind the block's own
 //! coplanar face and loses the depth test cleanly instead of fighting it. The
 //! discriminating case is a waterlogged stair's front: the stair fills only the
-//! bottom half of that square, so `FluidRenderer.isFaceOccludedBySelf` correctly
+//! bottom half of that square, so vanilla's face-occluded-by-self check correctly
 //! declines to cull the water face — vanilla emits it too — and the bottom half
 //! is then two coplanar surfaces from two different passes.
 //!

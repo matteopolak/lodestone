@@ -71,7 +71,7 @@
 //! memory (two 2 KiB nibble arrays per section). [`ColumnLight`] elides uniform
 //! sections to a one-byte tag — all-zero underground block light and full sky
 //! light above terrain are overwhelmingly common — mirroring vanilla's
-//! `DataLayer` and the light-update packet's present/empty section masks.
+//! nibble-array light storage and the light-update packet's present/empty section masks.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

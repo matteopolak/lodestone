@@ -3,7 +3,7 @@
 //!
 //! Layout verified independently against 26.2's own serverbound
 //! spectator-action packet (confirmed against the decompiled 26.2 source): a single
-//! `vanilla's own byte buf codecs's own var int` — an offset-encoded VarInt where `0`
+//! optional-VarInt codec — an offset-encoded VarInt where `0`
 //! means "absent" and a present id `i` is written as `i + 1`. This is the
 //! *opposite* convention from a bool-prefixed `Option`, which is exactly why
 //! this arm hand-decodes rather than deriving.

@@ -3,18 +3,18 @@
 //!
 //! ## What it is
 //!
-//! Vanilla's `BundleMouseActions` scroll-selects which item inside a hovered
+//! Vanilla's bundle mouse actions scroll-selects which item inside a hovered
 //! bundle a tooltip highlights, mutating the hovered `ItemStack`'s own
 //! `BUNDLE_CONTENTS` component in place for the highlight and informing the
-//! server with `ServerboundSelectBundleItemPacket` purely so a later
-//! right-click (`removeOne()`) takes the highlighted item rather than the
+//! server with select-bundle-item packet purely so a later
+//! right-click (remove one) takes the highlighted item rather than the
 //! front one — the component's own `selectedItem` never reaches the wire
 //! (see [`lodestone_model::ItemComponents::bundle_contents`]'s doc), so this
 //! is a one-way "FYI" send with no reply to predict against.
 //!
 //! ## How it works
 //!
-//! [`next_scroll_wheel_selection`] is `ScrollWheelHandler
+//! [`next_scroll_wheel_selection`] is the scroll wheel handler
 //! .getNextScrollWheelSelection` transcribed: one wheel notch steps the
 //! selection by exactly one slot, wrapping through `[0, limit)` — only the
 //! notch's *sign* matters, not its magnitude, the same shape every other
@@ -44,7 +44,7 @@
 
 use lodestone_game::item::ItemStack;
 
-/// `ScrollWheelHandler.getNextScrollWheelSelection`:
+/// The scroll wheel handler's get next scroll wheel selection:
 /// one notch steps by exactly one slot in the notch's direction, wrapping
 /// through `[0, limit)`. Only `wheel`'s *sign* matters, matching the real
 /// method's `Math.signum(wheel)`; `limit <= 0` (an empty or non-bundle slot)
@@ -84,18 +84,18 @@ pub struct BundleSelection {
 
 /// Resolves one scroll-wheel notch over `slot` (holding `stack`) into the new
 /// tracked selection, or `None` when the slot holds nothing scrollable —
-/// vanilla's own two-step gate, `BundleMouseActions.matches` (`is_bundle`)
+/// vanilla's own two-step gate, the bundle mouse actions's matches (`is_bundle`)
 /// then `onMouseScrolled`'s own `amountOfShownItems == 0` check
 /// (`bundle_items_to_show`), kept as two checks here for the same reason:
 /// `matches` runs before *any* wheel notch is looked at (it decides which
-/// `ItemSlotMouseAction` even gets asked), where the shown-items count can
+/// The item slot mouse action even gets asked), where the shown-items count can
 /// only be computed for a stack already known to carry the component.
 ///
 /// `previous` is the selection already being tracked, if any, so scrolling
 /// the *same* slot continues from its current index rather than restarting
 /// at "nothing selected" every notch; scrolling a *different* slot (or none
 /// tracked yet) starts fresh from `-1`, matching a freshly-hovered stack's
-/// `getSelectedItemIndex()`.
+/// get selected item index.
 #[must_use]
 pub fn bundle_slot_scrolled(
     window_id: i32,

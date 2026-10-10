@@ -203,7 +203,7 @@ where
         crate::commands::Effect::ClearEffects { effect } => {
             // The counterpart to `ApplyEffect` above — the single-effect
             // removal and all-effects removal paths each
-            // send `ClientboundRemoveMobEffectPacket` per cleared effect, so
+            // send remove-mob-effect packet per cleared effect, so
             // `/effect clear` must tell the client which icons to drop rather
             // than leaving them stuck on screen.
             match effect {

@@ -193,7 +193,7 @@ impl WindowApp {
                     self.sim
                         .send_creative_slot(-1, stack.item().clone(), count);
                 }
-                // Vanilla loops `inventoryMenu.getItems()` and reports every slot,
+                // Vanilla loops inventory menu's get items and reports every slot,
                 // so the whole 41-slot player section is cleared one write at a time
                 // rather than with a bulk verb that does not exist on the wire.
                 CreativeEffect::ClearInventory => {

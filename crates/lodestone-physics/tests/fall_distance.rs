@@ -447,7 +447,7 @@ fn slow_falling_resets_fall_distance_before_travel() {
 #[test]
 fn levitation_resets_fall_distance_before_travel() {
     // Same construction as the Slow Falling test, for the other half of the
-    // `hasEffect(SLOW_FALLING) || hasEffect(LEVITATION)` disjunction.
+    // `has_effect(SLOW_FALLING) || has_effect(LEVITATION)` disjunction.
     let world = World::default();
     let profile = PhysicsProfile::mc_1_21();
     let mut state = PlayerState::at(Vec3d::new(0.5, 200.0, 0.5), 0.0);

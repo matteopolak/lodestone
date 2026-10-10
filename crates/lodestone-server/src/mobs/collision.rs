@@ -169,7 +169,7 @@ pub(super) fn settle_sim_mob(
 /// Per-block friction is likewise not looked up: `block_friction` keeps
 /// [`lodestone_entity::item_entity::DEFAULT_BLOCK_FRICTION`], so an item slides on
 /// ice exactly as it does on stone. Vanilla reads
-/// `getBlockPosBelowThatAffectsMyMovement().getBlock().getFriction()`; wiring that
+/// get block's get friction; wiring that
 /// needs a per-block friction census this crate does not carry.
 /// Settles one item against a solidity oracle.
 ///

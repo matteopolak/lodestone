@@ -279,7 +279,7 @@ fn there_is_no_horizontal_drag_term_in_the_flight_branch() {
         run(false).velocity.x,
         "flight must not touch the horizontal components at all"
     );
-    // …and the shared value is vanilla's own airborne travel step's own drag, so neither path is
+    // …and the shared value is vanilla's airborne travel step's drag, so neither path is
     // silently zeroing it.
     assert_eq!(run(true).velocity.x, 0.3 * f64::from(0.91_f32));
 }
@@ -426,7 +426,7 @@ fn a_flying_player_never_jumps_from_the_ground() {
 #[test]
 fn flight_suppresses_the_block_speed_factor() {
     // Vanilla's own block-speed-factor accessor is
-    // `!flying && !isFallFlying() ? super : 1.0F`.
+    // `!flying && !is_fall_flying() ? super : 1.0F`.
     let profile = PhysicsProfile::mc_1_21();
     let world = SlowFloor;
 

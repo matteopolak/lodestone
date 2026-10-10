@@ -129,7 +129,7 @@ fn seam_runs_for_a_non_player_entity() {
     // A zombie box (taller than the player) free-falls through the seam and obeys
     // the same vanilla constants: each airborne tick subtracts gravity then scales
     // Y by the vertical air drag. The drag is *not* raw `0.98F`: vanilla runs it
-    // through `computeModifiedFriction(0.98F, AIR_DRAG_MODIFIER)` = `1 - (1-0.98)*1`
+    // through compute modified friction = `1 - (1-0.98)*1`
     // in `float`, which does not round-trip back to `0.98F`. And gravity is the
     // `float` literal `0.08F`, whose widening to `double` is `0.0799999982...`,
     // *not* a clean `0.08` — asserting either as a tidy decimal would be wrong for

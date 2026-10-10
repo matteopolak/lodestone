@@ -329,7 +329,7 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
 /// placed at all. This holds a sword in the main hand (which must place
 /// nothing) and dirt in the off hand (menu slot 45,
 /// `PlayerInventory::OFFHAND_NATIVE`'s own wire mapping — vanilla's
-/// `InventoryMenu` puts the off-hand slot at the end, after the four armour
+/// player inventory menu puts the off-hand slot at the end, after the four armour
 /// slots and the 27+9 inventory/hotbar), then sends `UseItemOn { hand:
 /// Hand::Off, .. }`.
 #[tokio::test]

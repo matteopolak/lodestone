@@ -93,7 +93,7 @@ const DEFAULT_TEXT_OPACITY: i8 = -1;
 /// variant, because that context selects no `display` key.
 const DEFAULT_ITEM_DISPLAY_CONTEXT: u8 = ItemDisplayContextOrdinal::NONE;
 
-/// The `ItemDisplayContext` ordinals this seam's consumers name rather than
+/// The item display context ordinals this seam's consumers name rather than
 /// leave as bare integers — transcribed from vanilla's own item-display-context
 /// declaration, which assigns each ordinal explicitly (`NONE(0)`,
 /// `THIRD_PERSON_LEFT_HAND(1)`, `THIRD_PERSON_RIGHT_HAND(2)`,
@@ -105,7 +105,7 @@ impl ItemDisplayContextOrdinal {
     const NONE: u8 = 0;
 }
 
-/// The [`lodestone_assets::DisplaySlot`] an `ItemDisplayContext` ordinal
+/// The [`lodestone_assets::DisplaySlot`] an item display context ordinal
 /// selects, or `None` for `NONE` (and for any out-of-range byte, which
 /// vanilla's own by-id lookup's out-of-bounds "zero" strategy also folds
 /// onto `NONE`).
@@ -205,7 +205,7 @@ pub struct DisplayDraw {
     /// reported (an empty `ItemStack::default()`-shaped absence, same
     /// contract as `lodestone_ecs::entity::DisplayItem`).
     pub item: Option<ItemStack>,
-    /// `item_display`'s `ItemDisplayContext` ordinal, defaulted to vanilla's
+    /// `item_display`'s item display context ordinal, defaulted to vanilla's
     /// own `FIXED` (the item-frame-style no-perspective context) when
     /// unreported — see [`DEFAULT_ITEM_DISPLAY_CONTEXT`] for why that default
     /// is `NONE` rather than `FIXED`.

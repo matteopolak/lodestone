@@ -163,11 +163,11 @@ impl Sim {
     /// minecarts), and its own do-push override still reaches `entity.push(this)`
     /// for one (the parrot's own override skips players outright).
     ///
-    /// Note this is *not* the neighbour's `isPushable()`. That gates the
-    /// **pushee** — it is the `input` of `EntitySelector.pushableBy` — which is
+    /// Note this is *not* the neighbour's is pushable. That gates the
+    /// **pushee** — it is the `input` of EntitySelector's pushable by — which is
     /// why `lodestone_physics::push::pair_admitted` takes our own
     /// `self_pushable` and never reads the neighbour's. Keying the census on
-    /// `isPushable()` would admit boats and minecarts, which both override it
+    /// is pushable would admit boats and minecarts, which both override it
     /// to `true`.
     ///
     /// An unknown type — and a build with no version family compiled in —
@@ -258,7 +258,7 @@ impl Sim {
                         return None;
                     }
                     // `step_height` plays no part in vanilla's `makeBoundingBox`;
-                    // the `RangedAttribute` default is passed so the field never
+                    // the ranged attribute default is passed so the field never
                     // reads as a real step height resolved from an attribute map.
                     let dims =
                         EntityDimensions::new(facts.dimensions.width, facts.dimensions.height, 0.6);
@@ -268,7 +268,7 @@ impl Sim {
                     neighbour.collidable = facts.collidable;
                     neighbour.same_vehicle = ridden_vehicle == Some(entity_id.0);
 
-                    // `EntitySelector.pushableBy`'s team gate — see
+                    // EntitySelector's pushable by's team gate — see
                     // `lodestone_physics::push::team_allows_push`. A neighbour
                     // outside the scoreboard census (no team, or a team we
                     // failed to resolve a holder key for) keeps
@@ -293,7 +293,7 @@ impl Sim {
                         .and_then(|holder| scoreboard.and_then(|board| board.team_of(holder)))
                     {
                         neighbour.collision_rule = convert_collision_rule(team.collision_rule);
-                        // `Team.isAlliedTo` is reference equality
+                        // Team's is allied to is reference equality
                         // — vanilla has no cross-team alliance,
                         // so "allied" collapses to "same named team", and the
                         // comparison is symmetric regardless of which side

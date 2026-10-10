@@ -116,7 +116,7 @@ pub struct LoginDisconnect {
 /// mechanism (historically Forge/FML's handshake). `payload` is nullable on
 /// the wire (`writeNullable`); this crate never has one to send, matching
 /// vanilla's own reference client
-/// (`vanilla's own client handshake packet listener impl's own handle custom query`), which answers
+/// (its handshake listener's custom-query handler), which answers
 /// every `custom_query` with `payload: null` unconditionally regardless of
 /// channel.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]

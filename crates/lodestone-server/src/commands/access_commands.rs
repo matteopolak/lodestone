@@ -36,7 +36,7 @@
 //! reason: [`crate::commands::CommandWorld`] only ever carries currently
 //! *connected* [`crate::commands::PlayerCandidate`]s, so a player must be
 //! online to be opped/deopped/whitelisted here. Vanilla's own
-//! `GameProfileArgument` can additionally resolve an offline player from its
+//! The game profile argument can additionally resolve an offline player from its
 //! profile cache; this server keeps no such cache, so that half is a
 //! disclosed narrowing rather than a silent one.
 //!

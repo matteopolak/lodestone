@@ -256,7 +256,7 @@ impl RailShape {
         })
     }
 
-    /// `RailShape.isSlope()`.
+    /// RailShape's is slope.
     #[must_use]
     pub fn is_slope(self) -> bool {
         matches!(
@@ -289,7 +289,7 @@ impl RailShape {
 /// The five minecart subclasses this crate models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MinecartKind {
-    /// `Minecart` — the only rideable one (`isRideable() => true`).
+    /// `Minecart` — the only rideable one (`is_rideable() => true`).
     Plain,
     /// Chest minecart — container minecart, 27 slots.
     Chest,
@@ -454,7 +454,7 @@ impl CollisionView for MinecartCollision<'_> {
     }
 }
 
-/// `Entity.isInWater()`, approximated over the cart's own bounding box —
+/// Entity's is in water, approximated over the cart's own bounding box —
 /// vanilla's real `updateInWaterStateAndDoWaterCurrentPushing` scans every
 /// cell the (slightly shrunk) box overlaps; this does the same over
 /// [`MINECART_DIMENSIONS`]'s box rather than a single-cell guess, so a cart
@@ -671,7 +671,7 @@ impl<'w> MobSim<'w> {
             }
         }
         // A player already aboard a *boat* must be dismounted from it first —
-        // `Entity.startRiding`'s own "already riding something" precondition,
+        // Entity's start riding's own "already riding something" precondition,
         // the cross-family half `MobSim::mount_vehicle`'s own doc comment
         // only states for two boats. `dismount_rider` is a no-op when the
         // player rides no boat.
@@ -682,7 +682,7 @@ impl<'w> MobSim<'w> {
         true
     }
 
-    /// `Entity.stopRiding` for whatever `player_entity_id` rides, returning
+    /// Entity's stop riding for whatever `player_entity_id` rides, returning
     /// the minecart it left. Called on disconnect exactly as
     /// [`MobSim::dismount_rider`] is for a boat.
     pub fn dismount_minecart_rider(&mut self, player_entity_id: i32) -> Option<i32> {

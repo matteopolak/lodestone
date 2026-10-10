@@ -545,15 +545,15 @@ pub const CLOUD_CELL_BLOCKS: f32 = 12.0;
 /// attributes with two separate timeline tracks.
 pub const CLOUD_COLOR_RGB: [f32; 3] = [1.0, 1.0, 1.0];
 
-/// The alpha of the same attribute: `as8BitChannel(0.8F) = 204`, i.e. `204/255`
+/// The alpha of the same attribute: `as_8b_it_channel(0.8F) = 204`, i.e. `204/255`
 /// exactly `0.8`. Every cloud-colour keyframe has alpha `0xff`, so the
 /// per-tick `multiply` leaves it untouched and this is the alpha at every hour.
 ///
-/// It needs the cloud pipeline to blend (vanilla's `CLOUDS_SNIPPET` uses
-/// `BlendFunction.TRANSLUCENT`, `RenderPipelines`'s own decompiled source). An opaque cloud
+/// It needs the cloud pipeline to blend (vanilla's cloud snippet uses
+/// translucent blending). An opaque cloud
 /// pipeline silently discards it.
 pub const CLOUD_COLOR_ALPHA: f32 = 0.8;
-/// Scroll speed in blocks per tick (vanilla `CloudRenderer.BLOCKS_PER_SECOND`
+/// Scroll speed in blocks per tick (vanilla's cloud blocks-per-second
 /// applied per-tick as `0.03` — the renderer's own comment there literally
 /// reads `0.030000001F`, i.e. this constant).
 pub const CLOUD_SCROLL_BLOCKS_PER_TICK: f32 = 0.030_000_001;
@@ -565,10 +565,10 @@ pub const CLOUD_SCROLL_BLOCKS_PER_TICK: f32 = 0.030_000_001;
 /// # A deliberate simplification vs. vanilla's fancy clouds
 ///
 /// Vanilla voxelizes `clouds.png` into a 3D cell grid and extrudes visible
-/// faces (`CloudRenderer.buildMesh`/`buildExtrudedCell`) for its "fancy" cloud
+/// faces (the cloud mesh and extruded-cell builders) for its "fancy" cloud
 /// mode. This instead reproduces only the flatter "fast" mode: a single quad
 /// whose fragment shader alpha-tests against the same texture (a transparent
-/// texel is an empty cell — `CloudRenderer.isCellEmpty`'s `alpha < 10` check —
+/// texel is an empty cell — the cell-empty check is `alpha < 10` —
 /// so per-pixel alpha-testing this texture on a flat quad reproduces "which
 /// cells are filled" with no CPU-side cell meshing at all). No cell extrusion,
 /// no top/side faces, no "inside the cloud layer" cross-section. Chosen for
@@ -616,8 +616,8 @@ pub fn cloud_plane_geometry(
 ///
 /// # Why `None` is a whole-pass gate rather than a per-element flag
 ///
-/// Vanilla's `LevelRenderer.addSkyPass` reads
-/// `if (state.skybox != DimensionType.Skybox.NONE)` around the *entire* pass —
+/// Vanilla's sky pass is guarded by
+/// a skybox-is-not-`NONE` check around the *entire* pass —
 /// disc, sunrise band, sun, moon, stars and the dark disc are all inside it. It
 /// is not "the Nether draws a red disc instead of a blue one": the Nether draws
 /// **no sky geometry at all**, and everything the player sees overhead is the
@@ -626,7 +626,7 @@ pub fn cloud_plane_geometry(
 /// already has — it clears and then draws — so `None` is "clear, draw nothing".
 ///
 /// Clouds are a *different* vanilla pass, gated on
-/// `ARGB.alpha(levelRenderState.cloudColor) > 0`. `EnvironmentAttributes.CLOUD_COLOR`
+/// the cloud colour's alpha being above 0. The cloud-colour attribute
 /// registers a default of `0` (fully transparent) and `the_nether.json` declares no
 /// `minecraft:visual/cloud_color`, so the Nether's cloud alpha is zero and its
 /// cloud pass never runs either. [`crate::SkyFrame::draws_clouds`] folds that in,
@@ -745,8 +745,7 @@ impl CloudStatus {
 }
 
 /// Vertical thickness of the FANCY cloud layer, in blocks
-/// (`CloudRenderer.render`'s `relativeTopY = relativeBottomY + 4.0F`,
-/// `CloudRenderer`'s own decompiled source).
+/// (the top is the bottom plus 4.0).
 pub const CLOUD_FANCY_THICKNESS: f32 = 4.0;
 
 /// The cloud distance, in chunks: the player option's default, and the value
@@ -779,7 +778,7 @@ pub const CLOUD_FADE_END_BLOCKS: f32 = (CLOUD_RANGE_CHUNKS * 16) as f32;
 
 /// Upper bound on the faces [`crate::cloud_mesh::extruded_faces`] can return
 /// for a given `radius_cells`, from vanilla's own
-/// `CloudRenderer.getSizeForCloudDistance`: `((r+1)*2)^2/2` cells in the disc,
+/// cloud-size rule: `((r+1)*2)^2/2` cells in the disc,
 /// each worth at most 4 un-flagged side/top/bottom faces, plus 54 for the
 /// worst case of the interior 3x3 neighbourhood (9 cells * 6 flagged faces).
 /// Sized once, at pipeline construction, so the vertex/index buffers never
@@ -793,7 +792,7 @@ pub const fn cloud_fancy_max_faces(radius_cells: i32) -> u32 {
 
 /// Vanilla's cloud sampling position, wrapped into one texture period and
 /// split into a texel cell plus an in-cell offset
-/// (`CloudRenderer.render`, `CloudRenderer`'s own decompiled source). Shared by `FAST`
+/// (the cloud renderer's render step). Shared by `FAST`
 /// and `FANCY` in vanilla — the mesh differs, this math does not — but
 /// [`cloud_plane_geometry`]'s FAST quad uses a different, continuous UV
 /// instead (see its own doc), so today only [`fancy_cloud_geometry`] calls
@@ -804,7 +803,7 @@ pub const fn cloud_fancy_max_faces(radius_cells: i32) -> u32 {
 /// scales into a scroll, so the offset stays exact in `f64` for any world age.
 ///
 /// The `+ 3.96` on `cloud_z` is vanilla's own constant
-/// (`CloudRenderer`'s own decompiled source, undocumented there too) — kept byte-for-byte
+/// (in the cloud renderer, undocumented there too) — kept byte-for-byte
 /// because it is a real, shipped asymmetry between the X and Z sampling axes,
 /// not a typo to "fix".
 ///
@@ -838,8 +837,7 @@ pub fn cloud_cell_and_offset(
 }
 
 /// Which side of the FANCY cloud layer the camera is on, from its world Y
-/// alone (`CloudRenderer.render`'s `relativeTopY`/`relativeBottomY` branch,
-/// `CloudRenderer`'s own decompiled source).
+/// alone (the cloud renderer's relative top/bottom Y branch).
 #[must_use]
 pub fn cloud_relative_pos_for_camera_y(camera_y: f32) -> CloudRelativePos {
     let relative_bottom_y = CLOUD_HEIGHT - camera_y;
@@ -856,7 +854,7 @@ pub fn cloud_relative_pos_for_camera_y(camera_y: f32) -> CloudRelativePos {
 /// Unit-cube corner offsets per face, straight from
 /// `rendertype_clouds.vsh`'s `vertices` array — in [`CloudFaceDir`] order
 /// (`Down, Up, North, South, West, East`, which is also vanilla's
-/// `Direction.get3DDataValue()` order, so this table needs no re-indexing).
+/// Direction's get 3d data value order, so this table needs no re-indexing).
 const CLOUD_FACE_UNIT_VERTICES: [[[f32; 3]; 4]; 6] = [
     // Down
     [[1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]],
@@ -1236,7 +1234,7 @@ mod tests {
         assert!(star_brightness_for_time_of_day(18_000) > 0.0);
     }
 
-    /// `MoonPhase.startTick() == index * 24000` fixes phase `n` to world-day
+    /// `MoonPhase.start_tick() == index * 24000` fixes phase `n` to world-day
     /// `n`; day 8 must wrap back to phase 0, not overflow or misalign.
     #[test]
     fn moon_phase_cycles_every_eight_days() {
@@ -1253,8 +1251,8 @@ mod tests {
     }
 
     /// Every expected value here is `Math.min(chunks * 16, 512)`
-    /// worked by hand from `AtmosphericFogEnvironment`'s own decompiled source +
-    /// `FogRenderer`'s own decompiled source, never by calling the function under test with a
+    /// worked by hand from the reference's atmospheric-fog and fog-renderer sources,
+    /// never by calling the function under test with a
     /// rearranged argument.
     #[test]
     fn sky_fog_end_is_the_render_distance_clamped_to_the_attribute_default() {
@@ -1450,7 +1448,7 @@ mod tests {
     // FANCY clouds
     // -----------------------------------------------------------------------
 
-    /// Hand-derived from `CloudRenderer`'s own decompiled source: camera at the origin,
+    /// Hand-derived from the cloud renderer's source: camera at the origin,
     /// tick 0 (no scroll), so `cloudX = 0`, `cloudZ = 0 + 3.96`. Both are
     /// already inside `[0, 12)` for a 16x16 texture (192-block period), so
     /// wrapping is a no-op and `cellX = floor(0/12) = 0`,

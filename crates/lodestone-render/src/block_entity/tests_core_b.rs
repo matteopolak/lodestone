@@ -156,7 +156,7 @@
         assert!(a.abs_diff_eq(expected, 1e-4), "{a}");
     }
 
-    /// `dir.getStepX()/getStepZ()` recovered by trig against a hand-verified
+    /// `dir.get_step_x()/get_step_z()` recovered by trig against a hand-verified
     /// table (not derived from the function under test): south `(0, 1)`,
     /// west `(-1, 0)`, north `(0, -1)`, east `(1, 0)`. A sign slip here
     /// offsets a wall skull toward the wrong wall while it still renders a
@@ -300,7 +300,7 @@
             open.part_transforms[base], closed.part_transforms[base],
             "opening a box moved its base"
         );
-        // `lid.setPos(0, 24 - progress * 0.5 * 16, 0)` and `yRot = 270 * progress`
+        // lid's set pos and `yRot = 270 * progress`
         // — predicted from the jar, not read back out of the port.
         assert_eq!(shulker_lid_pose(0.0), (24.0, 0.0));
         let (y, y_rot) = shulker_lid_pose(1.0);

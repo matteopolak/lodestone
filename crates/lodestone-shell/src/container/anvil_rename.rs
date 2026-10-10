@@ -26,16 +26,16 @@
 //! ## The two rules `onNameChanged` needs, both ported exactly
 //!
 //! ```text
-//! private void onNameChanged(String name) {
-//!    Slot slot = this.menu.getSlot(0);
+//! private void on name changed {
+//!    Slot slot = menu's get slot;
 //!    if (slot.hasItem()) {
 //!       String newName = name;
-//!       if (!slot.getItem().has(DataComponents.CUSTOM_NAME)
-//!             && newName.equals(slot.getItem().getHoverName().getString())) {
+//!       if (!slot's get item.has(the data components's custom name)
+//!             && newName.equals(slot.get item's get hover name.getString())) {
 //!          newName = "";
 //!       }
-//!       if (this.menu.setItemName(newName)) {
-//!          connection.send(new ServerboundRenameItemPacket(newName));
+//!       if (menu's set item name) {
+//!          connection.send(new rename-item packet(newName));
 //!       }
 //!    }
 //! }
@@ -55,7 +55,7 @@
 //!    caller cannot confuse "send an empty rename" with "there is nothing to
 //!    rename".
 //!
-//! `menu.setItemName(newName)` — the client-side prediction gate that decides
+//! Menu's set item name — the client-side prediction gate that decides
 //! *whether* a changed name is worth sending at all — is not modelled: this
 //! shell has no local item-rename prediction to consult, so every value
 //! change is sent. A duplicate send of the same name the server already has
@@ -65,7 +65,7 @@
 //! ## `slotChanged`'s reset, approximated
 //!
 //! Vanilla resets the box to the input slot's own hover name (and refocuses
-//! it) whenever `AbstractContainerMenu`'s broadcast-changes machinery detects
+//! it) whenever abstract container menu's broadcast-changes machinery detects
 //! slot 0's `ItemStack` differs from what it last broadcast — a mechanism
 //! this shell does not reproduce. [`AnvilRenameState::sync`] approximates it
 //! with a cheap **signature** comparison instead: `(has_custom_name,
@@ -114,7 +114,7 @@ impl AnvilRenameState {
     ///
     /// Returns whether a reset happened, so a caller that also owns focus
     /// state can refocus the box the way vanilla's own `slotChanged` does
-    /// (`this.setFocused(this.name)`).
+    /// (this's set focused).
     pub fn sync(&mut self, item: Option<(bool, &str)>) -> bool {
         let signature = item.map(|(has_custom_name, name)| (has_custom_name, name.to_owned()));
         if signature == self.signature {
@@ -130,7 +130,7 @@ impl AnvilRenameState {
     /// One printable character, appended — vanilla's `EditBox.charTyped`
     /// minus the input filter, which is already the whole of
     /// `EditBox::insert_text`'s job for a widget with no selection to
-    /// replace. `setMaxLength(50)` (`AnvilScreen.subInit`).
+    /// replace. `setMaxLength(50)` (the anvil screen's sub init).
     pub fn push_char(&mut self, ch: char) {
         const MAX_LEN: usize = 50;
         if self.value.chars().count() < MAX_LEN {

@@ -3,7 +3,7 @@
 //!
 //! # The defect this was built for
 //!
-//! `terrain.fsh`'s discard is `#ifdef ALPHA_CUTOUT`, and `RenderPipelines`
+//! `terrain.fsh`'s discard is `#ifdef ALPHA_CUTOUT`, and the render pipelines
 //! gives three terrain pipelines three different answers: `SOLID_TERRAIN`
 //! defines nothing and runs no test, `CUTOUT_TERRAIN` uses `0.5`, and
 //! `TRANSLUCENT_TERRAIN` uses `0.1`. `model.wgsl` hardcoded `0.5` for every

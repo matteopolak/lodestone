@@ -175,10 +175,10 @@ impl DisplayTransformation {
 
 /// The full per-frame placement for a display entity: `T(anchor) *
 /// orientation * transformation`, vanilla's display-renderer submit function
-/// (`poseStack.pushPose(); mulPose(orientation); mulPose(transformation);`)
+/// (`poseStack.push_pose(); mul_pose(orientation); mul_pose(transformation);`)
 /// with the entity's world position folded in as the outermost translation —
 /// `submit` itself receives that translation already applied by the caller's
-/// own `PoseStack`, one level up (vanilla's entity-render-dispatcher render function).
+/// own pose stack, one level up (vanilla's entity-render dispatcher).
 #[must_use]
 pub fn display_placement_matrix(anchor: Vec3, orientation: Quat, transform: &DisplayTransformation) -> Mat4 {
     Mat4::from_translation(anchor) * Mat4::from_quat(orientation) * transform.to_matrix()
@@ -200,8 +200,8 @@ pub fn display_placement_matrix(anchor: Vec3, orientation: Quat, transform: &Dis
 /// ```
 ///
 /// A local glyph or background-panel corner is then fed to `pose` **directly
-/// unoffset** (`buffer.addVertex(pose, -1, -1, -0.01)`,
-/// `textCollector.submitText(pose, offset, y, …)` — `submitText`'s own
+/// unoffset** (buffer's add vertex,
+/// text collector's submit text — `submitText`'s own
 /// internal push is equivalent to translating by `(offset, y, 0)` before
 /// drawing each glyph at its own local pixel rect), so every caller of this
 /// function's result multiplies a **raw, un-offset** local point (a glyph's

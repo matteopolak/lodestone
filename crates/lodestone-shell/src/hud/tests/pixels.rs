@@ -472,7 +472,7 @@ fn xp_bar_reaches_pixels() {
 /// is just a solid rectangle and doesn't use the texture pack for it at
 /// all." Runs through the **real vanilla `client.jar`** atlas
 /// (`GuiAtlas::build`), not a synthetic one, because the bug's own
-/// symptom — a flat fill instead of `BossHealthOverlay`'s real
+/// symptom — a flat fill instead of the boss health overlay's real
 /// per-colour sprite art — can only be told apart from a correct draw by
 /// looking at the *actual shipped pixels*, which
 /// [`boss_bar_reaches_the_sprite_geometry_layer_not_just_the_model`]
@@ -658,7 +658,7 @@ fn boss_bar_paints_real_sprite_art_not_a_flat_rectangle() {
 ///   top row from its pixels, then render the digit alone (`level: 5,
 ///   progress: 0.0` — no fill, since the fill only draws `if p > 0.0`) to
 ///   find the digit's top row. The **gap** between them is what
-///   `ContextualBar.extractExperienceLevel` vs `ContextualBar.top`
+///   The contextual bar's extract experience level vs contextual bar's top
 ///   fixes at vanilla's `6` logical px —
 ///   independent of wherever the cluster's own bottom margin happens to
 ///   place the bar, so this cannot pass by coincidentally agreeing with our
@@ -1098,7 +1098,7 @@ fn hud_vitals_draw_the_real_heart_sprite() {
 }
 
 /// The scoreboard sidebar's two background plates, predicted from
-/// `Hud.displayScoreboardSidebar` (`.cache/mc/26.2/client-src`) rather than
+/// Hud's display scoreboard sidebar (`.cache/mc/26.2/client-src`) rather than
 /// eyeballed — the *magnitude* species this repo warns against otherwise.
 /// Content is chosen so the 1x/2x hypotheses diverge everywhere (title
 /// 30px vs 60px; row widths 54/36 vs 108/72, never coinciding after a
@@ -1131,7 +1131,7 @@ fn sidebar_panel_lands_on_vanillas_own_geometry_not_a_2x_pitch() {
     let geo = HudGeometry::build(&frame, w, h);
     let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
 
-    // Independently hand-derived from `Hud.displayScoreboardSidebar` and
+    // Independently hand-derived from Hud's display scoreboard sidebar and
     // the shell's fixed-advance jar-less font (`(GLYPH_W + 1) * scale` per
     // visible char, `GLYPH_W == 5`) — not by calling the code under test.
     let str_w = |s: &str| s.chars().count() as f32 * (font::GLYPH_W as f32 + 1.0);
@@ -1193,7 +1193,7 @@ fn sidebar_panel_lands_on_vanillas_own_geometry_not_a_2x_pitch() {
 }
 
 /// The boss bar's fixed native rect —
-/// `BossHealthOverlay.BAR_WIDTH`/`BAR_HEIGHT` (182×5,
+/// The boss health overlay's bar width/`BAR_HEIGHT` (182×5,
 /// `.cache/mc/26.2/client-src`) and `extractRenderState`'s `yOffset`
 /// arithmetic — not a canvas-relative width or this HUD's ambient 2×
 /// text pitch.

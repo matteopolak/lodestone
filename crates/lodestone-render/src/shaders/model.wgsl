@@ -57,7 +57,7 @@ struct Origin {
 // checks the two do not drift).
 const SECTION_FADE_DURATION_SECS: f32 = 0.75;
 
-// Vanilla's `SectionRenderDispatcher.RenderSection.getVisibility`: 0 the
+// Vanilla's render-section visibility: 0 the
 // instant a section is built, ramping linearly to 1 over
 // `SECTION_FADE_DURATION_SECS`. `build_time` in the past by more than the
 // duration (the `SECTION_FADE_ALREADY_VISIBLE` sentinel, or simply an old
@@ -119,7 +119,7 @@ fn not_gamma_vec3(c: vec3<f32>) -> vec3<f32> {
 // brightness setting yet; 0.0 is vanilla's `Moody`, 1.0 its `Bright`.
 const BRIGHTNESS_FACTOR: f32 = 0.5;
 
-// `EnvironmentAttributes.AMBIENT_LIGHT_COLOR` for the *current* dimension --
+// the ambient-light-colour environment attribute for the *current* dimension --
 // grey `0x0A0A0A` in the overworld, warm brown `0x302821` in the Nether, sage
 // `0x3F473F` in the End. `lightmap.fsh` seeds its accumulator with it (`color =
 // max(AmbientColor, nightVisionColor)`) before adding either light half, so an
@@ -131,7 +131,7 @@ fn ambient_light() -> vec3<f32> {
     return camera.fog_ambient_light.rgb;
 }
 
-// Vanilla's warm torch tint, `EnvironmentAttributes.BLOCK_LIGHT_TINT`
+// Vanilla's warm torch tint, the block-light-tint attribute
 // (`0xFFFFD88C`), and its `BlockFactor` (`blockLightFlicker + 1.4`, flicker
 // not modelled -- see `crate::light`'s doc). Mirrors `crate::light::
 // BLOCK_LIGHT_TINT`/`BLOCK_FACTOR`.
@@ -205,7 +205,7 @@ struct AnimSlots {
 // Vanilla's per-pipeline alpha test threshold, as a pipeline-overridable
 // constant so one shader can serve both terrain passes exactly as
 // `terrain.fsh` does with `#ifdef ALPHA_CUTOUT` and
-// `RenderPipeline.Builder.withShaderDefine("ALPHA_CUTOUT", ...)`.
+// Builder's with shader define.
 //
 // Vanilla ships three terrain pipelines and **three different answers**: the
 // solid one defines no threshold at all and runs no test, the cutout one uses
@@ -226,9 +226,9 @@ struct AnimSlots {
 override alpha_cutout: f32 = 0.5;
 
 // Which of `terrain.fsh`'s two sampling paths this pipeline takes, as vanilla's
-// `UseRgss` uniform: `0` is `TextureFilteringMethod.NONE` (`sample_nearest`),
+// `UseRgss` uniform: `0` is texture-filtering NONE (`sample_nearest`),
 // non-zero is `RGSS` (`sample_rgss`). Vanilla's shipped default is `NONE` --
-// `Options`' `textureFiltering` instance declares it, and `OptionsRenderState`
+// the options' texture-filtering instance declares it, and the options render state
 // initialises the field to it -- and so is this shader's.
 //
 // It is an override rather than a uniform because nothing else in this
@@ -348,7 +348,7 @@ fn snap_uv(uv: vec2<f32>, pixel_size: vec2<f32>, texel_screen_size: vec2<f32>) -
 }
 
 // Vanilla `terrain.fsh`'s `sampleRGSS` -- rotated-grid supersampling, the
-// `TextureFilteringMethod.RGSS` branch, selected by the `use_rgss` override
+// texture-filtering RGSS branch, selected by the `use_rgss` override
 // above. Vanilla ships `NONE` (plain `sample_nearest`) as its default and
 // offers this one as a video setting; so do we, and the default matches.
 // This arm is worth keeping switchable rather than deleting: measured on a

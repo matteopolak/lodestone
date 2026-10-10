@@ -49,7 +49,7 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
 const PROTOCOL_776: i32 = 776;
 
-/// The player inventory (`InventoryMenu`) always occupies window 0 and has
+/// The player inventory menu always occupies window 0 and has
 /// exactly 46 slots: result(1) + crafting 2×2(4) + armour(4) + main(27) +
 /// hotbar(9) + offhand(1). This is the known value the live content is checked
 /// against — a mismatch means our menu model disagrees with the real server.
@@ -318,7 +318,7 @@ async fn live_reconcile_agrees_with_server() {
                         // the server. Force it to broadcast its authoritative
                         // window-0 content by sending a click with a stale
                         // state id (any no-op click with state_id != server's
-                        // triggers broadcastFullState()).
+                        // triggers broadcast full state).
                         if !forced_resync_sent {
                             let stale = 30_000;
                             conn.write_packet(

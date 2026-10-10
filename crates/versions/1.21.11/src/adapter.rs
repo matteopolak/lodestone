@@ -2745,7 +2745,7 @@ fn decode_explode_774(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     skip_particle_options_774(&mut reader, explosion_particle)?;
     skip_sound_holder_774(&mut reader)?;
 
-    // WeightedList<ExplosionParticleInfo>: count, then particle options,
+    // Weighted list of explosion particle info: count, then particle options,
     // scaling, speed and weight for each entry. A zero-length list is the
     // normal server tail for explosions without custom block debris.
     let particle_count = reader.var_i32().map_err(dec_err)?;

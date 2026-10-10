@@ -38,7 +38,7 @@
 //!
 //! - **The reputation discount and the Hero of the Village discount are
 //!   independent and additive**, not a choice between the two. Both apply when
-//!   their guard is met (`reputation != 0`, `hasEffect(HERO_OF_THE_VILLAGE)`), so a player who
+//!   their guard is met (`reputation != 0`, has effect), so a player who
 //!   is both reputable *and* carrying the effect gets both discounts summed
 //!   into `special_price_diff`.
 //! - **The reputation discount multiplies by each offer's own

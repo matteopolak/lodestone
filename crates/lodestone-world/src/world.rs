@@ -607,7 +607,7 @@ impl World {
 
     /// The packaged plugin block write API:
     /// `set_block(pos, state, physics)`, with a `physics: bool` matching
-    /// Bukkit's `Block.setType`/`setBlockData(data, applyPhysics)` split.
+    /// Bukkit's Block's set type/`setBlockData(data, applyPhysics)` split.
     ///
     /// Returns the previous state at that position (or `None` under the same
     /// no-op conditions [`set_block`](Self::set_block) has — chunk not

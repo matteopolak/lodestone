@@ -359,9 +359,9 @@ impl Rotation {
 /// pulling a real quaternion-math crate (`glam`) into this dependency-light
 /// model crate — `lodestone_model::Vec3`/`Vec3f` already make the same choice
 /// for plain vectors. This exists for the wire's `QUATERNION` metadata
-/// serializer (`Display.DATA_LEFT_ROTATION_ID`/`DATA_RIGHT_ROTATION_ID`,
+/// serializer (the display entity's left/right rotation ids,
 /// `26.2`): a version adapter decodes `x, y, z, w` in that order (matching
-/// `FriendlyByteBuf.readQuaternion`'s `new Quaternionf(x, y, z, w)`) and hands
+/// the reader's `new Quaternionf(x, y, z, w)`) and hands
 /// it through unmodified. A consumer that already depends on `glam` converts
 /// with `glam::Quat::from_xyzw(q.x, q.y, q.z, q.w)` — the field order is
 /// identical, so this is a relabelling, not a transform.

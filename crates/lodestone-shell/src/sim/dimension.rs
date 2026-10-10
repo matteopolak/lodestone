@@ -52,7 +52,7 @@
 
 use super::*;
 
-/// Vanilla's `LocalPlayer.handlePortalTransitionEffect` ramp, per tick, while
+/// Vanilla's LocalPlayer's handle portal transition effect ramp, per tick, while
 /// the player stands in a nether portal: `step = 0.0125F`.
 ///
 /// 80 ticks — four seconds — from nothing to full. Not a round `1.0 / 100.0` or
@@ -121,7 +121,7 @@ impl Sim {
     }
 
     /// This level's void fog — the two numbers vanilla's
-    /// `FogRenderer.computeFogColor` reads, resolved from the connected
+    /// The fog renderer's compute fog color reads, resolved from the connected
     /// dimension rather than assumed.
     ///
     /// Pushed to the renderer once per frame by `app/redraw.rs`, exactly like
@@ -198,7 +198,7 @@ impl Sim {
         (from + (to - from) * alpha).clamp(0.0, 1.0)
     }
 
-    /// One tick of vanilla's `LocalPlayer.handlePortalTransitionEffect`.
+    /// One tick of vanilla's LocalPlayer's handle portal transition effect.
     ///
     /// `+0.0125` while the player is inside a nether portal, `-0.05` otherwise,
     /// clamped to `0.0..=1.0`, with the previous value kept for the frame lerp.
@@ -276,7 +276,7 @@ impl Sim {
         false
     }
 
-    /// Vanilla's `Entity.checkInsideBlocks` deflation, `1.0E-5F`.
+    /// Vanilla's Entity's check inside blocks deflation, `1.0E-5F`.
     const INSIDE_BLOCK_DEFLATE: f64 = 1.0e-5;
 
     /// React to a server-reported respawn, which is **also** how the server
@@ -377,7 +377,7 @@ impl Sim {
         // were left expired, the destination overlay would dismiss immediately
         // over an empty store. Restart the loading phase at this same edge.
         self.restart_terrain_loading();
-        // The other entities. Vanilla builds a whole new `ClientLevel` on
+        // The other entities. Vanilla builds a whole new client level on
         // `handleRespawn`, which drops every entity in the old one; this is the
         // same call `end_session` uses, and it exempts the local player for the
         // reason its own doc gives (the driver holds that `Entity` across the
@@ -408,7 +408,7 @@ impl Sim {
         // The portal effect is decaying at this point (the player has left the
         // portal by arriving), so it is deliberately **not** zeroed: vanilla
         // carries `portalEffectIntensity` across `handleRespawn` explicitly
-        // (`ClientPacketListener.handleRespawn` copies both it and its previous
+        // (the client packet listener's handle respawn copies both it and its previous
         // value onto the new player), so the overlay fades out in the
         // destination rather than vanishing at the seam.
         self.status = "changed dimension".into();
@@ -783,7 +783,7 @@ mod tests {
     }
 
     /// The curve, against the two constants read off
-    /// `LocalPlayer.handlePortalTransitionEffect` — and the **asymmetry** is what
+    /// LocalPlayer's handle portal transition effect — and the **asymmetry** is what
     /// is asserted, because a symmetric fade is the plausible wrong answer that a
     /// direction-only check cannot separate from the real one.
     ///

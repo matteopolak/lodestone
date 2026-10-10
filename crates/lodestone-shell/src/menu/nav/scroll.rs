@@ -128,10 +128,10 @@ impl MenuNav {
             // are **non-uniform** — a header is taller than a control row — so
             // this is the one arm that goes through `ListSpec::with_heights`.
             // Placed after the KeyBinds/Language arms, which are their own
-            // geometry rather than `OptionsList`'s.
+            // geometry rather than the options list's.
             //
             // **`None` for a page with no list.** `SettingsPage::Root` is an
-            // arranged widget grid, not an `OptionsList` — `Root.entries()` is
+            // arranged widget grid, not an options list — `Root.entries()` is
             // empty — so reporting a spec there would hang a scrollbar beside a
             // screen with no rows. `ListSpec::model` would reject it anyway, but
             // saying so here is the same explicitness the `Accounts` arm above
@@ -169,7 +169,7 @@ impl MenuNav {
 
     /// Scroll whichever list [`Self::active_list`] reports by `notches` of mouse
     /// wheel, at a `canvas_height`-tall canvas — vanilla's
-    /// `AbstractScrollArea::mouseScrolled` on the active screen.
+    /// The abstract scroll area's mouse scrolled on the active screen.
     ///
     /// The write-back half of the hook, and the reason `app` needs exactly **one**
     /// `MouseWheel` arm for the whole menu rather than one per screen. Returns
@@ -277,8 +277,8 @@ impl MenuNav {
     }
 
     /// Scrolls the multiplayer list by `notches` of mouse wheel — vanilla's
-    /// `AbstractScrollArea::mouseScrolled`,
-    /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())`.
+    /// The abstract scroll area's mouse scrolled,
+    /// set scroll amount.
     ///
     /// `notches` is winit's `scrollY` verbatim, so **positive scrolls up**
     /// (toward entry 0), matching vanilla's sign — the negation lives in
@@ -313,7 +313,7 @@ impl MenuNav {
     }
 
     /// Keeps [`Self::server`] inside the scrolled window — vanilla's
-    /// `AbstractSelectionList.scrollToEntry` (`:251-261`), in pixels, modelled on
+    /// The abstract selection list's scroll to entry (`:251-261`), in pixels, modelled on
     /// [`super::accounts`]'s `scroll_to_show`. Uses the canvas-independent
     /// [`super::render::server_list_window_rows`] rather than a real canvas
     /// height, so a keyboard press needs no new plumbing from `app.rs` — see
@@ -360,8 +360,8 @@ impl MenuNav {
     /// The cursor's position **relative to the favicon** of list row `row`, or
     /// `None` when there is no cursor yet or it is outside that row.
     ///
-    /// This is `relX`/`relY` in `OnlineServerEntry.mouseClicked` — `event.x() -
-    /// getContentX()` — and it is derived
+    /// This is `relX`/`relY` in the online server entry's mouse clicked — `event.x() -
+    /// get_content_x()` — and it is derived
     /// through [`super::render::server_row_content_rect`], the same expression the
     /// draw uses, rather than restating the row geometry here. That is what keeps
     /// the highlighted quadrant and the quadrant that acts from drifting apart.
@@ -489,7 +489,7 @@ impl MenuNav {
         self.lan_published
     }
 
-    /// Pushes vanilla's `hasSingleplayerServer()` in, from
+    /// Pushes vanilla's has singleplayer server in, from
     /// `UiState::kind() == Some(SessionKind::Singleplayer)` — see
     /// [`Self::has_singleplayer_server`]'s own field doc.
     pub fn set_has_singleplayer_server(&mut self, value: bool) {

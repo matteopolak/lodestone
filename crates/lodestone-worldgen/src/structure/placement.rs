@@ -73,7 +73,7 @@ pub enum FrequencyReduction {
     LegacyType1,
     /// `legacy_type_2` — vanilla's own large-feature-with-salt seeding at
     /// `(seed, sourceX, sourceZ, 10387320)`
-    /// with vanilla's own hardcoded "highly arbitrary" random salt, ignoring the set's own salt.
+    /// with vanilla's hardcoded "highly arbitrary" random salt, ignoring the set's salt.
     LegacyType2,
     /// `legacy_type_3` — vanilla's own large-feature-seed derivation then `nextDouble() < probability`.
     LegacyType3,

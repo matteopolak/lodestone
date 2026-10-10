@@ -672,8 +672,8 @@ impl Sim {
     /// carries no cloned tracker alongside those two clock values**: a
     /// beacon's `levels`/`beamSections` are pure functions of *current* block
     /// state (the base pyramid, and the run of coloured glass above it), the
-    /// same way vanilla's own `BeaconBlockEntity.tick` — an ordinary
-    /// block-entity ticker `Level.tickBlockEntities` runs on both sides —
+    /// same way vanilla's own beacon block entity's tick — an ordinary
+    /// block-entity ticker Level's tick block entities runs on both sides —
     /// recomputes them fresh from the block data the client already has
     /// loaded, with no server packet carrying either value. See
     /// `crate::block_entities::beacon_spawns`' module doc for the full
@@ -934,7 +934,7 @@ impl Sim {
     /// This frame's campfire cooking items, for
     /// [`RenderState::set_campfire_source`](crate::gpu::RenderState::set_campfire_source).
     ///
-    /// Clock-free like [`Self::lectern_source`]: `CampfireRenderer` has no
+    /// Clock-free like [`Self::lectern_source`]: the campfire renderer has no
     /// animation of any kind, so there is nothing a partial tick could feed. The
     /// per-frame install is [`Self::skull_source`]'s reason only — a source that
     /// outlived a disconnect would hand out spawns from a dead world's handle.
@@ -989,7 +989,7 @@ impl Sim {
         // `banner_phase` only needs a value that advances by exactly one every
         // tick, every tick — it is purely decorative, not synced to anything
         // server-side. `handle.get().map(|c| c.world_time().0)` (vanilla's
-        // `level.getGameTime()`) looked like the obvious source, and it is the
+        // level's get game time) looked like the obvious source, and it is the
         // wrong clock here: `WorldTime` is a flat snapshot the net thread only
         // overwrites on a decoded `SET_TIME`, which the server sends roughly
         // once per second (`docs/served-session-liveness.md`'s

@@ -103,7 +103,7 @@ const AIM_HEIGHT: f64 = 0.6;
 /// species in this family use the same `0.2F`.
 const ARC_LIFT: f64 = 0.2;
 
-/// A bow at full draw. Vanilla releases at `getTicksUsingItem() >= 20`
+/// A bow at full draw. Vanilla releases at `get_ticks_using_item() >= 20`
 /// (vanilla's own bow-attack-goal per-tick update), which is also the point
 /// its own bow-power-for-time curve reaches its `1.0` ceiling.
 const BOW_FULL_DRAW_TICKS: i32 = 20;
@@ -208,7 +208,7 @@ impl BowStrikeGoal {
 
 impl Goal for BowStrikeGoal {
     fn flags(&self) -> FlagSet {
-        // Vanilla's own flag set: `setFlags(EnumSet.of(MOVE, LOOK))`.
+        // Vanilla's own flag set: set flags.
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
 
@@ -427,7 +427,7 @@ impl Goal for RangedStrikeGoal {
 ///
 /// | `attack_step` after increment | `attack_time` set to | fires? |
 /// |---|---|---|
-/// | 1 | 60 | no — this is the charge-up (`setCharged(true)`) |
+/// | 1 | 60 | no — this is the charge-up (set charged) |
 /// | 2, 3, 4 | 6 | yes |
 /// | 5 | 100, and step resets to 0 | no |
 ///
@@ -459,7 +459,7 @@ const BLAZE_MELEE_DIST_SQR: f64 = 4.0;
 impl BlazeFireballGoal {
     /// The goal as a blaze registers it — no arguments in vanilla
     /// (its own goal registration); `speed` is the
-    /// absolute figure behind `setWantedPosition(..., 1.0)` (in its own per-tick update) and
+    /// absolute figure behind set wanted position (in its own per-tick update) and
     /// `follow_range` the blaze's own attribute.
     #[must_use]
     pub fn new(speed: f64, follow_range: f64) -> Self {
@@ -483,7 +483,7 @@ impl Goal for BlazeFireballGoal {
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        // Vanilla's own eligibility check — `getTarget() != null && isAlive() && canAttack(target)`.
+        // Vanilla's own eligibility check — `get_target() != null && isAlive() && can_attack(target)`.
         mob.attack_target().is_some()
     }
 
@@ -493,7 +493,7 @@ impl Goal for BlazeFireballGoal {
     }
 
     fn stop(&mut self, _mob: &mut dyn MobController) {
-        // Vanilla's own stop step — `setCharged(false)`, which for us is just the step.
+        // Vanilla's own stop step — set charged, which for us is just the step.
         self.attack_step = 0;
     }
 
@@ -572,7 +572,7 @@ impl Goal for BlazeFireballGoal {
 /// [`FlagSet`] reproduces that exactly rather than approximating it.
 ///
 /// **Not modelled**: the `hasLineOfSight` half of the range gate
-/// (`target.distanceToSqr(this.ghast) < 4096.0 && this.ghast.hasLineOfSight(target)`)
+/// (`target.distance_to_sqr(this.ghast) < 4096.0 && this.ghast.has_line_of_sight(target)`)
 /// — [`MobController`] has no world or raycast access, the same
 /// gap every other goal in this file already lives with — so a ghast charges
 /// and fires through walls once a target is merely within
@@ -584,7 +584,7 @@ pub struct GhastFireballGoal {
     charge_time: i32,
 }
 
-/// Vanilla's own per-tick update's own `target.distanceToSqr(this.ghast) < 4096.0`
+/// Vanilla's own per-tick update's own `target.distance_to_sqr(this.ghast) < 4096.0`
 /// — `64.0` blocks, squared.
 const GHAST_FIREBALL_RANGE_SQR: f64 = 4096.0;
 
@@ -608,7 +608,7 @@ impl Goal for GhastFireballGoal {
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        // Vanilla's own eligibility check — `getTarget() != null`.
+        // Vanilla's own eligibility check — `get_target() != null`.
         mob.attack_target().is_some()
     }
 
@@ -722,7 +722,7 @@ fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// Vanilla's own witch ranged-attack goal, throwing a
 /// splash potion.
 ///
-/// The power is vanilla's own ranged-attack step's own `dist <= 2.0 ? 0.45F : 0.75F`.
+/// The power is vanilla's ranged-attack step's `dist <= 2.0 ? 0.45F : 0.75F`.
 /// `0.75` is used: the goal only fires while the witch is inside its
 /// 10-block attack radius and closing, so the far branch is the one a player meets,
 /// and this crate's `RangedStrikeGoal` carries one power rather than a per-shot
@@ -1669,7 +1669,7 @@ mod tests {
     }
 
     /// A `GoalSelector` is what actually runs a goal, and `remove` is what
-    /// vanilla's own weapon-reassessment step needs (`GoalSelector.removeGoal`).
+    /// vanilla's own weapon-reassessment step needs (GoalSelector's remove goal).
     /// A bow goal removed mid-flight must stop cleanly and stop shooting.
     #[test]
     fn removing_the_bow_goal_stops_the_shooting() {

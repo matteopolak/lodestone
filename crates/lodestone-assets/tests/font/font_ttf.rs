@@ -310,7 +310,7 @@ fn build_font(units_per_em: u16, specs: &[GlyphSpec]) -> Vec<u8> {
 /// |---|---|---|---|
 /// | `A` | U+0041 | two contours: a wide dense block in the top of the box (y 500..700), a narrow sparse one at the very bottom (y 0..100), a real gap between | orientation + metrics |
 /// | `B` | U+0042 | full square, different bounds/advance from `A` | also declared in a `bitmap` sheet — priority, and a discriminating decoy |
-/// | `C` | U+0043 | none (0 contours) | `TrueTypeGlyphProvider`'s `EmptyGlyph` case |
+/// | `C` | U+0043 | none (0 contours) | the TrueType provider's empty-glyph case |
 /// | `S` | U+0053 | full square | listed in the pack's `skip` |
 ///
 /// `A` is two contours rather than one rectangle on purpose: a single filled
@@ -413,7 +413,7 @@ fn fixture(with_ttf_bytes: bool) -> ResourceManager {
     src.insert("assets/minecraft/font/default.json", font_json().into_bytes());
     src.insert("assets/minecraft/textures/font/sheet.png", sheet_png());
     if with_ttf_bytes {
-        // Vanilla's own true-type-glyph-provider-definition load step: `resourceManager.open(this.location.withPrefix("font/"))`
+        // Vanilla's own true-type-glyph-provider-definition load step: `resourceManager.open(this.location.with_prefix("font/"))`
         // — the `file` field itself carries no `font/` prefix, unlike `unihex`'s `hex_file`.
         src.insert("assets/minecraft/font/fixture.ttf", fixture_font_bytes());
     }
@@ -476,7 +476,7 @@ fn ttf_metrics_match_the_font_tables_read_independently() {
     }
     // shift.x = +1.0 folds straight into bearing_left; shift.y = -0.5 folds
     // in negated (glyph space grows up, screen space grows down), matching
-    // `TrueTypeGlyphProvider`'s `transformY = -shiftY * oversample`. Both
+    // the Y transform of -shift_y * oversample. Both
     // hand-derived from the outline's own corners (xmin 100, ymin 350, ymax
     // 700 font units) at scale 40/1000 = 0.04, which happens to land on
     // exact integers at every rounding step, so the tolerance here is tight:

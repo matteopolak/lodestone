@@ -10,7 +10,7 @@
 //!
 //! * **One-shot blocks could not be broken at all.** A client that knows the
 //!   block is instant sends `START_DESTROY_BLOCK` *and nothing else* — vanilla's
-//!   `MultiPlayerGameMode` concludes an instant break there, because the block
+//!   The multi player game mode concludes an instant break there, because the block
 //!   is already gone locally (`lodestone-game`'s `mining` module says so in its
 //!   own `destroyed` field doc, and this module is the same defect seen from the server side).
 //!   So `pending_break` was set and never consumed, and sugar cane, grass,
@@ -96,7 +96,7 @@ use crate::vitals::EYE_HEIGHT;
 
 /// Vanilla's `STOP_DESTROY_BLOCK` acceptance threshold: a dig that has accrued
 /// at least this much progress breaks the block
-/// (`ServerPlayerGameMode.handleBlockBreakAction`'s `destroyProgress >= 0.7F`).
+/// (the server player game mode's handle block break action's `destroyProgress >= 0.7F`).
 ///
 /// It is `0.7` rather than `1.0` because the client is the authority on when it
 /// released the button and the server's tick accounting is one tick coarser than
@@ -124,7 +124,7 @@ pub const UNTRACKED_SPEED_HEADROOM: f32 = 8.0;
 
 /// How far from the player's eyes a block may be and still be breakable.
 ///
-/// Vanilla is `Player.isWithinBlockInteractionRange(pos, 1.0)`: the
+/// Vanilla is Player's is within block interaction range: the
 /// `block_interaction_range` attribute (default `4.5`) plus a 1.0 padding,
 /// measured to the closest point of the block's box. This crate measures to the
 /// block *centre* from the eye position instead, which is up to ~0.87 further,
@@ -162,7 +162,7 @@ pub(crate) struct PendingBreak {
     /// treat as instant, `StopDestroy` **is** the ordinary end of a dig, and the
     /// server's estimate is always a little behind the client's own progress. A
     /// shortfall is the expected case on a slow block, not a cheat, so vanilla
-    /// keeps ticking (`ServerPlayerGameMode.tick`) rather than rolling the client
+    /// keeps ticking (the server player game mode's tick) rather than rolling the client
     /// back. Refusing here made every non-instant block unbreakable: hold the
     /// mouse on stone, release, nothing happens.
     pub(crate) deferred: bool,

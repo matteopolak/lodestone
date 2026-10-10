@@ -11,7 +11,7 @@
 //!
 //! 1. **Which resolver a block uses** (grass colormap vs. foliage colormap vs.
 //!    a constant vs. the biome water colour vs. the redstone power ramp). This
-//!    is registered in the *client* jar package (`BlockColors`), which is **not**
+//!    is registered in the *client* jar package (the block colour table), which is **not**
 //!    part of Mojang's deobfuscated *server* source, so it cannot be transcribed
 //!    from the jar. It is therefore a version-crate responsibility, expressed
 //!    here as the [`vanilla_tint_kind`] default plus a caller-supplied override.
@@ -42,7 +42,7 @@ use crate::texture::Image;
 pub type Rgb = u32;
 
 /// Colour constants verified against Mojang's server source
-/// (`FoliageColor`, `DryFoliageColor`).
+/// (foliage and dry-foliage colour tables).
 pub mod colors {
     use super::Rgb;
 
@@ -64,7 +64,7 @@ pub mod colors {
 }
 
 /// A 256x256 biome colormap (`grass`, `foliage`, or `dry_foliage`), indexed by
-/// temperature and downfall exactly as vanilla's `ColorMapColorUtil`.
+/// temperature and downfall exactly as vanilla's colormap utility.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Colormap {
     /// Row-major `0xRRGGBB` pixels; typically 65 536 entries for a 256x256 map.
@@ -349,7 +349,7 @@ pub fn vanilla_tint_kind(
     }
     let path = block.path();
     match (path, tint_index) {
-        // Grass colormap (BiomeColors.getAverageGrassColor). `tall_grass`/
+        // Grass colormap (biome average-grass colour). `tall_grass`/
         // `large_fern` sample the lower half's position in the mesher, but the
         // colormap kind is the same.
         (
@@ -400,7 +400,7 @@ pub fn vanilla_tint_kind(
 
 /// The tint a **break/hit particle** of `block` takes, matching vanilla's own
 /// "color as terrain particle" accessor at layer 0 — what
-/// `TerrainParticle`'s constructor multiplies its `0.6` grey by.
+/// the terrain particle's constructor multiplies its `0.6` grey by.
 ///
 /// This is *not* the same lookup as `vanilla_tint_kind(block, 0, …)`. In-world
 /// face tinting and particle tinting are separate virtual methods on
@@ -667,9 +667,8 @@ pub fn biome_effects(id: &str) -> Option<&'static BiomeEffects> {
 /// tint (a single-sample world) diverge only in what `sample` does, not in
 /// this function's control flow.
 ///
-/// The default biome-blend-radius option value is `2` (vanilla's own options class's own
-/// biome-blend-radius option's
-/// `new OptionInstance.IntRange(0, 7, false), 2, …`), giving the vanilla
+/// The default biome-blend-radius option value is `2` (vanilla's options class's
+/// biome-blend-radius option, an int range 0..=7 defaulting to `2`), giving the vanilla
 /// default 5x5 = 25-sample average this crate's callers should use unless a
 /// video setting says otherwise (this client has no such setting yet, so `2`
 /// is not a guess — it is the only value reachable).
@@ -691,13 +690,13 @@ pub fn blend_box<F: FnMut(i32, i32) -> Rgb>(x: i32, z: i32, radius: i32, mut sam
     ((r / count) << 16) | ((g / count) << 8) | (b / count)
 }
 
-/// Vanilla's default biome-blend radius (vanilla's own options class's own
+/// Vanilla's default biome-blend radius (vanilla's options class's
 /// biome-blend-radius option). See
 /// [`blend_box`]'s doc for why this is the only reachable value right now.
 pub const DEFAULT_BLEND_RADIUS: i32 = 2;
 
 /// The largest value vanilla's own biome-blend-radius option exposes — its
-/// `new OptionInstance.IntRange(0, 7, false)`. It bounds [`BlendRowCursor`]'s
+/// int range of 0 to 7. It bounds [`BlendRowCursor`]'s
 /// window, which is why that type needs no allocation.
 pub const MAX_BLEND_RADIUS: i32 = 7;
 

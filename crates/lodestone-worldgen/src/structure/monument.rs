@@ -516,12 +516,12 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// `getBlock(level, x, y, z, chunkBB)`.
+    /// get block.
     fn get(&self, x: i32, y: i32, z: i32) -> BlockState {
         self.local.get(&(x, y, z)).cloned().unwrap_or_else(|| self.flood_default(y))
     }
 
-    /// `placeBlock(level, state, x, y, z, chunkBB)` — mirror, rotate, record
+    /// place block — mirror, rotate, record
     /// into both the local map (so a later read sees it) and the ordered
     /// block list (so the placement pipeline applies it, last write wins).
     fn place(&mut self, state: &BlockState, x: i32, y: i32, z: i32) {
@@ -535,7 +535,7 @@ impl<'a> Canvas<'a> {
         });
     }
 
-    /// `generateBox(..., edge, fill, skipAir = false)`.
+    /// generate box.
     #[allow(clippy::too_many_arguments)]
     fn generate_box(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32, edge: &BlockState, fill: &BlockState) {
         for y in y0..=y1 {
@@ -1756,7 +1756,7 @@ fn build_wing_room(piece: Piece, main_design: i32, ctx: &dyn StartContext) -> St
         c.place(&light, 13, 7, 20);
         c.generate_box(6, 0, 21, 7, 4, 21, &light, &light);
         c.generate_box(15, 0, 21, 16, 4, 21, &light, &light);
-        // `spawnElder(11, 2, 16)` — ledgered, see the module doc.
+        // spawn elder — ledgered, see the module doc.
     } else if main_design == 1 {
         c.generate_box(9, 3, 18, 13, 3, 20, &light, &light);
         c.generate_box(9, 0, 18, 9, 2, 18, &light, &light);
@@ -1787,7 +1787,7 @@ fn build_wing_room(piece: Piece, main_design: i32, ctx: &dyn StartContext) -> St
         }
         c.generate_box(8, 3, 8, 8, 3, 13, &black, &black);
         c.generate_box(14, 3, 8, 14, 3, 13, &black, &black);
-        // `spawnElder(11, 5, 13)` — ledgered, see the module doc.
+        // spawn elder — ledgered, see the module doc.
     }
     c.finish("minecraft:omwr", 1)
 }
@@ -2185,7 +2185,7 @@ mod tests {
     }
 
     /// The shell's own bounding box is vanilla's fixed 58×23×58 footprint at
-    /// a literal Y of 39 — re-derived from `makeBoundingBox(west, 39, north,
+    /// a literal Y of 39 — re-derived from `make bounding box(west, 39, north,
     /// direction, 58, 23, 58)`, not asserted from memory.
     #[test]
     fn the_shell_box_is_the_fixed_58x23x58_footprint() {

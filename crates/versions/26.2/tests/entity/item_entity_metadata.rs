@@ -49,7 +49,7 @@ fn fixture_bytes(text: &str) -> Vec<u8> {
 }
 
 /// The component the capture actually carries. It was unmodeled when the bytes
-/// were captured and is decoded now (`vanilla's own byte buf codecs's own var int`), which is why
+/// were captured and is decoded now (a VarInt), which is why
 /// [`with_unmodeled_component`] exists.
 const CAPTURED_COMPONENT: &str = "minecraft:repair_cost";
 
@@ -58,9 +58,9 @@ const CAPTURED_COMPONENT: &str = "minecraft:repair_cost";
 /// `minecraft:instrument` held it next until the item-component sweep that
 /// closed the "62 of 111 unmodelled" backlog modeled every component that is
 /// genuinely skippable byte-accurately. `minecraft:can_place_on` is the
-/// replacement: its `DataComponentMatchers` payload dispatches through a
+/// replacement: its component-matchers payload dispatches through a
 /// second, independent registry whose entries can recurse into another
-/// `DataComponentMatchers` — a general-purpose predicate interpreter, not
+/// component matchers — a general-purpose predicate interpreter, not
 /// "one more component reader" — so it is a genuine decode cliff and a
 /// deliberately durable choice, unlike the two components that held this slot
 /// before it.

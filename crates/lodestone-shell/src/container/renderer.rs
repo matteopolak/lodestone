@@ -550,7 +550,7 @@ impl ContainerRenderer {
     ///
     /// # Why this hook exists instead of "draw it afterwards"
     ///
-    /// `AbstractRecipeBookScreen.extractRenderState` is the record, and it is
+    /// The abstract recipe book screen's extract render state is the record, and it is
     /// explicit about the order:
     ///
     /// ```text
@@ -560,7 +560,7 @@ impl ContainerRenderer {
     /// nextStratum()
     /// extractCarriedItem       the stack on the cursor
     /// extractTooltip           the hovered slot's tooltip
-    /// recipeBookComponent.extractTooltip
+    /// recipe book component's extract tooltip
     /// ```
     ///
     /// So the recipe-book panel sits **above** every slot and **below** the
@@ -637,7 +637,7 @@ impl ContainerRenderer {
     /// for the creative-inventory screen, which builds its own
     /// geometry from [`super::creative_geometry`] rather than from a
     /// [`ContainerFrame`] — vanilla's creative screen is backed by a client-only
-    /// `ItemPickerMenu` with no `Menu` behind it, so it cannot go through
+    /// The item picker menu with no `Menu` behind it, so it cannot go through
     /// `build_inner`. Everything *below* that seam is shared: same pipelines,
     /// same bind groups, same four-pass order, and therefore the same guarantee
     /// about stack counts landing over their icons rather than under them.
@@ -895,7 +895,7 @@ impl ContainerRenderer {
 
         // The inventory avatar, immediately after the panel art it stands in and
         // before the slot icons — which is where vanilla calls it, from
-        // `InventoryScreen.extractBackground`, right after its own `INVENTORY_LOCATION`
+        // The inventory screen's extract background, right after its own `INVENTORY_LOCATION`
         // blit. Ordering against the slots is free (the recess holds no slot), but
         // ordering against the *panel* is not: drawn first it would be painted over.
         //
@@ -1053,7 +1053,7 @@ impl ContainerRenderer {
         // Everything above is the **slot stratum**. Flush it, then let the
         // caller's overlay — today the recipe-book panel — submit its own work
         // *between* the two strata, exactly where
-        // `AbstractRecipeBookScreen.extractRenderState` draws
+        // The abstract recipe book screen's extract render state draws
         // `recipeBookComponent`. wgpu executes submissions in order, so two
         // encoders either side of the hook is what buys the layering; a single
         // encoder finished at the end of this function could not, because the

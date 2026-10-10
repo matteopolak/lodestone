@@ -5,9 +5,9 @@
 //!
 //! A **second pass over the item's own geometry** — not a texture swap, not a flat
 //! overlay quad. Vanilla re-emits every baked quad into a glint buffer
-//! (`ItemFeatureRenderer`'s own decompiled source) and draws it with `RenderPipelines.GLINT`,
-//! whose depth state is `CompareOp.EQUAL` with **zero** bias
-//! (`RenderPipelines`'s own decompiled source). That only works if the two passes rasterise
+//! (the item feature renderer's source) and draws it with the glint pipeline,
+//! whose depth state is compare EQUAL with **zero** bias
+//! (the render-pipelines source). That only works if the two passes rasterise
 //! byte-identical clip positions, which is why `glint.wgsl` recomputes `clip` the
 //! same way `model.wgsl` does and why the glint pipeline consumes `ModelVertex`'s
 //! own vertex layout so it can be handed the *same* vertex buffer.
@@ -21,9 +21,9 @@
 //!
 //! | hypothesis | jar | linear-space result |
 //! |---|---|---|
-//! | `GLINT` (correct) | `BlendFunction`'s own decompiled source — `SRC_COLOR, ONE` | `dst + src²` |
-//! | `ADDITIVE` | `BlendFunction`'s own decompiled source — `ONE, ONE` | `dst + src` |
-//! | `TRANSLUCENT` | `BlendFunction`'s own decompiled source — `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` | `src` (at α=1) |
+//! | `GLINT` (correct) | the blend function's source — `SRC_COLOR, ONE` | `dst + src²` |
+//! | `ADDITIVE` | the blend function's source — `ONE, ONE` | `dst + src` |
+//! | `TRANSLUCENT` | the blend function's source — `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` | `src` (at α=1) |
 //!
 //! `SRC_COLOR` is the source **squared**, and it is neither of the two obvious
 //! guesses. At the synthetic glint value used here the three predictions are tens
@@ -50,7 +50,7 @@
 //! The measured warning elsewhere in this repo is that the *effective blend alpha*
 //! through `ALPHA_BLENDING` on this Metal backend is a real, repeatable,
 //! non-trivial function of the raw fragment alpha. It does not apply here, and not
-//! by luck: `BlendFunction.GLINT`'s colour equation is `SRC_COLOR/ONE` and its
+//! by luck: the glint blend function's colour equation is `SRC_COLOR/ONE` and its
 //! alpha equation is `ZERO/ONE`, so **no alpha enters the colour blend at all** and
 //! the destination alpha is never touched. Every pixel compared here is a
 //! fully-opaque interior fragment of the item's slab.
@@ -100,7 +100,7 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const ITEM: &str = "minecraft:diamond_sword";
 
 /// The real glint texture inside `client.jar`
-/// (`ItemFeatureRenderer`'s own decompiled source).
+/// (the item feature renderer's source).
 const GLINT_PNG: &str = "assets/minecraft/textures/misc/enchanted_glint_item.png";
 
 /// Jar-verified dimensions of both glint PNGs.
@@ -717,7 +717,7 @@ fn suppressing_the_glint_pass_leaves_the_frame_byte_identical() {
 ///
 /// So this predicts the delta range for **both** hypotheses, from outside the
 /// renderer: the PNG's own bytes, bilinearly sampled over the glint-UV rect,
-/// squared through `BlendFunction.GLINT` and scaled by `GlintAlpha`. The two
+/// squared through the glint blend function and scaled by `GlintAlpha`. The two
 /// hypotheses are the atlas-corrected scale and the uncorrected one (vanilla's
 /// `8.0` applied straight to our larger sheet's UVs, which is what shipped), and
 /// the discriminating statistic is the **floor**: a smaller window sits inside
@@ -949,7 +949,7 @@ fn sample_sheet(sheet: &Image, u: f32, v: f32) -> f32 {
     a * (1.0 - ty) + b * ty
 }
 
-/// `(min, max)` of the linear light `BlendFunction.GLINT` would add over the
+/// `(min, max)` of the linear light the glint blend function would add over the
 /// mesh's UV rect under `matrix`, computed from the sheet's own bytes.
 ///
 /// `GLINT` is `SRC_COLOR, ONE`, so the added light is the source **squared**, and

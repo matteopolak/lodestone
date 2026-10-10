@@ -1,9 +1,9 @@
-//! Vanilla's `TreeNodePosition`: where each advancement widget sits
+//! Vanilla's tree node position: where each advancement widget sits
 //! in its tab's tree.
 //!
 //! # Why this has to exist
 //!
-//! 26.2's advancement JSON carries **no** `x`/`y`. `DisplayInfo`'s position
+//! 26.2's advancement JSON carries **no** `x`/`y`. The display info's position
 //! fields are computed server-side by vanilla's own tree-node-position layout routine
 //! and only ever appear on the wire, so a client that builds the screen from the
 //! data pack — which is what [`super::advancement_data`] does — has to run the
@@ -19,7 +19,7 @@
 //!
 //! # How to change it
 //!
-//! Index-based, not pointer-based: every `TreeNodePosition` field that is a
+//! Index-based, not pointer-based: every tree node position field that is a
 //! reference in Java is a `usize` into [`TreeLayout::nodes`] here, because the
 //! algorithm mutates siblings and ancestors while walking and `&mut` cannot
 //! express that. `NO_NODE` stands in for Java's `null` — using `Option<usize>`
@@ -44,9 +44,9 @@ pub struct PositionedAdvancement {
     pub advancement: &'static Advancement,
     /// Index into [`ADVANCEMENTS`] of its parent, or `None` for the root.
     pub parent: Option<usize>,
-    /// Vanilla's `DisplayInfo.x` — the depth from the root.
+    /// Vanilla's display info's x — the depth from the root.
     pub x: f32,
-    /// Vanilla's `DisplayInfo.y`.
+    /// Vanilla's display info's y.
     pub y: f32,
 }
 
@@ -59,7 +59,7 @@ pub struct TreeLayout {
     pub nodes: Vec<PositionedAdvancement>,
 }
 
-/// Working state for one node during the walk — Java's `TreeNodePosition`
+/// Working state for one node during the walk — Java's tree node position
 /// fields, one for one.
 #[derive(Debug, Clone)]
 struct Node {

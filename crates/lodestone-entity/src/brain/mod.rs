@@ -91,7 +91,7 @@ pub struct Brain {
     ///
     /// Exists for villager-shaped panic triggers: vanilla's own
     /// Villager panic trigger is an imperative `Behavior` that calls
-    /// `brain.setActiveActivityIfPossible(Activity.PANIC)` directly from
+    /// brain's set active activity if possible directly from
     /// inside `start()`, which this crate's [`Behavior`] trait has no seam
     /// for (it receives `&mut Memories` and `&mut dyn BrainMob`, never `&mut
     /// Brain` — deliberately, so a behaviour cannot reach into the scheduler

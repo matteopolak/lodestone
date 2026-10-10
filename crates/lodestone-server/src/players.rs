@@ -733,7 +733,7 @@ impl PlayerRegistry {
                         rotation: p.rotation,
                         // A player's head yaw and body yaw are the same value on
                         // this wire: the client reports one yaw per movement
-                        // packet and vanilla's `ServerEntity` sends that same
+                        // packet and vanilla's server entity sends that same
                         // angle in both the move-rotation and head-rotation
                         // packets for a player. They diverge only for mobs, whose
                         // AI aims the head independently of the body — which is

@@ -5,13 +5,13 @@
 //!
 //! ## What it is
 //!
-//! `LoomScreen`/`LoomMenu` (`26.2`): a 4×4 grid of up to sixteen visible
+//! The loom screen/loom menu (`26.2`): a 4×4 grid of up to sixteen visible
 //! pattern buttons, scrollable when more than sixteen patterns are offered.
 //! Vanilla offers one of two lists depending on the pattern-item slot
-//! (`LoomMenu.getSelectablePatterns`): a specific pattern *item* (e.g.
+//! (the loom menu's get selectable patterns): a specific pattern *item* (e.g.
 //! `minecraft:creeper_banner_pattern`) grants exactly one pattern and
 //! auto-selects it with **no button click at all**
-//! (`LoomMenu.slotsChanged`'s `selectablePatterns.size() == 1` branch,
+//! (the loom menu's slots changed's `selectablePatterns.size() == 1` branch,
 //! reproduced server-side in `lodestone_server::loom::result`); an *empty*
 //! pattern slot offers the 32-pattern base grid this module's [`grid_rect`]/
 //! [`hit_test_local`] exist for.
@@ -22,14 +22,14 @@
 //! first and computes this authoritatively for real; this is the *client's*
 //! copy of the identical tag-derived data, which is what lets a click be
 //! pre-validated (bounded to the real offer count) before it is even sent,
-//! exactly as vanilla's own client-side `LoomMenu` mirror does before
+//! exactly as vanilla's own client-side loom menu mirror does before
 //! `clickMenuButton` ever reaches the network.
 //!
 //! ## How it works
 //!
-//! [`grid_rect`] is `LoomScreen`'s own real layout constants (`PATTERNS_X =
+//! [`grid_rect`] is the loom screen's own real layout constants (`PATTERNS_X =
 //! 60`, `PATTERNS_Y = 13`, a 14×14 cell, 4 columns, 4 visible rows) —
-//! [`hit_test_local`] mirrors `LoomScreen.mouseClicked`'s exact arithmetic,
+//! [`hit_test_local`] mirrors the loom screen's mouse clicked's exact arithmetic,
 //! `start_row`-relative (vanilla's own local variable name — the loom scrolls
 //! by **row**, not by absolute index the way the stonecutter's `start_index`
 //! does, since `index = (row + startRow) * 4 + column` is computed fresh
@@ -54,7 +54,7 @@
 //! Scrolling ([`start_row_for_scroll`]) is wired to the mouse wheel (see
 //! `WindowApp::scroll_loom`) the same way [`super::stonecutter`]'s own
 //! `start_index_for_scroll` is; **the scrollbar thumb drag is not** —
-//! `LoomScreen.mouseDragged`'s own click-track/drag-track offset
+//! The loom screen's mouse dragged's own click-track/drag-track offset
 //! inconsistency (`yo = topPos + 9` to *start* a drag,
 //! `yscr = topPos + 13` to *continue* one) is real vanilla behaviour, not a
 //! typo, but reproducing a drag surface for it was judged not worth the
@@ -70,23 +70,23 @@ use lodestone_game::item::ItemStack;
 
 use super::layout::Rect;
 
-/// `LoomMenu`'s own slot indices — `Menu::loom`'s doc: banner (`0`), dye
+/// The loom menu's own slot indices — `Menu::loom`'s doc: banner (`0`), dye
 /// (`1`), pattern item (`2`), result (`3`).
 pub const BANNER_SLOT: usize = 0;
 pub const DYE_SLOT: usize = 1;
 pub const PATTERN_SLOT: usize = 2;
 
-/// A banner's own real cap — `BannerBlockEntity`'s pattern list is capped at
-/// six layers (`hasMaxPatterns` in `LoomMenu.slotsChanged`), mirroring
+/// A banner's own real cap — the banner block entity's pattern list is capped at
+/// six layers (`hasMaxPatterns` in the loom menu's slots changed), mirroring
 /// `lodestone_server::loom::MAX_BANNER_PATTERNS`.
 pub const MAX_BANNER_PATTERNS: usize = 6;
 
-/// `LoomScreen.PATTERNS_X`/`PATTERNS_Y`/cell size/column count.
+/// The loom screen's patterns x/`PATTERNS_Y`/cell size/column count.
 const GRID_X: f32 = 60.0;
 const GRID_Y: f32 = 13.0;
 const CELL: f32 = 14.0;
 const COLUMNS: i32 = 4;
-/// `LoomScreen`'s four visible rows (sixteen visible buttons at once).
+/// The loom screen's four visible rows (sixteen visible buttons at once).
 const VISIBLE_ROWS: i32 = 4;
 
 /// `tags/banner_pattern/pattern_item/*.json`, one row per file — `(pattern
@@ -145,27 +145,27 @@ const BASE_PATTERNS: &[&str] = &[
     "gradient_up",
 ];
 
-/// `BannerItem` — `LoomMenu`'s `bannerSlot.mayPlace`.
+/// The banner item — the loom menu's `bannerSlot.mayPlace`.
 #[must_use]
 pub fn is_banner_item(item: &str) -> bool {
     item.strip_prefix("minecraft:").is_some_and(|rest| rest.ends_with("_banner"))
 }
 
-/// `LoomMenu.isDyeItem` — the same `*_dye` suffix convention every dye item
+/// The loom menu's is dye item — the same `*_dye` suffix convention every dye item
 /// already follows in this crate.
 #[must_use]
 pub fn is_dye_item(item: &str) -> bool {
     item.strip_prefix("minecraft:").is_some_and(|rest| rest.ends_with("_dye"))
 }
 
-/// `LoomMenu.isPatternItem` — a [`PATTERN_ITEMS`] member.
+/// The loom menu's is pattern item — a [`PATTERN_ITEMS`] member.
 #[must_use]
 pub fn is_pattern_item(item: &str) -> bool {
     let bare = item.strip_prefix("minecraft:").unwrap_or(item);
     PATTERN_ITEMS.iter().any(|(name, _)| *name == bare)
 }
 
-/// `LoomMenu.getSelectablePatterns`'s own count: the pattern-item slot's
+/// The loom menu's get selectable patterns's own count: the pattern-item slot's
 /// single granted pattern, the 32-pattern base grid when the slot is empty,
 /// or zero for an item this crate does not recognise as a pattern item
 /// (vanilla's own `mayPlace` would already have refused it into the slot).
@@ -181,7 +181,7 @@ pub fn selectable_pattern_count(pattern_item: Option<&ItemStack>) -> usize {
     }
 }
 
-/// `LoomScreen`'s own `displayPatterns` gate (`containerChanged`): a banner
+/// The loom screen's own `displayPatterns` gate (`containerChanged`): a banner
 /// and a dye both present, the banner not already at its six-layer cap, and
 /// at least one pattern offered.
 #[must_use]
@@ -201,9 +201,9 @@ pub fn display_patterns(
 }
 
 /// One pattern button's local-widget-pixel rect, `index`-relative to
-/// `start_row` — `LoomScreen.extractBackground`'s own `posX`/`posY`
+/// `start_row` — the loom screen's extract background's own `posX`/`posY`
 /// (`x + column * 14`, `y + row * 14`), where `row`/`column` are recovered
-/// from the absolute `index` the same way `LoomScreen.mouseClicked`'s loop
+/// from the absolute `index` the same way loom screen's mouse clicked's loop
 /// derives `index = (row + startRow) * 4 + column`.
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // index/start_row are always small
@@ -227,7 +227,7 @@ fn hit(x: f32, y: f32, r: Rect) -> bool {
 }
 
 /// Resolves a **local widget-pixel** point to the pattern index it hits, if
-/// any — vanilla's own loom-screen click handling's own nested loop, `start_row`-relative,
+/// any — vanilla's loom-screen click handling's nested loop, `start_row`-relative,
 /// bounded by `pattern_count` (vanilla's own selectable-patterns count):
 /// a partially-filled last row must not accept a click past the real pattern
 /// count even though its cell rect exists, the same guard
@@ -250,7 +250,7 @@ pub fn hit_test_local(pattern_count: usize, start_row: i32, x: f32, y: f32) -> O
     None
 }
 
-/// `LoomScreen.totalRowCount`: `ceil(pattern_count / 4)`, minus the four
+/// The loom screen's total row count: `ceil(pattern_count / 4)`, minus the four
 /// visible rows, floored at `0` — the same shape
 /// [`super::stonecutter::offscreen_rows`] uses for its own three-row window.
 #[must_use]
@@ -259,12 +259,12 @@ fn offscreen_rows(pattern_count: usize) -> i32 {
     rows.max(0)
 }
 
-/// `LoomScreen.mouseDragged`/`mouseScrolled`'s shared tail:
+/// The loom screen's mouse dragged/`mouseScrolled`'s shared tail:
 /// `startRow = (scrollOffs * offscreenRows + 0.5) as i32`, `scroll_offset`
 /// clamped to `0.0..=1.0` first exactly as vanilla clamps it before either
 /// call site uses it. **Not pre-multiplied by the column count** — unlike
 /// [`super::stonecutter::start_index_for_scroll`]'s `start_index`, this is a
-/// row count, matching `LoomScreen`'s own `startRow` field.
+/// row count, matching loom screen's own `startRow` field.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)] // matches vanilla's own (int) cast
 pub fn start_row_for_scroll(scroll_offset: f32, pattern_count: usize) -> i32 {
@@ -273,7 +273,7 @@ pub fn start_row_for_scroll(scroll_offset: f32, pattern_count: usize) -> i32 {
     (clamped * rows + 0.5) as i32
 }
 
-/// `LoomScreen.mouseScrolled`'s own step: `scrollOffs = clamp(scrollOffs -
+/// The loom screen's mouse scrolled's own step: `scrollOffs = clamp(scrollOffs -
 /// scrollY / offscreenRows, 0, 1)` — a no-op (returns `current` unchanged)
 /// when nothing is offscreen, matching vanilla's own `offscreenRows > 0`
 /// guard rather than dividing by zero.

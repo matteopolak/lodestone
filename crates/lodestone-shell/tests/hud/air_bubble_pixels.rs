@@ -119,7 +119,7 @@ fn air_row_rect(width: u32, height: u32, scale: f32) -> (u32, u32, u32, u32) {
     // ~20 logical pixels below the rect being measured.
     //
     // `hud::vitals_line_base` is now the single expression the draw itself calls
-    // (vanilla's `Hud.extractPlayerHealth`'s `yLineBase == guiHeight - 39`, which
+    // (vanilla's Hud's extract player health's `yLineBase == guiHeight - 39`, which
     // takes no branch at all), so this rect cannot desync from it — including if
     // the hotbar or an XP bar is enabled in this fixture later, which is exactly
     // what used to break it.

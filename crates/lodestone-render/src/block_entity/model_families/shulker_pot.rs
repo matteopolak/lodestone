@@ -94,7 +94,7 @@ pub fn shulker_texture_stems() -> Vec<&'static str> {
 /// vanilla's own model-transform construction:
 ///
 /// ```text
-/// translation(0.5, 0.5, 0.5) · scale(0.9995) · rotate(facing.getRotation())
+/// translation(0.5, 0.5, 0.5) · scale(0.9995) · rotate(facing's get rotation)
 ///   · scale(1, -1, -1) · translate(0, -1, 0)
 /// ```
 ///

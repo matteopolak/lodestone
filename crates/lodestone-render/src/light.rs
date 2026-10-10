@@ -108,7 +108,7 @@
 //! * **`SKY_LIGHT_COLOR` is not constant white.** It is a *timeline* attribute
 //!   (vanilla's timeline registration) keyframed `-1` (white) at ticks 730 and 11270 and
 //!   `NIGHT_SKY_LIGHT_COLOR` at 13140 and 22860 — and that constant is
-//!   `colorFromFloat(1.0, 0.48, 0.48, 1.0)`, i.e. **blue**: red and green fall to
+//!   color from float, i.e. **blue**: red and green fall to
 //!   48% while blue holds at 100%. So vanilla's night light is not merely dimmer
 //!   than day, it is a different *hue*, which is why the grey specialisation in
 //!   [`not_gamma`] is a daylight-only convenience. This is the remaining reason
@@ -328,7 +328,7 @@ pub fn not_gamma_vec3(c: [f32; 3]) -> [f32; 3] {
 ///
 /// `SKY_LIGHT_COLOR` and `SKY_LIGHT_FACTOR` share identical keyframe ticks —
 /// `730 / 11270 / 13140 / 22860` (vanilla's timeline registration) — and neither track
-/// calls `.setEasing(...)`, so both interpolate linearly on the same
+/// calls `.set_easing(...)`, so both interpolate linearly on the same
 /// parameter. `SKY_LIGHT_FACTOR` runs `1.0` (day, ticks `≤ 730` and the
 /// `11270..13140` plateau) down to `0.24` (night, `≥ 13140`), so
 ///
@@ -337,12 +337,12 @@ pub fn not_gamma_vec3(c: [f32; 3]) -> [f32; 3] {
 /// ```
 ///
 /// is the same interpolation parameter `SKY_LIGHT_COLOR` uses, and
-/// `srgbLerp(t, white, NIGHT_SKY_LIGHT_COLOR)` (`NIGHT_SKY_LIGHT_COLOR =
-/// colorFromFloat(1.0, 0.48, 0.48, 1.0)` = `0xFF7A7AFF`, vanilla's timeline
+/// srgb lerp (`NIGHT_SKY_LIGHT_COLOR =
+/// color_from_float(1.0, 0.48, 0.48, 1.0)` = `0xFF7A7AFF`, vanilla's timeline
 /// registration)
 /// recovers the colour — **verified byte-exact** against the JVM oracle
 /// `tests/support/sky_light_timeline_jvm.txt` at ticks 0, 12000, 13000, 13140
-/// (see this function's tests), including `Mth.lerpInt`'s `floor` (a `round`
+/// (see this function's tests), including Mth's lerp int's `floor` (a `round`
 /// here is off by one byte on roughly half of all ticks).
 ///
 /// **Two known exceptions, both momentary, and both safe under the `clamp`:**

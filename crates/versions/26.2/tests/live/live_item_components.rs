@@ -14,7 +14,7 @@
 //!
 //! `HANDOFF.md` records the rule: when we own both sides of a round-trip test it
 //! cannot detect a shared misunderstanding of the wire format. Our own encoder
-//! and decoder could agree on a *wrong* `DataComponentPatch` layout and a
+//! and decoder could agree on a *wrong* data-component patch layout and a
 //! self-round-trip would pass while the real server disconnects us. So this gate
 //! joins the **real** server, has it (not us) serialise items carrying
 //! components, and asserts our decoder recovers them. The pre-fix code

@@ -4,7 +4,7 @@
 //!
 //! # Why a version-owned census, and not the wire
 //!
-//! A clientbound `ItemStack` is `(count, item registry id, DataComponentPatch)`,
+//! A clientbound item stack is `(count, item registry id, component patch)`,
 //! and that patch is the **delta** from the item's built-in prototype component
 //! map. Vanilla keeps all three of these components in that prototype, so
 //! `/give … diamond_helmet` arrives as an *empty patch* and the client is
@@ -19,7 +19,7 @@
 //!
 //! * **`minecraft:equippable`** — vanilla's own armour-slot "may place" check is
 //!   an "is equippable in slot" check on the holding entity, which is
-//!   `slot == equippable.slot() && canUseSlot(…) && equippable.canBeEquippedBy(…)`.
+//!   `slot == equippable.slot() && can_use_slot(…) && equippable.can_be_equipped_by(…)`.
 //!   With no component, the only slot that
 //!   accepts anything is the main-hand slot — **no armour is equippable by any click
 //!   type**.

@@ -5,8 +5,8 @@
 //! `entity::model_for_type` resolves an [`EntityType`] against the
 //! `entity_models` corpus, and the corpus names the four boat rigs by *class* —
 //! `boat`, `chest_boat`, `raft`, `chest_raft` — because that is how vanilla builds
-//! them (`BoatRenderer` picks its `ModelLayerLocation` from the boat's variant and
-//! its geometry from `BoatModel`/`ChestBoatModel`/`RaftModel`/`ChestRaftModel`; the
+//! them (the boat renderer picks its model layer from the boat's variant
+//! and its geometry from the boat, chest-boat, raft and chest-raft models; the
 //! wood species is a texture, not a mesh). The registry, meanwhile, has twenty-two
 //! *types*. So `model_for_type(EntityType::OakBoat)` returned `None`, and
 //! `resolve_animated` skips an entity with no model — a placed boat was invisible,
@@ -30,7 +30,7 @@
 //!
 //! Not from the suffix rule under test. [`RIGS`] pairs each type with the vanilla
 //! **class** the jar census recorded for it — `lodestone-data`'s generated
-//! `entity_census` carries `Boat` / `ChestBoat` / `Raft` / `ChestRaft` per type in
+//! `entity_census` carries a boat, chest-boat, raft or chest-raft class per type in
 //! its provenance column, dumped from the real registry — and the four class names
 //! map one-to-one onto the four corpus rigs. The table is then checked against
 //! `lodestone_data::entity_types` so it cannot drift into fiction: a species added
@@ -52,8 +52,8 @@ use lodestone_render::entity::model_for_type;
 ///
 /// `(entity type, corpus rig name)`. Ten wood species (nine from 26.2, poplar from 26.3) × (boat,
 /// chest boat), plus the two bamboo rafts. The rig column is the jar census's class column
-/// lowercased: `Boat` → `boat`, `ChestBoat` → `chest_boat`, `Raft` → `raft`,
-/// `ChestRaft` → `chest_raft`.
+/// lowercased and snake-cased: boat → `boat`, chest boat → `chest_boat`, raft → `raft`,
+/// chest raft → `chest_raft`.
 const RIGS: &[(EntityType, &str)] = &[
     (EntityType::AcaciaBoat, "boat"),
     (EntityType::AcaciaChestBoat, "chest_boat"),

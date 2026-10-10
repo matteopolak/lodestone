@@ -104,7 +104,7 @@ pub fn mode_for_state(state: StateId) -> Option<CommandBlockMode> {
 /// vanilla's own conditional block-state property.
 ///
 /// Absent property reads `false`, matching
-/// vanilla's own command-block-entity is-conditional check's own fallback for a block that is not
+/// vanilla's command-block-entity is-conditional check's fallback for a block that is not
 /// a command block.
 #[must_use]
 fn conditional_for_state(state: StateId) -> bool {

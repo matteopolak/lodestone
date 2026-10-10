@@ -39,7 +39,7 @@
 //! an effect the acting client would also predict must not reach *that* client.
 //! Publish it through `BlockTickFeed::publish_effect_except` with the
 //! acting player's uuid — vanilla's own `except` argument on
-//! `Level.playSound`/`Level.levelEvent` — and every other player still hears it.
+//! Level's play sound/Level's level event — and every other player still hears it.
 //! `publish_effect` is for effects with
 //! no acting player at all.
 
@@ -57,7 +57,7 @@ use crate::block_entities::BlockEntityKind;
 /// would just have to be un-lost there.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorldEffect {
-    /// Vanilla `ClientboundSoundPacket` — a positioned sound from the
+    /// Vanilla sound packet — a positioned sound from the
     /// `minecraft:sound_event` registry.
     Sound {
         /// Sound event id, e.g. `minecraft:entity.zombie.hurt`.
@@ -91,7 +91,7 @@ pub enum WorldEffect {
         /// this for the wither spawn and the dragon death only).
         global: bool,
     },
-    /// Vanilla `ClientboundLevelParticlesPacket` — a burst of one particle type
+    /// Vanilla level-particles packet — a burst of one particle type
     /// with a randomised spread.
     Particles {
         /// Particle type id, e.g. `minecraft:crit`.
@@ -109,7 +109,7 @@ pub enum WorldEffect {
         /// Bypass the client's particle-distance limiter.
         long_distance: bool,
     },
-    /// Vanilla `ClientboundBlockEntityDataPacket` — one block entity's update tag,
+    /// Vanilla block-entity-data packet — one block entity's update tag,
     /// republished for a cell whose *record* changed without the chunk being
     /// resent.
     ///
@@ -336,7 +336,7 @@ pub fn block_destroyed_id(pos: BlockPos, state: StateId) -> Option<WorldEffect> 
 
 /// The place sound for `state` at `pos` — vanilla's own
 /// item-place/block-placed-by pair, which plays
-/// `soundType.getPlaceSound()` at `(volume + 1) / 2` and `pitch * 0.8`.
+/// sound type's get place sound at `(volume + 1) / 2` and `pitch * 0.8`.
 #[must_use]
 pub fn block_placed(pos: BlockPos, state: StateId, seed: i64) -> Option<WorldEffect> {
     let sound = lodestone_data::sound_types::place_sound_name(state)?;
@@ -355,7 +355,7 @@ pub fn block_placed(pos: BlockPos, state: StateId, seed: i64) -> Option<WorldEff
 /// from `from` to `to`, or `None` if that pair is not an open/close toggle.
 ///
 /// Vanilla's own door play-sound routine is a real
-/// `level.playSound(…, SoundSource.BLOCKS, 1.0F, random.nextFloat() * 0.1F +
+/// `level.play_sound(…, the sound source's blocks, 1.0F, random.nextFloat() * 0.1F +
 /// 0.9F)` — **not** a level event, which is the thing worth checking before
 /// reaching for a `SOUND_*` level-event constant. The trapdoor's own play-sound routine
 /// and the fence gate's are the same shape.
@@ -420,14 +420,14 @@ pub fn openable_toggled_id(
 /// The hurt or death sound for an entity of type `entity_type`, or `None` for a
 /// type 26.2 gives no such sound (every non-living entity, plus the silent mobs).
 ///
-/// `LivingEntity.hurt` plays `getHurtSound()` and `LivingEntity.die` plays
-/// `getDeathSound()`; both are per-class constants of the form
+/// The living entity's hurt plays get hurt sound and the living entity's die plays
+/// get death sound; both are per-class constants of the form
 /// `entity.<path>.hurt` / `entity.<path>.death`, so deriving the name and
 /// checking it against the registry (module doc) is exact for every mob that has
 /// one and correctly silent for the rest.
 ///
 /// The category is `Hostile` or `Neutral` following vanilla's own
-/// `Entity.getSoundSource` split (`Monster` overrides it to `HOSTILE`).
+/// Entity's get sound source split (`Monster` overrides it to `HOSTILE`).
 #[must_use]
 pub fn mob_vocalisation(
     entity_type: &str,
@@ -461,13 +461,13 @@ pub fn mob_vocalisation(
 /// derivation gets wrong) is silently `None` rather than a rejected packet.
 ///
 /// The category split is [`mob_vocalisation`]'s own `Hostile`/`Neutral`
-/// split, for the same reason (`Entity.getSoundSource`, overridden to
+/// split, for the same reason (Entity's get sound source, overridden to
 /// `HOSTILE` by `Monster`).
 ///
 /// `pitch` is the caller's, drawn from whatever pseudo-random source it has
 /// (see `MobSim::roll_ambient_sound`'s own doc for why this crate cannot
 /// draw two independent samples from vanilla's level RNG the way
-/// `LivingEntity.getVoicePitch` does), but the **centre** it is built around
+/// The living entity's get voice pitch does), but the **centre** it is built around
 /// is this function's call, not the caller's: a baby's ambient call is
 /// higher-pitched than an adult's in vanilla regardless of species, so
 /// `is_baby` shifts the *expected* centre from `1.0` to `1.5` and the caller
@@ -496,10 +496,10 @@ pub fn mob_ambient_sound(
     })
 }
 
-/// `ZombieVillager.startConverting`'s entity-event sound
-/// (`SoundEvents.ZOMBIE_VILLAGER_CURE`, `entity.zombie_villager.cure`) —
+/// ZombieVillager's start converting's entity-event sound
+/// (the sound events's zombie villager cure, `entity.zombie_villager.cure`) —
 /// played the instant a golden apple starts the conversion
-/// timer. Category is always `Hostile`, matching `Monster.getSoundSource`
+/// timer. Category is always `Hostile`, matching Monster's get sound source
 /// (a converting zombie villager is still a zombie until the timer
 /// completes).
 #[must_use]
@@ -516,7 +516,7 @@ pub fn zombie_villager_cure_sound(pos: Vec3, volume: f32, pitch: f32, seed: i64)
 }
 
 /// The centre of the block at `pos` — where vanilla's
-/// `Level.playSound(…, BlockPos, …)` overload puts a block sound
+/// Level's play sound overload puts a block sound
 /// (`pos.getX() + 0.5` and so on).
 fn block_centre(pos: BlockPos) -> Vec3 {
     Vec3 {

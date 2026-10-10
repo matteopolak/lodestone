@@ -76,8 +76,8 @@ impl<'w> MobSim<'w> {
     }
 
     /// The id and position of every live end crystal — what
-    /// `EnderDragon.checkCrystals`'s rescan
-    /// (`level().getEntitiesOfClass(EndCrystal.class, ...)`) reads before
+    /// EnderDragon's check crystals's rescan
+    /// (level's get entities of class) reads before
     /// picking the nearest. Unfiltered by distance: the caller (`dragon.rs`'s
     /// `tick_dragons`) does the nearest-of search itself, matching how
     /// `checkCrystals` folds the scan and the pick in one pass.

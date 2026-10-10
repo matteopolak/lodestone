@@ -1,6 +1,6 @@
 //! Hermetic tests for protocol 776 `add_entity` dispatch.
 //!
-//! `add_entity`'s wire layout (`ClientboundAddEntityPacket`) is VarInt entity
+//! `add_entity`'s wire layout (the add-entity packet) is VarInt entity
 //! id, UUID, VarInt entity-type registry id, position `f64`×3, a low-precision
 //! velocity, three signed-byte angles (pitch, yaw, head yaw), and a VarInt data
 //! field. Head yaw travels separately from body yaw and is surfaced through the
@@ -38,7 +38,7 @@ fn var_i32(value: i32) -> Vec<u8> {
     out
 }
 
-/// Independent angle unpacker (`vanilla's own mth's own unpack degrees`): a signed byte over a
+/// Independent angle unpacker (the angle-byte unpacking): a signed byte over a
 /// 256-step circle.
 fn unpack_degrees(packed: i8) -> f32 {
     f32::from(packed) * 360.0 / 256.0
@@ -105,7 +105,7 @@ fn falling_block_type_id() -> i32 {
 /// directive, after the spawn and the head rotation.
 ///
 /// **This is the only channel the state ever travels on.**
-/// `vanilla's own falling block entity's own define synched data` registers `DATA_START_POS` and nothing
+/// The falling block registers only its start position as synched data and nothing
 /// else, so no `set_entity_data` ever carries it: an adapter that discards the
 /// Object Data field leaves every falling block drawn as whatever state id `0`
 /// resolves to, with nothing logged anywhere.
@@ -182,11 +182,11 @@ fn fishing_bobber_type_id() -> i32 {
 /// A fishing bobber's `ADD_ENTITY` yields the **caster's** entity id out of the
 /// same Object Data field the falling block reads a block state from.
 ///
-/// `vanilla's own fishing hook's own get add entity packet` writes
-/// `owner == null ? this.getId() : owner.getId()` there, and — exactly like the
+/// The fishing hook's add-entity packet writes the owner's entity id (or its own id
+/// when there is no owner) there, and — exactly like the
 /// falling block's state — nothing else carries it:
-/// `vanilla's own fishing hook's own define synched data` registers only `DATA_HOOKED_ENTITY` and
-/// `DATA_BITING`. An adapter that discards the field leaves the client with a
+/// The hook registers only its hooked-entity and
+/// biting fields. An adapter that discards the field leaves the client with a
 /// bobber it cannot anchor a line to.
 ///
 /// The owner id is picked **distinct from the bobber's own id** on purpose: the

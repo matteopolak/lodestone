@@ -109,7 +109,7 @@ pub struct SessionStatistics(pub lodestone_game::progress::Statistics);
 /// `update_recipes`.
 ///
 /// **Not** the recipe corpus (that is `RecipeRegistry`), and note 26.x identifies
-/// a recipe by a per-session `RecipeDisplayId` `i32` rather than an `Identifier`,
+/// a recipe by a per-session recipe display id `i32` rather than an `Identifier`,
 /// so `lodestone_game::recipe::RecipeUnlockState` -- which keys on `Identifier` --
 /// cannot be fed from this packet family. See
 /// [`lodestone_game::recipe_sync::RecipeBookSync`].
@@ -354,7 +354,7 @@ pub struct ServerGameMode(pub Option<GameMode>);
 
 /// The world difficulty as the server last reported it, plus whether it is
 /// locked from further changes in the options UI
-/// (`ClientboundChangeDifficultyPacket` / [`ClientEvent::DifficultyChanged`]).
+/// (the change-difficulty packet / [`ClientEvent::DifficultyChanged`]).
 ///
 /// `None` before the first report — one of the two `HudState`-shaped islands
 /// this table found: `HudState::apply` folded this correctly and was
@@ -380,8 +380,8 @@ pub struct ServerDifficulty(pub Option<(Difficulty, bool)>);
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ServerSimulationDistance(pub Option<i32>);
 
-/// The local player's server-granted **abilities** — `Abilities.Packed` on the
-/// wire, `ClientboundPlayerAbilitiesPacket`.
+/// The local player's server-granted **abilities** — a packed byte on the
+/// wire, in the player-abilities packet.
 ///
 /// # Why this exists at all: it was a complete island
 ///
@@ -402,7 +402,7 @@ pub struct ServerSimulationDistance(pub Option<i32>);
 /// # `flying` is state, `may_fly` is permission
 ///
 /// They are separate wire bits and must not be collapsed. `may_fly` gates the
-/// client's double-tap toggle (`LocalPlayer.aiStep`'s `abilities.mayfly` check);
+/// client's double-tap toggle (LocalPlayer's ai step's `abilities.mayfly` check);
 /// `flying` is whether flight is engaged right now, and the server both reports
 /// it and accepts our echo of it (`ServerboundPlayerAbilities`). A client that
 /// sets `flying` without `may_fly` desyncs and gets corrected.

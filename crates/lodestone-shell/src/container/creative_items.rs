@@ -96,7 +96,7 @@
 //!   dedup, the `every_item_id_is_namespaced_lowercase_with_no_spaces` test, the page/grid
 //!   split) working unchanged: the suffix is still `minecraft:`-prefixed, still lowercase,
 //!   still space-free, and -- critically -- still a **distinct string per variant**, which
-//!   is what makes the search tab's `ItemStackLinkedSet`-style dedup treat each potion and
+//!   is what makes the search tab's item stack linked set-style dedup treat each potion and
 //!   each book as its own entry rather than collapsing all 46 (or 43) into one.
 //!
 //! ## Deliberately skipped (component-bearing or registry-sweep families)
@@ -171,7 +171,7 @@ pub(crate) struct CreativeTab {
     pub(crate) items: &'static [&'static str],
 }
 
-/// Every tab, in `CreativeModeTabs.bootstrap` registration order — which is also
+/// Every tab, in the creative mode tabs's bootstrap registration order — which is also
 /// tab-strip order once `top_row`/`column` are applied.
 ///
 pub(crate) static CREATIVE_TABS: &[CreativeTab] = &[
@@ -1683,7 +1683,7 @@ pub(crate) static CREATIVE_TABS: &[CreativeTab] = &[
             "minecraft:crossbow",
             "minecraft:arrow",
             "minecraft:spectral_arrow",
-            // `generatePotionEffectTypes(combat, potions, Items.TIPPED_ARROW, ...)`:
+            // generate potion effect types:
             // one `minecraft:tipped_arrow` per `minecraft:potion` registry entry, in
             // that registry's own order — see `creative_items.rs`'s module doc for
             // the `#<potion path>` suffix convention and its outside source.
@@ -1784,7 +1784,7 @@ pub(crate) static CREATIVE_TABS: &[CreativeTab] = &[
             "minecraft:rabbit_stew",
             "minecraft:milk_bucket",
             "minecraft:honey_bottle",
-            // `generatePotionEffectTypes(consumables, potions, Items.POTION, ...)`,
+            // generate potion effect types,
             // then `Items.SPLASH_POTION`, then `Items.LINGERING_POTION`, in that call
             // order -- see the module doc for the `#<potion path>` suffix convention.
             "minecraft:potion#water",
@@ -2085,7 +2085,7 @@ pub(crate) static CREATIVE_TABS: &[CreativeTab] = &[
             "minecraft:experience_bottle",
             "minecraft:trial_key",
             "minecraft:ominous_trial_key",
-            // `generateEnchantmentBookTypesOnlyMaxLevel(ingredients, enchantments, ...)`:
+            // generate enchantment book types only max level:
             // one `minecraft:enchanted_book` per enchantment, at its own max level, in
             // alphabetical registry-path order -- see the module doc.
             "minecraft:enchanted_book#aqua_affinity",

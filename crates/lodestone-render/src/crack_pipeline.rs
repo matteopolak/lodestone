@@ -20,7 +20,7 @@
 //!
 //! # Blend: doubled multiply, not alpha
 //!
-//! Vanilla's `pipeline/crumbling` (`RenderPipelines.CRUMBLING`, its
+//! Vanilla's crumbling pipeline (its
 //! render-pipeline registration table) blends colour as
 //! `src_factor = DST_COLOR, dst_factor = SRC_COLOR, op = Add` — i.e.
 //! `out = dst*src + src*dst = 2 * src * dst`, a doubled multiply that can only
@@ -170,8 +170,8 @@ impl CrackPipeline {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
-                    // Doubled multiply, ported from vanilla's `pipeline/crumbling`
-                    // (`RenderPipelines.CRUMBLING`): colour = dst*src + src*dst =
+                    // Doubled multiply, ported from vanilla's crumbling pipeline
+                    // : colour = dst*src + src*dst =
                     // 2*src*dst, which only ever darkens. Plain `ALPHA_BLENDING`
                     // *adds* the sprite's light texels on top of the block instead
                     // of multiplying them in — that's the "too white" defect.
@@ -212,9 +212,9 @@ impl CrackPipeline {
                 // `DepthStencilState(GREATER_THAN_OR_EQUAL, false, 1.0F, 10.0F)`
                 // is `(depthTest, writeDepth, depthBiasScaleFactor,
                 // depthBiasConstant)` — scale factor *then* constant, verified
-                // against `VulkanRenderPipeline`'s own decompiled source where
-                // `depthBiasConstantFactor` reads `.depthBiasConstant()` and
-                // `depthBiasSlopeFactor` reads `.depthBiasScaleFactor()`. So
+                // against the Vulkan pipeline's own source, where
+                // the constant factor reads the bias constant and
+                // the slope factor reads the bias scale factor. So
                 // vanilla's actual bias is slope=1.0, constant=10.0 (easy to get
                 // backwards from the constructor call alone). Vanilla is
                 // reversed-Z (GREATER_THAN_OR_EQUAL, higher = nearer), so a

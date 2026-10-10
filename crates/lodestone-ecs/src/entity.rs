@@ -1023,7 +1023,7 @@ pub struct DisplayBlockState(pub BlockStateRef);
 pub struct DisplayItemContext(pub u8);
 
 /// A `Display` entity's packed brightness override
-/// (vanilla's own brightness-override metadata index), in vanilla's own
+/// (vanilla's brightness-override metadata index), in vanilla's
 /// packed-brightness layout (`block << 4 | sky << 20`) — **not** this
 /// renderer's one-byte `sky << 4 | block`. **Absent** until first reported, and
 /// `-1` (vanilla's own no-brightness-override sentinel) when the entity explicitly has no

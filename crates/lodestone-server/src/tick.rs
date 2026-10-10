@@ -397,7 +397,7 @@ where
 }
 
 
-/// Vanilla's own per-queue drain cap, `ServerLevel.MAX_SCHEDULED_TICKS_PER_TICK`
+/// Vanilla's own per-queue drain cap, the server level's max scheduled ticks per tick
 /// — see `crate::scheduled_tick`'s module doc for the
 /// full citation of `blockTicks.tick(tick, 65536, ...)`/`fluidTicks.tick(tick,
 /// 65536, ...)`.
@@ -575,8 +575,8 @@ pub struct BlockTickFeed(
     /// does.
     ///
     /// The `Option<Uuid>` is vanilla's `except` player — the first argument of
-    /// `Level.playSound(@Nullable Entity except, …)` (vanilla's own `Level`) and of
-    /// `Level.levelEvent(@Nullable Entity except, …)`. `None` reaches everyone.
+    /// Level's play sound (vanilla's own `Level`) and of
+    /// Level's level event. `None` reaches everyone.
     /// Without it the acting player's own break and place sounds could not be
     /// published at all, because the shell predicts them locally and would play
     /// each one twice; see [`drain_effects_for`](Self::drain_effects_for).
@@ -639,7 +639,7 @@ impl BlockTickFeed {
     }
 
     /// Records one world effect that `except` must **not** receive — vanilla's
-    /// `Level.playSound(player, …)`, whose first argument is the player to skip.
+    /// Level's play sound, whose first argument is the player to skip.
     ///
     /// This is what lets a player's own block break and place sounds be
     /// published: the acting client predicts them locally
@@ -897,7 +897,7 @@ fn post_note_block_vibration<W: crate::chunk::ChunkSource>(
 /// block is travelling through it, so a client that receives only the block update
 /// has a cell it knows is animating and no geometry to animate. The record it needs
 /// is read back out of the pending commit tick at that same cell — the pending tick
-/// *is* this crate's `PistonMovingBlockEntity`; see `crate::piston::finish_kind` for
+/// *is* this crate's piston moving block entity; see `crate::piston::finish_kind` for
 /// why it lives there rather than in a block-entity map.
 ///
 /// **The wire ordering this depends on is the drain order in `crate::server`**, not
@@ -1115,7 +1115,7 @@ impl TickDriver {
 /// `GameRules.MAX_COMMAND_SEQUENCE_LENGTH`'s default (`65536`) — this crate
 /// has no gamerule store for it yet, so the `TICK_COMMAND_BLOCK` arm below
 /// uses vanilla's own default as a plain bound rather than reading a rule
-/// that does not exist, matching `CommandBlock.executeChain`'s own overflow
+/// that does not exist, matching CommandBlock's execute chain's own overflow
 /// guard in spirit if not in configurability.
 const MAX_COMMAND_CHAIN_LENGTH: u32 = 65_536;
 
@@ -1186,7 +1186,7 @@ impl ChunkSource for ResidentTickSource<'_> {
 /// [`crate::commands::CommandSource`] (`crate::command_block
 /// ::COMMAND_BLOCK_SOURCE_UUID`, permission level 2 — `Commands
 /// .LEVEL_GAMEMASTERS`, matching `LevelBasedPermissionSet.GAMEMASTER` in
-/// `CommandBlockEntity`'s own `createCommandSourceStack`) and returns whether
+/// The command block entity's own `createCommandSourceStack`) and returns whether
 /// it ran (`CommandResponse::is_ran`) — the `TICK_COMMAND_BLOCK` arm below
 /// folds that into [`crate::command_block::CommandBlockData::success_count`].
 ///
@@ -1334,9 +1334,9 @@ fn run_command_block_command(
 ///
 /// Each iteration additionally drains the block-tick queue, then the
 /// fluid-tick queue, then runs random ticks over `tick_area` — in exactly
-/// that order, mirroring `ServerLevel.tick`'s own sequence
+/// that order, mirroring server level's tick's own sequence
 /// (`blockTicks.tick(...)` before
-/// `fluidTicks.tick(...)` before `this.getChunkSource().tick(...)`, which is
+/// `fluidTicks.tick(...)` before get chunk source's get chunk source, which is
 /// what eventually calls `tickChunk`'s random ticks — see
 /// vanilla's own chunk-cache tick). See [`crate::scheduled_tick`] for the queues'
 /// own ordering contract and [`crate::random_tick`] for the random-tick
@@ -1778,7 +1778,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     let mut game_tick: u64 = 0;
     // The day clock is world-state behavior, advanced one
     // per tick in lockstep with `game_tick` until a night skip jumps it — the
-    // `dayTime` counter of vanilla's `ServerLevel.tickTime` (which increments
+    // `dayTime` counter of vanilla's server level's tick time (which increments
     // both `gameTime` and `dayTime` as two counters). Owned by this thread with
     // no lock, exactly like `game_tick`. `i64` because the night skip lands on
     // `SleepState::morning_after`'s multiples of `DAY_LENGTH_TICKS`.
@@ -1816,7 +1816,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     let mut fluid_env: Option<crate::fluid::FluidEnv> = None;
     // `crate::fire`'s behaviour stream, and its lazily-resolved vertical extent.
     //
-    // One stream for the whole world, not one per fire block: `FireBlock::tick`
+    // One stream for the whole world, not one per fire block: the fire block's tick
     // draws from `level.random`, which is shared across every block tick in
     // vanilla too, so a per-cell RNG would produce a *different* world rather
     // than a more deterministic one. The draw count per tick is the
@@ -1867,8 +1867,8 @@ async fn run_tick_loop_with_weather_impl<W>(
     );
     // `crate::redstone_dispenser`'s slot pick (`random_slot`) and toss math
     // (`plain_toss`) — one stream for both, matching vanilla's single
-    // `RandomSource` per level: `DispenserBlockEntity.getRandomSlot` and
-    // `DefaultDispenseItemBehavior.execute` draw from the same generator.
+    // `RandomSource` per level: the dispenser block entity's get random slot and
+    // The default dispense item behavior's execute draw from the same generator.
     let mut dispenser_rng =
         crate::mob_spawn::SpawnRng::new(crate::redstone_dispenser::DISPENSER_BEHAVIOR_SEED);
     // `minecraft:spawner` block entities' delay reroll and per-attempt cell
@@ -2062,7 +2062,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // **Peaceful removes monsters.**
         // Vanilla does it in `Mob.checkDespawn`, which discards any
         // `MobCategory.MONSTER` entity when
-        // `level.getDifficulty() == Difficulty.PEACEFUL`; a difficulty that is
+        // `level.get_difficulty() == Difficulty.PEACEFUL`; a difficulty that is
         // is stored and broadcast but not read by the simulation, monsters remain.
         //
         // Also the `mob_drops` rule's carrier: `MobSim` has no handle on the world
@@ -2105,7 +2105,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 spawn_difficulty_instance.special_multiplier(),
                 spawn_difficulty_instance.is_hard(),
             );
-            // `level.isSpawningMonsters()` — `Zombie.hurtServer`'s other
+            // level's is spawning monsters — `Zombie.hurtServer`'s other
             // reinforcement-roll gate alongside the `hard` flag just above.
             sim.set_spawn_monsters_enabled(world_state.spawn_mobs());
             sim.set_difficulty(world_state.difficulty().0);
@@ -2190,7 +2190,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 // 24 000-tick phase boundary. This is also the mirror's first
                 // *reader* — until now it was written and never read.
                 natural_spawner.set_day_time(day_time);
-                // `SpawnPlacements.checkSpawnRules`' peaceful guard. The
+                // The spawn placements's check spawn rules' peaceful guard. The
                 // `remove_monsters` sweep a few lines up is the *other* half and
                 // is not a substitute: without this, a monster proposed on
                 // Peaceful is published in this tick's snapshot set and evicted in
@@ -2299,11 +2299,11 @@ async fn run_tick_loop_with_weather_impl<W>(
         // not be `MobSim`'s own static `self.world`. Called every tick
         // regardless of `players.is_empty()` above (unlike the natural-spawn
         // block, which is gated on a nonempty player list) because vanilla's
-        // own `PatrolSpawner.tick` decrements its countdown every world tick
+        // own patrol spawner's tick decrements its countdown every world tick
         // with no such gate, and skipping calls here would make patrols
         // rarer than vanilla rather than merely checked less often.
         //
-        // `is_bright_outside` is vanilla's `ServerLevel.isBrightOutside()`
+        // `is_bright_outside` is vanilla's server level's is bright outside
         // simplified to "daytime", ignoring thunder — no weather state
         // crosses this seam. `day_time` is this loop's own tracked mirror,
         // already read above for `natural_spawner.set_day_time`.
@@ -2331,7 +2331,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // `spawn_terrain` exists" gate as the patrol block just above, for
         // the same reason — see `MobSim::run_wandering_trader_spawn_cycle`'s
         // own doc comment. Called every tick `spawn_terrain` is available,
-        // matching vanilla's own `CustomSpawner.tick`, which decrements its
+        // matching vanilla's own custom spawner's tick, which decrements its
         // countdown unconditionally.
         if let Some(terrain) = spawn_terrain.as_ref() {
             let spawn_world = std::sync::Arc::clone(terrain);
@@ -2443,10 +2443,10 @@ async fn run_tick_loop_with_weather_impl<W>(
                     }
                 });
             }
-            // `TntBlock::wasExploded` — chain reaction. Gated on `TNT_EXPLODES`
+            // The tnt block's was exploded — chain reaction. Gated on `TNT_EXPLODES`
             // the same way `crate::fire`'s TNT arm below is, matching vanilla's
-            // own `if (level.getGameRules().get(GameRules.TNT_EXPLODES))` guard
-            // in `TntBlock::prime`.
+            // own `if (level.get_game_rules().get(GameRules.TNT_EXPLODES))` guard
+            // in the tnt block's prime.
             if world_state.tnt_explodes() {
                 mobs.with(|sim| {
                     for pos in primed_tnt {
@@ -2671,9 +2671,9 @@ async fn run_tick_loop_with_weather_impl<W>(
         //
         // Read off the block state rather than recomputed from neighbours here,
         // because the block state is vanilla's own source of truth:
-        // `HopperBlock.checkPoweredState` maintains `ENABLED` on every neighbour
+        // The hopper block's check powered state maintains `ENABLED` on every neighbour
         // change and on placement (`crate::random_tick`'s hopper arms), and
-        // `HopperBlockEntity` then simply obeys it. Recomputing would duplicate
+        // The hopper block entity then simply obeys it. Recomputing would duplicate
         // the signal walk and could disagree with what the client was told.
         //
         // The state snapshot is resident-only, so a hopper outside every
@@ -2770,7 +2770,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 else {
                     continue;
                 };
-                // `BaseSpawner.isNearPlayer`: an alive player within
+                // The base spawner's is near player: an alive player within
                 // `required_player_range` blocks of the spawner's centre.
                 let required_range = f64::from(state.required_player_range());
                 let near_player = spawner_players.iter().any(|p| {
@@ -2795,7 +2795,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                     }
                     state.is_some_and(|block| crate::spawn_egg::collision_boxes_for_id(block).is_empty())
                 };
-                // `level.getEntities(EntityTypeTest.forExactClass(...), aabb,
+                // `level.get_entities(the entity type test's for exact class, aabb,
                 // NO_SPECTATORS).size()` over the already-taken snapshot set —
                 // an exact-type count, not a category count.
                 let nearby_count =
@@ -2866,7 +2866,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // against the live world, simplified the same way
         // `mob_spawner`'s own `is_valid_position` closure above is: "solid
         // ground below, open air at foot and head height" stands in for
-        // `SpawnPlacements.isSpawnPositionOk`/`noCollision`, and there is no
+        // The spawn placements's is spawn position ok/`noCollision`, and there is no
         // liquid check (a disclosed reduction, matching this crate's other
         // simplified spawn-placement passes). Stops at the first candidate
         // that passes, exactly as vanilla's own loop `break`s on the first
@@ -2895,7 +2895,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                     f64::from(y),
                     f64::from(z) + 0.5,
                 );
-                // `!level.hasNearbyAlivePlayer(xt, yt, zt, 7.0)`.
+                // `!level.has_nearby_alive_player(xt, yt, zt, 7.0)`.
                 if spawner_players.iter().any(|p| {
                     let ddx = p.x - candidate.x;
                     let ddy = p.y - candidate.y;
@@ -2960,7 +2960,7 @@ async fn run_tick_loop_with_weather_impl<W>(
 
         // The clock is the **world's**, not this loop's: one
         // `tick_time` advances `game_time` unconditionally and `day_time` only
-        // under the `advance_time` rule (`ServerLevel.tickTime`, where `setDayTime`
+        // under the `advance_time` rule (the server level's tick time, where `setDayTime`
         // is gated and `gameTime` is not). The locals below are still the loop's
         // arithmetic, but they are *sourced* here rather than incremented — which
         // is the complete explanation, because the connection's periodic
@@ -3027,7 +3027,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             }
         }
         // The night-skip vote is world-state behavior and runs in
-        // vanilla's own position — `ServerLevel.tick` runs
+        // vanilla's own position — the server level's tick runs
         // `tickSleepingPlayers` right after the weather-cycle timers.
         // Snapshot the shared roster, fold it
         // into the loop-owned [`SleepState`] (recording each sleeper's
@@ -3040,7 +3040,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // (`moveToTimeMarker`, gated on the `advanceTime` rule standing in for
         // R1); the skip is broadcast so each connection can re-anchor its day
         // clock (`encode_set_time` on the connection side); and every sleeper
-        // wakes (`wakeUpAllPlayers` → `SleepStatus.removeAllSleepers`) and the
+        // wakes (`wakeUpAllPlayers` → sleep status's remove all sleepers) and the
         // roster is cleared so a day-sleeping click cannot vote again tonight.
         let (active, sleeper_ids) = sleep_vote.snapshot();
         sleep_state.reconcile(&sleeper_ids, game_tick);
@@ -3179,8 +3179,8 @@ async fn run_tick_loop_with_weather_impl<W>(
         // Placed after `game_tick += 1` and before the `block_ticks` drain on
         // purpose, and the ordering is the whole fidelity argument. Vanilla
         // handles queued packets at the top of a tick
-        // (`MinecraftServer.tickServer` -> `tickConnections`) and drains
-        // `ServerLevel.blockTicks` later in that *same* tick, so a placement
+        // (the minecraft server's tick server -> `tickConnections`) and drains
+        // The server level's block ticks later in that *same* tick, so a placement
         // arriving between tick N-1 and tick N schedules against N and fires at
         // `N + delay`. That is exactly what this does, which is why the residual
         // deviation is **not** in the fired tick number — see
@@ -3346,7 +3346,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // re-propagated through the same `propagate_and_react` call site a
         // random tick would use, so a chain reaction (a repeater flipping
         // and feeding a further torch) resolves depth-first within this one
-        // drain, exactly like vanilla's `LevelTicks::runCollectedTicks`
+        // drain, exactly like vanilla's level ticks's run collected ticks
         // invoking its callback once per due entry, in `DRAIN_ORDER`.
         let due_block_ticks = apply_scheduled_tick_owner_batches(
             block_ticks.drain_due_owner_batches(game_tick, MAX_SCHEDULED_TICKS_PER_TICK),
@@ -3389,7 +3389,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // itself (vanilla's immediate `setBlock`, which the spread loop then
             // reads back), so the loop only forwards what changed.
             //
-            // Fire is not random-ticked — `FireBlock::tick`'s first statement is
+            // Fire is not random-ticked — the fire block's tick's first statement is
             // its own reschedule — so this arm is the only thing keeping a fire
             // alive at all. `random_tick::react_at_placement` seeds the first
             // pending tick for any fire a world edit writes; a fire that loses
@@ -3425,7 +3425,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 for (at, new_state) in fire_changes.drain(..) {
                     block_tick_out.publish(at.x, at.y, at.z, new_state);
                 }
-                // `TntBlock::prime`, the fire-consumption arm — see
+                // The tnt block's prime, the fire-consumption arm — see
                 // `crate::fire::check_burn_out`'s own doc for why this is
                 // reported rather than spawned inline.
                 if world_state.tnt_explodes() {
@@ -3447,11 +3447,11 @@ async fn run_tick_loop_with_weather_impl<W>(
                 continue;
             }
 
-            // `FallingBlock.tick`, reached from `FallingBlock.onPlace`'s scheduled
+            // `FallingBlock.tick`, reached from FallingBlock's on place's scheduled
             // tick (`crate::gravity_tick::ticks_after_place`). Handled here with a
             // `continue` rather than through the `new_state` chain below, because
             // it is the one arm whose reaction is **at the tick's own position**:
-            // `settle_gravity_at` is exactly `isFree(below)` plus the drop, while
+            // `settle_gravity_at` is exactly is free plus the drop, while
             // the chain below ends in `propagate_and_react`, which notifies the
             // origin's six neighbours and *not* the origin. Routing gravity through
             // that would settle the sand's neighbours and leave the sand hanging —
@@ -3463,10 +3463,10 @@ async fn run_tick_loop_with_weather_impl<W>(
             // it.
             //
             // **This is now the only place in the tree a block leaves the world to
-            // fall**, and it creates a real `FallingBlockEntity` rather than
+            // fall**, and it creates a real falling block entity rather than
             // teleporting: `settle_gravity_at` answers "unsupported, landing at
             // `y`" and `MobSim::spawn_falling_block` returns the two effects in
-            // `FallingBlockEntity.fall`'s own order (clear the cell, *then*
+            // The falling block entity's fall's own order (clear the cell, *then*
             // broadcast the entity). The effects are applied in the order given —
             // see `gravity_tick::FallingBlockEffect` for why that order is a
             // returned value rather than two statements here.
@@ -3536,7 +3536,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 continue;
             }
 
-            // `redstone_tripwire::TICK_TRIPWIRE_RECHECK` — `TripWireHookBlock
+            // `redstone_tripwire::TICK_TRIPWIRE_RECHECK` — the trip wire hook block
             // .tick`'s periodic recheck. Handled here rather than through the
             // `Option<String>` chain below for the same reason gravity is: one
             // scan can rewrite the hook's own cell, a receiving hook, and every
@@ -3567,8 +3567,8 @@ async fn run_tick_loop_with_weather_impl<W>(
             //
             // A dropper always either pushes into a
             // container ahead or plain-tosses, never consulting the item
-            // table below (`DropperBlock.getDispenseMethod` hardcodes
-            // `DefaultDispenseItemBehavior` regardless of item); a dispenser
+            // table below (the dropper block's get dispense method hardcodes
+            // The default dispense item behavior regardless of item); a dispenser
             // instead matches the item against spawn egg, boat, bone meal and
             // flint-and-steel in turn, falling to a plain toss when none
             // match or a matched behaviour reports no effect. See
@@ -3637,7 +3637,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                         let mut swap_remainder: Option<lodestone_model::ResourceKey> = None;
 
                         if crate::redstone_dispenser::is_dropper(state) {
-                            // `DropperBlock.dispenseFrom`'s container branch.
+                            // The dropper block's dispense from's container branch.
                             let front = face.relative(origin);
                             let menu = block_entities.with(|reg| reg.get(front).and_then(crate::block_entities::BlockEntity::menu_name));
                             if menu.is_some_and(crate::redstone_dispenser::is_pushable_container) {
@@ -3691,7 +3691,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                                 sim.spawn_tnt(position, crate::mobs::tnt::DEFAULT_FUSE_TIME);
                             });
                         } else if let Some(kind) = crate::mobs::minecart::MinecartKind::from_item(&item_str) {
-                            // `MinecartDispenseItemBehavior` — a rail directly
+                            // The minecart dispense item behavior — a rail directly
                             // ahead of the dispenser (or one under an
                             // air-filled cell ahead) required, else the same
                             // plain-toss fallback every other unmatched item
@@ -3730,7 +3730,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                                 }
                                 crate::bone_meal::BoneMealOutcome::ConsumedNoChange => {}
                                 // Not a target, or a family this crate cannot
-                                // grow: vanilla's own `OptionalDispenseItemBehavior`
+                                // grow: vanilla's own optional dispense item behavior
                                 // never falls back to a toss here either — the
                                 // item just stays put, unconsumed.
                                 crate::bone_meal::BoneMealOutcome::NotBonemealable
@@ -3794,7 +3794,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                                     block_tick_out.publish(target.x, target.y, target.z, new_state);
                                 }
                                 // Same shape as bone meal: no toss fallback in
-                                // vanilla's own `FlintAndSteelDispenseItemBehavior`.
+                                // vanilla's own flint and steel dispense item behavior.
                                 None => consumed = false,
                             }
                         } else if let Some(entity_type) = lodestone_data::item::Item::from_name(&item_str)
@@ -3854,7 +3854,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                                 swap_remainder =
                                     Some("minecraft:bucket".parse().expect("valid key"));
                             } else {
-                                // `DefaultDispenseItemBehavior` fallback: a
+                                // The default dispense item behavior fallback: a
                                 // filled bucket with nowhere to empty just
                                 // tosses like an ordinary item.
                                 toss = true;
@@ -3951,8 +3951,8 @@ async fn run_tick_loop_with_weather_impl<W>(
                                     &stack,
                                     lodestone_model::Vec3::new(position.0, position.1, position.2),
                                     lodestone_model::Vec3::new(velocity.0, velocity.1, velocity.2),
-                                    // Vanilla's dispensed `ItemEntity` never calls
-                                    // `setDefaultPickUpDelay()`, so it keeps the
+                                    // Vanilla's dispensed item entity never calls
+                                    // set default pick up delay, so it keeps the
                                     // constructor's `pickupDelay = 0` — unlike a
                                     // broken block's drop, it is pickable the
                                     // instant it appears.
@@ -3975,7 +3975,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             }
 
             // `crate::mobs::tnt::TICK_TNT_PRIME` — the redstone-signal ignition
-            // arm (`TntBlock::onPlace`/`neighborChanged`) schedules this at
+            // arm (the tnt block's on place/`neighborChanged`) schedules this at
             // `current_tick` itself; see `crate::random_tick`'s TNT arm for why
             // it cannot spawn the entity directly. Handled here, with its own
             // `continue`, for the reason every other entity-spawning arm in
@@ -4125,7 +4125,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                                 *d = data.clone();
                             }
                         });
-                        // `CommandBlock.executeChain`, walked only on the tick
+                        // CommandBlock's execute chain, walked only on the tick
                         // this origin actually ran something — `Sequence`
                         // mode never reaches here at all, since `tick`'s own
                         // `Sequence` branch always answers `run: false`.
@@ -4427,7 +4427,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // Make one per-chunk thunder decision per tick over the same follow area and
         // startup-deferral window as the random-tick pass just above. Gated
         // on `thundering` alone — vanilla's own gate is `raining &&
-        // isThundering()`, independent of `randomTickSpeed`, which only
+        // is_thundering()`, independent of `randomTickSpeed`, which only
         // throttles the *random*-tick pass above — so a storm keeps striking
         // even with `/gamerule random_tick_speed 0`.
         //
@@ -4514,7 +4514,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // `MobSim::tick_lightning`'s fire-ignition candidates: `MobSim` holds
         // only a frozen pathfinding snapshot (`take_lightning_fires`'s own
         // doc), so the live write happens here, gated exactly like
-        // `LightningBolt.spawnFire` — air, and `FireBlock::canSurvive`.
+        // `LightningBolt.spawnFire` — air, and the fire block's can survive.
         pending_lightning_fires.extend(mobs.with(MobSim::take_lightning_fires));
         let mut lightning_fires = std::mem::take(&mut pending_lightning_fires).into_iter();
         while let Some(pos) = lightning_fires.next() {
@@ -4560,12 +4560,12 @@ async fn run_tick_loop_with_weather_impl<W>(
             }
         }
 
-        // Every live `FallingBlockEntity`, one tick — the driver half of the
+        // Every live falling block entity, one tick — the driver half of the
         // falling-block animation. Without it a spawned entity would sit still at
         // its spawn cell forever, which is a *worse* symptom than the teleport it
         // replaced: the block would appear to simply vanish.
         //
-        // **Position is vanilla's**: `ServerLevel.tick` runs `tickChunks` — which
+        // **Position is vanilla's**: the server level's tick runs `tickChunks` — which
         // is the scheduled-block, scheduled-fluid and random-tick passes above —
         // and only then walks `entityTickList`. So an entity created by a block
         // tick this tick does take its first `0.04` step in the same tick, exactly
@@ -4643,7 +4643,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             }
         }
 
-        // Every **unridden** boat, one tick — `AbstractBoat.tick`'s buoyancy and
+        // Every **unridden** boat, one tick — the abstract boat's tick's buoyancy and
         // drag. A ridden one is skipped inside `tick_vehicles`, which is the
         // client-authority handover: while somebody is aboard, their
         // `MoveVehicle` is the only writer, and ticking the hull here as well is
@@ -6010,7 +6010,7 @@ mod tests {
     }
 
     /// How long to let the loop run before giving up. An adult's mean grazing
-    /// interval is `adjustedTickDelay(1000)` = 500 ticks
+    /// interval is adjusted tick delay = 500 ticks
     /// (`GrazeGoal::ADULT_INTERVAL`), and the eat lands
     /// `EAT_ANIMATION_TICKS - CONSUME_AT` ticks into the animation after that,
     /// so a few thousand ticks is generous without being unbounded.
@@ -6905,7 +6905,7 @@ mod tests {
     }
 
     /// A fire with nothing under it and nothing flammable beside it fails
-    /// `FireBlock`'s `canSurvive` and is removed — and that removal happens
+    /// The fire block's `canSurvive` and is removed — and that removal happens
     /// **before any RNG draw**, so the predicted cell state is exactly
     /// `minecraft:air` with no distribution involved. It must also reach
     /// `BlockTickFeed`, or a connected client keeps rendering a fire the server

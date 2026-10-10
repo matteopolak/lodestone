@@ -2,7 +2,7 @@
 //! panic on arbitrary bytes.
 //!
 //! The unihex parser is a GNU Unifont `.hex` line-format reader
-//! (`UnihexProvider.readFromStream`'s Rust port). Resource packs — including
+//! (the Rust port of the game's unihex stream reader). Resource packs — including
 //! ones a server can push via `minecraft:resource_pack_push` — can ship a
 //! `.hex` file, so a hostile or malformed pack is the realistic untrusted
 //! source. `read_hex_entries` already returns `Result<_, FontError>` for

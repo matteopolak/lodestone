@@ -1,5 +1,5 @@
 //! The account screen: its metrics (referred to this repo's own
-//! `JoinMultiplayerScreen` port, because vanilla has no such screen), its
+//! The join multiplayer screen port, because vanilla has no such screen), its
 //! layout block, row rects, and the three frames it can be in.
 //!
 //! Named `account_screen` rather than `accounts` for [`super::world_list`]'s
@@ -16,7 +16,7 @@ use super::measure::clip;
 // **There is no accounts screen in vanilla to port.** Minecraft picks an account
 // in the launcher, outside the game — see `nav::MainButton::Accounts`, which
 // says the same thing about the title-screen button that opens this. So the
-// reference for every number below is *this repo's own* `JoinMultiplayerScreen`
+// reference for every number below is *this repo's own* join multiplayer screen
 // port two screens up: a `HeaderAndFooterLayout` title, a footer of
 // `LinearLayout`-arranged buttons, and 36 px list rows in a 305 px column. Each
 // constant therefore cites the server-list constant it deliberately matches
@@ -28,7 +28,7 @@ use super::measure::clip;
 // silently move this one.
 
 /// The header band: [`SERVER_LIST_HEADER_H`]'s 33, which is also
-/// [`layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT`] — one 9 px title `StringWidget`
+/// [`layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT`] — one 9 px title string widget
 /// with 12 px of slack either side.
 const ACCOUNTS_HEADER_H: f32 = 33.0;
 /// The footer band: [`SERVER_LIST_FOOTER_H`]'s 60, keeping the account and
@@ -48,7 +48,7 @@ pub(super) const ACCOUNTS_BUTTON_W: f32 = 74.0;
 const ACCOUNTS_ITEM_H: f32 = 36.0;
 /// A list row's width: [`SERVER_LIST_ROW_W`]'s 305.
 pub(super) const ACCOUNTS_ROW_W: f32 = 305.0;
-/// `AbstractSelectionList.Entry.CONTENT_PADDING`'s 2, per side.
+/// The abstract selection list's entry.CONTENT_PADDING's 2, per side.
 const ACCOUNTS_ENTRY_PADDING: f32 = 2.0;
 /// `getFirstEntryY() = getY() + 2` — the gap above row 0. A different
 /// expression from [`ACCOUNTS_ENTRY_PADDING`] that happens to be the same 2;
@@ -63,7 +63,7 @@ pub(super) const ACCOUNTS_TEXT_GAP: f32 = 3.0;
 pub(super) const ACCOUNTS_SPACING: f32 = 5.0;
 /// The detail line's offset below the content's top, [`SERVER_ENTRY_MOTD_Y`].
 pub(super) const ACCOUNTS_DETAIL_Y: f32 = 12.0;
-/// A `StringWidget`'s height — what the title header is.
+/// A string widget's height — what the title header is.
 const ACCOUNTS_TITLE_H: f32 = 9.0;
 /// The account list's own title.
 const ACCOUNTS_TITLE: &str = "Accounts";
@@ -86,7 +86,7 @@ const ACCOUNTS_SAVE_ERROR_LINES: f32 = 2.0;
 /// uses. Its own constant for the reason above.
 pub(super) const ACCOUNTS_DIM: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
 /// The highlighted row's interior, `-16777216` — opaque black, filled inside the
-/// 1 px outline, exactly `AbstractSelectionList.extractItem`'s selection pass.
+/// 1 px outline, exactly abstract selection list's extract item's selection pass.
 pub(super) const ACCOUNTS_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// The canvas [`accounts_block`] arranges at, for [`SERVER_LIST_REF_CANVAS`]'s
@@ -257,7 +257,7 @@ fn accounts_title_label(text: &str) -> MenuLabel {
     }
 }
 
-/// The left edge of every account row: `getRowLeft()`, i.e.
+/// The left edge of every account row: get row left, i.e.
 /// `floor(width / 2) - floor(rowWidth / 2)`.
 ///
 /// **Not `(width - 305) / 2`** — two separate integer divisions, which is what
@@ -316,7 +316,7 @@ pub fn accounts_list_spec(len: usize, scroll: f32) -> widget::ListSpec {
 /// changed together: `index` used to be the rendered-window position because
 /// [`accounts_idle_frame`] sliced the list first, which is precisely why this
 /// screen could only ever sit at a whole-row offset. The `floor` is vanilla's
-/// single `(int)this.scrollAmount()` truncation (`:144`) — outside the multiply, so
+/// single `(int)this.scroll_amount()` truncation (`:144`) — outside the multiply, so
 /// the column moves as a unit and rows stay exactly [`ACCOUNTS_ITEM_H`] apart.
 #[must_use]
 pub fn accounts_row_top(index: usize, scroll: f32) -> f32 {
@@ -641,7 +641,7 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
     // **The "Showing 1-5 of 9" counter is deliberately gone.** It was this screen's
     // stand-in for a scrollbar, and it existed only because the frame knew its own
     // window size while the draw had no bar to show. There is a real
-    // `AbstractScrollArea` scrollbar now, drawn from `MenuFrame::list` by the same
+    // The abstract scroll area scrollbar now, drawn from `MenuFrame::list` by the same
     // `draw_scrollbar` the multiplayer list uses, so the counter would be a second
     // answer to the question the thumb already answers — and vanilla has no such
     // label on any selection list. Re-adding it would also mean re-deriving a

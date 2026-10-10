@@ -3,7 +3,7 @@
 //!
 //! # Typed keys, and what they buy over Brigadier
 //!
-//! Brigadier reads an argument back with `getArgument("gamemode", GameType.class)`
+//! Brigadier reads an argument back with get argument
 //! — a string and a class, neither checked against the tree. An [`ArgKey<T>`]
 //! exists **only** as the second half of the [`Registrar::arg`] call that created
 //! its node, so there is no string to typo and no type to get wrong: a handler
@@ -456,7 +456,7 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// Show `line` to the command's caller (`source.sendSuccess`).
+    /// Show `line` to the command's caller (source's send success).
     pub fn send_success(&mut self, line: impl Into<String>) {
         self.feedback.push(line.into());
     }
@@ -812,7 +812,7 @@ impl Dispatcher<'_> {
     ///
     /// This is `/execute`'s `if`/`unless`: vanilla attaches **both**
     /// `.fork(execute, modifier)` *and* `.executes(numericConditionalHandler)`
-    /// to the same condition node (`ExecuteCommand::addConditional`), and real
+    /// to the same condition node (the execute command's add conditional), and real
     /// Brigadier's `ContextChain` only ever invokes one of the two — the fork
     /// modifier fires exclusively when the chain **continues** to a further
     /// stage (`execute if entity @a run …`), and a terminal match instead runs
@@ -880,7 +880,7 @@ impl Dispatcher<'_> {
                         }
                     }
                     Err(message) => {
-                        // A modifier throwing mid-chain is `BuildContexts
+                        // A modifier throwing mid-chain is the build contexts
                         // .execute`'s own `catch (CommandSyntaxException)`
                         // path in vanilla: it reports the error and drops
                         // this branch (or the whole command, unforked)

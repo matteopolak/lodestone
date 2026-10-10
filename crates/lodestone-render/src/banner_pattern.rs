@@ -238,8 +238,8 @@ pub fn gamma_rgb_to_bytes(rgb: [f32; 3]) -> [u8; 3] {
 }
 
 /// The maximum number of pattern layers vanilla ever draws
-/// (vanilla's own named pattern-renderer constant for this, banner-renderer's own decompiled source — `= 16`) —
-/// vanilla's own pattern-submit loop bound (banner-renderer's own decompiled source:
+/// (vanilla's named pattern-renderer constant for this, banner-renderer's decompiled source — `= 16`) —
+/// vanilla's pattern-submit loop bound (banner-renderer's decompiled source:
 /// the mask index must stay below both 16 and the stack's own stored layer count). A stack
 /// carrying more layers than this (vanilla itself refuses to add a 17th in
 /// survival, but a command or a foreign save could still produce one) has
@@ -314,7 +314,7 @@ fn banner_or_shield_layers(
 /// `patterns`' own order — mirroring
 /// vanilla's own pattern-submit function's banner branch
 /// (banner-renderer's own decompiled source) exactly. Sprites resolve under
-/// `entity/banner/…` (vanilla's own named banner sprite mapper, sprite-sheet mapper's own decompiled source).
+/// `entity/banner/…` (vanilla's named banner sprite mapper, sprite-sheet mapper's decompiled source).
 #[must_use]
 pub fn banner_pattern_layers(base_color: DyeColor, patterns: &[StoredPatternLayer]) -> Vec<PatternLayer> {
     banner_or_shield_layers(base_color, patterns, "entity/banner")
@@ -322,7 +322,7 @@ pub fn banner_pattern_layers(base_color: DyeColor, patterns: &[StoredPatternLaye
 
 /// Resolves a shield's full ordered draw list — same algorithm as
 /// [`banner_pattern_layers`], but sprites resolve under `entity/shield/…`
-/// (vanilla's own named shield sprite mapper, sprite-sheet mapper's own decompiled source) instead, per
+/// (vanilla's named shield sprite mapper, sprite-sheet mapper's decompiled source) instead, per
 /// vanilla's own pattern-submit function's shield branch
 /// (banner-renderer's own decompiled source).
 #[must_use]

@@ -1,9 +1,9 @@
 //! Every non-projectile entity used to be placed by `dying_entity_model_matrix`,
-//! the `LivingEntityRenderer` convention that lifts the model by
+//! the living-entity renderer convention that lifts the model by
 //! [`MODEL_FEET_OFFSET`] = 1.501 blocks. That is correct for a mob (a mob's
 //! model origin sits *above* its feet in local space) and wrong for a boat,
 //! chest boat, raft, chest raft or minecart, none of which extend
-//! `LivingEntity` in vanilla — a placed boat floated 1.126 blocks above the
+//! living entity in vanilla — a placed boat floated 1.126 blocks above the
 //! water and its interaction hitbox (built from the real, un-lifted position)
 //! sat at the water, so right-clicking it did nothing.
 //!
@@ -13,8 +13,8 @@
 //! placement gate.
 //!
 //! The expectation is not our own encoder read back: it is hand-derived from
-//! the 26.2 decompile (`AbstractBoatRenderer.submit`,
-//! `AbstractMinecartRenderer.submit`/`newRender`) via
+//! the 26.2 decompile (the abstract boat and minecart renderers' submit and
+//! new-render steps) via
 //! `non_living_vehicle_matrix`'s own doc comment, which cites the exact
 //! pose-stack ops and line numbers.
 
@@ -23,8 +23,8 @@ use lodestone_render::entity::{EntityModelSet, MODEL_FEET_OFFSET};
 use lodestone_render::entity_anim::AnimInput;
 
 /// Corpus model names that are non-living vehicles and must not get the
-/// `LivingEntityRenderer` feet lift. `armor_stand` is deliberately absent:
-/// `ArmorStand extends LivingEntity` in vanilla, so it keeps the mob
+/// living-entity renderer feet lift. `armor_stand` is deliberately absent:
+/// the armor stand extends the living entity in vanilla, so it keeps the mob
 /// convention and is exactly the control a too-broad "non-projectile" rule
 /// would get wrong.
 const NON_LIVING_VEHICLES: &[&str] = &["boat", "chest_boat", "raft", "chest_raft", "minecart"];
@@ -83,7 +83,7 @@ fn non_living_vehicles_get_the_vanilla_bob_not_the_living_lift() {
     );
 }
 
-/// The negative control: a real `LivingEntity` must keep the 1.501 lift, so
+/// The negative control: a real living entity must keep the 1.501 lift, so
 /// the assertion above is discriminating rather than accidentally true for
 /// every model regardless of placement.
 #[test]
@@ -102,7 +102,7 @@ fn a_living_entity_still_gets_the_feet_lift() {
 /// `armor_stand` is the case a too-broad "everything non-projectile that
 /// isn't obviously a mob" rule would get wrong: it is not in
 /// [`NON_LIVING_VEHICLES`] and must keep the living lift exactly like a pig,
-/// because `ArmorStandRenderer extends LivingEntityRenderer` in vanilla.
+/// because the armor-stand renderer extends the living-entity renderer in vanilla.
 #[test]
 fn armor_stand_keeps_the_living_lift_despite_its_name() {
     let models = EntityModelSet::load();

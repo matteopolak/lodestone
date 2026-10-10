@@ -27,7 +27,7 @@
 //!     reset the eleven PieceWeights (fresh place_count, fresh current_pieces)
 //!     start = StairsDown{ is_source: true } at (cx*16+2, 64, cz*16+2), a
 //!         random horizontal orientation (one draw bounded by 4)
-//!     start.addChildren  →  imposed_piece = FiveCrossing, then one forward
+//!     start's add children  →  imposed_piece = FiveCrossing, then one forward
 //!         door child (always a FiveCrossing on attempt one, box permitting)
 //!     while pending queue not empty:
 //!         pick a random pending index, remove it (Vec::remove, not swap —
@@ -1207,7 +1207,7 @@ impl Place<'_> {
     }
 }
 
-/// `StrongholdPieces::*::postProcess`, dispatched per kind.
+/// Stronghold piece post-processing, dispatched per kind.
 fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
     let stone_bricks = BlockState::from_block(Block::StoneBricks);
     let smooth_slab = BlockState::from_block(Block::SmoothStoneSlab);
@@ -1635,7 +1635,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
                     p.place(&portal, x, 3, z);
                 }
             }
-            // `SpawnerBlockEntity::setEntityId` — no entity-spawning layer
+            // The spawner block entity's set-entity-id — no entity-spawning layer
             // exists in this crate yet, see the module doc's
             // `coded:worldgen_entities` deviation.
             p.place(&BlockState::from_block(Block::Spawner), 5, 3, 6);

@@ -78,7 +78,7 @@ fn max_health_adds_a_second_heart_row_without_inferring_it_from_current_health()
 fn can_hurt_player_is_survival_and_not_creative_test() {
     use lodestone_model::GameMode;
     assert!(can_hurt_player(Some(GameMode::Survival)));
-    // `isSurvival()` returns true for ADVENTURE too — an adventure-mode player is
+    // is survival returns true for ADVENTURE too — an adventure-mode player is
     // hurtable and keeps the whole column.
     assert!(can_hurt_player(Some(GameMode::Adventure)));
     assert!(!can_hurt_player(Some(GameMode::Creative)));

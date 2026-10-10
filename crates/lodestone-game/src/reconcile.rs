@@ -269,14 +269,14 @@ impl ClientMenu {
             button: click.button,
             input: click.input,
             // **The server's** last state id, not the freshly bumped local one.
-            // Vanilla's client sends `containerMenu.getStateId()` — a value only
-            // ever *written* by the server (`setItem`/`initializeContents`); the
-            // client never increments it (`MultiPlayerGameMode.handleContainerInput`).
+            // Vanilla's client sends the container's state id — a value only
+            // ever *written* by the server (set-item / initialize-contents); the
+            // client never increments it.
             // `Menu::do_click` does bump, mirroring the server's own
-            // `incrementStateId`, so `predicted.state_id()` here is always
+            // state-id increment, so `predicted.state_id()` here is always
             // `server + 1` and every single click would arrive **stale**:
-            // `ServerGamePacketListenerImpl.handleContainerClick` then takes the
-            // `broadcastFullState()` branch, throwing away the changed-slot
+            // server's container-click handler then takes the
+            // full-state-broadcast branch, throwing away the changed-slot
             // prediction we just computed and re-sending all 46 slots. Worse for
             // a gate than for a player: with a full resync on every click the
             // server's reply is unconditionally its own truth, so "our
@@ -298,7 +298,7 @@ impl ClientMenu {
     /// caller desynchronise the pair.
     ///
     /// Unlike [`predict`](Self::predict), a drop is **not** a container click: it
-    /// travels as a bare `ServerboundPlayerActionPacket` and the server answers
+    /// travels as a bare player-action packet and the server answers
     /// with no slot update at all, having already performed the identical removal
     /// on its own inventory. So `confirmed` is not "what the server last told us"
     /// here but "what we know the server did", and it has to follow `predicted`

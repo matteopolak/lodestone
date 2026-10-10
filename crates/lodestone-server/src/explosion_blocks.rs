@@ -3,8 +3,8 @@
 //!
 //! # What this is
 //!
-//! A port of `ServerExplosion::calculateExplodedPositions` plus the one line of
-//! `ExplosionDamageCalculator::getBlockExplosionResistance` that gives each
+//! A port of the server explosion's calculate exploded positions plus the one line of
+//! The explosion damage calculator's get block explosion resistance that gives each
 //! traversed cell its cost, read out of the decompiled 26.2 tree as record
 //! definitions.
 //!
@@ -37,7 +37,7 @@
 //!
 //! # Where RNG enters a whole explosion, and the one thing that is not portable
 //!
-//! `ServerExplosion::explode` runs, in order: `calculateExplodedPositions`
+//! The server explosion's explode runs, in order: `calculateExplodedPositions`
 //! ([`RAY_COUNT`] `nextFloat` draws), `hurtEntities` (no RNG of its own —
 //! `getSeenPercent` is a deterministic grid sample), `interactWithBlocks`, then
 //! `createFire` if the blast's `fire` flag is set.
@@ -90,22 +90,22 @@
 //!
 //! # What is deliberately not modelled
 //!
-//! * **Drops.** `BlockBehaviour::onExplosionHit` rolls the block's loot table with
-//!   `LootContextParams.EXPLOSION_RADIUS` set for a `DESTROY_WITH_DECAY` blast (a
+//! * **Drops.** block behaviour's on explosion hit rolls the block's loot table with
+//!   The loot context params's explosion radius set for a `DESTROY_WITH_DECAY` blast (a
 //!   creeper's). [`crate::loot`] has no `EXPLOSION_RADIUS` parameter at all — its
 //!   own module doc lists `survives_explosion` as unconditionally `true` and
 //!   `explosion_decay` as a no-op — so rolling here would drop **every** block at
 //!   full rate instead of vanilla's `1/radius`. Dropping nothing is the inert
 //!   direction; duplicating items into a player's inventory is not. Closing this
 //!   needs `EXPLOSION_RADIUS` in `loot.rs`, not a change here.
-//! * **`shouldBlockExplode`.** `ExplosionDamageCalculator`'s base implementation
+//! * **`shouldBlockExplode`.** explosion damage calculator's base implementation
 //!   returns `true` unconditionally; the two overrides that matter are
-//!   `SimpleExplosionDamageCalculator` (wind charges, which this crate has none
-//!   of) and `EntityBasedExplosionDamageCalculator`, which delegates to
-//!   `Entity::shouldBlockExplode` — `true` for every entity except the
+//!   The simple explosion damage calculator (wind charges, which this crate has none
+//!   of) and the entity based explosion damage calculator, which delegates to
+//!   Entity's should block explode — `true` for every entity except the
 //!   wither/dragon special cases. A creeper is the only producer, so `true` is
 //!   exact here.
-//! * **Fire.** `ServerExplosion::createFire` runs only when the blast's own `fire`
+//! * **Fire.** server explosion's create fire runs only when the blast's own `fire`
 //!   flag is set, and a creeper's is `false`. Not modelled: no producer here
 //!   ever sets that flag, and an untested, uncalled implementation of it was
 //!   removed rather than left as dead weight — reimplement against
@@ -133,7 +133,7 @@
 //!   from the centre and will happily ask for `min_y - 1` when a blast happens on
 //!   the world floor; `ChunkColumn::block_state` indexes unguarded, so an
 //!   unchecked read panics the tick thread. Vanilla is safe for the same reason in
-//!   reverse: `Level::getBlockState` answers `VOID_AIR` outside build height, and
+//!   reverse: Level's get block state answers `VOID_AIR` outside build height, and
 //!   `calculateExplodedPositions` reads *then* breaks on `isInWorldBounds`, so the
 //!   value it read is discarded. Checking first and breaking is exactly
 //!   equivalent.
@@ -149,7 +149,7 @@ use lodestone_model::{BlockPos, Vec3};
 use crate::chunk::ChunkSource;
 use crate::mob_spawn::SpawnRng;
 
-/// The grid edge `ServerExplosion` samples (its own `int size = 16`). Only the
+/// The grid edge server explosion samples (its own `int size = 16`). Only the
 /// *surface* of this cube produces a ray.
 pub const GRID: i32 = 16;
 
@@ -175,7 +175,7 @@ pub const POWER_JITTER_SPAN: f32 = 0.6;
 /// `16³ − 14³`. Also the exact number of RNG draws the ray pass consumes.
 pub const RAY_COUNT: usize = 1352;
 
-/// `Level::isInWorldBounds`'s horizontal half — vanilla's ±30,000,000 limit.
+/// Level's is in world bounds's horizontal half — vanilla's ±30,000,000 limit.
 pub const HORIZONTAL_LIMIT: i32 = 30_000_000;
 
 /// The dimension's build height, so a blast on the world floor cannot read
@@ -215,7 +215,7 @@ impl BlastEnv {
         height: 384,
     };
 
-    /// `Level::isInWorldBounds` — inside build height *and* inside the
+    /// Level's is in world bounds — inside build height *and* inside the
     /// ±30,000,000 horizontal limit.
     #[must_use]
     pub fn contains(self, pos: BlockPos) -> bool {
@@ -274,7 +274,7 @@ pub fn step_cost(resistance: f32) -> f32 {
 ///
 /// Not used by [`destroy_blocks`], which does not model drops and therefore does
 /// not shuffle. It exists so that a caller wiring `createFire` — the next draw
-/// consumer after `interactWithBlocks` in `ServerExplosion::explode` — can keep
+/// consumer after `interactWithBlocks` in the server explosion's explode — can keep
 /// the stream aligned with vanilla's. See this module's own doc comment for why
 /// the shuffle's *order* is not reproducible even though its *count* is.
 #[must_use]
@@ -296,7 +296,7 @@ fn containing(x: f64, y: f64, z: f64) -> BlockPos {
 
 /// Every block position a blast of `radius` centred at `centre` destroys.
 ///
-/// A faithful port of `ServerExplosion::calculateExplodedPositions`. Draws
+/// A faithful port of the server explosion's calculate exploded positions. Draws
 /// exactly [`RAY_COUNT`] values from `rng`, one per ray, in the `x → y → z` order
 /// vanilla's triple loop visits — the draw count and order are part of the
 /// specification, not an implementation detail, because a blast's crater shape is
@@ -372,7 +372,7 @@ pub fn exploded_positions<S: ChunkSource>(
 /// writes air into every one of them, and returns the `(position, new state)`
 /// pairs a caller must publish to connected clients.
 ///
-/// `ServerExplosion::interactWithBlocks` plus `BlockBehaviour::onExplosionHit`'s
+/// The server explosion's interact with blocks plus block behaviour's on explosion hit's
 /// own `setBlock(pos, AIR)`, minus the drops — see this module's doc comment for
 /// why dropping nothing is the deliberate choice rather than an omission, and for
 /// why the shuffle vanilla performs first is skipped.

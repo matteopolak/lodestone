@@ -33,14 +33,14 @@
 //! # What is asserted, and why these two things
 //!
 //! **The level count is vanilla's arithmetic**, not a floor or a bound:
-//! `TextureAtlas.createTexture` asks for `mipLevel + 1` levels, so
-//! `mipmapLevels = n` must upload exactly `n + 1`. Predicting the number (and
+//! the atlas texture creation asks for `mip_level + 1` levels, so
+//! `mipmap_levels = n` must upload exactly `n + 1`. Predicting the number (and
 //! not merely "more than one") is what separates the fix from the bug — the bug
 //! uploaded **11** at `n = 0`.
 //!
 //! **Every texel orthogonally outside a sprite's rect, at every uploaded level,
 //! equals that sprite's own nearest edge texel.** That is the extrusion vanilla
-//! gets from `TextureAtlas.uploadInitialContents` drawing over the *padded*
+//! gets from the atlas's initial-contents upload drawing over the *padded*
 //! rect while `animate_sprite.vsh` pushes the sprite UV outward against a
 //! `CLAMP_TO_EDGE` scratch texture. Equality with the edge texel is a stronger
 //! claim than "opaque" or "not black": a neighbouring sprite's texels are

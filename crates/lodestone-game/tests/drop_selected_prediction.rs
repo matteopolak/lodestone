@@ -11,7 +11,7 @@
 //!   `case DROP_ALL_ITEMS:` call `this.player.drop(false)` / `drop(true)` and
 //!   `return`. **No `SET_CONTAINER_SLOT`, no content packet, nothing comes back.**
 //! * Vanilla's own local-player drop step: the client does
-//!   `ItemStack prediction = this.getInventory().removeFromSelected(all);` and
+//!   `ItemStack prediction = this.get_inventory().removeFromSelected(all);` and
 //!   *then* sends the bare drop-item action packet. Vanilla names the
 //!   variable `prediction`.
 //!
@@ -208,9 +208,9 @@ fn plain_drop_of_the_last_item_empties_the_slot() {
 
 /// An empty selected slot is a no-op in both forms, and reports it.
 ///
-/// `removeFromSelected`'s first line is the `selectedItem.isEmpty()` guard, and
-/// `ContainerHelper.removeItem` guards `count > 0` underneath it — so
-/// `Ctrl`+`Q` on an empty slot (`all ? getCount() : 1` → `0`) cannot produce a
+/// The remove-from-selected path's first check is the selected-item-empty guard, and
+/// the container helper's remove-item guards `count > 0` underneath it — so
+/// `Ctrl`+`Q` on an empty slot (`all ? count : 1` → `0`) cannot produce a
 /// phantom removal either.
 #[test]
 fn dropping_from_an_empty_slot_changes_nothing() {

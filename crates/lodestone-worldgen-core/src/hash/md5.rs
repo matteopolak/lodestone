@@ -1,6 +1,6 @@
 //! MD5 (RFC 1321), implemented from the published specification.
 //!
-//! Vanilla's `RandomSupport.seedFromHashOf` feeds the MD5 of a UTF-8 string
+//! The game's string-seeded random derivation feeds the MD5 of a UTF-8 string
 //! into a 128-bit seed. Only the raw 16-byte digest is needed, so this is a
 //! minimal, allocation-light implementation with no external dependency.
 

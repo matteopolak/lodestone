@@ -10,7 +10,7 @@
 //! swap moves the very stack the menu is displaying, exactly as vanilla's
 //! shared `Slot`/`Container` aliasing does.
 //!
-//! Menu-slot layout of the **player inventory screen** (`InventoryMenu`):
+//! Menu-slot layout of the **player inventory screen**:
 //!
 //! | menu slot | meaning        | native index |
 //! |-----------|----------------|--------------|
@@ -21,7 +21,7 @@
 //! | 36..=44   | hotbar         | 0..=8        |
 //! | 45        | off-hand       | 40           |
 //!
-//! Menu-slot layout of a **generic container** (`ChestMenu`, `n` container
+//! Menu-slot layout of a **generic container** (`n` container
 //! slots): `0..n` container, then `n..n+27` main storage, then the last 9 are
 //! the hotbar. The player's armour and off-hand are not shown but remain
 //! swap-addressable through their native indices.
@@ -213,17 +213,17 @@ impl Menu {
 
     /// Builds an "item combiner" menu: `container_size` leading slots, all
     /// accepting any item except `result_slot` (take-only), then the player's
-    /// main storage and hotbar — vanilla's `ItemCombinerMenu` shape shared by
-    /// the anvil (`AnvilMenu`, `container_size = 3, result_slot = 2`), the
-    /// grindstone (`GrindstoneMenu`, `3, 2`) and the smithing table
-    /// (`SmithingMenu`, `4, 3`). All three put `getInventorySlotStart()` /
-    /// `INV_SLOT_START` at exactly `result_slot + 1`, which is why
+    /// main storage and hotbar — vanilla's item-combiner shape shared by
+    /// the anvil (`container_size = 3, result_slot = 2`), the
+    /// grindstone (`3, 2`) and the smithing table
+    /// (`4, 3`). All three put the inventory start slot
+    /// at exactly `result_slot + 1`, which is why
     /// [`generic`](Self::generic)'s own numbering — `0..container_size`
     /// container, then main, then hotbar — already matches their quick-move
     /// ranges with no further change; only the result slot's *kind* differs.
     ///
-    /// The input-slot `mayPlace` predicates these three menus actually declare
-    /// (smithing's per-slot `RecipePropertySet` tests, the grindstone's
+    /// The input-slot placement predicates these three menus actually declare
+    /// (smithing's per-slot recipe-property-set tests, the grindstone's
     /// damageable-or-enchanted check) are server data this tree does not have —
     /// the same "genuinely different, left on generic order" call
     /// [`crate::menus::build_menu`]'s doc comment already makes for the furnace
@@ -256,7 +256,7 @@ impl Menu {
     /// take-only result slot to mark, only a placement restriction on slot 1.
     ///
     /// The three enchantment **costs**, the level-requirement clues and the
-    /// enchantment seed (`EnchantmentMenu`'s ten `DataSlot`s) are not part of
+    /// enchantment seed (the enchanting menu's ten data slots) are not part of
     /// the slot layout; they arrive as `container_set_data` and are read back
     /// through [`crate::menus::Menus::container_data`].
     #[must_use]
@@ -437,7 +437,7 @@ impl Menu {
     /// grindstone and smithing table. The slot is not marked
     /// [`SlotKind::Output`] either: unlike those three, the payment slot both
     /// accepts an item (a placement) and later loses it (consumed by a
-    /// successful `SET_BEACON`, vanilla's own effect-update step's own
+    /// successful `SET_BEACON`, vanilla's effect-update step's
     /// payment-slot removal) — never a take-only result.
     #[must_use]
     pub fn beacon() -> Self {
@@ -872,7 +872,7 @@ impl Menu {
     ///   arriving into an empty cell. Adding the symmetric check "for
     ///   consistency" changes observable behaviour and desynchronises from the
     ///   server.
-    /// * **The merge pass is gated on `moving.isStackable()`**, not on
+    /// * **The merge pass is gated on moving's is stackable**, not on
     ///   the per-slot cap. An unstackable item skips merging entirely and goes
     ///   straight to the first empty slot.
     /// * **The merge cap is measured against the stack already in the slot**,
@@ -947,8 +947,8 @@ impl Menu {
     /// caller's repeat loop can detect a re-filling output slot). Returns `None`
     /// when nothing could be moved.
     ///
-    /// One vanilla tail is deliberately not modelled: `CraftingMenu` finishes a
-    /// result-slot quick move with `player.drop(stack, false)`, throwing any
+    /// One vanilla tail is deliberately not modelled: the crafting menu finishes a
+    /// result-slot quick move by dropping the stack, throwing any
     /// remainder that would not fit into the inventory onto the floor rather
     /// than leaving it in the result slot. Reaching it needs a result stack
     /// larger than the free space in a 36-slot inventory, which one predicted
@@ -1057,7 +1057,7 @@ impl Menu {
     /// diverge, and the difference is not cosmetic: vanilla's own crafting-table
     /// quick-move step tries the
     /// grid first, so shift-clicking planks in a
-    /// crafting table *loads the grid*. `InventoryMenu` has no such branch —
+    /// crafting table *loads the grid*. The inventory menu has no such branch —
     /// shift-clicking in the player screen never fills the 2×2 — so
     /// [`quick_move_player`](Self::quick_move_player) must not grow one.
     fn quick_move_crafting(

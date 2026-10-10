@@ -25,9 +25,9 @@
 //!
 //! * **The packet ids** are Mojang's own generated `packets.json` for 26.2, via
 //!   `crate::packet_ids` — `player_combat_kill` is `68` and `respawn` is `82`.
-//! * **The wire layout** is `ClientboundPlayerCombatKillPacket`'s own record
+//! * **The wire layout** is player-combat-kill packet's own record
 //!   (`record (int playerId, Component message)`, a VarInt id then
-//!   `vanilla's own component serialization's own trusted stream codec`), hand-built into
+//!   the trusted component stream codec), hand-built into
 //!   [`golden_combat_kill_body`] rather than obtained from the encoder under
 //!   test.
 //! * **The semantics** come from [`V770Adapter`], which is an *independently
@@ -74,17 +74,17 @@ mod common;
 use common::unique_username;
 
 /// Full health, from `V770ServerProtocol::begin_play_at`'s fresh-spawn
-/// `SetHealth` and vanilla's `vanilla's own attributes's own max health` default.
+/// `SetHealth` and vanilla's max-health attribute default.
 const MAX_HEALTH: f32 = 20.0;
 
-/// Vanilla's `vanilla's own attributes's own safe fall distance` default. Written here rather than
+/// Vanilla's safe-fall-distance attribute default. Written here rather than
 /// imported so the predicted health below is derived from the vanilla constant
 /// and not from `lodestone_server::fall`'s copy of it.
 const SAFE_FALL_DISTANCE: f64 = 3.0;
 
 /// The exact damage a fall of `blocks` deals, from
-/// `vanilla's own living entity's own calculate fall damage`/`calculateFallPower`
-/// (`vanilla's own living entity's own java`): `floor((d + 1e-6 - safe) * 1.0 * 1.0)`.
+/// the living entity's fall-damage calculation
+/// : `floor((d + 1e-6 - safe) * 1.0 * 1.0)`.
 fn fall_damage(blocks: f64) -> f32 {
     let raw = (blocks + 1.0e-6 - SAFE_FALL_DISTANCE).floor();
     if raw > 0.0 { raw as f32 } else { 0.0 }
@@ -143,7 +143,7 @@ fn accept_teleportation_bytes(id: i32) -> Vec<u8> {
 }
 
 /// Hand-written serverbound `move_player_pos`: `f64`×3 then the flags byte,
-/// per `vanilla's own serverbound move player packet's own pos`. `on_ground` is bit `0x01`.
+/// per the serverbound move-player-pos packet. `on_ground` is bit `0x01`.
 fn pos_bytes(x: f64, y: f64, z: f64, on_ground: bool) -> Vec<u8> {
     let mut w = Writer::default();
     w.f64(x);
@@ -214,7 +214,7 @@ async fn join<T: Transport>(client: &mut Connection<T>, name: &str, uuid: Uuid) 
         .write_packet(play::serverbound::PLAYER_LOADED, &[])
         .await
         .unwrap();
-    // `ClientboundLoginPacket`'s first field is a raw big-endian `i32` entity id.
+    // Login packet's first field is a raw big-endian `i32` entity id.
     let login_body = joined
         .iter()
         .find(|(id, _)| *id == play::clientbound::LOGIN)
@@ -241,7 +241,7 @@ async fn step<T: Transport>(
 
 /// The `health` field of every `set_health` in `packets`, in order.
 ///
-/// Layout per `ClientboundSetHealthPacket`: `f32` health, VarInt food, `f32`
+/// Layout per set-health packet: `f32` health, VarInt food, `f32`
 /// saturation.
 fn healths(packets: &[(i32, Vec<u8>)]) -> Vec<f32> {
     packets
@@ -269,7 +269,7 @@ fn respawns(packets: &[(i32, Vec<u8>)]) -> usize {
 /// A hand-built `player_combat_kill` body: a VarInt player id, then a
 /// network-form NBT chat component (root tag id, no root name).
 ///
-/// Written from `ClientboundPlayerCombatKillPacket`'s record definition, not
+/// Written from player-combat-kill packet's record definition, not
 /// obtained from the encoder under test — see this file's module docs.
 fn golden_combat_kill_body(player_id: i32, key: &str, victim: &str) -> Vec<u8> {
     let component = Nbt::Compound(vec![
@@ -507,7 +507,7 @@ async fn a_respawn_request_from_a_dead_player_sends_the_respawn_packet() {
 }
 
 /// A **living** player's respawn request must be ignored, mirroring vanilla's
-/// `handleClientCommand` guard (`this.player.getHealth() > 0.0F` → return).
+/// `handleClientCommand` guard (`this.player.get_health() > 0.0F` → return).
 ///
 /// The control for the test above: without it, that one passes against a server
 /// that answers `perform_respawn` unconditionally, which would let a client

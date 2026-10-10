@@ -164,7 +164,7 @@ fn back_off_is_the_only_difference() {
 
 #[test]
 fn back_off_steps_in_005_increments_rather_than_clamping_once() {
-    // The distinction a single clamp cannot reproduce. `canFallAtLeast(dx)` is true
+    // The distinction a single clamp cannot reproduce. can fall at least is true
     // for every `dx >= 0.8 - 1e-7` here (the probe only has to clear x = 1.0, and
     // there is nothing further east to stop it), so from delta.x = 1.0 the loop
     // steps 1.00 -> 0.95 -> 0.90 -> 0.85 -> 0.80 -> 0.75 and exits at the first

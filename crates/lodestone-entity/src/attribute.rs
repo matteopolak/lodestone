@@ -589,7 +589,7 @@ const LIVING_PATHS: &[&str] = &[
 ];
 
 /// A concrete entity type's base-value overrides: the explicit `.add(ATTR, v)`
-/// calls in its `createAttributes()`, layered on top of its [`BaseTemplate`].
+/// calls in its create attributes, layered on top of its [`BaseTemplate`].
 struct TypeSpec {
     template: BaseTemplate,
     /// `(attribute path, base value)` overrides. An entry whose path is not in
@@ -1342,7 +1342,7 @@ mod tests {
              claim about what the bug *was* needs rewriting."
         );
 
-        // (type, vanilla's own movement_speed, vanilla's own max_health)
+        // (type, vanilla's movement_speed, vanilla's max_health)
         let cases: &[(&str, f64, f64)] = &[
             ("rabbit", 0.3, 3.0),
             ("drowned", 0.23, 20.0),

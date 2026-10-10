@@ -37,7 +37,7 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::COOLDOWN {
-            // `vanilla's own identifier's own stream codec` is `STRING_UTF8.map(Identifier::parse, ...)`
+            // The identifier stream codec is `STRING_UTF8.map(Identifier::parse, ...)`
             // — a single length-prefixed "namespace:path" string, the same shape
             // `parse_key` already expects, not a separate namespace/path pair.
             let mut reader = Reader::new(payload);
@@ -50,8 +50,8 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::CHANGE_DIFFICULTY {
-            // `vanilla's own difficulty's own stream codec` wraps out-of-range ids in vanilla
-            // (`vanilla's own by id map's own out of bounds strategy's own wrap`); this adapter instead treats an
+            // The difficulty stream codec wraps out-of-range ids in vanilla
+            // (an out-of-bounds wrap strategy); this adapter instead treats an
             // id outside `0..=3` as an explicit decode error rather than silently
             // aliasing it to a different difficulty.
             let mut reader = Reader::new(payload);
@@ -241,7 +241,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::CameraSet { entity_id })]);
         }
         if packet_id == play::clientbound::OPEN_BOOK {
-            // `InteractionHand` ordinal: 0 = main hand, 1 = off hand.
+            // Hand ordinal: 0 = main hand, 1 = off hand.
             let mut reader = Reader::new(payload);
             let ordinal = reader.var_i32().map_err(dec_err)?;
             let main_hand = match ordinal {
@@ -314,7 +314,7 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::MOUNT_SCREEN_OPEN {
             // Unlike most entity ids on the wire, `entityId` here is a raw
-            // 4-byte `int` (`FriendlyByteBuf::readInt`), not a VarInt.
+            // 4-byte `int`, not a VarInt.
             let mut reader = Reader::new(payload);
             let container_id = reader.var_i32().map_err(dec_err)?;
             let inventory_columns = reader.var_i32().map_err(dec_err)?;
@@ -354,8 +354,8 @@ impl V770Adapter {
     }
 }
 
-/// Reads an `vanilla's own entity anchor argument's own anchor` ordinal (a VarInt): `0` = feet,
-/// `1` = eyes. Used by `ClientboundPlayerLookAtPacket`.
+/// Reads an entity anchor ordinal (a VarInt): `0` = feet,
+/// `1` = eyes. Used by the player-look-at packet.
 fn read_look_anchor(reader: &mut Reader<'_>) -> Result<LookAnchor, AdapterError> {
     match reader.var_i32().map_err(dec_err)? {
         0 => Ok(LookAnchor::Feet),

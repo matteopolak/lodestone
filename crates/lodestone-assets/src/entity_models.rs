@@ -83,7 +83,7 @@ fn cube(origin: [f32; 3], size: [f32; 3], tex: [f32; 2]) -> CubeDef {
 ///
 /// Visible to the crate because [`crate::equipment`] builds the armour layers
 /// from the *same* function at `g = 0.5` / `g = 1.0`. Vanilla does exactly that
-/// — vanilla's own humanoid model's base-armor-mesh construction calls `createMesh(g, 0.0F)` — and
+/// — vanilla's own humanoid model's base-armor-mesh construction calls create mesh — and
 /// sharing it is what keeps an armour piece's pivots identical to the wearer's,
 /// which is the precondition for posing a piece off the wearer's own part
 /// matrix.
@@ -444,8 +444,8 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         // cat/wolf/ocelot and parrot are deferred pending the texture-variant
         // seam (see the module banner above `end_crystal_model`). item_frame
         // is intentionally absent: vanilla resolves it via a block-model JSON
-        // (vanilla's own item-frame renderer/block-model resolver), not a `ModelPart`
-        // `LayerDefinition`, so it does not fit `CubeDef`'s single-tex_offset
+        // (vanilla's own item-frame renderer/block-model resolver), not a part-tree
+        // layer definition, so it does not fit `CubeDef`'s single-tex_offset
         // box-unwrap primitive without extending it or routing through the
         // block-model pipeline instead. ---
         EntityModelEntry {
@@ -886,8 +886,8 @@ mod tests {
     /// **Both hypotheses, from the real vanilla source.** vanilla's own boat model's water-patch construction
     /// (`.cache/mc/26.2/client-src`) builds the *same* box `boat_hull`'s own
     /// `"bottom"` child does — `addBox(-14, -9, -3, 28, 16, 3)` at `texOffs(0, 0)`
-    /// — but at pose `offsetAndRotation(0, -3, 1, PI/2, 0, 0)`, where `"bottom"`
-    /// sits at `offsetAndRotation(0, 3, 1, PI/2, 0, 0)`. Only the pivot's `y`
+    /// — but at pose offset and rotation, where `"bottom"`
+    /// sits at offset and rotation. Only the pivot's `y`
     /// differs, and only in sign: everything else — the box, the rotation, `x`,
     /// `z` — must be bit-identical, or the patch sits somewhere vanilla's own
     /// hollow-interior fix does not, and the gap it exists to close reopens on
@@ -933,7 +933,7 @@ mod tests {
         assert!((patch.pose.z_rot - bottom.pose.z_rot).abs() < 1e-6, "z rotation must match");
 
         // The box itself: bit-identical origin/size/tex_offset to `"bottom"`'s,
-        // per vanilla's own boat model's water-patch construction's own `texOffs(0, 0).addBox(-14, -9,
+        // per vanilla's boat model's water-patch construction's `texOffs(0, 0).addBox(-14, -9,
         // -3, 28, 16, 3)` — the same literal `addBox` call `addCommonParts`
         // makes for `"bottom"`.
         assert_eq!(patch.cubes.len(), 1, "the patch is one box, not the whole hull");

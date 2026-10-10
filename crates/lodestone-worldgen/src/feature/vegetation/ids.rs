@@ -85,8 +85,8 @@ pub(crate) enum Tag {
     /// (a mangrove trunk can grow up through e.g. its own leaves/propagules,
     /// same shape as [`Tag::Leaves`]'s air-or-leaves anchor for dark oak).
     MangroveLogsCanGrowThrough,
-    /// `#minecraft:mangrove_roots_can_grow_through` — `MangroveRootPlacer
-    /// .canPlaceRoot`'s extra OR-arm.
+    /// `#minecraft:mangrove_roots_can_grow_through` — the mangrove root placer's
+    /// extra OR-arm.
     MangroveRootsCanGrowThrough,
     /// The ground tag used by the bundled huge-brown-mushroom feature.
     HugeBrownMushroomCanPlaceOn,
@@ -306,7 +306,7 @@ pub(super) enum Rewrite {
     /// `waterlogged=true|false`, `try_place_leaf`'s fix-up.
     Waterlogged(bool),
     /// `axis=x|y|z`, the pillar-axis property — the fancy trunk placer's log-axis rule
-    /// and `FallenTreeFeature`'s own `getSidewaysStateModifier`, both of which
+    /// and the fallen-tree feature's sideways-state modifier, both of which
     /// pick a log's axis from the direction it was placed in rather than the
     /// configured (vertical) default.
     Axis(Axis),
@@ -378,7 +378,7 @@ impl IdTags {
     }
 }
 
-/// `LeavesBlock.DISTANCE`'s value in a canonical state string, if it has one.
+/// The leaves block's distance value in a canonical state string, if it has one.
 ///
 /// The single definition of how the property is read; [`VegTags::bind`] fills the
 /// [`IdTags::distance`] table from it.

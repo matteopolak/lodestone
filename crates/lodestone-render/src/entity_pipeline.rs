@@ -1867,7 +1867,7 @@ impl EntityPipeline {
     /// mesh to instance — each piece is a *unique* quad, positioned, sized and
     /// coloured freshly on the CPU every frame from the ground scan
     /// (`lodestone_shell`'s `prepare_shadows`), exactly the way vanilla's own
-    /// `VertexConsumer`-based shadow-feature renderer builds it. So this pipeline
+    /// vertex-consumer shadow-feature renderer builds it. So this pipeline
     /// takes a single plain (non-instanced) [`ShadowVertex`] buffer, the same
     /// shape a debug-line or block-outline draw already uses elsewhere in this
     /// engine — see that call site's doc for the precedent.
@@ -1904,7 +1904,7 @@ impl EntityPipeline {
     /// `DepthStencilState`, so it has **no** depth bias at all — and a shadow
     /// piece is placed *exactly* coplanar with the ground it sits on, by
     /// construction: vanilla's shadow-feature renderer's prepare function emits its quad at
-    /// `piece.relativeY() + shapeBelow().bounds().minY`, and the only blocks
+    /// `piece.relative_y() + shape_below().bounds().minY`, and the only blocks
     /// that reach it are the ones `isCollisionShapeFullBlock` accepted, whose
     /// bounds are the unit cube. **Zero separation**, which is the part no
     /// amount of depth precision helps with: a polygon offset is the only
@@ -2368,7 +2368,7 @@ mod tests {
         assert_eq!(plain.tint, NO_TINT);
 
         // Overlay alone: RGB bits untouched (still opaque white), alpha byte set
-        // to vanilla's 178 (`-1291911168`'s alpha channel, `OverlayTexture`'s red
+        // to vanilla's 178 (`-1291911168`'s alpha channel, the overlay texture's red
         // row, vanilla's living-entity renderer).
         let hurt = EntityInstanceRaw::new(m, 0).with_hurt_overlay(true);
         assert_eq!(hurt.tint & 0x00FF_FFFF, NO_TINT);
@@ -2469,7 +2469,7 @@ mod tests {
     }
 
     /// [`creeper_overlay_alpha_from_progress`]: hand-evaluated from
-    /// `OverlayTexture`'s constructor (`(1 - x/15*0.75) * 255`, `x =
+    /// the overlay texture's constructor (`(1 - x/15*0.75) * 255`, `x =
     /// (int)(progress * 15)`), not read back off this implementation.
     #[test]
     fn creeper_overlay_alpha_transcribes_the_vanilla_lookup_texture() {
@@ -2787,7 +2787,7 @@ mod tests {
     ///
     /// Both numbers are predicted from vanilla's constants rather than asserted
     /// as "smaller": an adult zombie's `s` is `0.6 × 1.4 = 0.84`, a baby's box is
-    /// `getDimensions().scale(0.5)` so its `s` is exactly `0.42`.
+    /// get dimensions's get dimensions so its `s` is exactly `0.42`.
     ///
     /// The layer-count half is the counter-intuitive one and it is the reason
     /// this is not a "babies get fewer quads" change. The count comes from
@@ -2864,7 +2864,7 @@ mod tests {
 
     /// [`FlameQuad::fire_1`] must alternate starting from `fire_0`
     /// (vanilla's flame-feature renderer's `ss % 2 == 0 ? fire1 : fire2`, and
-    /// `fire1` names vanilla's own first flame-sprite constant — see that field's own doc for why
+    /// `fire1` names vanilla's first flame-sprite constant — see that field's doc for why
     /// the naming looks swapped and is not).
     #[test]
     fn flame_quads_alternate_textures_starting_from_fire_0() {

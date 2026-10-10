@@ -1,4 +1,4 @@
-//! Vanilla's `ConfirmScreen`: a question, a warning naming the thing at risk,
+//! Vanilla's confirm screen: a question, a warning naming the thing at risk,
 //! and two buttons — the screen an irreversible action has to pass through.
 //!
 //! ## What it is
@@ -20,9 +20,9 @@
 //! - the affirmative button is a *different control on a different screen*, and
 //!   its rect does not overlap the Delete button's — the two are 177 px apart at
 //!   the reference canvas, because vanilla centres this block in the screen while
-//!   `SelectWorldScreen` pins Delete to a footer band. So a second click where
+//!   The select world screen pins Delete to a footer band. So a second click where
 //!   the first one landed hits **nothing**;
-//! - **nothing is focused when this screen opens.** Vanilla's `ConfirmScreen.init`
+//! - **nothing is focused when this screen opens.** Vanilla's confirm screen's init
 //!   (`:45-56`) calls no `setInitialFocus`, unlike its own select-world screen rendering,
 //!   so Enter immediately after opening presses nothing. Reproducing that is both
 //!   faithful *and* the safe direction: a held Enter cannot roll through the
@@ -35,10 +35,10 @@
 //! ## How it works
 //!
 //! [`confirm_block`] arranges vanilla's own tree — a vertical linear layout
-//! at spacing 8 holding a title `StringWidget`, the message, and a
+//! at spacing 8 holding a title string widget, the message, and a
 //! horizontal linear layout at spacing 4 of two `Button.DEFAULT_WIDTH` buttons
 //! with `paddingTop(16)` — and
-//! `FrameLayout.centerInRectangle`s it in the canvas (`:59-62`). Every leaf is
+//! FrameLayout's center in rectangles it in the canvas (`:59-62`). Every leaf is
 //! then read back as a [`ConfirmPlacement`], which [`Origin::Confirm`] resolves,
 //! so the buttons' rects come out of the arranged tree rather than out of
 //! restated numbers. That matters twice over here: the "cannot be
@@ -53,7 +53,7 @@
 //!
 //! ## Two deliberate deviations
 //!
-//! - **The message is one clipped line, not a `MultiLineTextWidget`.** Vanilla
+//! - **The message is one clipped line, not a multi line text widget.** Vanilla
 //!   wraps it to `width - 50` over up to 15 rows (`:67-69`), which makes the
 //!   block's *height* — and therefore the buttons' y — a function of the font.
 //!   There is no font at arrange time here (the same reason every title cell in
@@ -64,8 +64,8 @@
 //!   [`super::render::text_px`] — the same fixed advance the jar-less draw
 //!   measures with. `the_confirmation_message_fits_its_own_block` is the gate.
 //! - **No `setDelay`/`delayTicker`.** Vanilla's is not used by the world-delete
-//!   path at all (`WorldSelectionList.deleteWorld` (`:619-637`) constructs a
-//!   plain `ConfirmScreen`); it exists for the backup-and-experimental-world
+//!   path at all (the world selection list's delete world (`:619-637`) constructs a
+//!   plain confirm screen); it exists for the backup-and-experimental-world
 //!   confirmations. It also could not work here — `frame_for` is a pure function
 //!   of the UI state with no tick input — so porting the field would be a
 //!   constant claiming a delay happened.
@@ -90,7 +90,7 @@ pub const DELETE_WARNING: &str = "'%s' will be lost forever! (A long time!)";
 /// not `gui.yes`. The wording is part of the
 /// safety: a button saying `Yes` answers a question the player may not have read.
 pub const DELETE_BUTTON: &str = "Delete";
-/// `CommonComponents.GUI_CANCEL` = `gui.cancel` (`:635`).
+/// The common components's gui cancel = `gui.cancel` (`:635`).
 pub const CANCEL_BUTTON: &str = "Cancel";
 
 /// Vanilla's own vertical linear layout at spacing 8, and the same 8
@@ -98,9 +98,9 @@ pub const CANCEL_BUTTON: &str = "Cancel";
 const BLOCK_SPACING: i32 = 8;
 /// Vanilla's own horizontal linear layout at spacing 4 for the button row (`:51`).
 const BUTTON_SPACING: i32 = 4;
-/// `buttonLayout.defaultCellSetting().paddingTop(16)` (`:52`).
+/// default cell setting's default cell setting (`:52`).
 const BUTTON_PADDING_TOP: i32 = 16;
-/// A `StringWidget`'s height — the title, and the one
+/// A string widget's height — the title, and the one
 /// message line this port reserves (see the module doc's first deviation).
 const LINE_H: f32 = 9.0;
 
@@ -129,7 +129,7 @@ const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 /// tree is centred in a canvas that is only known at draw time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmPlacement {
-    /// The title `StringWidget` — zero-width, so its rect *is* the text's centre.
+    /// The title string widget — zero-width, so its rect *is* the text's centre.
     Title,
     /// The message line. Zero-width for the same reason.
     Message,
@@ -137,7 +137,7 @@ pub enum ConfirmPlacement {
     Button(u8),
 }
 
-/// Vanilla's `ConfirmScreen.init` as a real [`LinearLayout`] tree, arranged and
+/// Vanilla's confirm screen's init as a real [`LinearLayout`] tree, arranged and
 /// then centred in a `width`×`height` canvas — `repositionElements`' own two
 /// steps.
 ///
@@ -155,9 +155,9 @@ fn confirm_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
         let baseline = root.default_cell_setting();
         *baseline = baseline.align_horizontally_center();
     }
-    // `this.layout.addChild(new StringWidget(this.title, this.font))` (`:48`).
+    // `this.layout.add_child(new string widget(this.title, this.font))` (`:48`).
     root.add_child(string_widget());
-    // `this.addMessage()` (`:49`) — one reserved line, see the module doc.
+    // this's add message (`:49`) — one reserved line, see the module doc.
     root.add_child(string_widget());
     // Vanilla's own button layout: a horizontal linear layout at spacing 4
     // added as a child, with its default cell setting padded 16 on top (`:51-52`).
@@ -177,7 +177,7 @@ fn confirm_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
     root.add_child(Box::new(buttons));
     root.arrange_elements();
     // Vanilla's own center-in-rectangle frame-layout helper applied to
-    // `(this.layout, this.getRectangle())` (`:61`).
+    // `(this.layout, this.get_rectangle())` (`:61`).
     layout::align_in_rectangle(&mut root, 0.0, 0.0, width, height, 0.5, 0.5);
     layout::widget_rects(&root)
 }
@@ -233,7 +233,7 @@ pub fn row_slot(row: usize) -> Slot {
 ///
 /// An enum with one variant rather than a bare `dir_name`, because the whole
 /// value of a generic confirm screen is that the next irreversible action
-/// (`EditWorldScreen`'s reset, a re-create that overwrites) adds a variant here
+/// (the edit world screen's reset, a re-create that overwrites) adds a variant here
 /// instead of a screen — and because [`super::nav::MenuNav::apply_confirm`]'s
 /// `match` then makes "opened a confirmation and forgot to act on it" a compile
 /// error rather than a silently harmless Yes.
@@ -303,10 +303,10 @@ impl Default for ConfirmNav {
 
 impl ConfirmNav {
     /// The world-delete confirmation for the world in `dir_name` displayed as
-    /// `display_name` — `WorldSelectionList.WorldListEntry.deleteWorld`'s own
-    /// `ConfirmScreen` (`:619-637`).
+    /// `display_name — the world selection list's world list entry.delete_world`'s own
+    /// The confirm screen (`:619-637`).
     ///
-    /// **Nothing is focused.** See the module doc: vanilla's `ConfirmScreen.init`
+    /// **Nothing is focused.** See the module doc: vanilla's confirm screen's init
     /// sets no initial focus, and here that is also what stops a held Enter
     /// carrying through from the world list into a deletion.
     #[must_use]
@@ -365,7 +365,7 @@ impl ConfirmNav {
 
     /// The row the cursor is over. Separate from focus for
     /// [`super::world_select::WorldSelectNav::hovered`]'s reason, and joined only
-    /// where the sprite is picked (`isHoveredOrFocused()`).
+    /// where the sprite is picked (is hovered or focused).
     #[must_use]
     pub fn hovered(&self) -> Option<usize> {
         self.hovered
@@ -394,7 +394,7 @@ impl ConfirmNav {
     /// One key, in vanilla's `Screen.keyPressed` order.
     ///
     /// Escape is `callback.accept(false)` — note
-    /// `shouldCloseOnEsc()` is `false` on this screen precisely so that the
+    /// should close on esc is `false` on this screen precisely so that the
     /// *callback* runs rather than a bare `onClose`, which is why this is a `No`
     /// and not a silent dismissal.
     pub fn handle_key(&mut self, key: MenuKey) -> ConfirmOutcome {
@@ -411,7 +411,7 @@ impl ConfirmNav {
         match self.focus.screen_key_pressed(&mut self.widgets, event) {
             KeyOutcome::Close => ConfirmOutcome::No,
             KeyOutcome::Consumed | KeyOutcome::FocusMoved => ConfirmOutcome::Handled,
-            // `AbstractButton.keyPressed` presses a focused, active button on
+            // The abstract button's key pressed presses a focused, active button on
             // Enter. With **no** focus — the state this screen opens in — there is
             // nothing to press, which is the point.
             KeyOutcome::Declined if key == MenuKey::Enter => match self.focus.focused() {
@@ -468,7 +468,7 @@ fn warning_for(name: &str) -> String {
 /// `selected` is `usize::MAX` when nothing is focused — **which is the state this
 /// screen opens in** — rather than `0`, which would light the affirmative button
 /// up and, worse, would make [`super::render::draw_widget`]'s
-/// `isHoveredOrFocused()` draw it as the one the keyboard is on.
+/// is hovered or focused draw it as the one the keyboard is on.
 #[must_use]
 pub fn frame(nav: &ConfirmNav) -> MenuFrame<'static> {
     let rows: Vec<MenuRow> = (0..ROW_COUNT)
@@ -504,8 +504,8 @@ pub fn frame(nav: &ConfirmNav) -> MenuFrame<'static> {
 }
 
 /// The live resource-pack accept/decline dialog —
-/// `ClientCommonPacketListenerImpl.PackConfirmScreen`, a second
-/// `ConfirmScreen` subclass sharing this file's geometry
+/// The client common packet listener impl's pack confirm screen, a second
+/// The confirm screen subclass sharing this file's geometry
 /// ([`confirm_rects`]/[`row_slot`]/[`ConfirmWidgets`]) but **not**
 /// [`Screen::Confirm`](super::Screen::Confirm)/[`ConfirmNav`] — see
 /// [`Screen::ResourcePackPrompt`](super::Screen::ResourcePackPrompt)'s own
@@ -515,12 +515,12 @@ pub fn frame(nav: &ConfirmNav) -> MenuFrame<'static> {
 ///
 /// Two buttons, vanilla's own wording: `Proceed`/`Disconnect` for a
 /// `required` pack, `Yes`/`No` for an optional one
-/// (`CommonComponents.GUI_PROCEED`/`GUI_DISCONNECT` vs `GUI_YES`/`GUI_NO`,
-/// `ClientCommonPacketListenerImpl`'s `PackConfirmScreen` constructor call).
+/// (the common components's gui proceed/`GUI_DISCONNECT` vs `GUI_YES`/`GUI_NO`,
+/// The client common packet listener impl's pack confirm screen constructor call).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourcePackPromptNav {
     /// Accept then decline, in [`ACCEPT_ROW`]/[`DECLINE_ROW`] order — vanilla
-    /// adds its affirmative button first (`ConfirmScreen.addButtons`).
+    /// adds its affirmative button first (the confirm screen's add buttons).
     pub widgets: ConfirmWidgets,
     focus: FocusSet,
     hovered: Option<usize>,
@@ -549,7 +549,7 @@ pub enum ResourcePackPromptOutcome {
     /// The player accepted.
     Accept,
     /// The player declined — Escape, the negative button, or a click on it
-    /// (vanilla's `shouldCloseOnEsc() == false` on `ConfirmScreen`, so
+    /// (vanilla's `should_close_on_esc() == false` on the confirm screen, so
     /// Escape runs the callback with `false` rather than a bare close, the
     /// same rule [`ConfirmNav::handle_key`] already follows for the world
     /// list's confirmation).

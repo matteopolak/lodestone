@@ -25,7 +25,7 @@
 //!   own fit-gated pose-update state machine, which is what makes a
 //!   swimmer `0.6` tall without ever clipping them into a ceiling.
 //! * [`push`] — entity-versus-entity interaction: the soft crowd push
-//!   (vanilla's own entity-push step) and the entity half of vanilla's own
+//!   (vanilla's entity-push step) and the entity half of vanilla's
 //!   no-collision check. Deliberately *not* on [`collision::CollisionView`]:
 //!   that trait answers block geometry, and entity data is a caller-owned
 //!   per-tick snapshot rather than a repeatable spatial query.

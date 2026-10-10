@@ -29,7 +29,7 @@
 //!
 //! The order in vanilla's own situational-music selection is:
 //!
-//! 1. A screen's own `getBackgroundMusic()`, if any — this wins outright.
+//! 1. A screen's own get background music, if any — this wins outright.
 //! 2. Otherwise, if there is a player: `END_BOSS` when the dimension is the End
 //!    *and* the boss overlay wants music; else the probed
 //!    vanilla's own background-music selection with the creative/underwater flags, which may be `None`.
@@ -51,8 +51,8 @@
 //! | `CREDITS` | 0 | 0 | yes | vanilla's own CREDITS music constant |
 //! | `END_BOSS` | 0 | 0 | yes | vanilla's own END_BOSS music constant |
 //! | `END` | 6000 | 24000 | yes | vanilla's own END music constant |
-//! | `UNDER_WATER` | 12000 | 24000 | no | vanilla's own UNDER_WATER music constant, via vanilla's own game-music helper |
-//! | `GAME` | 12000 | 24000 | no | vanilla's own GAME music constant, via vanilla's own game-music helper |
+//! | `UNDER_WATER` | 12000 | 24000 | no | vanilla's UNDER_WATER music constant, via vanilla's game-music helper |
+//! | `GAME` | 12000 | 24000 | no | vanilla's GAME music constant, via vanilla's game-music helper |
 //!
 //! and the scheduler's own: [`STARTING_DELAY`] is 100 ticks
 //! (vanilla's own starting-delay constant, and its own next-song-delay
@@ -96,10 +96,10 @@ use lodestone_audio::JavaRandom;
 /// when music is stopped explicitly.
 pub const STARTING_DELAY: i32 = 100;
 
-/// vanilla's own ten-minute constant — the min delay every vanilla's own game-music helper track uses.
+/// vanilla's ten-minute constant — the min delay every vanilla's game-music helper track uses.
 pub const GAME_MUSIC_MIN_DELAY: i32 = 12_000;
 
-/// vanilla's own twenty-minute constant — the max delay every vanilla's own game-music helper track uses.
+/// vanilla's twenty-minute constant — the max delay every vanilla's game-music helper track uses.
 pub const GAME_MUSIC_MAX_DELAY: i32 = 24_000;
 
 /// Ticks per minute, the conversion vanilla's own frequency enum's constructor
@@ -266,9 +266,9 @@ pub mod musics {
         MusicDelay::from_ticks(24_000),
         true,
     );
-    /// vanilla's own UNDER_WATER music constant, via vanilla's own game-music helper.
+    /// vanilla's UNDER_WATER music constant, via vanilla's game-music helper.
     pub const UNDER_WATER: Music = Music::game("music.under_water");
-    /// vanilla's own GAME music constant, via vanilla's own game-music helper.
+    /// vanilla's GAME music constant, via vanilla's game-music helper.
     pub const GAME: Music = Music::game("music.game");
 }
 
@@ -401,7 +401,7 @@ pub fn next_int(rng: &mut JavaRandom, min_inclusive: i32, max_inclusive: i32) ->
     rng.next_i32_bound(max_inclusive - min_inclusive + 1) + min_inclusive
 }
 
-/// Everything vanilla's own situational-music selection and vanilla's own music-volume selection read,
+/// Everything vanilla's situational-music selection and vanilla's music-volume selection read,
 /// gathered by the caller once per tick.
 ///
 /// Deliberately a plain data struct with no world access: the shell resolves the
@@ -425,7 +425,7 @@ pub struct MusicSituation<'a> {
     pub background_music: &'a BackgroundMusic,
     /// `instabuild && mayfly`, in vanilla's own situational-music selection — *not* a gamemode check.
     pub creative: bool,
-    /// vanilla's own underwater check on the player, read in vanilla's own situational-music selection.
+    /// vanilla's underwater check on the player, read in vanilla's situational-music selection.
     pub underwater: bool,
     /// The probed `audio/music_volume` attribute (default 1.0). `pale_garden`
     /// sets it to 0.0, which fades music out rather than muting it abruptly.
@@ -517,7 +517,7 @@ pub trait MusicSink {
     fn is_active(&self) -> bool;
 
     /// Set the music bus's runtime gain, for the volume fade — vanilla's
-    /// vanilla's own fade-playing routine calling vanilla's own category-volume update for the music bus.
+    /// vanilla's fade-playing routine calling vanilla's category-volume update for the music bus.
     fn set_music_gain(&mut self, gain: f32);
 }
 

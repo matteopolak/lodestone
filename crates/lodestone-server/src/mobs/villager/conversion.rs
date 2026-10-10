@@ -113,7 +113,7 @@ pub fn roll_conversion_ticks(next_int: impl FnOnce(i32) -> i32) -> i32 {
     next_int(CONVERSION_WAIT_MAX - CONVERSION_WAIT_MIN + 1) + CONVERSION_WAIT_MIN
 }
 
-/// Starts a conversion: `ZombieVillager.startConverting`'s timer half (the
+/// Starts a conversion: ZombieVillager's start converting's timer half (the
 /// effect swap — removing Weakness, adding Strength — and the entity-event
 /// broadcast are the caller's job, since they touch `SimMob`/`WorldEffect`
 /// this pure module has no access to).
@@ -125,7 +125,7 @@ pub fn start_converting(starter: Option<Uuid>, next_int: impl FnOnce(i32) -> i32
     }
 }
 
-/// `ZombieVillager.getConversionProgress`: normally `1`, occasionally more.
+/// ZombieVillager's get conversion progress: normally `1`, occasionally more.
 ///
 /// `next_f32` is **one** shared `nextFloat()`-shaped stream (`[0.0, 1.0)`),
 /// used for both the initial 1% gate and every block roll after it — matching

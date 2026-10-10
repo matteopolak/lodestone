@@ -460,17 +460,12 @@ pub fn apply_local_player_state(
                     dimension.0 = Some(dim.clone());
                     game_mode.0 = Some(*mode);
                     alive.0 = true;
-                    // The two entity-metadata-fed fields go back to
-                    // "no reading yet", because a respawn is a **brand-new
-                    // player entity on both sides**: `PlayerList.respawn` does
-                    // `new ServerPlayer(...)` and
-                    // vanilla's *client* likewise builds a fresh `LocalPlayer`
-                    // via `gameMode.createPlayer`
-                    // (in `ClientPacketListener.handleRespawn`) and only
-                    // copies the old id onto it. Its synched data therefore
-                    // starts at `Entity`'s own defaults —
-                    // `entityDataBuilder.define(DATA_AIR_SUPPLY_ID,
-                    // getMaxAirSupply())` (i.e. 300) and
+                    // The two metadata-fed fields go back to "no reading yet": a
+                    // respawn is a **brand-new player entity on both sides** (the
+                    // server builds a new one; the client builds a fresh local player
+                    // and only copies the old id onto it). Its synched data therefore
+                    // starts at the entity defaults — air supply 300 (the max) and
+                    // shared flags 0 — so nothing in the dead entity's last
                     // shared flags 0 — so nothing in the dead entity's last
                     // metadata survives. We keep one long-lived entity instead
                     // of respawning ours, which is exactly why the clear has to
@@ -500,8 +495,8 @@ pub fn apply_local_player_state(
                     vitals.air = None;
                     vitals.on_fire = None;
                     // Same "fresh entity on both sides" reasoning, one field over:
-                    // vanilla's respawned `ServerPlayer` is never a passenger and
-                    // `ServerPlayer.restoreFrom` carries no vehicle across, so a
+                    // a respawned player is never a passenger and the restore path
+                    // carries no vehicle across, so a
                     // player who died while riding must land on foot. `None` and
                     // not "leave it alone": the server sends no `SET_PASSENGERS`
                     // for a vehicle it destroyed our seat in, so without this the

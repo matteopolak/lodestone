@@ -117,7 +117,7 @@ pub struct ServerStatus {
 /// the same value here, by design.
 ///
 /// Vanilla's anonymous-player shaping
-/// (`MinecraftServer.ANONYMOUS_PLAYER_PROFILE` →
+/// (the minecraft server's anonymous player profile →
 /// `multiplayer.status.anonymous_player`, `:99-104`) needs the profile id this
 /// display model deliberately drops, so it is not reproduced; the shell shows
 /// the name the server sent.
@@ -243,17 +243,17 @@ pub const PINGING_SPRITES: [&str; 5] = [
 ///
 /// `multiplayer.status.pinging`'s `en_us` string, and it goes in the **MOTD**
 /// slot rather than the status one because that is what vanilla does:
-/// `ServerStatusPinger.pingServer` assigns `data.motd = translatable(
+/// The server status pinger's ping server assigns `data.motd = translatable(
 /// "multiplayer.status.pinging")` and blanks `data.status`.
 pub const PINGING_MOTD: &str = "Pinging...";
 
-/// `ServerSelectionList.INCOMPATIBLE_SPRITE`.
+/// The server selection list's incompatible sprite.
 pub const INCOMPATIBLE_SPRITE: &str = "server_list/incompatible";
-/// `ServerSelectionList.UNREACHABLE_SPRITE`.
+/// The server selection list's unreachable sprite.
 pub const UNREACHABLE_SPRITE: &str = "server_list/unreachable";
 
 /// The signal-strength sprite for a round-trip time, from
-/// `ServerSelectionList.refreshStatus`'s `SUCCESSFUL` arm (`:417-427`).
+/// The server selection list's refresh status's `SUCCESSFUL` arm (`:417-427`).
 ///
 /// The buckets are `< 150`, `< 300`, `< 600`, `< 1000`, else — and note they
 /// run *downward*: a fast server gets `ping_5` (five bars) and a slow one
@@ -277,7 +277,7 @@ pub fn ping_sprite(ping_ms: Option<u64>) -> &'static str {
 }
 
 /// The animated pinging sprite for row `index` at `millis`, from
-/// `ServerSelectionList.extractContent` (`:315-327`).
+/// The server selection list's extract content (`:315-327`).
 ///
 /// `(millis / 100 + index * 2) & 7` gives 0..=7 and the `if idx > 4 { idx = 8 -
 /// idx }` fold turns that into a **ping-pong** over 0..=4 rather than a sawtooth

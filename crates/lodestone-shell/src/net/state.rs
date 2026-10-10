@@ -286,7 +286,7 @@ impl CommandTreeCell {
     /// Stored whole, **including its transaction id**: the id is the only
     /// thing that lets the consumer discard a reply to a request the input has
     /// since outgrown (vanilla's own
-    /// `ClientSuggestionProvider::completeCustomSuggestions` check), so
+    /// The client suggestion provider's complete custom suggestions check), so
     /// flattening this to just the strings here would destroy the one field
     /// that makes a stale reply detectable.
     pub(crate) fn apply_suggestions(
@@ -389,12 +389,12 @@ impl SkyDefaultCell {
 pub type SharedSkyDefault = Arc<SkyDefaultCell>;
 
 /// One server-pushed resource pack awaiting the player's accept/decline
-/// answer — `ClientboundResourcePackPushPacket`'s fields, plus the message
+/// answer — resource-pack-push packet's fields, plus the message
 /// this dialog draws.
 ///
-/// `message` is vanilla's own pack-prompt header text, with the server's own optional prompt
+/// `message` is vanilla's pack-prompt header text, with the server's optional prompt
 /// component appended — pre-flattened to plain text and folded onto one
-/// line, the same "one clipped line, not a wrapped `MultiLineTextWidget`"
+/// line, the same "one clipped line, not a wrapped multi line text widget"
 /// simplification [`crate::menu::confirm`]'s module doc already makes and
 /// names for the identical reason: there is no font at menu-frame-build time
 /// to wrap against.
@@ -464,7 +464,7 @@ impl PackPromptCell {
         }
     }
 
-    /// Unconditionally clears the cell — `ClientboundResourcePackPopPacket`
+    /// Unconditionally clears the cell — resource-pack-pop packet
     /// with no id, vanilla's "remove every pack".
     pub(super) fn clear_all(&self) {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;

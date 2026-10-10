@@ -38,9 +38,9 @@ pub(super) fn local_attachment_with_view_lag(
 /// This is deliberately position-agnostic. It used to document itself as
 /// sampling "an entity's feet … exactly as vanilla lights it", and that was
 /// wrong on both halves: vanilla probes at the entity's **eye**
-/// (`EntityRenderer.getPackedLightCoords` → `Entity.getLightProbePosition` →
+/// (EntityRenderer's get packed light coords → Entity's get light probe position →
 /// `getEyePosition`), and it forces the block half to 15 for a burning entity
-/// (`EntityRenderer.getBlockLightLevel`). Both of those belong to the caller,
+/// (EntityRenderer's get block light level). Both of those belong to the caller,
 /// because both depend on the entity rather than on the world — see
 /// `super::entity_passes::entity_light`, which is where every entity pass gets
 /// its light and the only place either rule is applied. The first-person arm
@@ -125,7 +125,7 @@ impl std::fmt::Debug for SkyDarkenSource {
 }
 
 /// Where this frame's per-dimension **ambient light colour** comes from:
-/// `EnvironmentAttributes.AMBIENT_LIGHT_COLOR`, the floor `lightmap.fsh` seeds
+/// The environment attributes's ambient light color, the floor `lightmap.fsh` seeds
 /// its accumulator with before either light half is added — see
 /// `lodestone_render::light::light_color_from_levels`'s `ambient` parameter
 /// and `DimensionType::ambient_light_color` for the wire source.
@@ -304,7 +304,7 @@ impl std::fmt::Debug for TimeOfDaySource {
 /// camera-space chain the rested arm hangs off — never in the animated
 /// `setupAnim` result a third-person view needs. The body has no
 /// such divergence: vanilla's own third-person player renderer is just
-/// `PlayerModel`/`HumanoidModel.setupAnim`, exactly what
+/// The player model/humanoid model's setup anim, exactly what
 /// [`lodestone_render::entity_anim::Skeleton::pose`] already computes for
 /// every other humanoid mob.
 ///
@@ -415,7 +415,7 @@ impl ThirdPersonBodyState {
             // And the same construction, for the same reason, keeps the local
             // player's own body from toppling: no ingest entity means no
             // `DeathTime` to read. The local player's death is drawn by
-            // `camera_rig`'s *camera* roll (`GameRenderer.bobHurt`, a different
+            // `camera_rig`'s *camera* roll (the game renderer's bob hurt, a different
             // vanilla expression on the same tick count) rather than by tipping
             // this body over, which is also what vanilla does in first person.
             death_time: 0.0,
@@ -676,7 +676,7 @@ impl std::fmt::Debug for HandSwingSource {
 /// # Why the *interpolated* usage time and not `(ticks, partial)`
 ///
 /// Vanilla's `applyEatTransform` computes `currUsageTime` once
-/// (`getUseItemRemainingTicks() - frameInterp + 1.0F`) and then uses it for both the
+/// (`get_use_item_remaining_ticks() - frameInterp + 1.0F`) and then uses it for both the
 /// bob's phase and the jiggle's fraction. Handing the renderer the combined value
 /// keeps that single derivation
 /// ([`eat_usage_time`](lodestone_render::entity::eat_usage_time)) in one place; two
@@ -873,7 +873,7 @@ impl std::fmt::Debug for ThirdPersonBodySource {
 ///
 /// A `Fn(Vec3) -> Vec<ChestSpawn>` taking the **camera position**, because
 /// vanilla's own gate is per-block-entity distance from the camera
-/// (`BlockEntityRenderer.shouldRender`, a flat 64 blocks against the block
+/// (BlockEntityRenderer's should render, a flat 64 blocks against the block
 /// *centre*) and the cheapest place to apply it is where the world is being
 /// walked, not after a `Vec` of every chest in the world has been built.
 ///
@@ -1041,7 +1041,7 @@ impl std::fmt::Debug for BeaconSource {
 
 /// Where this frame's end portals come from — same "unset means draw
 /// nothing" convention as [`SkullSource`]. No per-position tracker behind
-/// it, for the same reason [`BeaconSource`] needs none: `TheEndPortalBlockEntity.
+/// it, for the same reason [`BeaconSource`] needs none: the the end portal block entity.
 /// shouldRenderFace` reads no world state and no NBT at all (always `{Up,
 /// Down}`), so there is nothing to advance in `Sim::step`.
 #[derive(Default)]
@@ -1152,7 +1152,7 @@ impl std::fmt::Debug for DecoratedPotSource {
 /// Where this frame's conduits come from.
 ///
 /// **Not** as thin as [`ShulkerSource`]: a conduit's `isActive`/`isHunting` and
-/// its two tick counters are `ConduitBlockEntity.clientTick`'s own
+/// its two tick counters are the conduit block entity's client tick's own
 /// **client-computed** state (a 3×3×3-then-5×5×5 block-store scan, never sent
 /// over the wire — see `lodestone_render::block_entity::conduit_frame_scan`'s
 /// doc), so the closure this wraps has to carry a per-position tick tracker the
@@ -1438,7 +1438,7 @@ impl std::fmt::Debug for CopperGolemStatueSource {
 /// **The odd one out of this family**: every other block-entity source above
 /// feeds `prepare_block_entities` and the entity pipeline, and this one feeds
 /// [`RenderState::prepare_item_geometry`](crate::gpu::RenderState) and the
-/// *model* pipeline, because `CampfireRenderer` draws item models rather than a
+/// *model* pipeline, because campfire renderer draws item models rather than a
 /// cuboid rig. Adding it to `prepare_block_entities`' emptiness condition would
 /// be wrong for exactly that reason — it has no `BlockEntityBatch` to contribute.
 #[derive(Default)]
@@ -1471,7 +1471,7 @@ impl std::fmt::Debug for CampfireSource {
 /// Where this frame's brushable-block revealed items come from.
 ///
 /// **The same odd one out as [`CampfireSource`], for the same reason**:
-/// `BrushableBlockRenderer.submit` draws a single item model, not a cuboid
+/// The brushable block renderer's submit draws a single item model, not a cuboid
 /// rig — the suspicious sand/gravel a player sees is the ordinary block
 /// model, real geometry the terrain mesher already draws — so this feeds
 /// [`RenderState::prepare_item_geometry`](crate::gpu::RenderState) and the
@@ -1510,7 +1510,7 @@ impl std::fmt::Debug for BrushableSource {
 /// Where this frame's shelved items come from.
 ///
 /// **The same odd one out as [`CampfireSource`]/[`BrushableSource`], for the
-/// same reason**: `ShelfRenderer.submit` draws up to three item models, not
+/// same reason**: the shelf renderer's submit draws up to three item models, not
 /// a cuboid rig — a shelf's board/back/sides are all real block-model
 /// geometry the terrain mesher already draws — so this feeds
 /// [`RenderState::prepare_item_geometry`](crate::gpu::RenderState) and the
@@ -1543,7 +1543,7 @@ impl std::fmt::Debug for ShelfSource {
 /// Where this frame's vault display-item clusters come from.
 ///
 /// **The same odd one out as [`CampfireSource`], for the same reason**:
-/// `VaultRenderer.submit` draws an item cluster, not a cuboid rig — the
+/// The vault renderer's submit draws an item cluster, not a cuboid rig — the
 /// vault's cage/door/base are all real block-model geometry the terrain
 /// mesher already draws (`blockstates/vault.json` is a plain `variants`
 /// map) — so this feeds
@@ -1578,10 +1578,10 @@ impl std::fmt::Debug for VaultSource {
 }
 
 /// Where this frame's moving pistons come from — vanilla's
-/// `PistonHeadRenderer`.
+/// The piston head renderer.
 ///
 /// **The odd one out twice over.** Like [`CampfireSource`] it does not feed
-/// `prepare_block_entities`, because `PistonHeadRenderer`'s constructor calls no
+/// `prepare_block_entities`, because piston head renderer's constructor calls no
 /// `bakeLayer` and so it owns no cuboid rig; and unlike `CampfireSource` it does
 /// not feed the item path either. It feeds
 /// [`RenderState::prepare_moving_blocks`](crate::gpu::RenderState), the
@@ -1591,7 +1591,7 @@ impl std::fmt::Debug for VaultSource {
 /// **Must be re-installed every frame**, and for the sharpest reason in this file
 /// after [`EnchantingTableSource`]: the closure captures both a snapshot of the
 /// client-side progress tracker *and* the partial tick, and the entire animation
-/// lasts **two ticks** (`PistonMovingBlockEntity.TICKS_TO_EXTEND`, `progress +=
+/// lasts **two ticks** (the piston moving block entity's ticks to extend, `progress +=
 /// 0.5` per tick). A stale closure does not merely freeze it — it freezes it at
 /// `progress` 0, which places the head one whole cell back *inside* the piston
 /// base, so the degradation is overlapping geometry rather than a still frame.
@@ -1599,7 +1599,7 @@ impl std::fmt::Debug for VaultSource {
 /// Unset — the offline demo, every headless test, and any session against a server
 /// that does not send `moving_piston` block entities — yields an empty vec. That
 /// leaves a **hole** for the duration of the push, not a missing decoration:
-/// `moving_piston` is `RenderShape.INVISIBLE` and has no block model for the
+/// `moving_piston` is the render shape's invisible and has no block model for the
 /// terrain mesher to draw, exactly as chest and shulker box do not.
 #[derive(Default)]
 pub struct MovingPistonSource(

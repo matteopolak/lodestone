@@ -47,7 +47,7 @@ pub(super) fn encode_chunk_cache_center_body(cx: i32, cz: i32) -> Vec<u8> {
 
 /// Hand-written encoder for the clientbound `forget_level_chunk` packet: a
 /// single packed `i64` — `x` in the low 32 bits, `z` in the high 32 — mirroring
-/// vanilla's vanilla's own chunk-position type's own pack exactly as `V770Adapter::handle_play`'s
+/// the chunk-position packing exactly as `V770Adapter::handle_play`'s
 /// `FORGET_LEVEL_CHUNK` decode arm already reads it (`adapter/chunk.rs`, the
 /// `packed as i32` / `(packed >> 32) as i32` pair).
 pub(super) fn encode_forget_chunk_body(cx: i32, cz: i32) -> Vec<u8> {
@@ -59,9 +59,9 @@ pub(super) fn encode_forget_chunk_body(cx: i32, cz: i32) -> Vec<u8> {
 
 /// Hand-written encoder for the clientbound `block_update` packet: a packed
 /// `BlockPos` long ([`pack_block_pos`]) followed by a VarInt block-state
-/// registry id — mirrors vanilla's own clientbound block-update packet's own stream codec
-/// (vanilla's own block-position type's own stream codec composed with vanilla's own codec library's own id mapper(Block
-/// .BLOCK_STATE_REGISTRY)`, vanilla's own clientbound block-update packet's own stream codec) and
+/// registry id — mirrors the block-update packet's stream codec
+/// (the block-position stream codec composed with an id-mapper codec over the block-state registry,
+/// the block-update packet's stream codec) and
 /// this crate's own decode of the same packet in `V770Adapter::handle_play`'s
 /// `BLOCK_UPDATE` arm (`adapter/chunk.rs`), which reads the identical
 /// packed-i64-then-VarInt shape.
@@ -75,8 +75,8 @@ pub(super) fn encode_block_update_body(x: i32, y: i32, z: i32, state_id: u32) ->
 /// Hand-written encoder for the clientbound `game_event` packet (wire id 38),
 /// the small keyed world-state channel vanilla uses for weather transitions.
 /// Wire layout: an unsigned byte event id, then a big-endian `f32` param —
-/// exactly `ClientboundGameEventPacket`'s `writeByte(event) + writeFloat(param)`
-/// (vanilla's own clientbound game-event packet's own stream codec), and exactly the shape
+/// exactly the game-event packet's byte event id plus float param
+/// (the clientbound game-event packet's stream codec), and exactly the shape
 /// `packets::game::GameEvent`'s `Decode` impl reads back on this crate's own
 /// client side (`V770Adapter`'s `GAME_EVENT` arm, `adapter/chunk.rs`).
 pub(super) fn game_event_body(kind: u8, value: f32) -> Vec<u8> {
@@ -135,17 +135,17 @@ pub(super) fn encode_set_time_body(game_time: i64, day_time: Option<i64>) -> Vec
 /// already had. The two agree; that agreement is now evidence rather than an
 /// assumption.
 ///
-/// # Payloads, each from its own `ArgumentTypeInfo::serializeToNetwork`
+/// # Payloads, each from its own argument-type-info network serialiser
 ///
 /// | parsers | payload |
 /// |---|---|
-/// | the four Brigadier numerics | vanilla's own argument-utils helper's own create number flags byte (bit 0 min, bit 1 max) then only the **present** bounds |
+/// | the four Brigadier numerics | a flags byte (bit 0 min, bit 1 max) then only the **present** bounds |
 /// | `brigadier:string` | `writeEnum`, i.e. a VarInt `StringType` ordinal |
 /// | `minecraft:entity` | one flags byte, bit 0 `single`, bit 1 `playersOnly` |
 /// | `minecraft:score_holder` | one flags byte, bit 0 `multiple` |
 /// | `minecraft:time` | a bare big-endian `int` minimum — **no** flags byte |
-/// | the five `resource*` | `writeResourceKey` → `writeIdentifier`, one VarInt-length UTF-8 string |
-/// | everything else | nothing at all (`SingletonArgumentInfo::serializeToNetwork` is empty) |
+/// | the five `resource*` | resource-key write → identifier write, one VarInt-length UTF-8 string |
+/// | everything else | nothing at all (the singleton argument info's serialiser is empty) |
 ///
 /// A bound is *absent* exactly when it equals its type's sentinel — vanilla's own
 /// test is `template.min != the JDK's own integer type's own min-value accessor and, for the floating types,
@@ -172,9 +172,9 @@ pub(super) fn write_argument_parser(wire: Wire, w: &mut Writer, parser: &Argumen
 }
 
 fn write_argument_parser_base(w: &mut Writer, parser: &ArgumentParser) {
-    /// vanilla's own argument-utils helper's own number-flag-min accessor.
+    /// The number-flag min bit.
     const HAS_MIN: u8 = 1;
-    /// vanilla's own argument-utils helper's own number-flag-max accessor.
+    /// The number-flag max bit.
     const HAS_MAX: u8 = 2;
 
     match parser {
@@ -321,20 +321,20 @@ fn write_argument_parser_base(w: &mut Writer, parser: &ArgumentParser) {
     }
 }
 
-/// Writes one vanilla's own clientbound commands packet's own entry: `Entry::write`'s exact order —
+/// Writes one commands-packet node entry in exact order —
 /// the flags byte, the child-index array (`writeVarIntArray`, so a VarInt count
 /// then VarInt elements), the redirect index **only** when `FLAG_REDIRECT` is
 /// set, then the type-dependent stub.
 ///
-/// The stub order for an argument is `writeUtf(name)`, the parser id, the parser
+/// The stub order for an argument is write utf, the parser id, the parser
 /// payload, and only then the custom-suggestions identifier — the suggestions id
 /// comes **after** the payload, which is the one field order here that cannot be
-/// guessed from field names and which `ArgumentNodeStub::write` fixes.
+/// guessed from field names and which the argument node's writer fixes.
 ///
 /// A [`NodeKind::Unrecognized`] node is written as a **root-type** entry, keeping
 /// its children, redirect and executable bit. That is not a fallback invented
 /// here: it is what a client already does with such a node, since
-/// vanilla's own clientbound commands packet's own read returns a null stub and vanilla's own command-node resolver's own resolve
+/// the commands packet's read returns a null stub and the command-node resolver
 /// builds a bare `RootCommandNode` for it. Re-encoding it as an argument is
 /// impossible anyway — a node that failed to decode carries neither a name nor a
 /// payload.
@@ -397,8 +397,8 @@ pub(super) fn write_command_node(wire: Wire, w: &mut Writer, node: &RawCommandNo
 
 /// Encodes a whole `minecraft:commands` payload (clientbound id 16).
 ///
-/// `ClientboundCommandsPacket::write` is `writeCollection(entries, …)` then
-/// `writeVarInt(rootIndex)` — the node list **first**, the root index last, which
+/// The commands packet's writer is a collection write of the entries then
+/// a VarInt root index — the node list **first**, the root index last, which
 /// is the mirror of `V770Adapter`'s `decode_command_tree` and the ordering a
 /// round-trip cannot catch you getting wrong if both ends agree wrongly. Read
 /// against the vanilla record, not against the decoder.
@@ -415,7 +415,7 @@ pub(super) fn encode_commands_body(wire: Wire, tree: &WireCommandTree) -> Vec<u8
 
 /// Encodes a whole `minecraft:command_suggestions` payload (clientbound id 15).
 ///
-/// vanilla's own clientbound command-suggestions packet's own stream codec (mirrored from the
+/// The command-suggestions packet's stream codec (mirrored from the
 /// decode side in `V770Adapter::decode_command_suggestions`, which this crate's
 /// own client half uses to read a *real* server's reply): three VarInts (`id`,
 /// `start`, `length`), then a list of `Entry(String text, Optional<Component>

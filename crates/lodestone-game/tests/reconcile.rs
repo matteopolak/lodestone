@@ -161,13 +161,13 @@ fn set_slot_correction_targets_one_slot() {
 /// A predicted click must stamp **the server's** state id, never the locally
 /// bumped one.
 ///
-/// Vanilla's client sends `containerMenu.getStateId()` and never increments it
-/// (`MultiPlayerGameMode.handleContainerInput`); only the server writes that
+/// Vanilla's client sends the container's state id and never increments it
+/// (in the client game mode's container input); only the server writes that
 /// field. Our [`Menu::do_click`](lodestone_game::menu::Menu) *does* bump, because
 /// it doubles as the server-side model, so reading the id back off the predicted
 /// menu yields `server + 1` — which
-/// `ServerGamePacketListenerImpl.handleContainerClick` reads as **stale** and
-/// answers with `broadcastFullState()`. Every click would then be a 46-slot
+/// server's container-click handler reads as **stale** and
+/// answers with a full-state broadcast. Every click would then be a 46-slot
 /// resync that discards the prediction, and the reconcile seam could never
 /// observe agreement.
 #[test]

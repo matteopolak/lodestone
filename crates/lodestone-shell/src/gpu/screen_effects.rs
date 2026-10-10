@@ -31,7 +31,7 @@ pub struct ScreenEffects {
     pub on_fire: bool,
     /// Whether the local player is in spectator mode. Vanilla's
     /// `ScreenEffectRenderer.submit` skips both overlays entirely for a
-    /// spectator (`!this.minecraft.player.isSpectator()`), matching a
+    /// spectator (`!this.minecraft.player.is_spectator()`), matching a
     /// spectator's general "nothing about my own body renders" treatment.
     pub spectator: bool,
     /// The current game tick, for the fire overlay's animation frame
@@ -59,7 +59,7 @@ pub struct ScreenEffects {
     /// is the spyglass
     ///. First-person-gated, like
     /// [`Self::wearing_pumpkin`] (both live inside vanilla's own
-    /// camera-overlays extraction's `if (getCameraType().isFirstPerson())`
+    /// camera-overlays extraction's `if (get_camera_type().isFirstPerson())`
     /// block) — unlike freeze/nausea/portal below.
     pub scoping: bool,
     /// Vanilla's own get-effect-blend-factor accessor for the nausea effect,
@@ -105,11 +105,11 @@ impl ScreenEffects {
     ///   !isSleeping && !isSpectator` (this crate has no "sleeping" concept,
     ///   so that conjunct is omitted — never a false negative, since an
     ///   unmodelled state cannot suppress a draw it never influences);
-    ///   pumpkin/scoping come from `Hud.extractCameraOverlays`'s own nested
-    ///   `if (getCameraType().isFirstPerson())` block.
+    ///   pumpkin/scoping come from Hud's extract camera overlays's own nested
+    ///   `if (get_camera_type().isFirstPerson())` block.
     /// - [`Self::freeze_percent`]/[`Self::nausea_intensity`]/
     ///   [`Self::portal_intensity`] are **not** — vanilla draws
-    ///   `player.getTicksFrozen() > 0` and the
+    ///   `player.get_ticks_frozen() > 0` and the
     ///   portal/confusion overlays as *siblings* of the
     ///   `if (isFirstPerson())` block, not nested inside it, so they paint in
     ///   third person too. Checked against the jar directly, not assumed —

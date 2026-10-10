@@ -143,7 +143,7 @@ pub(super) fn avoided_species(species: &str) -> &'static [&'static str] {
         // skeleton variant.
         "skeleton" | "stray" | "wither_skeleton" | "bogged" => &["wolf"],
         // Vanilla's own spider goal registration. Vanilla additionally requires
-        // `!armadillo.isScared()`; nothing here models an armadillo's scared
+        // `!armadillo.is_scared()`; nothing here models an armadillo's scared
         // state, so that filter is a disclosed omission rather than a silent
         // one — it can only make a spider flee slightly more often.
         "spider" | "cave_spider" => &["armadillo"],
@@ -160,8 +160,8 @@ pub(super) fn flees_players(species: &str) -> bool {
     matches!(species, "cod" | "salmon" | "tropical_fish" | "pufferfish")
 }
 
-/// Whether `entity_type` is fire-immune (`Entity.fireImmune()`, vanilla's own
-/// `EntityType.Builder.fireImmune()` registration flag) — an immune mob's
+/// Whether `entity_type` is fire-immune (Entity's fire immune, vanilla's own
+/// Builder's fire immune registration flag) — an immune mob's
 /// burn counter is cleared outright rather than merely dealing no damage (see
 /// `crate::burning::BurnState::tick`'s `fire_immune` parameter for why that
 /// distinction matters for a later, longer ignition).
@@ -255,7 +255,7 @@ pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
     }
 }
 
-/// What feeding this species does — vanilla's `Animal.isFood` tag, read out of
+/// What feeding this species does — vanilla's Animal's is food tag, read out of
 /// `.cache/mc/26.2/src/data/minecraft/tags/item/*_food.json`.
 ///
 /// # This is not [`tempt_food`], and the two must not be merged
@@ -263,7 +263,7 @@ pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
 /// They coincide for the five species [`tempt_food`] covers, because those
 /// species' `LureGoal` is constructed with the very same tag. They diverge
 /// wherever vanilla constructs the tempt goal with a *different* predicate, and
-/// the wolf is the case that matters: `Wolf.isFood` is `#wolf_food` (meat and
+/// the wolf is the case that matters: Wolf's is food is `#wolf_food` (meat and
 /// fish), while a **bone** is what tames it — and a bone is in neither tag.
 /// Merging the tables would make a bone a breeding item and meat a taming item,
 /// both wrong.
@@ -312,7 +312,7 @@ pub(super) fn breeding_food(species: &str) -> &'static [&'static str] {
         ],
         // `#cat_food`. Note it is *raw* fish only, unlike `#wolf_food`.
         "cat" => &["cod", "salmon"],
-        // `Parrot.isFood` returns a literal `false`, and `Parrot.canMate`
+        // Parrot's is food returns a literal `false`, and Parrot's can mate
         // returns `false` with `getBreedOffspring` returning `null`. A parrot
         // cannot be bred at all — an empty row, not an unfinished one.
         "parrot" => &[],
@@ -329,7 +329,7 @@ pub(super) fn breeding_food(species: &str) -> &'static [&'static str] {
 /// | wolf | a **bone** (`Items.BONE`), and only while not angry | `random.nextInt(3) == 0` |
 /// | cat | `#cat_food` (raw cod or salmon) | `random.nextInt(3) == 0` |
 /// | parrot | `#parrot_food` (six seeds) | `random.nextInt(10) == 0` |
-/// | horse family | **being ridden**, not fed | `random.nextInt(getMaxTemper()) < getTemper()` |
+/// | horse family | **being ridden**, not fed | `random.nextInt(get_max_temper()) < get_temper()` |
 ///
 /// The wolf's trigger item is in none of its own food tags, the parrot's odds
 /// differ by a factor of three, and the horse's roll is not a constant chance at

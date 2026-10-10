@@ -58,7 +58,7 @@ Gotcha: `DimensionProperties` bounds and the generator's `min_y()`/`height()` ha
 
 Generation-time: `StructureTemplate::place(origin, &PlaceSettings::default(), &mut grid)` writes into the `DenseBlockGrid` the generator already holds.
 
-Live: `place_structure_live(source: &dyn ChunkSource, template, origin: PlaceOrigin, settings: &PlaceSettings) -> usize` reads the template's bounding box, hydrates a working grid from the live source (so a world-inspecting processor, such as a `RuleProcessor`'s "water under this dirt path", sees real placed blocks), calls the same `StructureTemplate::place`, and writes every cell back through `ChunkSource::set_block`, the player-edit path, so the paste persists and reads through `column()`/`block_state()`.
+Live: `place_structure_live(source: &dyn ChunkSource, template, origin: PlaceOrigin, settings: &PlaceSettings) -> usize` reads the template's bounding box, hydrates a working grid from the live source (so a world-inspecting processor, such as a a rule processor's "water under this dirt path", sees real placed blocks), calls the same `StructureTemplate::place`, and writes every cell back through `ChunkSource::set_block`, the player-edit path, so the paste persists and reads through `column()`/`block_state()`.
 
 `StructureTemplate::from_blocks(size, palette, blocks)` builds a template programmatically (every block gets `nbt: None`; jigsaw blocks and chest loot references need `parse`). The 1212 bundled templates come from `lodestone_server::embedded_structure_template(id)` / `embedded_structure_template_ids()`, and a plugin's own `.nbt` through `StructureTemplate::parse(bytes)`.
 

@@ -325,7 +325,7 @@ pub enum BlockEntity {
     /// widest arm alone — see [`PlacedBlockEntity`]'s doc comment for the
     /// arithmetic this costs a wide match specifically.
     Crafter {
-        /// The 9-slot 3×3 crafting grid, row-major (`CrafterMenu`'s own
+        /// The 9-slot 3×3 crafting grid, row-major (the crafter menu's own
         /// `x + y * 3` addressing).
         slots: Box<[Option<ItemStack>; 9]>,
         /// `true` where that index is disabled — `CONTAINER_SLOT_STATE_CHANGED`'s
@@ -344,7 +344,7 @@ pub struct LecternData {
 }
 
 /// A placed beacon's pyramid tier, selected powers and payment item —
-/// vanilla's `BeaconBlockEntity`, reduced to what `SET_BEACON` and the
+/// vanilla's beacon block entity, reduced to what `SET_BEACON` and the
 /// periodic effect sweep actually touch. The beam-continuity/colour state
 /// (`beamSections`) is not carried here at all: nothing in this crate renders
 /// a beam, and [`crate::beacon::beam_unobstructed`] recomputes the one bit
@@ -383,12 +383,12 @@ pub struct SignData {
     pub back: [String; 4],
     /// `is_waxed` — set by a honeycomb interaction (not modelled here yet);
     /// while `true`, [`apply_sign_update`] refuses every edit, matching
-    /// `updateSignText`'s own `!this.isWaxed()` guard.
+    /// `updateSignText`'s own `!this.is_waxed()` guard.
     pub waxed: bool,
-    /// `playerWhoMayEdit` — the uuid `SignBlock.openTextEdit` last granted
+    /// `playerWhoMayEdit` — the uuid sign block's open text edit last granted
     /// edit permission to, or `None` once spent. This crate grants it only at
     /// placement time (see [`block_entity_for_item`]'s sign arms), matching
-    /// `SignItem.useOn`'s own `sign.openTextEdit(player, signEntity, true)`;
+    /// `SignItem.useOn`'s own sign's open text edit;
     /// vanilla's *other* grant site — right-clicking an already-placed blank
     /// sign — needs the interact-on-block path this crate's `USE_ITEM_ON`
     /// consumer does not thread block-entity access through yet, so a sign
@@ -418,7 +418,7 @@ impl Default for SignData {
     }
 }
 
-/// `ChatFormatting::stripFormatting`'s regex, transcribed —
+/// The chat formatting's strip formatting's regex, transcribed —
 /// `(?i)§[0-9A-FK-OR]`: every `§` immediately followed by a legacy colour or
 /// style code (case-insensitive) is dropped as a pair, and nothing else is
 /// touched. `handleSignUpdate` runs this on every line *before* the ownership
@@ -445,11 +445,11 @@ pub fn strip_sign_formatting(line: &str) -> String {
     out
 }
 
-/// Applies a `SIGN_UPDATE` packet — `SignBlockEntity.updateSignText`'s full
+/// Applies a `SIGN_UPDATE` packet — the sign block entity's update sign text's full
 /// gate, transcribed: `entity` must be a [`BlockEntity::Sign`], not waxed, and
 /// `editor` must be the uuid currently granted edit permission
 /// ([`SignData::editor`]). A successful edit clears the grant
-/// (`setAllowedPlayerEditor(null)`), so a second `SIGN_UPDATE` for the same
+/// (set allowed player editor), so a second `SIGN_UPDATE` for the same
 /// position without a fresh grant is refused exactly like vanilla's — the
 /// same "was warned and ignored" outcome `updateSignText`'s `else` branch
 /// logs.
@@ -691,13 +691,13 @@ impl BlockEntity {
             }),
             BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             // A command block opens its own dedicated GUI
-            // (`Player.openCommandBlock`), not an `AbstractContainerMenu` —
+            // (Player's open command block), not an abstract container menu —
             // there is no vanilla menu identifier for it at all.
             | BlockEntity::CommandBlock(_)
-            // A spawner has no `AbstractContainerMenu` either — right-clicking
+            // A spawner has no abstract container menu either — right-clicking
             // one in survival does nothing at all in vanilla.
             | BlockEntity::Spawner(_)
-            // A sign has no `AbstractContainerMenu` either — `SignBlock`'s own
+            // A sign has no abstract container menu either — the sign block's own
             // interaction opens the dedicated text-edit screen `SIGN_UPDATE`
             // answers, not a menu.
             | BlockEntity::Sign(_) => None,
@@ -721,10 +721,10 @@ impl BlockEntity {
             BlockEntity::Furnace(f) => vec![f.input().cloned(), f.fuel().cloned(), f.output().cloned()],
             BlockEntity::Hopper(h) => h.slots().to_vec(),
             BlockEntity::Container { slots, .. } => slots.clone(),
-            // `BeaconMenu`'s single payment slot (`PAYMENT_SLOT = 0`).
+            // The beacon menu's single payment slot (`PAYMENT_SLOT = 0`).
             BlockEntity::Beacon(b) => vec![b.payment.clone()],
             BlockEntity::Lectern(l) => vec![l.book.clone()],
-            // `CrafterMenu.addSlots`'s own `x + y * 3` order — already this
+            // The crafter menu's add slots's own `x + y * 3` order — already this
             // array's own indexing.
             BlockEntity::Crafter { slots, .. } => slots.to_vec(),
             BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
@@ -905,7 +905,7 @@ impl BlockEntity {
     /// over the whole map) can resolve, so it is deliberately excluded here
     /// and ticked separately.
     ///
-    /// Returns `Some(now_lit)` when a [`Furnace`]'s `AbstractFurnaceBlock.LIT`
+    /// Returns `Some(now_lit)` when a [`Furnace`]'s abstract furnace block's lit
     /// flipped this tick — [`FurnaceTick::lit_changed`], forwarded rather than
     /// dropped so the caller (which holds the [`ChunkSource`](crate::chunk::ChunkSource)
     /// this registry does not) can write the block state through. Composter
@@ -937,7 +937,7 @@ impl BlockEntity {
             // registry — has a handle to. `crate::tick::run_tick_loop` drives
             // it directly instead, the same reason the natural-spawn cycle
             // does not live in this registry either.
-            // A sign has no active tick of its own — `SignBlockEntity` in
+            // A sign has no active tick of its own — the sign block entity in
             // 26.2 carries no `tick()` at all (unlike a hanging sign's older
             // wind-sway variant, which this port does not model), so an
             // idle-until-edited sign matches vanilla exactly.
@@ -1767,7 +1767,7 @@ impl BlockEntityRegistry {
     /// `enabled` receives a hopper's position and answers whether it may
     /// transfer this tick — `false` while redstone-powered. The caller reads it
     /// off the block state, which is where vanilla keeps it
-    /// (`HopperBlock.ENABLED`, maintained by `checkPoweredState`); this registry
+    /// (the hopper block's enabled, maintained by `checkPoweredState`); this registry
     /// has no world access and deliberately does not compute it.
     ///
     /// `is_loaded` receives every entity's position (not only a hopper's) and
@@ -2026,7 +2026,7 @@ pub fn block_state_id_nbt(state: lodestone_data::block_states::StateId) -> Nbt {
     Nbt::Compound(fields)
 }
 
-/// One in-flight moving piston's network NBT — `PistonMovingBlockEntity`'s
+/// One in-flight moving piston's network NBT — the piston moving block entity's
 /// `getUpdateTag`, which is `saveCustomOnly`, i.e. exactly `saveAdditional`'s five
 /// fields with no `id`/`x`/`y`/`z`.
 ///
@@ -2928,7 +2928,7 @@ mod tests {
     /// `tests/serve_play.rs` already established for this crate — real
     /// `tokio::time::interval`s, virtual clock, resolves in a fraction of a
     /// second of actual wall time.
-    /// [`moving_piston_nbt`] against `PistonMovingBlockEntity.saveAdditional` read
+    /// [`moving_piston_nbt`] against the piston moving block entity's save additional read
     /// as a record definition: five fields, and the **tag types** are the half a
     /// name-only comparison cannot see.
     ///

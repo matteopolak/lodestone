@@ -88,7 +88,7 @@
 //!   `CommandDispatcher::parseNodes` does. This only differs when one node
 //!   has more than one *argument* child that both accept the same text —
 //!   none of the three named consumers' expected trees do that.
-//! - [`CommandTree::parse`] collapses Brigadier's `reader.canRead(redirect ==
+//! - [`CommandTree::parse`] collapses Brigadier's `reader.can_read(redirect ==
 //!   null ? 2 : 1)` recursion gate to a single `can_read()` check. Getting
 //!   *some* form of this gate right turns out to matter a lot more than it
 //!   looks: it is the reason a redirect back to an ancestor is merely *deep*

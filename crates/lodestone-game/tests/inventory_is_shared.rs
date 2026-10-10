@@ -9,8 +9,8 @@
 //! A quick-move into the hotbar therefore updated the container's copy and left
 //! window 0 untouched — the item was usable, because the server had it, and the
 //! hotbar cell stayed blank or stale, including after the screen closed, because
-//! a vanilla server sends nothing on close (`ServerPlayer.doCloseContainer` only
-//! calls `transferState`).
+//! a vanilla server sends nothing on close (its close handler only
+//! transfers state).
 //!
 //! Vanilla has one `Inventory` and every menu's player-section slots are
 //! references into it. Rust will not lend one `Container` to two owned `Menu`s,
@@ -32,9 +32,9 @@
 //!
 //! Expected landing slots are hand-derived from 26.2, not from this port:
 //! vanilla's own chest quick-move step moves a container stack with
-//! `moveItemStackTo(stack, containerSize, slots.size(), true)`
+//! move item stack to
 //! and its own crafting-table quick-move step moves the result with
-//! `moveItemStackTo(stack, 10, 46, true)`; the
+//! move item stack to; the
 //! trailing `true` is `reverseDirection`, so both fill from the **last** menu
 //! slot backwards. The last slot of either menu is the ninth hotbar cell, native
 //! index 8.
@@ -55,7 +55,7 @@ const LAST_HOTBAR_NATIVE: usize = 8;
 /// Native index of the first hotbar cell (`Inventory` slot 0, the one the HUD
 /// draws leftmost).
 const FIRST_HOTBAR_NATIVE: usize = 0;
-/// Native index of the helmet slot (`InventoryMenu`'s armour run is `39 - i`).
+/// Native index of the helmet slot (the inventory menu's armour run is `39 - i`).
 const HELMET_NATIVE: usize = 39;
 /// Native index of the off-hand slot.
 const OFFHAND_NATIVE: usize = 40;
@@ -196,7 +196,7 @@ fn window_zero_set_slot_while_a_container_is_open_reaches_both_views() {
     let mut menus = Menus::new();
     open_chest(&mut menus, 4, None);
 
-    // Window-0 menu slot 36 is the first hotbar cell (`InventoryMenu`: 0 result,
+    // Window-0 menu slot 36 is the first hotbar cell (inventory menu: 0 result,
     // 1..=4 grid, 5..=8 armour, 9..=35 main, 36..=44 hotbar, 45 off-hand).
     menus.apply(&ClientEvent::ContainerSlot {
         window_id: 0,

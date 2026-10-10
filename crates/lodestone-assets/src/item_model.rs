@@ -162,7 +162,7 @@ pub enum ItemModelNode {
 /// Vanilla's own special-model-wrapper unbaked-bake step computes
 /// its own transformation-compose step `(transformation, this.transformation)`, which is
 /// its own transformation-compose step `(final Matrix4fc parent, Optional<Transformation>
-/// transform)` → `parent.mul(transform.getMatrix())` when present. JOML's own
+/// transform)` → `parent.mul(transform's get matrix)` when present. JOML's own
 /// matrix-multiply step multiplies as `this * other`, and applying a column-vector
 /// matrix product right-to-left means `other` (this node's own transform) is
 /// applied to the model *first*, and `parent` (the display-context transform
@@ -267,7 +267,7 @@ pub struct TintSource {
     /// Meaningless for the other seven sources, and `None` for them.
     pub grass: Option<[f32; 2]>,
     /// `minecraft:custom_model_data`'s `index` into that component's `colors`
-    /// list (`CustomModelDataSource`'s codec, optional, default `0`).
+    /// list (the custom-model-data source's codec, optional, default `0`).
     ///
     /// Meaningless for the other seven sources, and `0` for them.
     pub index: u32,
@@ -551,7 +551,7 @@ fn parse_node_body(
 /// `node`'s subtree, so a `Special` ends up holding the whole root-to-node
 /// chain outermost-first.
 ///
-/// This is vanilla's own unbaked item-model bake step's own transformation-compose
+/// This is vanilla's unbaked item-model bake step's transformation-compose
 /// step `(parent, this.transformation)` done once at parse time rather than per resolve: the
 /// accumulation is static (it does not depend on which branch a predicate
 /// picks), exactly as vanilla's is, so there is nothing to defer.
@@ -687,7 +687,7 @@ fn parse_rgb_color(value: &Value) -> Option<i32> {
 }
 
 /// `minecraft:grass`'s two required climate fields
-/// (`GrassColorSource`'s codec). Both must be present to be usable — a
+/// (the grass colour source's codec). Both must be present to be usable — a
 /// half-specified source falls back to vanilla's own default pair rather than
 /// mixing one authored value with one invented one.
 fn parse_grass_climate(value: &Value) -> Option<[f32; 2]> {

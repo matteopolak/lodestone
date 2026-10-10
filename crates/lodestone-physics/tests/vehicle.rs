@@ -495,14 +495,14 @@ fn a_horse_halves_sideways_input_and_quarters_reverse() {
     // A reared mount on the ground refuses to move at all.
     assert_eq!(ridden_input(MountRule::Horse, 1.0, 1.0, true, true), (0.0, 0.0));
     // …but the same rear-up in mid-air does not suppress the input: the clause is
-    // `onGround() && isStanding()`, and dropping the first conjunct would freeze a
+    // `onGround() && is_standing()`, and dropping the first conjunct would freeze a
     // falling mount.
     let (air_sideways, air_forward) = ridden_input(MountRule::Horse, 1.0, 1.0, false, true);
     assert!((air_sideways - 0.5).abs() < 1e-6);
     assert!((air_forward - 1.0).abs() < 1e-6);
 }
 
-/// **`AbstractHorse`'s rule is not universal**, and this is the gate for the
+/// **The horse family's rule is not universal**, and this is the gate for the
 /// override that makes a pig un-steerable.
 ///
 /// Vanilla's own pig and strider "get ridden input" steps both return a bare
@@ -558,7 +558,7 @@ fn the_ridden_speed_scales_differ_by_family() {
         false,
     );
     // f32-sized tolerances: vanilla narrows once at the end of the `Steered` arm
-    // (`(float)(getAttributeValue(...) * 0.225 * boostFactor())`), so the returned
+    // (`(float)(get_attribute_value(...) * 0.225 * boost_factor())`), so the returned
     // value is an `f32` and a 1e-9 bound is tighter than the type can represent.
     // Discrimination is untouched — the horse arm below is 4.4x away.
     assert!(
@@ -619,7 +619,7 @@ fn a_boat_clamps_its_riders_yaw_to_a_window_around_its_own_heading() {
 }
 
 /// The entry-into-water snap: crossing from `IN_AIR` to water places the hull at
-/// `getWaterLevelAbove() - bbHeight + 0.101` and kills the vertical velocity.
+/// `get_water_level_above() - bbHeight + 0.101` and kills the vertical velocity.
 ///
 /// This is the clause that makes a dropped boat *land* on the surface rather than
 /// bobbing up through it over several ticks, and it is an edge on the previous-status field — so
@@ -767,7 +767,7 @@ fn a_boat_on_ground_classifies_on_land_and_drags_with_that_blocks_friction() {
         // from its own "get ground friction" step, and its own float-boat step
         // then uses it and halves it, because a player is aboard.
         // The halving is not cumulative across ticks -- the next call to
-        // vanilla's own "get status" step re-latches the block's own `0.6` --
+        // vanilla's "get status" step re-latches the block's `0.6` --
         // so the *drag* is `0.6` every tick
         // and only this residue is halved. Asserting `0.6` here would be
         // asserting the wrong side of that order.

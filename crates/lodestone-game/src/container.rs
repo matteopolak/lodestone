@@ -186,8 +186,8 @@ pub struct Slot {
     /// this client shows today and forfeits every one of those the day a horse or
     /// brewing menu is added.
     ///
-    /// The **draw** rule is vanilla's, in `AbstractContainerScreen.extractSlot`
-    /// (`:224-230`): when the slot is empty and active, the icon is blitted 16x16
+    /// The **draw** rule is vanilla's, in the container screen's slot extraction
+    /// : when the slot is empty and active, the icon is blitted 16x16
     /// at the cell origin and `done = true` — so it *replaces* the item path
     /// rather than layering beneath it.
     pub no_item_icon: Option<&'static str>,
@@ -223,7 +223,7 @@ impl Slot {
     ///
     /// Output slots reject everything. Armour slots accept only a stack whose
     /// `minecraft:equippable` component names the matching position; a stack
-    /// with no such component is rejected, matching vanilla `ArmorSlot`. The
+    /// with no such component is rejected, matching vanilla's armour slot. The
     /// enchanting table's lapis slot accepts only `minecraft:lapis_lazuli`. All
     /// other slots accept any item.
     #[must_use]

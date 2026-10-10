@@ -4,7 +4,7 @@
 //! challenge id and is emitted as `ClientEvent::Ping` in both the
 //! configuration and play states; the caller is responsible for replying with
 //! `ClientAction::PongResponse`. Confirmed against 26.2's
-//! `ClientboundPingPacket` / `ServerboundPongPacket`.
+//! Ping packet / pong packet.
 
 use lodestone_model::{ClientEvent, ConnectionState, Directive, VersionAdapter};
 use lodestone_v26_2::V770Adapter;

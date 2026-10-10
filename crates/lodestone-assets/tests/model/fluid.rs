@@ -16,7 +16,7 @@ const SOURCE: f32 = 8.0 / 9.0;
 
 #[test]
 fn own_height_is_amount_over_nine() {
-    // Verified from FlowingFluid.getOwnHeight = amount / 9.
+    // Verified from the flowing fluid's own height = amount / 9.
     assert_eq!(FluidState::source().own_height(), SOURCE);
     assert_eq!(FluidState::new(8, false).own_height(), 8.0 / 9.0);
     assert_eq!(FluidState::new(1, false).own_height(), 1.0 / 9.0);
@@ -24,7 +24,7 @@ fn own_height_is_amount_over_nine() {
 
 #[test]
 fn render_height_is_full_when_same_fluid_above() {
-    // Verified from FlowingFluid.getHeight = hasSameAbove ? 1.0 : ownHeight.
+    // Verified from the flowing fluid's height: same above → 1.0 : own height.
     let s = FluidState::source();
     assert_eq!(s.render_height(false), SOURCE);
     assert_eq!(s.render_height(true), 1.0);
@@ -32,7 +32,7 @@ fn render_height_is_full_when_same_fluid_above() {
 
 #[test]
 fn neighbor_height_distinguishes_air_from_solid() {
-    // Verified FluidRenderer.getHeight: same fluid → 1 (above) / own; different
+    // Verified fluid renderer height: same fluid → 1 (above) / own; different
     // fluid → 0 if non-solid (air, averaged in), -1 if solid (excluded).
     assert_eq!(neighbor_height(true, true, SOURCE, false), 1.0);
     assert_eq!(neighbor_height(true, false, SOURCE, false), SOURCE);

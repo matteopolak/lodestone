@@ -10,10 +10,10 @@
 //!
 //! | field | vanilla | consumer |
 //! |---|---|---|
-//! | [`BlockBlast::explosion_resistance`] | vanilla's own "get explosion resistance" accessor | vanilla's own explosion "calculate exploded positions" step's per-step ray cost |
-//! | [`BlockBlast::ignite_odds`] | vanilla's own fire-block class's own ignite-odds map | vanilla's own fire-block "get ignite odds" accessor — *can fire start on this cell* |
-//! | [`BlockBlast::burn_odds`] | vanilla's own fire-block class's own burn-odds map | vanilla's own fire-block "check burn out" step — *can this block be consumed* |
-//! | [`BlockBlast::ignited_by_lava`] | vanilla's own block-state base class's own "ignited by lava" field | vanilla's own lava-fluid "is flammable" check — lava starting a fire nearby |
+//! | [`BlockBlast::explosion_resistance`] | vanilla's "get explosion resistance" accessor | vanilla's explosion "calculate exploded positions" step's per-step ray cost |
+//! | [`BlockBlast::ignite_odds`] | vanilla's fire-block class's own ignite-odds map | vanilla's fire-block "get ignite odds" accessor — *can fire start on this cell* |
+//! | [`BlockBlast::burn_odds`] | vanilla's fire-block class's own burn-odds map | vanilla's fire-block "check burn out" step — *can this block be consumed* |
+//! | [`BlockBlast::ignited_by_lava`] | vanilla's block-state base class's "ignited by lava" field | vanilla's own lava-fluid "is flammable" check — lava starting a fire nearby |
 //!
 //! **`ignite_odds > 0` and `ignited_by_lava` are different sets and neither
 //! contains the other.** Measured on the real dump: 207 blocks are flammable to
@@ -56,7 +56,7 @@
 //!
 //! `blocks.json` carries neither an explosion-resistance nor any flammability
 //! field, and the fire odds are not even reachable from a block's *properties* —
-//! they live in two private maps that vanilla's own fire-block class's own
+//! they live in two private maps that vanilla's fire-block class's
 //! bootstrap step
 //! fills at boot. So this is a JVM dump, generated the same way
 //! [`crate::hardness`] and [`crate::collision_shapes`] are: boot the real 26.2
@@ -172,7 +172,7 @@ pub fn blast_or_inert(block: &str) -> BlockBlast {
     blast(block).unwrap_or(BlockBlast::INERT)
 }
 
-/// `FireBlock::getIgniteOdds` — the block's ignite odds, **or `0` when the state
+/// The block's ignite odds, **or `0` when the state
 /// is `waterlogged=true`**.
 ///
 /// The waterlogged override is the whole reason this exists next to [`blast`]: a
@@ -199,7 +199,7 @@ pub fn ignite_odds_for_state_id(state: StateId) -> u8 {
     blast_for_block(state.block()).ignite_odds
 }
 
-/// `FireBlock::getBurnOdds` — the block's burn odds, **or `0` when the state is
+/// The block's burn odds, **or `0` when the state is
 /// `waterlogged=true`**.
 #[must_use]
 #[cfg(test)]

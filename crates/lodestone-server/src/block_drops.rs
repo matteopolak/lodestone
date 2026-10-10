@@ -190,7 +190,7 @@ pub struct PoppedItem {
     /// World-space feet position, already carrying `popResource`'s jitter and
     /// its `- halfHeight` centring.
     pub position: Vec3,
-    /// Velocity in blocks/tick, as the `ItemEntity` constructor sets it.
+    /// Velocity in blocks/tick, as the item entity constructor sets it.
     pub velocity: Vec3,
 }
 
@@ -425,12 +425,12 @@ pub fn drop_explosion_loot(
 /// # Chain reaction
 ///
 /// A destroyed `minecraft:tnt` block is chain-primed rather than looted —
-/// `TntBlock::wasExploded` — because `TntBlock.dropFromExplosion` is `false`:
-/// vanilla replaces the loot roll for that cell with a fresh `PrimedTnt`
+/// The tnt block's was exploded — because the tnt block's drop from explosion is `false`:
+/// vanilla replaces the loot roll for that cell with a fresh the primed tnt
 /// entirely, it does not also drop a TNT item. Its positions are the third
 /// return value; the caller (`tick::run_tick_loop`) is what owns a
 /// [`crate::mobs::MobSim`] to spawn into, so this function only reports where,
-/// not the entity itself. Each one gets `PrimedTnt.getRandomShortFuse`'s
+/// not the entity itself. Each one gets the primed tnt's get random short fuse's
 /// shortened fuse, not [`crate::mobs::tnt::DEFAULT_FUSE_TIME`] — see
 /// [`crate::mobs::MobSim::spawn_tnt_short_fuse`].
 ///
@@ -567,7 +567,7 @@ fn drop_block_loot_in(
 /// whose feet are at `item_position`.
 ///
 /// This is vanilla's own per-tick pickup test, not a radius:
-/// `this.getBoundingBox().inflate(1.0, 0.5, 1.0)` intersected against the other
+/// get bounding box's get bounding box intersected against the other
 /// entity's box (via a level entity-in-area query).
 /// Two boxes, so **both** sets of half-extents contribute:
 ///
@@ -904,7 +904,7 @@ mod tests {
     /// **Fortune 3 on gravel drops flint on every single seed.**
     ///
     /// `gravel.json`'s `table_bonus` carries `chances: [0.1, 0.14285715, 0.25,
-    /// 1.0]` on `minecraft:fortune`, and `BonusLevelTableCondition.test` reads
+    /// 1.0]` on `minecraft:fortune`, and the bonus level table condition's test reads
     /// `values[min(level, len - 1)]` — so at level 3 the chance is exactly `1.0`
     /// and `nextFloat() < 1.0` is true for every draw `nextFloat` can produce
     /// (its range is `[0, 1)`). That makes this the strongest single assertion
@@ -1306,7 +1306,7 @@ mod tests {
     /// [`loot_block_state`] hands the loot context the **whole** property set,
     /// filling in what the state string left out — the property that makes a
     /// `block_state_property` matcher behave like vanilla's, where
-    /// `StateDefinition.getProperty` finds every property the block has whether or
+    /// The state definition's get property finds every property the block has whether or
     /// not the caller named it.
     ///
     /// The discriminating input is a *bare* name. A comma-splitting implementation

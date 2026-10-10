@@ -297,7 +297,7 @@ fn lava_side_face_back_copy_is_visible_through_the_opaque_cull_back_pipeline() {
     );
 
     // Negative control, executed: a single quad's winding is fixed by
-    // `bake_fluid`'s vertex order (matching vanilla `FluidRenderer`'s
+    // `bake_fluid`'s vertex order (matching vanilla's fluid renderer
     // `positions` array) — it cannot be "front-facing" from both directions at
     // once, so *one* of the two draws above must read as the clear colour if
     // culling is doing anything at all. Whichever one it is, this proves the

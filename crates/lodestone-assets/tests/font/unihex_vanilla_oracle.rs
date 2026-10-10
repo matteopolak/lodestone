@@ -25,7 +25,7 @@
 //! of the 2,414 codepoints the three bitmap sheets plus the `space` provider
 //! supply, so the resolved font must cover exactly 114,432 codepoints of which
 //! 112,018 come from unihex. The per-codepoint advances are hand-derived from the
-//! glyph's own HEX line by the rule in `UnihexProvider`, and each case names what
+//! glyph's own HEX line by the unihex provider's rule, and each case names what
 //! the *wrong* reading would have produced.
 
 use lodestone_assets::font::{FontLoader, FontOptions};

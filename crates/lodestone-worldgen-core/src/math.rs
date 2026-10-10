@@ -98,7 +98,7 @@ pub fn ceil(v: f64) -> i32 {
 /// [`f64::round`] — Rust rounds half *away from zero*
 /// (`(-0.5_f64).round() == -1.0`), vanilla rounds half *up*
 /// (`Math.round(-0.5) == 0`), and this repo has no existing helper for the
-/// difference (vanilla's own band-lookup routine's own clay-bands-offset-noise
+/// difference (vanilla's band-lookup routine's clay-bands-offset-noise
 /// rounding is
 /// this crate's first use of `Math.round`). The two formulas agree
 /// everywhere except exactly on a `.5` boundary, which a continuous noise
@@ -114,7 +114,7 @@ pub fn round(v: f64) -> i32 {
 /// # Why this exists rather than `powf`/`powi`
 ///
 /// Vanilla writes `Math.pow(2.0, k)` with an integer `k` in four places that
-/// feed terrain — vanilla's own Perlin-noise class's own lowest-frequency
+/// feed terrain — vanilla's Perlin-noise class's lowest-frequency
 /// input/value factor fields
 /// and its own multi-octave simplex-noise class's
 /// own highest-frequency twin fields. **`java.lang.Math.pow` is specified

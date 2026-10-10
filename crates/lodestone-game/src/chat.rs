@@ -18,7 +18,7 @@
 //! A player/disguised message is rendered by applying a [`ChatDecoration`] (the
 //! bound chat type's translation key + parameter order + style) to the message
 //! content, substituting the sender name, target name, and body — exactly the
-//! vanilla `ChatType.Bound.decorate` operation, expressed against
+//! decorate operation of the bound chat type, expressed against
 //! [`lodestone_model::Text`].
 
 use std::collections::VecDeque;
@@ -371,7 +371,7 @@ fn entry_display(entry: &ChatEntry) -> &Text {
 /// The message *content* model — bounding, ordering, trust, the 100-line cap —
 /// is [`ChatFeed`]; this adds only the monotonic arrival time of each entry,
 /// which drives the vanilla fade-out (a client-renderer detail vanilla itself
-/// keeps in `ChatComponent`, not in server state). The two structures are pushed
+/// keeps in its chat component, not in server state). The two structures are pushed
 /// and evicted in lockstep so index *i* of one matches the other.
 ///
 /// Times are plain `f64` seconds supplied by the caller, so this type stays free
@@ -407,7 +407,7 @@ impl ChatLog {
     ///
     /// Every `recent_*` projection above flattens an entry to text and drops
     /// that classification, which is why a caller wanting to *badge* a line —
-    /// vanilla's `GuiMessageTag` — cannot be served by them.
+    /// vanilla's message tag — cannot be served by them.
     #[must_use]
     pub fn feed(&self) -> &ChatFeed {
         &self.feed

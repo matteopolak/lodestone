@@ -333,8 +333,8 @@ pub struct EntityMetadataUpdate {
     /// # Why this can be absent on a packet that carried the byte
     ///
     /// The byte's index collides with a *non*-living entity's own flags byte of
-    /// the same serializer (in 26.2, `AbstractArrow`'s crit/pierce bitfield sits
-    /// at the same index as `LivingEntity`'s), so the wire alone cannot say which
+    /// the same serializer (in 26.2, the abstract arrow's crit/pierce bitfield sits
+    /// at the same index as the living entity's), so the wire alone cannot say which
     /// one arrived. A version adapter that cannot establish the entity is living
     /// leaves this `None` rather than surfacing a byte that may mean something
     /// else entirely — a critical arrow's crit bit is bit-identical to the
@@ -417,7 +417,7 @@ pub struct EntityMetadataUpdate {
     ///
     /// # Why a consumer must apply a pose even when every part is `None`
     ///
-    /// Vanilla's `ArmorStandArmorModel.setupAnim` calls the humanoid
+    /// Vanilla's armor-stand model setup calls the humanoid
     /// `super.setupAnim` — walk cycle, idle bob and all — and then **assigns**
     /// all six part rotations from the pose, unconditionally. The swing is
     /// computed and thrown away. A stand that has never reported a pose still

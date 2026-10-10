@@ -34,7 +34,7 @@
 //! and that is not a gap to close.** [`lodestone_game::tablist::TabList::header`]/
 //! `footer` and a row's display name are ordinary [`Text`](lodestone_model::Text)
 //! and could in principle carry a `clickEvent`/`hoverEvent`, but this client's
-//! decompiled reference (`PlayerTabOverlay`/`Hud`) has no click or hover
+//! decompiled reference (the player tab overlay/`Hud`) has no click or hover
 //! handling for the overlay at all — it draws while Tab is held and the
 //! crosshair still owns the cursor, so vanilla itself never has a free
 //! pointer to hit-test the list against. `to_spans()` keeps every run's
@@ -75,14 +75,14 @@ pub const MAX_TAB_ROWS: usize = 80;
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabListRow {
     /// The name to draw, as styled spans — vanilla's own get-name-for-display routine,
-    /// which prefers `getTabListDisplayName()` and falls back to the plain
+    /// which prefers get tab list display name and falls back to the plain
     /// profile name.
     pub name: Vec<TextSpan>,
     /// The GUI-atlas sprite id for this row's signal bars — see [`ping_sprite`].
     pub ping_sprite: &'static str,
     /// Whether this player is a spectator. Vanilla draws a spectator's name in
     /// `0x90FFFFFF` rather than opaque white (`extractRenderState`'s
-    /// `info.getGameMode() == GameType.SPECTATOR ? -1862270977 : -1`) *and*
+    /// `info.get_game_mode() == GameType.SPECTATOR ? -1862270977 : -1`) *and*
     /// italicises it in `decorateName`; only the alpha is modelled here, because
     /// this font has no italic variant and a fabricated slant would be worse
     /// than the dimming alone.
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(without_team.rows[0].name[0].style.color, None);
 
         // An explicit display name still wins outright over the team, exactly
-        // as `getNameForDisplay` reads: `getTabListDisplayName() != null` short-
+        // as `getNameForDisplay` reads: `get_tab_list_display_name() != null` short-
         // circuits before the team branch is ever reached.
         let mut with_display = TabList::new();
         let mut e = entry(1, "Notch", 10, GameMode::Survival);
@@ -451,7 +451,7 @@ mod tests {
     }
 
     /// An unlisted player is in the state and not in the overlay — vanilla's
-    /// `getListedOnlinePlayers()`. Tab-completion reads the *unfiltered* set, which
+    /// get listed online players. Tab-completion reads the *unfiltered* set, which
     /// is why the two must not share one projection.
     #[test]
     fn an_unlisted_player_is_folded_but_not_drawn() {

@@ -232,7 +232,7 @@ pub(crate) fn set_age_id(state: StateId, age: u32) -> Option<StateId> {
 
 /// `true` iff a text fixture is a crop strictly below its own max age —
 /// mirrors the real crop block's is-randomly-ticking query
-/// (`!this.isMaxAge(state)`).
+/// (`!this.is_max_age(state)`).
 #[must_use]
 #[cfg(test)]
 pub fn is_growable_crop(block_state: &str) -> bool {
@@ -243,7 +243,7 @@ pub fn is_growable_crop(block_state: &str) -> bool {
 }
 
 /// The crop's current age (real default `0` — the real crop block's own constructor,
-/// `registerDefaultState(... setValue(AGE, 0))`).
+/// register default state).
 #[must_use]
 #[cfg(test)]
 pub fn get_age(block_state: &str) -> u32 {
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn missing_properties_default_to_the_vanilla_registered_defaults() {
         // No suffix at all: distance defaults to 7, persistent defaults to
-        // false — LeavesBlock's own registerDefaultState — so a bare
+        // false — the leaves block's own registerDefaultState — so a bare
         // "minecraft:oak_leaves" is eligible to decay.
         assert!(leaves_should_decay("minecraft:oak_leaves"));
     }

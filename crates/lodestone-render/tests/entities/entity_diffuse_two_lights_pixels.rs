@@ -129,11 +129,11 @@ const OUTLIER_BUDGET: f64 = 0.06;
 /// * `com.mojang.blaze3d.platform.Lighting` — `DIFFUSE_LIGHT_0 =
 ///   new Vector3f(0.2F, 1.0F, -0.7F).normalize()`, `DIFFUSE_LIGHT_1 =
 ///   new Vector3f(-0.2F, 1.0F, 0.7F).normalize()`, both written to the `LEVEL`
-///   entry by `updateLevel(DEFAULT)`.
+///   entry by update level.
 ///
 /// The world pass and the first-person hand pass both run under `LEVEL`:
-/// `renderItemInHand` is called from inside `renderLevel`, and the only
-/// `setupFor(ITEMS_3D)` in `GameRenderer` is after the level is finished, for the
+/// the in-hand item render is called from inside the level render, and the only
+/// 3D-items setup in the game renderer is after the level is finished, for the
 /// GUI.
 fn vanilla_diffuse(n: Vec3) -> f32 {
     let l0 = Vec3::new(0.2, 1.0, -0.7).normalize();

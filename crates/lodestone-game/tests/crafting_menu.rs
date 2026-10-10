@@ -2,7 +2,7 @@
 //! `Menus`-level routing that picks the layout from the server's `open_screen`.
 //!
 //! Hermetic — no jar cache, no server. The values asserted here are vanilla's
-//! `CraftingMenu` layout, not our own output.
+//! crafting menu layout, not our own output.
 
 use lodestone_game::click::{Click, PlayerCtx};
 use lodestone_game::container::SlotKind;
@@ -35,7 +35,7 @@ fn model_stack(name: &str, count: u32) -> ModelItemStack {
 #[test]
 fn crafting_menu_has_vanilla_slot_count_and_kinds() {
     let menu = Menu::crafting(3, 3);
-    // Vanilla CraftingMenu: 1 result + 9 grid + 27 main + 9 hotbar.
+    // Vanilla crafting menu: 1 result + 9 grid + 27 main + 9 hotbar.
     assert_eq!(menu.slot_count(), 46);
     assert_eq!(menu.kind(), MenuKind::Generic { container_size: 10 });
 
@@ -146,11 +146,11 @@ fn shift_clicking_the_result_sends_it_to_the_player_inventory() {
 }
 
 // ---------------------------------------------------------------------------
-// Taking the result: `ResultSlot.onTake`.
+// Taking the result: the result slot's on-take hook.
 //
 // `Slot::may_place` returning false for the output slot is only half of
 // "take-only". The other half is that taking must *cost* something: vanilla's
-// `ResultSlot.onTake` removes one item from every occupied grid cell. Without
+// the result slot's on-take hook removes one item from every occupied grid cell. Without
 // it the ingredients are never consumed, so the client's very next prediction
 // contradicts the server on every grid cell at once.
 //
@@ -296,7 +296,7 @@ fn the_result_slot_still_refuses_a_placement() {
 }
 
 /// **The repeat rule.** Vanilla's `doClick` QUICK_MOVE loop repeats while the
-/// slot still holds the same item — but a client's `CraftingMenu` is built with
+/// slot still holds the same item — but a client's crafting menu is built with
 /// a null level access, so nothing refills the result between
 /// iterations and the loop stops after exactly one craft. The repetition is the
 /// *server's*: it runs the same loop over a menu that does refill, and pushes

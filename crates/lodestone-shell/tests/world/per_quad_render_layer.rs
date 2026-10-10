@@ -1,8 +1,8 @@
 //! Vanilla's render layer is per **quad**, not per block state — and this gate
 //! drives the real production producer to prove it.
 //!
-//! `SectionCompiler` sends every quad to `quad.materialInfo().layer()`, which
-//! `ChunkSectionLayer.byTransparency` derives from the transparency of that
+//! The section compiler sends every quad to material info's material info, which
+//! The chunk section layer's by transparency derives from the transparency of that
 //! quad's own sprite. So `grass_block`'s six fully opaque cube faces draw
 //! through `SOLID_TERRAIN` — a pipeline that defines no `ALPHA_CUTOUT` and
 //! therefore runs **no alpha test at all** — while its four coplanar

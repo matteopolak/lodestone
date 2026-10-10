@@ -51,7 +51,7 @@ impl<'w> MobSim<'w> {
     /// the context has no attacker field to fill (see [`crate::loot`]).
     pub(super) fn reap_dead(&mut self) {
         let now = self.tick_count;
-        // `drops_experience` is vanilla's own drop-experience call's own guard, read here
+        // `drops_experience` is vanilla's drop-experience call's guard, read here
         // while the mob still exists: a player's hit within the last
         // `PLAYER_HURT_EXPERIENCE_TIME` ticks, and not a baby
         // (its own "should drop experience" check is "not a baby").
@@ -285,7 +285,7 @@ impl<'w> MobSim<'w> {
     ///
     /// The caller has already applied vanilla's two eligibility tests (see
     /// [`reap_dead`](Self::reap_dead)); this applies the third,
-    /// `level.getGameRules().get(GameRules.MOB_DROPS)`, which is the same rule
+    /// get game rules's get game rules, which is the same rule
     /// [`drop_death_loot`](Self::drop_death_loot) honours — so `/gamerule mobDrops
     /// false` suppresses XP as well as items, exactly as vanilla does.
     ///

@@ -69,7 +69,7 @@ pub(super) fn draw_debug_overlay(b: &mut Builder<'_>, frame: &HudFrame<'_>) {
         &right,
         &|s: &str| measure_text(b.font, s, debug_scale),
     );
-    // All plates precede all text, matching `DebugScreenOverlay.extractLines`.
+    // All plates precede all text, matching debug screen overlay's extract lines.
     for row in &rows {
         b.rect_px(
             row.x - 1.0,
@@ -106,7 +106,7 @@ pub(super) const PROFILER_CHART_LOWER_HALF_SHADE: f32 = 0.7;
 /// `app::frame_profile::FramePhase`'s own position in `FramePhase::ALL` —
 /// **not** stored on [`ProfilerChartSlice`] (see that type's doc): vanilla
 /// assigns a section's pie colour by hashing its identity
-/// (`ProfileResults.getPreferredColor` in spirit), so a fixed palette keyed by
+/// (the profile results's get preferred color in spirit), so a fixed palette keyed by
 /// position is this instrument's equivalent of "a stable colour per section
 /// across frames" without needing a hash at all, since the eight phases are a
 /// fixed, ordered set.

@@ -223,7 +223,7 @@ fn an_item_over_a_void_column_never_settles_and_is_discarded() {
         mid.y
     );
 
-    // A long run: past `min_y - 64`, so `Entity.checkBelowWorld`'s discard fires.
+    // A long run: past `min_y - 64`, so Entity's check below world's discard fires.
     // Without it an escaped item is ticked and streamed for its full 6000-tick
     // life at ever-increasing depth.
     for _ in 0..2000 {

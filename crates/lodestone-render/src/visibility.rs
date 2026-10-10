@@ -351,7 +351,7 @@ struct WalkNode {
 ///
 /// Like vanilla, an already-**dequeued** node is not re-expanded when a new source
 /// face arrives; `exits` also comes from the first reach only
-/// (`node1.setDirections(node.directions, direction)`). Both are vanilla's own
+/// (node1's set directions). Both are vanilla's own
 /// approximations, kept deliberately: diverging from them would make our cull
 /// differ from the client we are matching, in the direction of drawing *fewer*
 /// sections than vanilla does, which is the direction that loses pixels.

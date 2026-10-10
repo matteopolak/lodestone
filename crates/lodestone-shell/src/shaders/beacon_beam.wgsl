@@ -1,7 +1,7 @@
 // The beacon light beam: `rendertype_beacon_beam.vsh`/`.fsh`, ported.
 //
 // No lighting term at all, matching the real shaders exactly — vanilla submits
-// beam geometry with `setLight(15728880)` (full-bright), so there is nothing
+// beam geometry with set light (full-bright), so there is nothing
 // for a light channel to attenuate. `fragColor = texture(Sampler0, uv) *
 // vertexColor * ColorModulator` minus the fog term this pass does not carry
 // (see `gpu/beacon_beam.rs`'s module doc for why fog is a deliberate gap

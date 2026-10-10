@@ -8,7 +8,7 @@ pub struct DebugStats {
     /// Pitch in degrees.
     pub pitch: f32,
     /// Frames presented in the last completed one-second window — a **count**,
-    /// not a reciprocal, matching vanilla's own `Minecraft.runTick` counter.
+    /// not a reciprocal, matching vanilla's own Minecraft's run tick counter.
     /// Deliberately not smoothed: an EMA over a per-second count would lag a
     /// real rate change without making the figure any more stable.
     pub fps: f32,
@@ -175,8 +175,8 @@ pub struct DebugStats {
     /// the honest "no data" state and is drawn as such.
     ///
     /// There is no "light-level pie chart" to draw: **26.2 does not have one.**
-    /// `DebugScreenEntries` registers a `minecraft:light_levels` *text* entry
-    /// (`DebugEntryLight`) that prints `Client Light: <raw> (<sky> sky, <block>
+    /// The debug screen entries registers a `minecraft:light_levels` *text* entry
+    /// (the debug entry light) that prints `Client Light: <raw> (<sky> sky, <block>
     /// block)`, and the pie was removed. So this reproduces the entry that
     /// actually exists rather than a chart that no longer does — see
     /// `docs/debug-overlay.md`.
@@ -320,7 +320,7 @@ impl ProfilerChart {
 /// **Not the translated `options.difficulty.*` component**, which this overlay
 /// has no translation table to draw from (see the module doc's "jar-less"
 /// path). Lowercase rather than shouted because that is the F3 overlay's own
-/// convention for an enum: `DebugEntryPosition` prints its own direction's
+/// convention for an enum: the debug entry position prints its own direction's
 /// to-string,
 /// which is the lowercase `name`, and the dimension as `minecraft:overworld`.
 pub(super) fn difficulty_name(d: lodestone_model::Difficulty) -> &'static str {
@@ -332,12 +332,12 @@ pub(super) fn difficulty_name(d: lodestone_model::Difficulty) -> &'static str {
     }
 }
 
-/// `DebugScreenOverlay.formatChart` — `formatKeybind(…) + " " + name + " " +
+/// The debug screen overlay's format chart — `format_keybind(…) + " " + name + " " +
 /// (status ? "visible" : "hidden")`, with `formatKeybind` bracketing the chord as
 /// `"[" + modifier + "+" + key + "]"`.
 ///
 /// The chord arrives as a literal (`"F3+B"`) rather than as a lookup, because
-/// unlike vanilla's these two are not `KeyMapping`s — they are hardcoded in
+/// unlike vanilla's these two are not the key mappings — they are hardcoded in
 /// `app/input.rs` behind the `KeyGate::debug_held` flag, so there is no
 /// `getTranslatedKeyMessage` to ask and no unbound case to handle. **If they ever
 /// become rebindable this must read the binding**, or the hint will name the old
@@ -349,9 +349,9 @@ pub(super) fn format_toggle(chord: &str, name: &str, shown: bool) -> String {
     )
 }
 
-/// `Mth.wrapDegrees(float)` — `angle % 360`, pulled into `[-180, 180)`.
+/// Mth's wrap degrees — `angle % 360`, pulled into `[-180, 180)`.
 ///
-/// `DebugEntryPosition` wraps both angles before printing them, so a player who
+/// The debug entry position wraps both angles before printing them, so a player who
 /// has spun twice reads `-12.3` rather than `708.0`. Rust's `%` and Java's `%`
 /// agree on sign for floats, so this is the same two branches.
 pub(super) fn wrap_degrees(angle: f32) -> f32 {
@@ -381,10 +381,10 @@ impl DebugStats {
     }
 
     /// The two halves of vanilla's `Facing:` line — its own direction to-string (the
-    /// lowercase enum `name`) and `DebugEntryPosition`'s own `faceString`.
+    /// lowercase enum `name`) and the debug entry position's own `faceString`.
     ///
     /// The thresholds are [`Self::facing`]'s, which are already vanilla's:
-    /// `Direction.fromYRot` is `from2DDataValue(floor(yRot / 90 + 0.5) & 3)`
+    /// Direction's from y rot is from 2d data value
     /// with `0 = SOUTH, 1 = WEST, 2 = NORTH, 3 = EAST`, and that flips exactly
     /// at yaw 45/135/225/315. Kept separate from `facing` because that method's
     /// `south (+Z)` shorthand is [`Self::one_line`]'s stdout format and is not
@@ -441,7 +441,7 @@ impl DebugStats {
     /// on the grounds that "vanilla's split is mechanical, and a mechanical
     /// halve would reshuffle both columns every time a line is added".
     /// **That is superseded.** The premise was half right and the conclusion
-    /// does not follow from it. `DebugScreenOverlay.extractRenderState` does not
+    /// does not follow from it. The debug screen overlay's extract render state does not
     /// halve *lines*; it halves within three **categories**, and the categories
     /// are semantic:
     ///
@@ -449,7 +449,7 @@ impl DebugStats {
     /// |---|---|---|
     /// | priority | `addPriorityLine` | into whichever column is currently shorter |
     /// | regular | `addLine` | the flat list halved at `mid = (n + 1) / 2` |
-    /// | group | `addToGroup(id, …)` | whole named groups, halved by *group count* |
+    /// | group | add to group | whole named groups, halved by *group count* |
     ///
     /// So the thing that decides a line's column is which category its entry
     /// used, and each category block is separated from the next by a `""`
@@ -462,7 +462,7 @@ impl DebugStats {
     /// arithmetic would then put `XYZ:` on the right — further from vanilla's
     /// screen, not closer. The category→column assignment below is therefore
     /// still by hand, but it is now *derived from vanilla's own default-profile
-    /// output* rather than chosen freely: with `DebugScreenProfile.DEFAULT` the
+    /// output* rather than chosen freely: with the debug screen profile's default the
     /// enabled entries are `3d_crosshair`, `fps`, `game_version`, `memory`,
     /// `player_position`, `player_section_position`,
     /// `simple_performance_impactors`, `system_specs` and `tps` (sorted by
@@ -477,11 +477,11 @@ impl DebugStats {
     #[must_use]
     pub fn left_lines(&self) -> Vec<String> {
         let [bx, by, bz] = self.block_position();
-        // `ChunkPos.containing` / `SectionPos.blockToSectionCoord`, both `>> 4`.
+        // `ChunkPos.containing` / SectionPos's block to section coord, both `>> 4`.
         let (cx, cy, cz) = (bx >> 4, by >> 4, bz >> 4);
         let (facing, face_hint) = self.facing_parts();
         let mut out = vec![
-            // `DebugEntryFps`: `"%d fps T: %s%s"`, a *priority* line, and the
+            // The debug entry fps: `"%d fps T: %s%s"`, a *priority* line, and the
             // first one added — so it lands left, because `addPriorityLine`
             // fills the shorter column and both start empty.
             //
@@ -501,7 +501,7 @@ impl DebugStats {
             self.ping_rtt_ms
                 .map_or_else(|| "Ping: -".to_string(), |ms| format!("Ping: {ms} ms")),
             String::new(),
-            // `DebugEntryLight`'s group, verbatim: `"Client Light: " +
+            // The debug entry light's group, verbatim: `"Client Light: " +
             // rawBrightness + " (" + sky + " sky, " + block + " block)"`.
             // `getRawBrightness` is the max of the two, which is what the
             // renderer actually samples.
@@ -511,7 +511,7 @@ impl DebugStats {
                 }
                 None => "Client Light: -".to_string(),
             },
-            // Vanilla's neighbouring entry is `DebugEntryLocalDifficulty`,
+            // Vanilla's neighbouring entry is the debug entry local difficulty,
             // `"Local Difficulty: %.2f // %.2f"` — a *server*-side scalar folded
             // from inhabited time and moon brightness, which we do not compute.
             // This is the world difficulty the server reported instead, so the
@@ -525,7 +525,7 @@ impl DebugStats {
                 None => "Difficulty: -".to_string(),
             },
             String::new(),
-            // `DebugEntryPosition`'s group. The four format strings are
+            // The debug entry position's group. The four format strings are
             // vanilla's, including the asymmetric `%.3f / %.5f / %.3f` (Y gets
             // five places because a step height or a fluid offset lives in the
             // fourth), the `r.X.Z.mca` region hint, and the `%02d` pad on the
@@ -548,9 +548,9 @@ impl DebugStats {
                 wrap_degrees(self.pitch)
             ),
         ];
-        // The fifth and last line `DebugEntryPosition` adds to its group is
+        // The fifth and last line debug entry position adds to its group is
         // `level.dimension().identifier() + " FC: " + chunks.size()`. The
-        // identifier is real here; `FC` is `ServerLevel.getForceLoadedChunks`,
+        // identifier is real here; `FC` is the server level's get force loaded chunks,
         // which the client has no view of, so the suffix is dropped rather than
         // printed as a `0` we did not measure. Absent rather than `-` before
         // login: vanilla omits its whole position group when there is no camera
@@ -559,10 +559,10 @@ impl DebugStats {
             out.push(dimension.clone());
         }
         out.extend([
-            // `DebugEntrySectionPosition`, which joins the *position* group and
-            // is therefore drawn after everything `DebugEntryPosition` added.
+            // The debug entry section position, which joins the *position* group and
+            // is therefore drawn after everything debug entry position added.
             format!("Section-relative: {:02} {:02} {:02}", bx & 15, by & 15, bz & 15),
-            // `DebugEntryLookingAt.BlockStateInfo`'s first line, whose prefix is
+            // The debug entry looking at's block state info's first line, whose prefix is
             // the literal `"Targeted Block"` and whose separators are commas.
             // The block state and its properties are the rest of that group and
             // are not plumbed here — see the doc's table.
@@ -572,7 +572,7 @@ impl DebugStats {
             },
             String::new(),
             // Vanilla closes the left column with its chart-keybind block, gated
-            // on `isOverlayVisible()`:
+            // on is overlay visible:
             //
             //   Debug charts: [F3+2] Profiler hidden; [F3+1] FPS + TPS hidden;
             //   [F3+3] Ping hidden; [F3+4] Lightmap hidden
@@ -609,13 +609,13 @@ impl DebugStats {
     #[must_use]
     pub fn right_lines(&self) -> Vec<String> {
         let mut out = vec![
-            // `DebugEntryVersion`'s priority line, `"Minecraft " + version +
+            // The debug entry version's priority line, `"Minecraft " + version +
             // " (" + launched + "/" + brand + ")"`. It is the *second* priority
             // line added, so vanilla's shorter-column rule sends it right.
             format!("Lodestone {}", env!("CARGO_PKG_VERSION")),
             String::new(),
         ];
-        // `DebugEntryTps`'s slot — `"\"%s\" server%s, %.0f tx, %.0f rx"` remote,
+        // The debug entry tps's slot — `"\"%s\" server%s, %.0f tx, %.0f rx"` remote,
         // `"Integrated server @ %.1f/%.1f ms…"` in singleplayer. We have neither
         // a smoothed server tick time nor packet-rate counters, so this carries
         // the session status ("local world", "connecting…").
@@ -639,7 +639,7 @@ impl DebugStats {
             out.push(line);
         }
         out.extend([
-            // `LevelExtractor.sectionStatistics`, `"C: %d/%d %sD: %d, %s"` —
+            // The level extractor's section statistics, `"C: %d/%d %sD: %d, %s"` —
             // rendered sections over total, then the view distance and the
             // dispatcher's queue. Ours is drawn-over-graph-nodes (the occlusion
             // graph is the closest thing here to vanilla's own view-area size accessor),
@@ -656,7 +656,7 @@ impl DebugStats {
                 || format!("E: {}", self.entities_drawn),
                 |distance| format!("E: {}, SD: {distance}", self.entities_drawn),
             ),
-            // `DebugEntryParticleRenderStats`, `"P: " + countParticles()`. The
+            // The debug entry particle render stats, `"P: " + count_particles()`. The
             // unresolved count is ours and stays on the line: a zero draw
             // against a non-zero alive count is the "renders nothing, reports
             // fine" state that counter exists to expose.

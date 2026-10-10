@@ -5,11 +5,11 @@
 //! Expected payloads are built from the wire specification with an
 //! independent VarInt encoder (never the adapter's own codec), so a
 //! symmetric bug cannot pass. Layouts are verified against 26.2's
-//! `ServerboundPlayerLoadedPacket` (`vanilla's own stream codec's own unit`, empty body),
-//! `ServerboundSeenAdvancementsPacket` (VarInt `Action` ordinal, plus a
-//! conditional identifier only for `OPENED_TAB`), `ServerboundCommandSuggestionPacket`
-//! (VarInt id + UTF-8 string), `ServerboundPaddleBoatPacket` (two plain
-//! booleans) and `ServerboundMoveVehiclePacket` (`Vec3` + yaw/pitch + a
+//! Player-loaded packet (a unit stream codec, empty body),
+//! Seen-advancements packet (VarInt `Action` ordinal, plus a
+//! conditional identifier only for `OPENED_TAB`), command-suggestion packet
+//! (VarInt id + UTF-8 string), paddle-boat packet (two plain
+//! booleans) and move-vehicle packet (`Vec3` + yaw/pitch + a
 //! single trailing boolean, no horizontal-collision bit unlike player
 //! movement).
 //!
@@ -78,7 +78,7 @@ fn seen_advancements_opened_tab_carries_the_identifier() {
         )
         .expect("encode seen advancements");
     let mut want = Vec::new();
-    want.extend_from_slice(&varint(0)); // vanilla's own action's own opened tab
+    want.extend_from_slice(&varint(0)); // action OPENED_TAB
     let id = "minecraft:story/root";
     want.extend_from_slice(&varint(id.len() as i32));
     want.extend_from_slice(id.as_bytes());
@@ -98,7 +98,7 @@ fn seen_advancements_closed_screen_has_no_identifier() {
         encoded,
         Some((
             play::serverbound::SEEN_ADVANCEMENTS,
-            varint(1) // vanilla's own action's own closed screen, nothing follows
+            varint(1) // action CLOSED_SCREEN, nothing follows
         ))
     );
 }

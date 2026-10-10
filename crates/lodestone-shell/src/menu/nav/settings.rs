@@ -126,12 +126,12 @@ impl MenuNav {
     /// It used to say: the screen has no row highlight, each control owns its own
     /// key (Up/Down stepped the GUI scale, Enter toggled View Bobbing), and "when
     /// a third control lands, that is the point to introduce a real highlight and
-    /// vanilla's own `OptionsScreen` list and re-point those tests once, on
+    /// vanilla's own options screen list and re-point those tests once, on
     /// purpose." A hundred and thirty-third control landed; this is that.
     ///
     /// So Up/Down no longer change a value — they move a cursor, like every other
     /// screen in this shell — and the GUI scale is cycled by pressing Enter on
-    /// **its own row**, which is vanilla's `CycleButton.onPress`. The tests that
+    /// **its own row**, which is vanilla's cycle button's on press. The tests that
     /// asserted the old binding were rewritten rather than deleted: the behaviour
     /// they protected (a scale that cycles and reaches `options.json`) is still
     /// asserted, through the new path.
@@ -361,7 +361,7 @@ impl MenuNav {
                 // it installs the column's order into
                 // `resources::selected_packs` and persists it. It has to happen
                 // *before* `leave_packs`, which resets the nav — vanilla commits
-                // in `PackSelectionScreen.onClose` for the same reason, and
+                // in the pack selection screen's on close for the same reason, and
                 // Escape comes through here too, so leaving is never a cancel.
                 crate::menu::packs::commit(self.settings.packs());
                 let outcome = self.settings.leave_packs();
@@ -453,7 +453,7 @@ impl MenuNav {
                 MenuAction::None
             }
             // The eight chat/text-background options. Each one steps its
-            // `UnitDouble` by [`crate::config::UNIT_DOUBLE_STEP`] and persists,
+            // The unit double by [`crate::config::UNIT_DOUBLE_STEP`] and persists,
             // and `app.rs` already copies all eight into
             // `hud_frame.chat_options` from `self.nav.options()` every frame —
             // so no threading is needed beyond the mutation here.
@@ -612,7 +612,7 @@ impl MenuNav {
     /// Steps one of the eleven `soundSource.*` volumes and persists it eagerly.
     ///
     /// Goes through [`Self::step_unit_double_option`] rather than writing the
-    /// wrap out again — the eleven are `UnitDouble`s like the chat sliders, and
+    /// wrap out again — the eleven are the unit doubles like the chat sliders, and
     /// the only thing that varies is the array slot.
     ///
     /// An out-of-range index is a **no-op**, not a panic: the index arrives from
@@ -654,7 +654,7 @@ impl MenuNav {
     /// FAST, FANCY — and wraps, then persists.
     ///
     /// **Three states, and the order is the enum's rather than a chosen one**,
-    /// because that is what `CycleButton` visits. A hand-picked order would put
+    /// because that is what cycle button visits. A hand-picked order would put
     /// FANCY (the default) somewhere other than where vanilla's third click
     /// leaves it.
     ///
@@ -676,7 +676,7 @@ impl MenuNav {
 
     /// Cycles `attackIndicator` through its three declared states
     /// (`Off`, `Crosshair`, `Hotbar`) and wraps, then persists —
-    /// [`Self::cycle_cloud_status`]'s shape, and vanilla's own `CycleButton`
+    /// [`Self::cycle_cloud_status`]'s shape, and vanilla's own cycle button
     /// order, which is the enum's declaration order.
     ///
     /// No consumer push: `app/redraw.rs` copies the field onto
@@ -802,7 +802,7 @@ impl MenuNav {
     /// applies it — [`Self::apply_graphics_preset`] — and persists.
     ///
     /// The apply happens **every** step, `Custom` included, matching vanilla:
-    /// `Options::applyGraphicsPreset` calls `value.apply(minecraft)`
+    /// Options's apply graphics preset calls `value.apply(minecraft)`
     /// unconditionally, and `GraphicsPreset.apply`'s `switch` simply has no
     /// `CUSTOM` case, so applying `Custom` is a real call that writes nothing
     /// — not a skipped call. [`Self::apply_graphics_preset`] mirrors that
@@ -946,7 +946,7 @@ impl MenuNav {
     /// period): a click is the only way to move these rows, so a value parked at
     /// the maximum has to be able to come back down. Vanilla drags instead and
     /// therefore needs no wrap at all — this is a consequence of departure 1, not
-    /// a transcription of `IntRangeBase::next`,
+    /// a transcription of the int range base's next,
     /// which really does saturate.
     ///
     /// The bounds are `config`'s `MIN_RENDER_DISTANCE..=MAX_RENDER_DISTANCE` — the same
@@ -979,7 +979,7 @@ impl MenuNav {
     }
 
     /// Set a live slider's value from a track fraction — the drag half of
-    /// vanilla's `AbstractSliderButton` (`onClick`/`onDrag` both call
+    /// vanilla's abstract slider button (`onClick`/`onDrag` both call
     /// `setValueFromMouse`).
     ///
     /// Returns `true` when the fraction was applied, `false` for a
@@ -1002,7 +1002,7 @@ impl MenuNav {
     /// bounds would land the handle somewhere the value cannot be.
     pub(super) fn set_live_slider(&mut self, live: LiveOption, fraction: f32) -> bool {
         let f = fraction.clamp(0.0, 1.0);
-        // The eight `UnitDouble` options plus `sensitivity`: the fraction *is*
+        // The eight unit double options plus `sensitivity`: the fraction *is*
         // the value, so this needs no conversion at all.
         if let Some(slot) = live.unit_double_mut(&mut self.options) {
             *slot = f;
@@ -1094,8 +1094,8 @@ impl MenuNav {
             self.persist_options();
             return true;
         }
-        // `graphicsPreset`'s `SliderableEnum`, the third shape alongside
-        // `UnitDouble` and `IntRange` above — see
+        // `graphicsPreset`'s sliderable enum, the third shape alongside
+        // The unit double and `IntRange` above — see
         // `menu::options::graphics_preset_from_fraction`.
         if live == LiveOption::GraphicsPreset {
             self.options.graphics_preset = crate::menu::options::graphics_preset_from_fraction(f);
@@ -1106,7 +1106,7 @@ impl MenuNav {
         false
     }
 
-    /// Steps one `UnitDouble`-backed option and persists it eagerly.
+    /// Steps one unit double-backed option and persists it eagerly.
     ///
     /// Takes a field selector rather than being written out once per option:
     /// every one of these has an identical `[0, 1]` domain and an identical wrap,

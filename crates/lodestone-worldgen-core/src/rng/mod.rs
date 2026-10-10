@@ -105,11 +105,11 @@ pub trait PositionalRandomFactory {
 
 /// `WorldgenRandom` seed-derivation helper.
 ///
-/// In vanilla, `WorldgenRandom extends LegacyRandomSource` and overrides only
-/// `next(bits)` to pull from its wrapped source — so **all** of its draws
-/// (`nextLong`, `nextInt`, …) use the *legacy* `BitRandomSource` structure even
-/// when the wrapped source is xoroshiro. Concretely `nextLong()` consumes two
-/// `next(32)` calls, and for a non-legacy source `next(32) == (int)(inner.nextLong() >>> 32)`.
+/// The game's world-generation random subclasses the legacy generator and overrides only
+/// the bit draw to pull from its wrapped source, so **all** of its draws (long, int, …)
+/// use the *legacy* bit-based structure even when the wrapped source is xoroshiro.
+/// Concretely a long draw consumes two 32-bit draws, and for a non-legacy source a
+/// 32-bit draw is the top 32 bits of the inner source's next long.
 /// Reproducing that exactly is essential: a naive delegation to
 /// `inner.next_long()` diverges immediately (and did, until this was fixed).
 #[derive(Debug)]
@@ -153,7 +153,7 @@ impl<R: RandomSource> WorldgenRandom<R> {
         result
     }
 
-    /// `setFeatureSeed(seed, index, step)`.
+    /// set feature seed.
     pub fn set_feature_seed(&mut self, seed: i64, index: i32, step: i32) {
         let result = seed
             .wrapping_add(i64::from(index))
@@ -171,7 +171,7 @@ impl<R: RandomSource> WorldgenRandom<R> {
         self.count = 0;
     }
 
-    /// `setLargeFeatureSeed(seed, chunkX, chunkZ)`.
+    /// set large feature seed.
     pub fn set_large_feature_seed(&mut self, seed: i64, chunk_x: i32, chunk_z: i32) {
         self.set_seed(seed);
         let x_scale = self.next_long();
@@ -182,7 +182,7 @@ impl<R: RandomSource> WorldgenRandom<R> {
         self.set_seed(result);
     }
 
-    /// `setLargeFeatureWithSalt(seed, x, z, blend)` — the seed derivation every
+    /// set large feature with salt — the seed derivation every
     /// structure-set placement decision is made against.
     ///
     /// Transcribed from the record definition in vanilla's own worldgen-random
@@ -191,7 +191,7 @@ impl<R: RandomSource> WorldgenRandom<R> {
     ///
     /// ```text
     /// long result = x * 341873128712L + z * 132897987541L + seed + blend;
-    /// setSeed(result);
+    /// set seed;
     /// ```
     ///
     /// The decompiler names the fourth parameter `blend`; every caller passes a
@@ -203,7 +203,7 @@ impl<R: RandomSource> WorldgenRandom<R> {
     ///
     /// Vanilla's own structure-placement probability-reducer — the `default`
     /// `frequency_reduction_method`, the one 18 of the 20 bundled structure sets
-    /// use — calls this as `setLargeFeatureWithSalt(seed, salt, sourceX, sourceZ)`:
+    /// use — calls this as set large feature with salt:
     /// the *salt* lands in `x`, the chunk X in `z`, and the chunk Z in `blend`.
     /// Vanilla's own random-spread-placement potential-structure-chunk lookup calls it the
     /// straightforward way (`seed, gridX, gridZ, salt`). Both spellings are
@@ -220,7 +220,7 @@ impl<R: RandomSource> WorldgenRandom<R> {
     }
 }
 
-/// Vanilla's own worldgen-random slime-chunk seeding routine, `seedSlimeChunk(x, z, seed, salt)`.
+/// Vanilla's own worldgen-random slime-chunk seeding routine, seed slime chunk.
 ///
 /// A free function rather than a method because vanilla's is `static` and needs no
 /// carrier state: it derives a fresh [`LegacyRandomSource`]
@@ -314,7 +314,7 @@ impl<R: RandomSource> RandomSource for WorldgenRandom<R> {
     }
 
     fn next_int_bounded(&mut self, bound: i32) -> i32 {
-        // BitRandomSource semantics (inherited from LegacyRandomSource).
+        // Bit-draw semantics (inherited from the legacy generator).
         assert!(bound > 0, "bound must be positive");
         if bound & (bound - 1) == 0 {
             return ((i64::from(bound).wrapping_mul(i64::from(self.next_bits(31)))) >> 31) as i32;

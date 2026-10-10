@@ -167,12 +167,12 @@ fn tick_water_among_entities(
 
     // Vanilla's own fall-damage bookkeeping call. `in_water` is `true` — the
     // reset above already zeroed `fall_distance` for this whole tick, and
-    // vanilla's own `!isInWater()` guard would block any accumulation here
+    // vanilla's own `!is_in_water()` guard would block any accumulation here
     // too, so this is only reachable for its grounded-reset half (e.g.
     // touching a submerged floor).
     accumulate_fall_distance(state, state.position.y - old_y, true);
 
-    // `if (horizontalCollision && onClimbable()) movement = (x, 0.2, z)` — a ladder
+    // `if (horizontalCollision && on_climbable()) movement = (x, 0.2, z)` — a ladder
     // still lifts you while submerged, and it does so *before* the water drag.
     let mut movement = state.velocity;
     if state.horizontal_collision && on_climbable(state, view) {
@@ -196,17 +196,17 @@ fn tick_water_among_entities(
 /// flat `0.02F`, and gravity is applied as an extra `-baseGravity/4` term
 /// regardless of depth. What differs by depth is the post-move velocity scale:
 ///
-/// * **deep** (`!isInShallowFluid(LAVA)`) ⇒ a flat `scale(0.5)` on all three
+/// * **deep** (`!is_in_shallow_fluid(LAVA)`) ⇒ a flat `scale(0.5)` on all three
 ///   axes, with no buoyant falling-adjustment at all;
-/// * **shallow** (`isInShallowFluid(LAVA)`, i.e. `lava_height <=
+/// * **shallow** (is in shallow fluid, i.e. `lava_height <=
 ///   `[`fluid_jump_threshold`]) ⇒ `multiply(0.5, 0.8, 0.5)` (a *different* Y
 ///   factor from deep's implicit `0.5`) followed by
 ///   [`fluid_falling_adjusted_movement`] — the same buoyant slow-descent water
 ///   always gets, which deep lava never does.
 ///
 /// The predicate and both arms were ported from the jar directly (not from a
-/// summary): vanilla's own "is in shallow fluid" check is `getFluidHeight(tag)
-/// <= getFluidJumpThreshold()`, already used by [`apply_fluid_jump`] for the
+/// summary): vanilla's own "is in shallow fluid" check is `get_fluid_height(tag)
+/// <= get_fluid_jump_threshold()`, already used by [`apply_fluid_jump`] for the
 /// jump decision, so this reuses the same [`FluidState::lava_height`] /
 /// [`fluid_jump_threshold`] inputs rather than adding a parallel predicate.
 ///

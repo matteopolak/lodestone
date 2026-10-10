@@ -505,7 +505,7 @@ detail:
 
 | | OPFS | File System Access API |
 |---|---|---|
-| entry point | `navigator.storage.getDirectory()` | `showDirectoryPicker()` |
+| entry point | storage's get directory | `showDirectoryPicker()` |
 | random access | `createSyncAccessHandle()` — **synchronous** read/write at byte offsets, in a Web Worker | async read/write via `FileSystemFileHandle` |
 | quota | orders of magnitude above `localStorage` | the user's real disk |
 | prompt | none | one permission prompt per session |

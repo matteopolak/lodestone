@@ -396,7 +396,7 @@ fn a_minecart_is_left_to_the_server() {
 ///
 /// The charge is asserted through the queued `boost` byte rather than through the
 /// component, because the byte is the thing that reaches the server:
-/// `Mth.floor(getJumpRidingScale() * 100.0F)` after three held ticks is
+/// `Mth.floor(get_jump_riding_scale() * 100.0F)` after three held ticks is
 /// `floor(0.3 * 100)` — and the ramp's `0.1F` per tick makes that **30**, which is
 /// a different number from the 40 a `0.4`-floored reading would give.
 #[test]

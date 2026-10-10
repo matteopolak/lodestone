@@ -309,7 +309,7 @@ fn above_clamps_are_wider_than_inside_clamps() {
     );
     // The step asymmetry that a prose summary gets wrong: the drag-down step is
     // `-0.03` in BOTH rows and only the clamp widens, whereas the push-up step
-    // changes as well. `BubbleColumnBlock` is not "three times stronger above".
+    // changes as well. The bubble-column block is not "three times stronger above".
     assert_eq!(
         INSIDE_DOWN_STEP, -0.03,
         "the drag-down step is the same in both rows"

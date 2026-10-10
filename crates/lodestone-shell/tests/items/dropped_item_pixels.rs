@@ -104,7 +104,7 @@ fn camera() -> Camera {
 fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
     EntityDraw {
         // A dropped item is not a living entity, so it never reddens — vanilla's
-        // overlay is `LivingEntityRenderer`'s, and an item entity is drawn
+        // overlay is the living entity renderer's, and an item entity is drawn
         // through the model pipeline instead.
         hurt: false,
         block_state: None,

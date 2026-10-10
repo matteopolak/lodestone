@@ -371,7 +371,7 @@ fn handle_add_entity(
 
     // Remember the facts a later `set_entity_data` cannot recover from the wire:
     // the concrete class for mobs whose variant index is ambiguous, whether the
-    // type is a `LivingEntity` (which decides whether index 8's byte is a
+    // type is a living entity (which decides whether index 8's byte is a
     // using-item bitfield or an arrow's crit flag — see `IDX_LIVING_FLAGS`), and
     // whether it is a `Mob` (index 15: mob flags, or an armour stand's client
     // flags — see `IDX_MOB_FLAGS`). Types with none of those stay out of the map,
@@ -527,13 +527,13 @@ fn handle_add_entity(
     Ok(directives)
 }
 
-/// `vanilla's own entity types's own painting`'s registry key — the type whose default variant is
+/// The painting entity type's registry key — the type whose default variant is
 /// synthesized at spawn, above.
 const PAINTING_TYPE: &str = "minecraft:painting";
-/// `vanilla's own entity types's own falling block`'s registry key — one of the two entity types
+/// The falling-block entity type's registry key — one of the two entity types
 /// whose `ADD_ENTITY` Object Data field this adapter interprets.
 const FALLING_BLOCK_TYPE: &str = "minecraft:falling_block";
-/// `vanilla's own entity types's own fishing bobber`'s registry key — the other. Its Object Data is
+/// The fishing-bobber entity type's registry key — the other. Its Object Data is
 /// the caster's entity id, not a block state; see the arm that reads it.
 const FISHING_BOBBER_TYPE: &str = "minecraft:fishing_bobber";
 /// Decodes `remove_entities` (a VarInt-length list of VarInt ids) into a removal
@@ -753,11 +753,11 @@ fn handle_set_entity_motion(payload: &[u8]) -> Result<Vec<Directive>, AdapterErr
 }
 
 /// Decodes `move_minecart_along_track`: a VarInt entity id followed by a
-/// VarInt-counted list of `vanilla's own new minecart behavior's own minecart step` lerp steps, each
+/// VarInt-counted list of minecart-step lerp steps, each
 /// `(Vec3 position, Vec3 movement, ROTATION_BYTE yRot, ROTATION_BYTE xRot,
 /// f32 weight)` in that order — verified against
-/// `vanilla's own new minecart behavior's own minecart step's own stream codec` in 26.2 decompiled source.
-/// `vanilla's own vec3's own stream codec` is three big-endian f64s (matching every other
+/// the new minecart behavior minecart step stream codec in 26.2 decompiled source.
+/// The vec3 stream codec is three big-endian f64s (matching every other
 /// absolute-position decode in this adapter); `ROTATION_BYTE` is the same
 /// signed-byte-angle encoding [`unpack_degrees`] already inverts for
 /// `rotate_head`/`move_entity_*`.
@@ -810,7 +810,7 @@ fn handle_move_minecart_along_track(payload: &[u8]) -> Result<Vec<Directive>, Ad
             entity_id,
             movement: EntityMovement::Absolute(pos),
             rotation: Some(Rotation::new(yaw, pitch)),
-            // MinecartStep carries no on-rail/on-ground bit.
+            // The minecart step carries no on-rail/on-ground bit.
             on_ground: false,
         }),
         Directive::Emit(ClientEvent::EntityVelocity { entity_id, velocity }),
@@ -844,7 +844,7 @@ fn handle_set_entity_data(
         return Vec::new();
     };
     // An id with no entry is an entity we chose not to track, which means it is
-    // neither an ambiguous-variant mob nor a `LivingEntity` — so the default's
+    // neither an ambiguous-variant mob nor a living entity — so the default's
     // `living: false` is the right answer for it, not a lost fact.
     let tracked = variants
         .lock()

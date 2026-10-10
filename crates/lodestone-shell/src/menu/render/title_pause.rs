@@ -19,7 +19,7 @@ use super::*;
 ///   `0, 24, 48, 72, 96` either way.
 /// - the column's width is `max(200, 68, 200) = 200`, so centring it on
 ///   `width / 2` is `width / 2 - 100`;
-/// - `getHorizontalPosition(n, 3, 20)` is `width/2 - 34 + (n-1) * 24`
+/// - get horizontal position is `width/2 - 34 + (n-1) * 24`
 ///  , and a 68 px row centred in the 200 px column
 ///   is at `lerp(0.5, 0, 200 - 68) = 66`, i.e. `width/2 - 100 + 66` — the same
 ///   `width/2 - 34`. The 34 is `totalWidth / 2` and the 66 is `(200 - 68) / 2`;
@@ -57,7 +57,7 @@ fn title_menu_column() -> layout::LinearLayout {
     column
 }
 
-/// Vanilla's `PauseScreen.createPauseMenu` as a real
+/// Vanilla's pause screen's create pause menu as a real
 /// [`layout::GridLayout`], arranged.
 ///
 /// `menu_padding_top` is `MENU_PADDING_TOP` (50) in production; it is a parameter
@@ -65,7 +65,7 @@ fn title_menu_column() -> layout::LinearLayout {
 /// control that fix asks for — change one `LayoutSettings` padding value and watch the
 /// rect assertions go red — against the real builder rather than a copy of it.
 ///
-/// The Options row takes vanilla's **`hasSingleplayerServer()`** branch
+/// The Options row takes vanilla's **has singleplayer server** branch
 /// (`:157-160`) when `published` is `false`: two half-width buttons, Options
 /// and Open to LAN, rather than one full-width Options. This client does
 /// host its own worlds, and since scope 1 the second button has
@@ -77,7 +77,7 @@ fn title_menu_column() -> layout::LinearLayout {
 /// alone, full width, no gutter sibling. **Not vanilla's actual reason for
 /// taking that branch** — see [`PauseButton::OpenToLan`]'s own doc for why a
 /// published *singleplayer* world still ends up here despite
-/// `hasSingleplayerServer()` being true. Row 0 (Back to Game), row 1
+/// has singleplayer server being true. Row 0 (Back to Game), row 1
 /// (Advancements/Statistics) and the icon row are unaffected either way, so
 /// the grid keeps its five rows and its overall size regardless of
 /// `published` — only the Options row's child count changes, and the two
@@ -90,7 +90,7 @@ pub(super) fn pause_menu_grid_with(menu_padding_top: i32, published: bool) -> la
     };
     let mut grid = layout::GridLayout::new();
     {
-        // `gridLayout.defaultCellSetting().padding(4, 4, 4, 0)` (`:93`) — the
+        // default cell setting's default cell setting (`:93`) — the
         // *live* baseline, so every cell below inherits it.
         let baseline = grid.default_cell_setting();
         *baseline = baseline.padding_ltrb(
@@ -164,7 +164,7 @@ impl MenuBlock {
 /// The title-screen column, arranged once.
 ///
 /// Arranging is canvas-*independent* — only the final
-/// `FrameLayout.alignInRectangle` step depends on the screen size, and that is
+/// FrameLayout's align in rectangle step depends on the screen size, and that is
 /// what [`Origin`] applies at draw time — so the tree is built once per process
 /// rather than per frame. [`super::layout`]'s module docs say which of vanilla's
 /// two two-phase timings this is, and why.
@@ -295,7 +295,7 @@ const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
 const GITHUB_ENTRY_MARGIN: f32 = 4.0;
 
 /// Vanilla's rect for one pause-screen widget, from
-/// `PauseScreen.createPauseMenu` — **read out of the
+/// The pause screen's create pause menu — **read out of the
 /// arranged grid** (`pause_menu_grid_with`) rather than resolved by hand.
 ///
 /// It used to be a table of nine hand-derived offsets, and the derivation is

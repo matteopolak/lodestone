@@ -1340,7 +1340,7 @@ fn sprite_texel_transparent(atlas: &Atlas, sprite: &AtlasSprite, frame: u32, x: 
 /// a byte-identical item set, which the rest of this module already guarantees.
 /// The quads are opaque and mutually non-overlapping, so order is not observable.
 ///
-/// Vanilla unions the outline over `getUniqueFrames()` — the frames the animation
+/// Vanilla unions the outline over get unique frames — the frames the animation
 /// metadata actually plays. We union over every *physical* frame in the strip,
 /// which is a superset: a frame present in the PNG but never played can only add
 /// an edge quad, never remove one. Almost every item sprite is static anyway.
@@ -2144,7 +2144,7 @@ impl BlockModels {
         // The item-frame bodies. Baked here, beside the states, because the
         // frame is a *block model* with no block: vanilla's item-frame renderer
         // submit function
-        // poses `state.frameModel` — a `BlockStateModel` resolved through
+        // poses its frame model — a block-state model resolved through
         // vanilla's block-model-resolver item-frame update function — exactly the way
         // vanilla's falling-block renderer poses a real block's, so it wants this atlas,
         // this palette and these UVs rather than an entity sheet. There is no
@@ -2479,7 +2479,7 @@ impl BlockModels {
     /// A state outside [`FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS`] — including
     /// `copper_grate`, deliberately excluded from that list — never skips.
     /// The leaves family's own same-neighbour clause
-    /// (`!cutoutLeaves && neighborState.getBlock()` is an instance of that family) is
+    /// (`!cutoutLeaves && neighborState.get_block()` is an instance of that family) is
     /// a **different** vanilla rule this does not implement.
     #[must_use]
     pub fn skips_rendering_against(&self, state_id: StateId, neighbour_id: StateId) -> bool {
@@ -2497,7 +2497,7 @@ impl BlockModels {
     }
 
     /// Normalised atlas UVs `[u0, v0, u1, v1]` of the sprite a
-    /// `BreakingItemParticle` of `item` should sample — the crumbs vanilla throws
+    /// breaking-item particle of `item` should sample — the crumbs vanilla throws
     /// while an entity eats, and when a tool breaks.
     ///
     /// # Why the bounding rect and not one quad's UVs
@@ -2578,7 +2578,7 @@ impl BlockModels {
     ///
     /// This is the **per-quad** layer, and it is what decides which pass a quad
     /// draws in. Vanilla's section-compiler class buckets each quad on
-    /// `quad.materialInfo().layer()`, which its transparency-bucketing function
+    /// material info's material info, which its transparency-bucketing function
     /// derives from the transparency of that quad's *own* sprite — not from a
     /// per-block-state roll-up. The two disagree on any model that mixes an
     /// opaque sprite with a cutout or translucent one in a single state:

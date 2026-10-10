@@ -109,9 +109,9 @@ impl std::fmt::Display for Bbox {
 /// Which of vanilla's two labels a measurement is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Which {
-    /// `AbstractContainerScreen.title`.
+    /// The abstract container screen's title.
     Title,
-    /// `AbstractContainerScreen.playerInventoryTitle`.
+    /// The abstract container screen's player inventory title.
     PlayerInventory,
 }
 
@@ -296,8 +296,8 @@ fn assert_at_anchor(what: &str, got: Bbox, anchor: [f32; 2]) {
 /// constructors rather than against our own layout function, so the two cannot
 /// agree by sharing a mistake:
 ///
-/// * `ContainerScreen`'s own decompiled source — `super(..., 176, 114 + rowCount * 18)`
-/// * `AbstractContainerScreen`'s recipe-book subclasses — `176 x 166`
+/// * The container screen's own decompiled source — `super(..., 176, 114 + rowCount * 18)`
+/// * The abstract container screen's recipe-book subclasses — `176 x 166`
 #[test]
 fn slot_layout_height_is_vanillas_image_height() {
     for rows in 1..=6u32 {
@@ -323,7 +323,7 @@ fn label_anchors_match_vanillas_four_fields() {
     let big_chest = Menu::generic(54);
     let table = Menu::crafting(3, 3);
 
-    // `InventoryScreen`'s own decompiled source — pushed right, past the player model panel —
+    // The inventory screen's own decompiled source — pushed right, past the player model panel —
     // and `:73-75`, the `extractLabels` override that drops the second call.
     assert_eq!(
         label_layout(&player, &slot_layout(&player)),
@@ -333,8 +333,8 @@ fn label_anchors_match_vanillas_four_fields() {
             inventory: None,
         }
     );
-    // `CraftingScreen`'s own decompiled source. Note this one *does* keep the second label:
-    // `InventoryScreen` is the only `extractLabels` override in the package.
+    // The crafting screen's own decompiled source. Note this one *does* keep the second label:
+    // The inventory screen is the only `extractLabels` override in the package.
     assert_eq!(
         label_layout(&table, &slot_layout(&table)),
         LabelLayout {
@@ -343,7 +343,7 @@ fn label_anchors_match_vanillas_four_fields() {
             inventory: Some([8.0, 166.0 - 94.0]),
         }
     );
-    // `AbstractContainerScreen`'s own decompiled source, with `imageHeight` moving under it.
+    // The abstract container screen's own decompiled source, with `imageHeight` moving under it.
     assert_eq!(
         label_layout(&chest, &slot_layout(&chest)),
         LabelLayout {

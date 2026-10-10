@@ -94,7 +94,7 @@ use crate::entity_record::{SavedEntity, field, read_uuid};
 
 use crate::region_source::Error;
 
-/// Vanilla's `RegionFileVersion.DEFAULT`, matching the terrain writer.
+/// Vanilla's region file version's default, matching the terrain writer.
 const SCHEME: CompressionScheme = CompressionScheme::Zlib;
 
 /// One world's `entities/` region sets, one per built-in dimension, each

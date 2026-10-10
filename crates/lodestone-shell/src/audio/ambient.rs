@@ -352,7 +352,7 @@ impl ShellAmbience {
     }
 }
 
-/// Vanilla's step volume/pitch for a block's `SoundType` —
+/// Vanilla's step volume/pitch for a block's sound type —
 /// vanilla's own step-sound trigger scales volume by 0.15, pitch as-is.
 ///
 /// Split out here rather than inlined at the call site so the two multipliers

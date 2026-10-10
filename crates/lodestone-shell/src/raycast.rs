@@ -35,7 +35,7 @@
 //!   face puts a block on the wrong side of a thin block even once the hit test
 //!   itself is right;
 //! * **the hit point is exact** ([`RayHit::hit`]), which is what vanilla's
-//!   `BlockHitResult` carries and what `use_item_on`'s cursor field wants.
+//!   The block hit result carries and what `use_item_on`'s cursor field wants.
 //!
 //! An empty box list means "not targetable", and that is a real answer — air,
 //! water, lava and `minecraft:light` all have an empty vanilla outline. There is
@@ -45,7 +45,7 @@
 pub const REACH: f64 = 4.5;
 
 /// A block-local axis-aligned box the pick ray is clipped against — one entry of
-/// vanilla's `state.getShape(…).toAabbs()`.
+/// vanilla's get shape's to aabbs.
 ///
 /// Coordinates are **block-local**, in the same `0..1`-per-cell space the version
 /// census uses (`VersionAdapter::block_outline`), so a caller can hand the census

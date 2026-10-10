@@ -363,7 +363,7 @@ fn local_player_hurt_reaches_the_bob_frame_and_survives_view_bobbing_off() {
     assert!(off.hurt > 0.0, "bobHurt must not be muted by the option");
     assert_eq!(off.hurt_dir_degrees, 90.0);
 
-    // The countdown is driven by the 20 Hz tick, like `LivingEntity.tick`'s.
+    // The countdown is driven by the 20 Hz tick, like the living entity's tick's.
     sim.step(1.0 / 20.0);
     assert!(
         sim.bob_frame().hurt < off.hurt,
@@ -578,7 +578,7 @@ fn the_walk_bob_reaches_the_projection_at_vanillas_own_magnitude_and_axis() {
         "a walking player saturates `min(0.1, speed)`; got {}",
         settled.bob
     );
-    // `LocalPlayer.move`: `addWalkedDistance(length(dx, dz) * 0.6)`, negated
+    // `LocalPlayer.move`: add walked distance, negated
     // by `getBackwardsInterpolatedWalkDistance`. Compared against `moved`,
     // which came from the position and not from the bob.
     let advance = phase_before - settled.walk_phase;

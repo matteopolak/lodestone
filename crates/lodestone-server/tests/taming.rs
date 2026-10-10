@@ -858,7 +858,7 @@ fn a_second_player_cannot_board_an_already_mounted_horse() {
     );
 }
 
-/// Vanilla's `isVehicle() || isBaby()` guard at the very top of
+/// Vanilla's `is_vehicle() || isBaby()` guard at the very top of
 /// Horse routes a baby straight to `Animal.mobInteract`,
 /// which has no empty-handed arm — so a tame baby horse can be fed and bred
 /// but never boarded, even though [`MobSim::mount_mob`] itself has no age
@@ -881,7 +881,7 @@ fn a_tame_baby_horse_cannot_be_boarded_by_an_empty_handed_click() {
     assert_eq!(sim.mob_rider(horse), None);
 }
 
-/// `Entity.stopRiding`: an explicit dismount clears the link both ways and
+/// Entity's stop riding: an explicit dismount clears the link both ways and
 /// hands back the mob the caller left.
 #[test]
 fn dismount_mob_clears_the_link_and_returns_the_mob() {
@@ -1027,7 +1027,7 @@ fn feeding_two_cows_wheat_breeds_them_once_and_pops_an_orb() {
 }
 
 /// A mob already in its post-breeding cooldown cannot be re-triggered, because
-/// `Animal.mobInteract`'s gate is `getAge() == 0` and **not** `!isBaby()`.
+/// `Animal.mobInteract`'s gate is `get_age() == 0` and **not** `!isBaby()`.
 ///
 /// This is the discriminating input for that distinction: a cooling-down parent
 /// is not a baby, so the wrong reading accepts it and the pair breeds forever.
@@ -1060,7 +1060,7 @@ fn a_cooling_down_parent_and_a_baby_both_refuse_the_breeding_item() {
 /// The breeding-item tables are per species, and this gate is built on the
 /// crossings rather than on the matches: wheat breeds a cow and not a pig, a
 /// carrot breeds a pig and not a cow, and a **parrot cannot be bred at all**
-/// (`Parrot.canMate` returns `false` and `getBreedOffspring` returns `null`).
+/// (Parrot's can mate returns `false` and `getBreedOffspring` returns `null`).
 ///
 /// # The wolf and the cat are not the same case, and the difference is measured
 ///

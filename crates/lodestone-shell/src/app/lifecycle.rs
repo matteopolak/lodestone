@@ -977,7 +977,7 @@ impl WindowApp {
             // Scroll cycles the hotbar (down = right, like vanilla) only
             // during active play; menus and the chat prompt ignore it. The
             // step is scaled by `mouseWheelSensitivity` through
-            // the same fractional accumulator vanilla's `ScrollWheelHandler`
+            // the same fractional accumulator vanilla's scroll wheel handler
             // uses, so sensitivity below 1.0 can take more than one notch to
             // move a slot.
             //
@@ -1576,7 +1576,7 @@ impl WindowApp {
             Some(KeyOutcome::AnvilRename) => {
                 // Same shape as the two search boxes above, but this one
                 // also has a *responder*: vanilla calls `onNameChanged`
-                // after every edit (`EditBox::setResponder`), which is
+                // after every edit (EditBox's set responder), which is
                 // what actually produces `ClientAction::RenameItem` —
                 // this arm closes the send side of the island (`RenameItem` was
                 // modelled, encoded and consumed server-side with zero
@@ -2252,7 +2252,7 @@ impl WindowApp {
     ///   is exactly one Tab implementation rather than two that can drift. The
     ///   refresh happens per keystroke rather than at open time because a player
     ///   can join while the chat box is up, and vanilla recomputes
-    ///   `getCustomTabSuggestions()` on every keystroke for the same reason.
+    ///   get custom tab suggestions on every keystroke for the same reason.
     ///
     /// Note the Tab key reaches chat at all only because `input::resolve_key`
     /// short-circuits on `gate.chat_open` before any gameplay binding —
@@ -2293,14 +2293,14 @@ impl WindowApp {
                 // it here rather than teaching `take` to record is the whole
                 // point: `take` is on the **Escape** path too, and a cancelled
                 // line is not part of the history — vanilla only records under
-                // `handleChatInput(msg, addToRecent = true)`, which Escape never
+                // handle chat input, which Escape never
                 // reaches.
                 let line = self.chat_input.as_str().to_owned();
                 self.chat_input.record_sent(&line);
                 false
             }
             KeyCode::Tab => {
-                // `getOnlinePlayers()`, not `getListedOnlinePlayers()`: vanilla's
+                // `getOnlinePlayers()`, not get listed online players: vanilla's
                 // suggestion provider offers every entry, including a player the
                 // server has hidden from the tab overlay.
                 self.chat_input.set_online_players(

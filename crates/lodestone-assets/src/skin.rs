@@ -153,7 +153,7 @@ impl PlayerModelType {
         }
     }
 
-    /// The `id` (`StringRepresentable` serialized name) — `"wide"`/`"slim"`.
+    /// The `id` (serialized name) — `"wide"`/`"slim"`.
     /// This is the datapack/component spelling, **not** the one that appears in
     /// a `textures` property.
     #[must_use]
@@ -196,7 +196,7 @@ pub struct DefaultSkin {
     pub texture: &'static str,
 }
 
-/// `DefaultPlayerSkin.DEFAULT_SKINS`, in its own declared order: nine slim
+/// The default player skins, in their own declared order: nine slim
 /// identities, then the same nine names wide. **Order is load-bearing** — the
 /// index vanilla's uuid-hash pick lands on is this array's index, not an
 /// alphabetised or regrouped one.
@@ -393,7 +393,7 @@ pub fn textures_from_json(json: &serde_json::Value) -> ProfileTextures {
 
     let skin_entry = entry("SKIN");
     let skin = url_of(skin_entry).map(|url| {
-        // `getMetadata("model")` — a lookup into a `Map<String, String>`, so a
+        // get metadata — a lookup into a `Map<String, String>`, so a
         // missing `metadata` object and a missing `model` key are the same
         // thing, and both mean wide.
         let declared = skin_entry

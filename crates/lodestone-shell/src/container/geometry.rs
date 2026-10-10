@@ -29,7 +29,7 @@ use super::{
 
 /// Declared (16x-baseline) full-sprite size the furnace family's lit-flame
 /// sub-rect is authored against — vanilla's own abstract furnace-screen's
-/// `blitSprite(pipeline, litProgressSprite, 14, 14, 0, 14 - h, x, y, 14, h)`.
+/// blit sprite.
 /// Shared by all three furnace variants: the furnace/blast-furnace/smoker
 /// screens all reuse vanilla's own abstract furnace-screen's background
 /// extraction, only
@@ -38,21 +38,21 @@ use super::{
 /// a resource pack whose real pixels exceed this baseline.
 const FURNACE_LIT_DECLARED: (f32, f32) = (14.0, 14.0);
 /// As [`FURNACE_LIT_DECLARED`], for the burn-progress bar —
-/// `blitSprite(pipeline, burnProgressSprite, 24, 16, 0, 0, x, y, w, 16)`.
+/// blit sprite.
 const FURNACE_BURN_DECLARED: (f32, f32) = (24.0, 16.0);
 /// The brewing stand's fuel-length bar's declared size —
 /// vanilla's own brewing-stand screen's
-/// `blitSprite(pipeline, FUEL_LENGTH_SPRITE, 18, 4, 0, 0, x, y, len, 4)`.
+/// blit sprite.
 const BREWING_FUEL_DECLARED: (f32, f32) = (18.0, 4.0);
 /// The brewing stand's brew-progress bar's declared size —
-/// `blitSprite(pipeline, BREW_PROGRESS_SPRITE, 9, 28, 0, 0, x, y, 9, len)`.
+/// blit sprite.
 const BREWING_BREW_DECLARED: (f32, f32) = (9.0, 28.0);
 /// The brewing stand's bubble-column's declared size —
-/// `blitSprite(pipeline, BUBBLES_SPRITE, 12, 29, 0, 29 - len, x, y, 12, len)`.
+/// blit sprite.
 const BREWING_BUBBLES_DECLARED: (f32, f32) = (12.0, 29.0);
 
 /// Vanilla's own anvil-screen background extraction's own blit:
-/// `graphics.blitSprite(pipeline, hasItem ? TEXT_FIELD_SPRITE :
+/// `graphics.blit_sprite(pipeline, hasItem ? TEXT_FIELD_SPRITE :
 /// TEXT_FIELD_DISABLED_SPRITE, leftPos + 59, topPos + 20, 110, 16)`. Neither
 /// `container/anvil/text_field` nor `text_field_disabled` is one of the
 /// whole-panel sheets [`ContainerBackground`] stitches (it only loads
@@ -79,7 +79,7 @@ const ANVIL_FIELD_FILL: [f32; 4] = [160.0 / 255.0, 145.0 / 255.0, 114.0 / 255.0,
 /// The disabled interior fill — `text_field_disabled.png`'s dominant pixel
 /// `(78, 71, 55)` (1274 of 1760 texels, measured).
 const ANVIL_FIELD_FILL_DISABLED: [f32; 4] = [78.0 / 255.0, 71.0 / 255.0, 55.0 / 255.0, 1.0];
-/// `EditBox::setTextColor(-1)` (`AnvilScreen.subInit`) — opaque white.
+/// EditBox's set text color (the anvil screen's sub init) — opaque white.
 const ANVIL_FIELD_TEXT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// Geometry for the container overlay: coloured chrome plus, when an item atlas
@@ -233,7 +233,7 @@ pub struct ContainerGeometry {
     ///
     /// `Some` exactly when [`MenuKind::Player`] — vanilla calls
     /// `extractEntityInInventoryFollowsMouse` only from
-    /// `InventoryScreen.extractBackground`, so a chest or a furnace has no avatar
+    /// The inventory screen's extract background, so a chest or a furnace has no avatar
     /// and drawing one there would be a divergence, not a bonus.
     ///
     /// This is a *placement*, not a vertex stream: the rig is 3-D and goes through
@@ -336,12 +336,12 @@ impl ContainerGeometry {
         });
 
         // Vanilla's own dim behind an open container screen (that fix's
-        // leftover). `AbstractContainerScreen::isInGameUi()` overrides `true`
+        // leftover). The abstract container screen's is in game ui overrides `true`
         //, which routes
-        // `Screen::extractBackground` to `extractTransparentBackground`
+        // Screen's extract background to `extractTransparentBackground`
         // — a full-canvas vertical **gradient**, not the
         // pause menu's tiled dirt texture (that is the `else` branch, for
-        // `isInGameUi() == false` screens). The straight-alpha source is black,
+        // `is_in_game_ui() == false` screens). The straight-alpha source is black,
         // with alpha 192/255 at the top and 208/255 at the bottom, so even a
         // nearly black world pixel cannot be lifted by the backdrop.
         //
@@ -384,8 +384,8 @@ impl ContainerGeometry {
                 [0.22, 0.20, 0.17, 0.70],
             );
         }
-        // The player-inventory status-effect column (`EffectsInInventory`).
-        // Vanilla's `InventoryScreen.extractRenderState` calls
+        // The player-inventory status-effect column (the effects in inventory).
+        // Vanilla's inventory screen's extract render state calls
         // `this.effects.extractRenderState(...)` **before** `super`'s, so the
         // column belongs in this same under-the-slots bucket. It never
         // overlaps the panel, so the order is a faithfulness point rather than
@@ -455,7 +455,7 @@ impl ContainerGeometry {
                     | SpecialLayout::BlastFurnace
                     | SpecialLayout::Smoker),
                 ) => {
-                    // `AbstractFurnaceMenu`: data[0] litTime, data[1]
+                    // The abstract furnace menu: data[0] litTime, data[1]
                     // litDuration, data[2] cookingProgress, data[3]
                     // cookingTotalTime.
                     let (lit_sprite, burn_sprite) = match kind {
@@ -501,7 +501,7 @@ impl ContainerGeometry {
                     }
                 }
                 Some(SpecialLayout::Brewing) => {
-                    // `BrewingStandMenu`: data[0] brewingTicks, data[1] fuel
+                    // The brewing stand menu: data[0] brewingTicks, data[1] fuel
                     //.
                     let fuel = data(1);
                     let fuel_len = ((18 * fuel + 19) / 20).clamp(0, 18);
@@ -554,8 +554,8 @@ impl ContainerGeometry {
                     // not the real 9-sliced bevel (this crate has no path to
                     // that sprite from here; see the doc comment above), but
                     // enough that a solid red box no longer shows through.
-                    // `AnvilScreen.subInit`: `this.name.setEditable(this.menu
-                    // .getSlot(0).hasItem())`, and `extractBackground` blits
+                    // The anvil screen's sub init: `this.name.set_editable(this.menu
+                    // .get slot(0).hasItem())`, and `extractBackground` blits
                     // the disabled sprite variant on the same condition.
                     let has_item = menu.slot_item(0).is_some();
                     let fill = if has_item {
@@ -578,12 +578,12 @@ impl ContainerGeometry {
                         fill,
                     );
                     // `new EditBox(font, xo + 62, yo + 24, 103, 12, ...)`
-                    // (vanilla's own anvil-screen init), `setBordered(false)`: the
+                    // (vanilla's own anvil-screen init), set bordered: the
                     // inset a bordered box would add (vanilla's own edit-box:
                     // `this.bordered ? 4 : 0`) is zero, so text sits flush
                     // with the box's own x. `textY = getY() + (height - 8) /
                     // 2` centres it in the 12px-tall box. `textShadow`
-                    // defaults `true` and `AnvilScreen` never clears it, so
+                    // defaults `true` and the anvil screen never clears it, so
                     // this is `shadowed_label`, not `label`.
                     if let Some(name) = frame.anvil_name
                         && !name.is_empty()
@@ -595,7 +595,7 @@ impl ContainerGeometry {
             }
         }
         // Which slot the pointer is over — vanilla's `hoveredSlot`, set from
-        // `getHoveredSlot(mouseX, mouseY)` every frame
+        // get hovered slot every frame
         //. Derived from the **same**
         // `hit_test_with_book` the click path calls, with the same `gui_scale`
         // *and* the same `book_open`, so the highlight cannot land on a different
@@ -618,10 +618,10 @@ impl ContainerGeometry {
         // `ContainerFrame::hover_blocked`; note it deliberately does **not** gate
         // the carried-stack draw below.
         //
-        // `isHighlightable()` is not restated: base `Slot` returns `true` and the
-        // only override in 26.2 is `NonInteractiveResultSlot` (the crafter and
+        // Is highlightable is not restated: base `Slot` returns `true` and the
+        // only override in 26.2 is the non interactive result slot (the crafter and
         // the recipe-book ghost), which no menu this client models uses. In
-        // particular a crafting table's `ResultSlot` does **not** override it, so
+        // particular a crafting table's result slot does **not** override it, so
         // the result slot *is* highlighted — easy to assume otherwise given how
         // many other branches special-case it.
         let hovered = if frame.hover_blocked {
@@ -711,7 +711,7 @@ impl ContainerGeometry {
             }
         }
 
-        // Both labels, exactly as `AbstractContainerScreen::extractLabels` draws
+        // Both labels, exactly as the abstract container screen's extract labels draws
         // them:
         //
         //     graphics.text(font, title,               titleLabelX, titleLabelY, -12566464, false);
@@ -989,10 +989,10 @@ impl ContainerGeometry {
             let (cx, cy) = (cx / scale, cy / scale);
             // Mid-drag, vanilla shows the cursor holding what it would be *left*
             // with, not what it started with: `extractCarriedItem` (`:119-124`)
-            // replaces the stack with `copyWithCount(quickCraftingRemainder)`
+            // replaces the stack with copy with count
             // whenever more than one cell is painted. `remainder` is derived from
             // the same plan the cells drew from, so the numbers on screen add up.
-            // A remainder of zero draws nothing (vanilla's `copyWithCount(0)` is
+            // A remainder of zero draws nothing (vanilla's copy with count is
             // empty, and its yellow "0" decoration is not modelled).
             match drag.as_ref().filter(|p| !p.single) {
                 Some(preview) if preview.remainder > 0 => {
@@ -1066,7 +1066,7 @@ impl ContainerGeometry {
                 w: layout.width,
                 h: layout.height,
             }),
-            // The inventory avatar (`InventoryScreen.extractBackground`'s second
+            // The inventory avatar (the inventory screen's extract background's second
             // call). Measured from `x`/`y` — the **shifted** panel origin above —
             // for the reason that shift is applied there and nowhere else, and
             // with the cursor divided down by the same integer scale
@@ -1218,9 +1218,9 @@ fn draw_container_costs(
     }
 }
 
-/// `AnvilScreen.extractLabels`: the XP cost in
+/// The anvil screen's extract labels: the XP cost in
 /// the top-right of the panel, on a translucent backdrop, right-aligned.
-/// `container_data(0)` is `AnvilMenu`'s one `DataSlot`.
+/// `container_data(0)` is the anvil menu's one data slot.
 fn draw_anvil_cost(
     b: &mut Builder<'_>,
     menu: &Menu,
@@ -1237,7 +1237,7 @@ fn draw_anvil_cost(
     if cost <= 0 {
         return;
     }
-    // `AnvilMenu`'s result slot is menu index 2 (`Menu::item_combiner(3, 2,
+    // The anvil menu's result slot is menu index 2 (`Menu::item_combiner(3, 2,
     // Anvil)` — see `docs/container-cost-screens.md`).
     const RESULT_SLOT: usize = 2;
     let line: Option<(String, [f32; 4])> = if cost >= 40 && !frame.has_infinite_materials {
@@ -1245,7 +1245,7 @@ fn draw_anvil_cost(
     } else if menu.slot_item(RESULT_SLOT).is_none() {
         None
     } else {
-        // `AnvilMenu::mayPickup`: affordable iff
+        // The anvil menu's may pickup: affordable iff
         // infinite materials, or the player's level covers the cost.
         let may_pickup = frame.has_infinite_materials || frame.xp_level >= cost;
         let colour = if may_pickup { COST_GREEN } else { COST_RED };
@@ -1279,11 +1279,11 @@ fn draw_anvil_cost(
 /// buttons. `container_data(0..3)` are vanilla's own enchantment-menu costs[0..3].
 ///
 /// **Deliberately does not draw the enchantment-name text.** That is
-/// `EnchantmentNames`' Standard Galactic Alphabet cipher font, a whole
+/// The enchantment names' Standard Galactic Alphabet cipher font, a whole
 /// separate subsystem this build has no glyphs for — orthogonal to the cost
 /// number `docs/container-cost-screens.md` scopes this work to.
 fn draw_enchanting_costs(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFrame<'_>, x: f32, y: f32) {
-    // `EnchantmentMenu`'s lapis slot is menu index 1 (`Menu::enchanting_table`
+    // The enchantment menu's lapis slot is menu index 1 (`Menu::enchanting_table`
     // marks slot 1 `SlotKind::LapisOnly` — see `docs/container-cost-screens.md`).
     const LAPIS_SLOT: usize = 1;
     let gold_count = menu.slot_item(LAPIS_SLOT).map_or(0, ItemStack::count);
@@ -1319,15 +1319,15 @@ fn draw_enchanting_costs(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFram
 }
 
 /// The beacon's own "Primary Power"/"Secondary Power" backdrop colour —
-/// `BeaconScreen.extractLabels`' literal `-2039584` (an opaque light-grey),
+/// The beacon screen's extract labels' literal `-2039584` (an opaque light-grey),
 /// re-expressed as normalised RGBA.
 const BEACON_LABEL_COLOUR: [f32; 4] = [0xf0 as f32 / 255.0, 0xe0 as f32 / 255.0, 0xe0 as f32 / 255.0, 1.0];
 
-/// `BeaconScreen.extractLabels`/`init`: the two centred
+/// The beacon screen's extract labels/`init`: the two centred
 /// "Primary Power"/"Secondary Power" labels, the eight power buttons and the
 /// confirm/cancel controls.
 ///
-/// Every button is two blits, exactly as `BeaconScreenButton.extractContents`
+/// Every button is two blits, exactly as the beacon screen button's extract contents
 /// does it: a `22x22` state sprite (disabled / selected / highlighted / plain,
 /// chosen in that order) and then an `18x18` icon two pixels in. For a power
 /// button that icon is the effect's own `mob_effect/<id>` sprite; for the last
@@ -1367,7 +1367,7 @@ fn draw_beacon_panel(
         .map_or(0, |(_, v)| *v);
 
     // `PRIMARY_EFFECT_LABEL`/`SECONDARY_EFFECT_LABEL`, centred at local
-    // `(62, 10)`/`(169, 10)` (`BeaconScreen.extractLabels`). No language
+    // `(62, 10)`/`(169, 10)` (the beacon screen's extract labels). No language
     // table reaches this module — see `draw_anvil_cost`'s own doc for the
     // identical gap — so this is the resolved English wording.
     for (text, cx) in [("Primary Power", 62.0), ("Secondary Power", 169.0)] {
@@ -1384,7 +1384,7 @@ fn draw_beacon_panel(
         })
     };
 
-    // `BeaconScreenButton.extractContents`' own if/else-if chain, in its own
+    // The beacon screen button's extract contents' own if/else-if chain, in its own
     // order: inactive wins over selected, which wins over hovered.
     let state_sprite = |active: bool, selected: bool, hovered: bool| {
         if !active {
@@ -1431,7 +1431,7 @@ fn draw_beacon_panel(
         }
     }
 
-    // `BeaconConfirmButton`/`BeaconCancelButton.updateStatus` — confirm is
+    // The beacon confirm button/beacon cancel button's update status — confirm is
     // only bright when it would actually do something (a payment item
     // present and a primary chosen), cancel is always live.
     let has_payment = menu.slot_item(0).is_some();
@@ -1447,7 +1447,7 @@ fn draw_beacon_panel(
                 draw_beacon_button(
                     b,
                     bg,
-                    // Neither is ever `selected` — `BeaconSpriteScreenButton`
+                    // Neither is ever `selected` — the beacon sprite screen button
                     // does not call `setSelected`.
                     state_sprite(active, false, hovers(rect.x, rect.y)),
                     icon,
@@ -1505,7 +1505,7 @@ fn draw_stonecutter_grid(
     }
 }
 
-/// One `BeaconScreenButton`: its `22x22` state sprite, then its `18x18` icon
+/// One beacon screen button: its `22x22` state sprite, then its `18x18` icon
 /// inset by `BEACON_ICON_INSET` — `extractContents` followed by `extractIcon`.
 ///
 /// The icon is looked up as a GUI sprite first and as a mob-effect icon second,
@@ -1633,7 +1633,7 @@ fn drag_preview(menu: &Menu, drag: Option<(i32, &[usize])>) -> Option<DragPrevie
 
 /// Coverage for the anvil rename box (the report: "in the anvil, the input
 /// where it should show the text just shows a solid red box"). Root cause
-/// was `AnvilScreen.extractBackground`'s `TEXT_FIELD_SPRITE`/
+/// was the anvil screen's extract background's `TEXT_FIELD_SPRITE`/
 /// `TEXT_FIELD_DISABLED_SPRITE` overlay never being drawn at all — no code
 /// anywhere in this crate referenced `container/anvil/text_field[_disabled]`
 /// — so vanilla's own `anvil.png`, which bakes a flat opaque `(255, 0, 0)`
@@ -1648,13 +1648,13 @@ fn drag_preview(menu: &Menu, drag: Option<(i32, &[usize])>) -> Option<DragPrevie
 /// `b.shadowed_label` call commented out (the historical bug, reproduced):
 /// [`the_rename_box_draws_real_glyph_geometry_not_one_flat_quad`] and
 /// [`glyph_vertex_count_scales_with_the_known_strings_own_width`] both went
-/// `EffectsInInventory.extractEffects` — the status-effect column beside the
+/// The effects in inventory's extract effects — the status-effect column beside the
 /// player inventory panel.
 ///
 /// A no-op unless `frame.effects` is non-empty. The caller decides *which*
-/// screens populate it: vanilla constructs an `EffectsInInventory` only in
-/// `InventoryScreen`/`CreativeModeInventoryScreen`, and `Screen`'s own
-/// `showsActiveEffects()` is `false` everywhere else.
+/// screens populate it: vanilla constructs an effects in inventory only in
+/// The inventory screen/creative mode inventory screen, and `Screen`'s own
+/// shows active effects is `false` everywhere else.
 ///
 /// `x`/`y` are the panel's origin (`leftPos`/`topPos`) and `w` the logical
 /// canvas width (`screen.width`), all in the same logical GUI space every
@@ -1717,7 +1717,7 @@ fn draw_effect_column(
         if max_text_width > 0.0 {
             let text_x = x0 + INV_TEXT_X_OFFSET;
             let text_y = y0 + INV_SPACING;
-            // `ComponentRenderUtils.clipText`: the longest prefix that fits in
+            // The component render utils's clip text: the longest prefix that fits in
             // `maxTextWidth` minus the ellipsis' own width, plus the ellipsis.
             let name = if b.text_width(&row.name, 1.0) > max_text_width {
                 let budget = max_text_width - b.text_width(ELLIPSIS, 1.0);
@@ -1749,20 +1749,20 @@ fn draw_effect_column(
     }
 }
 
-/// `CommonComponents.ELLIPSIS`, the suffix `ComponentRenderUtils.clipText`
+/// The common components's ellipsis, the suffix component render utils's clip text
 /// appends to a name too wide for its widget.
 const ELLIPSIS: &str = "...";
 
-/// `EffectsInInventory.extractText`'s name colour — the literal `-1`, i.e.
+/// The effects in inventory's extract text's name colour — the literal `-1`, i.e.
 /// opaque white.
 const EFFECT_NAME_INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// `EffectsInInventory.extractText`'s duration colour — the literal
+/// The effects in inventory's extract text's duration colour — the literal
 /// `-8355712`, i.e. ARGB `0xFF808080`.
 const EFFECT_DURATION_INK: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
 
 /// The duration line's offset below the name — the literal `+ 9` in
-/// `EffectsInInventory.extractText`, which is one line of vanilla's font.
+/// The effects in inventory's extract text, which is one line of vanilla's font.
 const EFFECT_DURATION_DY: f32 = 9.0;
 
 
@@ -1870,7 +1870,7 @@ mod effect_column_tests {
     /// The expected quad count is **derived** from the button producers rather
     /// than predicted — the first version of this gate guessed "ten buttons"
     /// and the real number is six power buttons plus confirm and cancel, with
-    /// the ninth (`BeaconUpgradePowerButton`) appearing only once a primary is
+    /// the ninth (the beacon upgrade power button) appearing only once a primary is
     /// chosen. That second arm is the discriminating one: it moves the count
     /// by exactly two, which a per-button single blit could not produce.
     ///
@@ -1913,9 +1913,9 @@ mod effect_column_tests {
              background stream — otherwise the deltas below are not the buttons"
         );
 
-        // `BeaconSpriteScreenButton`'s two: confirm and cancel.
+        // The beacon sprite screen button's two: confirm and cancel.
         const SPRITE_BUTTONS: usize = 2;
-        /// One whole-panel blit — `BeaconScreen`'s `230x219` sheet.
+        /// One whole-panel blit — the beacon screen's `230x219` sheet.
         const PANEL_QUADS: usize = 1;
         let per_button = 2; // extractContents + extractIcon
 
@@ -2148,8 +2148,8 @@ mod anvil_rename_field_tests {
 
     /// A 3-slot anvil menu (`Menu::item_combiner(3, 2, SpecialLayout::Anvil)`)
     /// with slot 0 holding a diamond sword, optionally custom-named —
-    /// mirrors `AnvilScreen.subInit`'s `this.name.setEditable(this.menu
-    /// .getSlot(0).hasItem())` precondition (slot 0 is always occupied here,
+    /// mirrors the anvil screen's sub init's `this.name.set_editable(this.menu
+    /// .get slot(0).hasItem())` precondition (slot 0 is always occupied here,
     /// so the box is always the "enabled" variant).
     fn anvil_menu_with_item(custom_name: Option<&str>) -> Menu {
         let mut menu = Menu::item_combiner(3, 2, SpecialLayout::Anvil);

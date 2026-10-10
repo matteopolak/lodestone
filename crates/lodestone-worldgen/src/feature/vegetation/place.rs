@@ -393,7 +393,7 @@ pub(super) fn place_tree<R: RandomSource>(
         ),
     };
 
-    // `foliageAttachments.forEach(a -> foliagePlacer.createFoliage(...))` —
+    // `foliageAttachments.forEach(a -> foliagePlacer.create_foliage(...))` —
     // the public per-attachment overload draws `this.offset(random)` FRESH
     // for EACH attachment (not once overall), so the fresh
     // `sample_offset` call must live INSIDE this loop. For `Straight`

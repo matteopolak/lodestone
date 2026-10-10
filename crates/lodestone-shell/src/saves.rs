@@ -189,11 +189,11 @@ pub fn default_world_dir() -> PathBuf {
 /// - `icon` — vanilla shows `icon.png`, a screenshot the client saves on quit.
 ///   This client writes none, so an icon field would be `None` forever: the
 ///   island `CLAUDE.md` names.
-/// - `locked` — `DirectoryLock`/`session.lock`. Nothing in this client writes
+/// - `locked` — the directory lock/`session.lock`. Nothing in this client writes
 ///   one, so a `locked` flag would be a constant `false` claiming a check
 ///   happened.
 /// - `requiresManualConversion` / `requiresFileFixing` / `experimental` /
-///   `BackupStatus` — all four are `DataFixer` questions, and there is no data
+///   The backup status — all four are `DataFixer` questions, and there is no data
 ///   fixer here. [`Self::readable`] is the one real failure mode this client
 ///   has, and it maps to vanilla's own corrupted-level summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,7 +236,7 @@ impl WorldSummary {
     /// Vanilla's own primary-action-active accessor — whether **Play
     /// Selected World** is live for this row.
     ///
-    /// Narrowed to `readable`: vanilla's `isDisabled()` is
+    /// Narrowed to `readable`: vanilla's is disabled is
     /// `locked || requiresManualConversion || !isCompatible`, and this client
     /// models none of those three (see the type's doc). A world whose metadata
     /// will not decode is the one case where opening it would go wrong.
@@ -978,7 +978,7 @@ impl std::error::Error for DeleteError {}
 ///    a *world* rather than a directory: the saves root has no `level.dat`, and
 ///    neither does the `notaworld` folder every fixture here carries. It is
 ///    deliberately an *existence* check and not a decode: vanilla's
-///    `canDelete()` is unconditionally `true`, a corrupt world is the one you
+///    can delete is unconditionally `true`, a corrupt world is the one you
 ///    most need to remove, and requiring a decode would make exactly that world
 ///    permanent.
 ///
@@ -1496,7 +1496,7 @@ mod tests {
         assert_eq!(dirs, vec!["alpha", "charlie", "delta", "broken"]);
     }
 
-    /// A **corrupt** world is deletable — vanilla's `canDelete()` is
+    /// A **corrupt** world is deletable — vanilla's can delete is
     /// unconditionally `true`, and the world whose `level.dat` will not decode is
     /// the one you most need to be able to remove.
     ///

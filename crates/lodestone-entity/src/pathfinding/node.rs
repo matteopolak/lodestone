@@ -111,7 +111,7 @@ impl PathType {
         })
     }
 
-    /// The default danger malus for this type (`PathType.getMalus`). A negative
+    /// The default danger malus for this type (PathType's get malus). A negative
     /// malus means impassable.
     #[must_use]
     pub const fn malus(self) -> f32 {
@@ -199,7 +199,7 @@ impl Node {
         }
     }
 
-    /// Vanilla's `Node.createHash`, used to deduplicate nodes by position.
+    /// Vanilla's Node's create hash, used to deduplicate nodes by position.
     #[must_use]
     pub const fn hash(x: i32, y: i32, z: i32) -> i32 {
         (y & 0xFF)

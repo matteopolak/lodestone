@@ -246,7 +246,7 @@ fn special_node_carries_its_own_transformation() {
 /// An **ancestor** node's `"transformation"` reaches the `special` node under
 /// it. This is `assets/minecraft/items/shield.json`'s exact shape, trimmed to
 /// the branch under test: the `scale [1, -1, -1]` that vanilla's
-/// `ShieldSpecialRenderer` used to apply in code is hoisted into the item
+/// shield special renderer used to apply in code is hoisted into the item
 /// definition and sits on the enclosing `minecraft:condition` node, **not** on
 /// the `minecraft:special` node.
 ///

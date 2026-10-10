@@ -256,7 +256,7 @@ pub fn bow_power_for_time(ticks_held: i32) -> f64 {
     ((pow * pow + pow * 2.0) / 3.0).min(1.0)
 }
 
-/// Vanilla `Projectile.shootFromRotation` composed with `getMovementToShoot`: the
+/// Vanilla Projectile's shoot from rotation composed with `getMovementToShoot`: the
 /// initial velocity for a projectile launched by an entity facing
 /// `(yaw, pitch)` in degrees, at `power` blocks per tick.
 ///
@@ -387,13 +387,13 @@ pub const ARROW_BASE_DAMAGE: f64 = 2.0;
 /// not tier-derived, and **not** the same as the arrow's.
 pub const TRIDENT_BASE_DAMAGE: f64 = 8.0;
 
-/// `SmallFireball.onHitEntity`'s `hurtServer(..., 5.0F)`.
+/// SmallFireball's on hit entity's `hurtServer(..., 5.0F)`.
 pub const SMALL_FIREBALL_DAMAGE: f32 = 5.0;
 
-/// `SmallFireball.onHitEntity`'s `igniteForSeconds(5.0F)`.
+/// SmallFireball's on hit entity's ignite for seconds.
 pub const SMALL_FIREBALL_IGNITE_SECONDS: f32 = 5.0;
 
-/// `WitherSkull.onHitEntity`'s damage when the shooter is a living owner —
+/// WitherSkull's on hit entity's damage when the shooter is a living owner —
 /// the only case this crate's production skull spawns ever hit (see
 /// `lodestone_server::wither`'s own doc for the no-owner `5.0F` case, which
 /// this table does not carry because nothing here resolves "does this
@@ -402,7 +402,7 @@ pub const SMALL_FIREBALL_IGNITE_SECONDS: f32 = 5.0;
 /// table).
 pub const WITHER_SKULL_DAMAGE: f32 = 8.0;
 
-/// `LargeFireball.onHitEntity`'s `hurtServer(..., 6.0F)` — the ghast's own
+/// LargeFireball's on hit entity's `hurtServer(..., 6.0F)` — the ghast's own
 /// fireball, registry path `fireball` (see
 /// `crate::ai::mob::ProjectileKind::LargeFireball`'s own doc for why that is
 /// not `large_fireball`). The unconditional impact explosion
@@ -460,13 +460,13 @@ pub fn impact_effect(path: &str, speed: f64) -> ImpactEffect {
             ignite_seconds: SMALL_FIREBALL_IGNITE_SECONDS,
             consumed: true,
         },
-        // `Snowball.onHitEntity`: `entity instanceof Blaze ? 3 : 0`. The blaze
+        // Snowball's on hit entity: `entity instanceof Blaze ? 3 : 0`. The blaze
         // special case needs the *target's* type, which this function is not
         // given, so the host applies it — see `MobSim`'s impact pass. Zero here
         // is the general case, not a stand-in for the whole rule.
         "snowball" | "egg" | "ender_pearl" | "experience_bottle" | "splash_potion"
         | "lingering_potion" => none,
-        // `WitherSkull.onHitEntity`'s damage; the impact-blast/wither-effect
+        // WitherSkull's on hit entity's damage; the impact-blast/wither-effect
         // halves need the target's own liveness/owner, so `MobSim`'s impact
         // pass applies those, matching the snowball-vs-blaze precedent above.
         "wither_skull" => ImpactEffect {
@@ -481,7 +481,7 @@ pub fn impact_effect(path: &str, speed: f64) -> ImpactEffect {
     }
 }
 
-/// `Snowball.onHitEntity`'s blaze-only damage.
+/// Snowball's on hit entity's blaze-only damage.
 pub const SNOWBALL_BLAZE_DAMAGE: f32 = 3.0;
 
 /// One projectile the [`ProjectileRegistry`] is advancing, keyed by its

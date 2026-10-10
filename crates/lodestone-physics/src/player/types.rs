@@ -611,7 +611,7 @@ impl PlayerState {
     }
 
     /// Matches vanilla's own per-tick freeze-damage trigger:
-    /// `tickCount % 40 == 0 && isFullyFrozen() && canFreeze()`. The
+    /// `tickCount % 40 == 0 && is_fully_frozen() && can_freeze()`. The
     /// "can freeze" check is unconditionally `true` for a player — see
     /// [`Self::frozen_ticks`]'s "not modelled" note — so this reduces to the
     /// two terms this crate can actually answer, plus the one input it

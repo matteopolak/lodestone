@@ -131,8 +131,8 @@ fn container_set_slot_decodes_the_empty_stack() {
 /// `lodestone_data::generated::items::ITEM_NAMES`) with one added component,
 /// `minecraft:dyed_color` (registry id 44, per
 /// `lodestone_data::generated::data_component_types::DATA_COMPONENT_TYPE_NAMES`),
-/// whose payload is `vanilla's own dyed item color's own stream codec` — a bare
-/// `vanilla's own byte buf codecs's own int` (`vanilla's own dyed item color's own java`), i.e. 4 big-endian bytes, not
+/// whose payload is the dyed-colour stream codec — a bare
+/// 32-bit int, i.e. 4 big-endian bytes, not
 /// a `VarInt` like every other scalar component this file exercises. The rgb
 /// `0x00336699` is arbitrary; the point is that it survives the wire exactly,
 /// unmangled by a VarInt reader that would stop after the first `0x80`-set
@@ -171,7 +171,7 @@ fn container_set_slot_decodes_a_dyed_leather_helmet() {
 ///
 /// Before the `minecraft:trim` arm existed, this component fell to
 /// `read_component_patch`'s `other =>` cliff, which cannot skip an unmodeled
-/// payload (clientbound stacks use `vanilla's own data component patch's own stream codec`, undelimited
+/// payload (clientbound stacks use the data-component patch stream codec, undelimited
 /// — see that arm's own comment). So a trimmed stack lost the trim *and* every
 /// component after it *and* the rest of the packet. The second component and the
 /// clean `ensure_empty` are what prove the cliff is gone.
@@ -181,8 +181,8 @@ fn container_set_slot_decodes_a_dyed_leather_helmet() {
 /// # Why these two ids
 ///
 /// A dynamic registry's holder ids are its JSON entries **sorted by resource
-/// id** (`vanilla's own resource manager registry load task's own load`'s
-/// `.sorted(vanilla's own entry's own comparing by key())`), which for these all-`minecraft`
+/// id** (the registry loader sorts entries
+/// by key), which for these all-`minecraft`
 /// registries is alphabetical order of the file stems in
 /// `data/minecraft/trim_material/` and `data/minecraft/trim_pattern/`. This
 /// gate previously carried ids read off the matching `*.bootstrap` *datagen*

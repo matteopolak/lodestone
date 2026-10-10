@@ -358,7 +358,7 @@ fn biome_sky_colours_resolve_by_holder_id() {
 
     /// One biome entry shaped the way the wire carries it: an `attributes`
     /// compound keyed by attribute id, whose value for a plain `override` is the
-    /// bare hex string (`vanilla's own environment attribute map's own entry`'s `vanilla's own codec's own either` left
+    /// bare hex string (the attribute-map entry codec's left
     /// branch).
     fn biome(id: &str, sky: Option<&str>) -> PackedRegistryEntry {
         let mut attributes = vec![(
@@ -437,7 +437,7 @@ fn biome_sky_colours_resolve_by_holder_id() {
 
 /// The `has_precipitation`/`temperature`/`downfall` triple lives at the top of
 /// the biome compound, a sibling of `attributes` — not nested under it like
-/// `sky_color` — per `vanilla's own biome's own climate settings's own codec`.
+/// `sky_color` — per the biome climate-settings codec.
 /// This is the input `precipitation_for_temperature` and
 /// `height_adjusted_temperature` (`lodestone-render`'s `weather.rs`) have had
 /// unit tests for but no real caller for, per `docs/weather.md`'s "Snow: the
@@ -532,8 +532,8 @@ fn biome_climates_resolve_by_holder_id_and_hold_place_for_a_bad_entry() {
 /// The modifier form of an attribute entry, which no vanilla biome uses for
 /// `sky_color` and a data pack may.
 ///
-/// `vanilla's own environment attribute map's own entry::createCodec` is
-/// `vanilla's own codec's own either(valueCodec, fullCodec)`: a plain `override` collapses to the
+/// The attribute-map entry codec is
+/// an either-codec over a value codec and a full codec: a plain `override` collapses to the
 /// bare value, anything else serialises as `{ modifier, argument }`. Reading only
 /// the bare tag would return `None` here — a silently untinted sky rather than a
 /// visible failure, which is the direction this repo keeps getting burned in.
@@ -627,7 +627,7 @@ fn server_registry_data_payloads_match_the_captured_vanilla_fixtures() {
         },
     };
 
-    // The 29 entries of vanilla's own registry-data loader's own
+    // The 29 entries of the registry-data loader's
     // synchronized-registries list
     // (confirmed against the decompiled 26.2 source),
     // not `generated/reports/registries.json` — that file is authoritative

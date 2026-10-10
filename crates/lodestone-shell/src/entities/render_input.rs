@@ -67,7 +67,7 @@ pub struct EntityDraw {
     /// carried an `ITEM_STACK` field — a dropped item
     /// ([`ITEM_ENTITY_TYPE_PATH`]), an item frame's contents
     /// (`ItemFrame.DATA_ITEM`, including a framed `filled_map`), and a thrown
-    /// projectile's stack (`ThrowableItemProjectile`/`Fireball`/`EyeOfEnder`
+    /// projectile's stack (the throwable item projectile/`Fireball`/`EyeOfEnder`
     /// all sync through the same serializer). `None` for an entity that has
     /// never reported one.
     ///
@@ -229,7 +229,7 @@ pub struct EntityDraw {
     /// [`Self::block_state`] and [`Self::item_frame_rotation`] above.
     ///
     /// The painting's **facing** is not here and does not need to be:
-    /// `HangingEntity` writes the direction into the entity's ordinary yaw, so
+    /// The hanging entity writes the direction into the entity's ordinary yaw, so
     /// [`Self::yaw`] already carries it — see
     /// `lodestone_render::painting::painting_matrix`.
     pub painting: Option<&'static str>,
@@ -312,7 +312,7 @@ pub struct EntityDraw {
     /// **model**. Both are driven by a `deathTime` and they are not interchangeable.
     pub death_time: f32,
     /// This entity's using-item state, when it has ever reported the
-    /// `LivingEntity` flags byte — `None` otherwise, like every other component
+    /// The living entity flags byte — `None` otherwise, like every other component
     /// bridged off the ingest entity.
     ///
     /// # Why the draw needs it and not just [`Self::anim`]
@@ -328,7 +328,7 @@ pub struct EntityDraw {
     ///
     /// `off_hand` is load-bearing here in a way it is not for the pose: vanilla's
     /// `using_item` property is
-    /// `owner.isUsingItem() && owner.getUseItem() == itemStack`, so
+    /// `owner.is_using_item() && owner.get_use_item() == itemStack`, so
     /// `RenderState::merge_held_items` must compare it against the arm it is
     /// drawing or a skeleton drawing a bow would bend its off-hand item too.
     pub item_use: Option<ItemUse>,
@@ -383,7 +383,7 @@ pub struct EntityDraw {
     /// which is the correct default: an entity metadata has never described
     /// cannot be known to be on fire.
     ///
-    /// This deliberately does **not** re-check vanilla's `!isSpectator()`
+    /// This deliberately does **not** re-check vanilla's `!is_spectator()`
     /// half of the gate: a remote entity's game mode is not tracked on this
     /// side of the wire, and the server should never set bit `0x01` on a
     /// spectator's own metadata in the first place (spectators are otherwise

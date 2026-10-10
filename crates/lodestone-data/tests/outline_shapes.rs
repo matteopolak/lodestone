@@ -24,7 +24,7 @@
 //! Three vanilla accessors, three defaults, three different answers:
 //!
 //! * the outline-shape accessor defaults to a full cube
-//!   (vanilla's own block-behaviour base class's own accessor);
+//!   (vanilla's block-behaviour base class's accessor);
 //! * the collision-shape accessor defaults to the outline shape when the
 //!   state has collision at all, and to an empty shape otherwise
 //!   (same base class);
@@ -746,8 +746,8 @@ fn slabs_outline_to_a_half_block() {
     }
 }
 
-/// Walls build their outline with `makeShapes(16.0F, 14.0F)` and their collision
-/// with `makeShapes(24.0F, 24.0F)` (the wall block's own constructor), so a wall's outline
+/// Walls build their outline with make shapes and their collision
+/// with make shapes (the wall block's own constructor), so a wall's outline
 /// tops out at `y = 1.0` while its collision reaches `y = 1.5`. Using the
 /// collision shape for selection would draw the box half a block above the wall.
 ///

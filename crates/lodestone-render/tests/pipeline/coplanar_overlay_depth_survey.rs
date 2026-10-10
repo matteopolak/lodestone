@@ -157,7 +157,7 @@ struct Overlay {
     behind_bias: wgpu::DepthBiasState,
 }
 
-/// `MapRenderer`'s picture-plane offset, `1.01 / 128` blocks. Read from the
+/// The map renderer's picture-plane offset, `1.01 / 128` blocks. Read from the
 /// shell's own constant would be a cross-crate test dependency the shell does
 /// not export; it is restated here **and** pinned by
 /// [`the_surveyed_clearances_match_the_shipped_geometry`] against the shell's

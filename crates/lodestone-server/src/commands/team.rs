@@ -95,7 +95,7 @@ fn register_list(registrar: &mut Registrar, team: lodestone_command::NodeId) {
 }
 
 /// `/team list <team>`'s second feedback line — every configurable field
-/// vanilla's own `PlayerTeam` carries, in one place so `add`/`modify`'s own
+/// vanilla's own player team carries, in one place so `add`/`modify`'s own
 /// confirmation lines do not need to duplicate this formatting.
 fn describe_team_options(team: &super::team_store::Team) -> String {
     let color = team.color.map_or_else(|| "reset".to_string(), |c| c.name());
@@ -181,8 +181,8 @@ fn register_join(registrar: &mut Registrar, team: lodestone_command::NodeId) {
     let join = registrar.literal(team, "join");
     let (name_node, name_key) = registrar.arg(join, "team", TeamArg);
     // `join <team>` with no `<members>` — vanilla defaults to the caller
-    // (`TeamCommand`'s no-members overload resolves `context.getSource()
-    // .getEntityOrException()`'s own name).
+    // (the team command's no-members overload resolves `context.get_source()
+    // .get_entity_or_exception()`'s own name).
     registrar.exec(name_node, move |ctx| {
         let name = ctx.get(name_key).clone();
         let holder = ctx.source.name.clone();

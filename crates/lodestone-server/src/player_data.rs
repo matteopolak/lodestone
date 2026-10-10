@@ -3,7 +3,7 @@
 //! # What it is
 //!
 //! The thing that makes a player's inventory, position and health survive a
-//! disconnect. Before this, `grep -rn 'playerdata\|PlayerDataStorage'` across
+//! disconnect. Before this, `grep -rn 'playerdata\|the player data storage'` across
 //! every `.rs` file in the workspace matched exactly one *comment*, in a shell
 //! test: there was no per-uuid `.dat` code of any kind, so quitting a world threw
 //! away everything the player was carrying, where they were standing, and how

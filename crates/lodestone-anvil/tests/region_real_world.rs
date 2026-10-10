@@ -59,7 +59,7 @@ fn find_nbt_field<'a>(nbt: &'a Nbt, name: &str) -> Option<&'a Nbt> {
 fn assert_chunk_position(nbt: &Nbt, expected_x: i32, expected_z: i32) {
     // Every version in this test wraps per-chunk fields in a top-level
     // "Level" compound (pre-flattening-removal schema; 26.2's own
-    // `SerializableChunkData` is different and out of scope here — see the
+    // chunk serialiser is different and out of scope here — see the
     // module doc). `xPos`/`zPos` are the one pair of fields stable across
     // all of them and independent of any block-encoding scheme, which is
     // why they're the check: proof this crate decoded a *real, specific*

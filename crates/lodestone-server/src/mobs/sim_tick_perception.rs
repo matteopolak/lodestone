@@ -171,7 +171,7 @@ impl<'w> MobSim<'w> {
     /// [`crate::poi_storage::PoiStorage::occupied_in_range`] restricted to
     /// `home` POIs: every bed claimed through [`tick_villager_beds`](Self::tick_villager_beds)
     /// within `radius` real blocks of `center`. The raid trigger
-    /// (vanilla's own raid-creation-or-extension step's own point-of-interest
+    /// (vanilla's raid-creation-or-extension step's point-of-interest
     /// range query over the `#village` tag, occupied only) is this method's reason to exist: a bed
     /// claimed through [`villager::BedClaims`] is never written to the
     /// on-disk `poi/` region set (see that type's own doc), so a caller
@@ -362,7 +362,7 @@ impl<'w> MobSim<'w> {
     /// tag's three members — `air`/`cave_air`/`void_air` — rather than a real
     /// per-block-state emptiness census). Returns the nearest match's
     /// stand-on point: one block above the matched cell, block-centred,
-    /// matching vanilla's own generic "move to block" goal's own
+    /// matching vanilla's generic "move to block" goal's
     /// move-to-target getter (one block above).
     fn find_nearest_cat_block(
         world: &ChunkWorld,

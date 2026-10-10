@@ -326,14 +326,14 @@ impl Particles {
         match kind {
             "flame" => emit::flame(&mut self.engine, x, y, z, xa, ya, za),
             "smoke" => emit::smoke(&mut self.engine, x, y, z, xa, ya, za, 1.0),
-            // `LargeSmokeParticle extends SmokeParticle` with `scale = 2.5F`.
+            // The large smoke particle extends smoke particle with `scale = 2.5F`.
             "large_smoke" => emit::smoke(&mut self.engine, x, y, z, xa, ya, za, 2.5),
             "crit" => emit::crit(&mut self.engine, x, y, z, xa, ya, za),
             "splash" => emit::splash(&mut self.engine, x, y, z, xa, ya, za),
             "bubble" => emit::bubble(&mut self.engine, x, y, z, xa, ya, za),
             // The sweep-attack particle (that fix's split-out remainder — its own
             // issue now). `xa` doubles as the constructor's `size` parameter
-            // here, per `AttackSweepParticle`'s own signature; see
+            // here, per the attack sweep particle's own signature; see
             // `emit::sweep_attack`'s docs for why the one real vanilla call
             // site always sends `0.0` regardless of the swing direction.
             // The packet's own field is an f32; widened to f64 only for the
@@ -361,7 +361,7 @@ impl Particles {
             //
             // `effect`/`instant_effect` carry vanilla's own spell-particle option (an RGB
             // word plus a velocity multiplier) and `entity_effect` a
-            // `ColorParticleOption` (an ARGB word). Those payloads are the
+            // The color particle option (an ARGB word). Those payloads are the
             // *whole* of a potion particle's colour — the class has no palette
             // of its own — so a missing one draws a white mote, which looks
             // like a working particle and is why this went unnoticed. `v770`
@@ -493,7 +493,7 @@ impl Particles {
 
             // -- Ambient and environmental types ----------------
             //
-            // Every arm below is an argument-less `SimpleParticleType`, so the
+            // Every arm below is an argument-less simple particle type, so the
             // three velocity words are exactly what the wire sent and nothing
             // needs the `ParticleOptions` decoder. Several *also* have a
             // client-predicted emitter — see `Sim::tick_ambient_particles` —
@@ -549,14 +549,14 @@ impl Particles {
             // client-side (never sent over the wire at all). See
             // `docs/particle-catalogue.md`'s "Correction" entry for why this was
             // never blocked on the `ParticleOptions` decoder the way it first
-            // looked: vanilla's own firework particle type is a `SimpleParticleType`.
+            // looked: vanilla's own firework particle type is a simple particle type.
             "firework" => emit::firework(&mut self.engine, x, y, z, xa, ya, za),
             // Vanilla's own dragon-breath particle — a dragon's breath attack and, far more
-            // commonly, every lingering potion cloud. Its `PowerParticleOption`
+            // commonly, every lingering potion cloud. Its power particle option
             // is a velocity multiplier and nothing else; the purple is drawn
             // per particle inside the emitter, so a missing payload costs
             // motion rather than colour and the fallback is power 1.0
-            // (`PowerParticleOption`'s own data-codec default).
+            // (the power particle option's own data-codec default).
             "dragon_breath" => match options {
                 ParticleOptions::Power { power } => {
                     emit::dragon_breath(&mut self.engine, x, y, z, xa, ya, za, power);
@@ -570,7 +570,7 @@ impl Particles {
                     emit::dragon_breath(&mut self.engine, x, y, z, xa, ya, za, 1.0);
                 }
             },
-            // `SculkChargeParticle` has its own emitter rather than sharing
+            // The sculk charge particle has its own emitter rather than sharing
             // `animated_ambient` with the three below: its roll is a wire
             // field, its lifetime a per-particle draw, and its provider
             // installs the packet's velocity words verbatim.
@@ -641,7 +641,7 @@ impl Particles {
             "falling_spore_blossom" => self.drip(DripKind::SporeBlossom, DripPhase::Fall, pos),
             // `spore_blossom_air` used to sit in this drip block, and it is
             // not a drip particle at all — vanilla's own suspended-particle.
-            // SporeBlossomAirProvider`, which shares `drip_fall`'s *texture*
+            // The spore blossom air provider, which shares `drip_fall`'s *texture*
             // with `falling_spore_blossom` and nothing else. It hangs rather
             // than falling, and its lifetime is a flat 500..=1000 ticks against
             // the drip's own draw, so as a drip it vanished far too fast.
@@ -658,13 +658,13 @@ impl Particles {
             "crimson_spore" => emit::crimson_spore(&mut self.engine, x, y, z),
             "warped_spore" => emit::warped_spore(&mut self.engine, x, y, z),
 
-            // -- The `SuspendedTownParticle` ambient specks ----------------
+            // -- The suspended town particle ambient specks ----------------
             "mycelium" => emit::mycelium(&mut self.engine, x, y, z, xa, ya, za),
             "composter" => emit::composter(&mut self.engine, x, y, z, xa, ya, za),
             "egg_crack" => emit::egg_crack(&mut self.engine, x, y, z, xa, ya, za),
             "dolphin" => emit::dolphin(&mut self.engine, x, y, z, xa, ya, za),
 
-            // -- `BaseAshSmokeParticle`'s other three subclasses ----------------
+            // -- the base ash smoke particle's other three subclasses ----------------
             //
             // `ash` and `white_ash` take no velocity from the packet either;
             // `white_ash` draws its own and `ash` has none.
@@ -672,7 +672,7 @@ impl Particles {
             "white_ash" => emit::white_ash(&mut self.engine, x, y, z),
             "white_smoke" => emit::white_smoke(&mut self.engine, x, y, z, xa, ya, za),
 
-            // -- `ExplodeParticle` ----------------
+            // -- the explode particle ----------------
             //
             // `poof` is the mob-death, breeding and spawner puff — among the
             // most frequently spawned particles in the game, and until this arm
@@ -720,7 +720,7 @@ impl Particles {
                 ),
             },
 
-            // -- The `BlockParticleOption` family ------------------
+            // -- The block particle option family ------------------
             //
             // One wire payload, five providers. The payload is shared and the
             // *behaviour* is not: three build vanilla's own terrain particle (differing in
@@ -777,7 +777,7 @@ impl Particles {
             "bubble_column_up" => {
                 emit::bubble_column_up(&mut self.engine, x, y, z, xa, ya, za);
             }
-            // `WaterCurrentDownParticle`'s provider ignores the packet's
+            // The water current down particle's provider ignores the packet's
             // velocity entirely — the sink speed is a constant and the drift is
             // the spiral. Passing the wire's words would give every magma
             // column an initial kick vanilla does not have.
@@ -833,9 +833,9 @@ impl Particles {
                 ),
             },
 
-            // -- `BreakingItemParticle`'s hardcoded-item providers --
+            // -- the breaking item particle's hardcoded-item providers --
             //
-            // Three `SimpleParticleType`s with **no wire payload**: each
+            // Three simple particle types with **no wire payload**: each
             // provider names its own item and calls the four-argument
             // constructor. The item ids are resolved here rather than baked
             // into `lodestone-particle`, which knows nothing about the item
@@ -852,7 +852,7 @@ impl Particles {
             // particle — the same "log and use a harmless default" shape the
             // `dragon_breath`/`sculk_charge` arms above use for their own
             // missing payloads. `geyser_base`/`geyser_poof`/`geyser_plume`
-            // are vanilla's own eruption particle's own three children, drawn
+            // are vanilla's eruption particle's three children, drawn
             // through the same emitters here so a direct `/particle` of one
             // of those three (never how vanilla itself spawns them) still
             // draws something.
@@ -919,7 +919,7 @@ impl Particles {
         }
     }
 
-    /// The block state a `BlockParticleOption` particle should wear, or `None`
+    /// The block state a block particle option particle should wear, or `None`
     /// if this one must not spawn at all.
     ///
     /// Two refusals, and they are different in kind. A missing payload is a
@@ -985,7 +985,7 @@ impl Particles {
         Some(state)
     }
 
-    /// One `BreakingItemParticle` from the four-argument constructor, for the
+    /// One breaking item particle from the four-argument constructor, for the
     /// three registry types whose provider hardcodes an item.
     ///
     /// A named helper for the same reason [`Self::drip`] is one: the whole of

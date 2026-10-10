@@ -9,11 +9,11 @@
 //!
 //! # Where this comes from in the jar
 //!
-//! Vanilla's own `SignalGetter` interface is
+//! Vanilla's own signal getter interface is
 //! its own query layer, and every function below is a direct,
 //! citation-per-function port of it:
 //!
-//! - [`weak_signal`] ~ vanilla's own per-block weak-signal override (each block's own override —
+//! - [`weak_signal`] ~ vanilla's per-block weak-signal override (each block's override —
 //!   see the per-family jar citations inline below).
 //! - [`direct_signal`] ~ vanilla's own per-block direct-signal override.
 //! - [`direct_signal_to`] ~ vanilla's own signal-getter direct-signal-to routine.
@@ -384,7 +384,7 @@ pub fn is_button(state: StateId) -> bool {
     )
 }
 
-/// The two `WeightedPressurePlateBlock` registrations, which carry an analog
+/// The two weighted pressure plate block registrations, which carry an analog
 /// `POWER` rather than a boolean `POWERED`.
 ///
 /// Checked **before** [`is_pressure_plate`], because both of these also end in
@@ -395,7 +395,7 @@ pub fn is_weighted_pressure_plate(state: StateId) -> bool {
     matches!(base_name(state), Block::LightWeightedPressurePlate | Block::HeavyWeightedPressurePlate)
 }
 
-/// A boolean (`PressurePlateBlock`) pressure plate — every `*_pressure_plate`
+/// A boolean (the pressure plate block) pressure plate — every `*_pressure_plate`
 /// that is not one of the two weighted ones.
 #[must_use]
 pub fn is_pressure_plate(state: StateId) -> bool {
@@ -442,7 +442,7 @@ pub fn is_redstone_block(state: StateId) -> bool {
 
 /// The `POWERED` property shared by lever, button, boolean pressure plate,
 /// tripwire hook and detector rail. `false` for a state that does not name it,
-/// matching every one of those families' `registerDefaultState(... POWERED,
+/// matching every one of those families' `register default state(... POWERED,
 /// false)`.
 #[must_use]
 pub fn powered_property(state: StateId) -> bool {
@@ -488,8 +488,8 @@ pub fn tripwire_hook_facing(state: StateId) -> Direction {
 }
 
 /// Vanilla's own base-pressure-plate-block signal-for-state getter for both plate families:
-/// `PressurePlateBlock` reads its boolean `POWERED` as 15-or-0, while
-/// `WeightedPressurePlateBlock` reads its analog `POWER` directly.
+/// The pressure plate block reads its boolean `POWERED` as 15-or-0, while
+/// The weighted pressure plate block reads its analog `POWER` directly.
 ///
 /// **The two are not interchangeable.** A weighted plate's value comes from
 /// `getSignalStrength`, `ceil(min(maxWeight, count) / maxWeight * 15)` with
@@ -534,7 +534,7 @@ pub fn is_input_source(state: StateId) -> bool {
 /// hopper is **not** redstone-powered.
 ///
 /// Defaults to `true` for a state that does not name it, matching vanilla's
-/// `HopperBlock`'s own `registerDefaultState(... ENABLED, true)` and giving
+/// The hopper block's own register default state and giving
 /// a bare `minecraft:hopper` (which is what placement writes today) the
 /// correct unlocked initial value.
 #[must_use]
@@ -737,10 +737,10 @@ fn own_signal_with_comparator_output(state: StateId, comparator_output: u8) -> u
 /// the families this crate models. Every one of them returns an unconditional
 /// `true` in the jar — a source is a source whether or not it is currently
 /// emitting, and the *value* is what goes to zero: the redstone-torch block,
-/// `DiodeBlock`, `ObserverBlock`, `LeverBlock`, `ButtonBlock`,
-/// `BasePressurePlateBlock` (both plate families), `TripWireHookBlock`,
-/// `DetectorRailBlock`, `TargetBlock`, `DaylightDetectorBlock` and
-/// `PoweredBlock`.
+/// The diode block, the observer block, the lever block, the button block,
+/// The base pressure plate block (both plate families), the trip wire hook block,
+/// The detector rail block, the target block, the daylight detector block and
+/// The powered block.
 ///
 /// Dust is deliberately excluded here: vanilla's own wire-block is-signal-source override
 /// returns its own `shouldSignal` flag, which the general query path always
@@ -784,7 +784,7 @@ fn weak_signal_with_comparator_output(
             wire_power(state)
         }
     } else if is_standing_torch(state) {
-        // RedstoneTorchBlock.getSignal (`:114-116`): every direction except UP.
+        // The redstone torch block's get signal (`:114-116`): every direction except UP.
         if direction == Direction::Up {
             0
         } else if torch_lit(state) {
@@ -793,7 +793,7 @@ fn weak_signal_with_comparator_output(
             0
         }
     } else if is_wall_torch(state) {
-        // RedstoneWallTorchBlock.getSignal (`:88-90`): every direction except
+        // The redstone wall torch block's get signal (`:88-90`): every direction except
         // the one it's mounted against.
         if wall_torch_facing(state) == direction {
             0
@@ -803,14 +803,14 @@ fn weak_signal_with_comparator_output(
             0
         }
     } else if is_diode(state) {
-        // DiodeBlock.getSignal (`:152-154`): only in its own FACING direction.
+        // The diode block's get signal (`:152-154`): only in its own FACING direction.
         if diode_facing(state) == direction {
             own_signal_with_comparator_output(state, comparator_output)
         } else {
             0
         }
     } else if is_observer(state) {
-        // ObserverBlock.getSignal (`:110-112`): only in its own FACING direction.
+        // The observer block's get signal (`:110-112`): only in its own FACING direction.
         if observer_facing(state) == direction {
             own_signal_with_comparator_output(state, comparator_output)
         } else {
@@ -818,8 +818,8 @@ fn weak_signal_with_comparator_output(
         }
     } else if is_input_source(state) {
         // **None of the nine input families overrides `getSignal`.** They stop
-        // at `ownSignal`, so vanilla's own base block-behaviour get-signal's own body —
-        // `return this.ownSignal(state, level, pos)` — applies, and the value is
+        // at `ownSignal`, so vanilla's base block-behaviour get-signal's body —
+        // `return this.own_signal(state, level, pos)` — applies, and the value is
         // the same in all six directions.
         //
         // That is worth stating rather than assuming, because every *relaying*
@@ -863,7 +863,7 @@ fn direct_signal_with_comparator_output(
     comparator_output: u8,
 ) -> u8 {
     if is_torch(state) {
-        // RedstoneTorchBlock.getDirectSignal (`:99-101`): only straight DOWN
+        // The redstone torch block's get direct signal (`:99-101`): only straight DOWN
         // from the querier's perspective — i.e. only the block directly
         // ABOVE a torch receives strong power from it. Wall torches inherit
         // this unmodified (no override in vanilla's own wall-torch block).
@@ -884,7 +884,7 @@ fn direct_signal_with_comparator_output(
         weak_signal_with_comparator_output(state, direction, false, comparator_output)
     } else if is_lever(state) || is_button(state) {
         // Vanilla's own lever-block/button-block direct-signal getters:
-        // `POWERED && getConnectedDirection(state) == direction ? 15 : 0`.
+        // `POWERED && get_connected_direction(state) == direction ? 15 : 0`.
         //
         // This is the arm that makes a lever on the *side* of a block power a
         // wire on *top* of that block, via `getDirectSignalTo`'s six-face scan.
@@ -922,7 +922,7 @@ fn direct_signal_with_comparator_output(
         // neither `getSignal` nor `getDirectSignal`, so they keep
         // vanilla's own base block-behaviour direct-signal getter's `return 0` and send **no** strong
         // power at all. A block of redstone reaches a wire across a conductor
-        // only through vanilla's own signal-getter control-input-signal routine's own
+        // only through vanilla's signal-getter control-input-signal routine's
         // `is(Blocks.REDSTONE_BLOCK)` special case — see
         // [`control_input_signal`].
         0
@@ -1006,7 +1006,7 @@ where
 ///
 /// **The `minecraft:redstone_block` arm is load-bearing and not a shortcut.**
 /// The powered block overrides no `getDirectSignal`, so the generic
-/// `isSignalSource() ? getDirectSignal(...) : 0` tail below returns `0` for a
+/// `is_signal_source() ? getDirectSignal(...) : 0` tail below returns `0` for a
 /// block of redstone in every direction. Without vanilla's own explicit
 /// `is(Blocks.REDSTONE_BLOCK) -> 15` branch — placed *before* the wire check —
 /// a block of redstone beside a comparator supplies no side input at all, which
@@ -1413,7 +1413,7 @@ mod tests {
         let dir = Direction::Down;
         // control_input_signal's own `pos` parameter IS the neighbour being
         // queried (see `control_input_signal`'s own doc comment / the jar's
-        // `getControlInputSignal(pos, direction, ...)` signature) — the
+        // get control input signal signature) — the
         // torch itself, not `origin`.
         let torch_pos = dir.relative(origin);
         assert_eq!(control_input_signal(&world(&[(torch_pos, torch)]), torch_pos, dir, true), 0);
@@ -1455,30 +1455,30 @@ mod tests {
     /// hypothesis too, so no row does.
     fn input_source_own_signal_table() -> Vec<(StateId, u8)> {
         vec![
-            // LeverBlock.ownSignal / ButtonBlock.ownSignal: POWERED ? 15 : 0.
+            // The lever block's own signal / button block's own signal: POWERED ? 15 : 0.
             (state!(Lever, Face = Wall, Facing = North, Powered = True), 15),
             (state!(Lever, Face = Wall, Facing = North, Powered = False), 0),
             (state!(StoneButton, Face = Wall, Facing = East, Powered = True), 15),
             (state!(OakButton, Face = Floor, Facing = East, Powered = True), 15),
             (state!(StoneButton, Face = Wall, Facing = East, Powered = False), 0),
-            // PressurePlateBlock.getSignalForState: POWERED ? 15 : 0.
+            // The pressure plate block's get signal for state: POWERED ? 15 : 0.
             (state!(StonePressurePlate, Powered = True), 15),
             (state!(OakPressurePlate, Powered = False), 0),
-            // WeightedPressurePlateBlock.getSignalForState: the analog POWER.
+            // The weighted pressure plate block's get signal for state: the analog POWER.
             (state!(LightWeightedPressurePlate, Power = Value4), 4),
             (state!(HeavyWeightedPressurePlate, Power = Value3), 3),
             (state!(HeavyWeightedPressurePlate, Power = Value0), 0),
-            // TripWireHookBlock.ownSignal / DetectorRailBlock.ownSignal.
+            // The trip wire hook block's own signal / detector rail block's own signal.
             (state!(TripwireHook, Facing = West, Attached = True, Powered = True), 15),
             (state!(TripwireHook, Facing = West, Attached = True, Powered = False), 0),
             (state!(DetectorRail, Shape = NorthSouth, Powered = True), 15),
             (state!(DetectorRail, Shape = NorthSouth, Powered = False), 0),
-            // TargetBlock.ownSignal / DaylightDetectorBlock.ownSignal: analog.
+            // The target block's own signal / daylight detector block's own signal: analog.
             (state!(Target, Power = Value7), 7),
             (state!(Target, Power = Value0), 0),
             (state!(DaylightDetector, Inverted = False, Power = Value11), 11),
             (state!(DaylightDetector, Inverted = True, Power = Value0), 0),
-            // PoweredBlock.ownSignal: the unconditional constant.
+            // The powered block's own signal: the unconditional constant.
             (state!(RedstoneBlock), 15),
         ]
     }
@@ -1579,19 +1579,19 @@ mod tests {
     /// it, a ceiling lever the block above, and a wall lever the wall.
     fn input_source_direct_signal_table() -> Vec<(StateId, Direction, u8)> {
         vec![
-            // LeverBlock.getDirectSignal: getConnectedDirection(state) only.
+            // The lever block's get direct signal: get connected direction only.
             (state!(Lever, Face = Wall, Facing = North, Powered = True), Direction::North, 15),
             (state!(Lever, Face = Wall, Facing = East, Powered = True), Direction::East, 15),
             (state!(Lever, Face = Floor, Facing = North, Powered = True), Direction::Up, 15),
             (state!(Lever, Face = Ceiling, Facing = North, Powered = True), Direction::Down, 15),
             (state!(StoneButton, Face = Wall, Facing = South, Powered = True), Direction::South, 15),
             (state!(OakButton, Face = Floor, Facing = West, Powered = True), Direction::Up, 15),
-            // BasePressurePlateBlock.getDirectSignal: UP only.
+            // The base pressure plate block's get direct signal: UP only.
             (state!(StonePressurePlate, Powered = True), Direction::Up, 15),
             (state!(HeavyWeightedPressurePlate, Power = Value3), Direction::Up, 3),
-            // TripWireHookBlock.getDirectSignal: its own FACING only.
+            // The trip wire hook block's get direct signal: its own FACING only.
             (state!(TripwireHook, Facing = West, Attached = True, Powered = True), Direction::West, 15),
-            // DetectorRailBlock.getDirectSignal: UP only.
+            // The detector rail block's get direct signal: UP only.
             (state!(DetectorRail, Shape = NorthSouth, Powered = True), Direction::Up, 15),
         ]
     }
@@ -1694,7 +1694,7 @@ mod tests {
         let stone_pos = pos(0, 1, 0);
         let wire_pos = pos(0, 2, 0);
         // The lever is north of the stone. A wall lever attaches to
-        // `pos.relative(getConnectedDirection().getOpposite())`, so a lever at
+        // `pos.relative(get_connected_direction().get_opposite())`, so a lever at
         // `stone.north()` stuck to the stone has `facing=north` — not `south`.
         let lever_pos = Direction::North.relative(stone_pos);
         let w = world(&[
@@ -1782,8 +1782,8 @@ mod tests {
     /// A block of redstone reaches a comparator's side input only through
     /// `getControlInputSignal`'s own `is(Blocks.REDSTONE_BLOCK)` branch.
     ///
-    /// The generic `isSignalSource() ? getDirectSignal(...) : 0` tail cannot do
-    /// it, because `PoweredBlock` overrides no `getDirectSignal` — so this gate
+    /// The generic `is_signal_source() ? getDirectSignal(...) : 0` tail cannot do
+    /// it, because powered block overrides no `getDirectSignal` — so this gate
     /// asserts the direct signal is `0` *and* the control input is `15`, which
     /// together pin the value to that one branch rather than to the tail.
     #[test]

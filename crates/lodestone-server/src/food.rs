@@ -94,7 +94,7 @@
 //!
 //! ## The difficulty gate on starvation is not "peaceful is safe"
 //!
-//! `player.getHealth() > 10.0F || difficulty == HARD || (health > 1.0F && difficulty == NORMAL)`.
+//! `player.get_health() > 10.0F || difficulty == HARD || (health > 1.0F && difficulty == NORMAL)`.
 //! So on **Easy and Peaceful a starving player is still hurt down to 10 health**,
 //! on Normal down to 1, and on Hard all the way to death. Peaceful's protection is
 //! upstream instead: the depletion branch's own `difficulty != PEACEFUL` guard means

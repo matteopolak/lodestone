@@ -398,7 +398,7 @@ impl ChunkSource for CommandBlockSource {
     }
 }
 
-/// This gate is `vanilla's own player's own can use game master blocks`: creative mode **and**
+/// This gate is the player's can-use-game-master-blocks check: creative mode **and**
 /// `COMMANDS_GAMEMASTER_LEVEL`, both. `WorldStateHandle::default_game_mode`
 /// exists but — measured, not assumed — has **no production reader**: every
 /// connection's `game_mode` local starts hardcoded `GameMode::Survival`

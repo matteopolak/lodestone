@@ -354,7 +354,7 @@ impl EntityStreamer {
                 }
                 // Never added and still not visible: nothing to do, and
                 // nothing to remember — matches vanilla never broadcasting an
-                // invisible `ServerBossEvent` to a player in the first place.
+                // invisible server boss event to a player in the first place.
                 None => {}
                 Some(_) if !bar.visible => {
                     directives.push(proto.encode_boss_event_remove(bar.id));

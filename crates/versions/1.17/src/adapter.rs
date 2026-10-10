@@ -799,7 +799,7 @@ fn boss_overlay_from_ordinal(ordinal: i32) -> Result<BossOverlay, AdapterError> 
 /// Maps a `teams` varint colour/formatting ordinal to the canonical
 /// [`TeamColor`].
 ///
-/// Vanilla packs this as an `EnumChatFormatting`/`ChatFormatting` ordinal
+/// Vanilla packs this as a chat-formatting ordinal
 /// (the same 16-colour `§`-code order [`lodestone_model::TextColor`]'s own
 /// `NAMED` table walks), so `-1` ("no colour"/reset) and any other value
 /// outside `0..=15` both resolve to `None` rather than being rejected — a
@@ -2408,8 +2408,8 @@ impl V756Adapter {
 
     /// `minecraft:combat_event`. Event `0` (enter combat) carries nothing
     /// further; event `1` (end combat) reads a VarInt duration then a raw
-    /// `i32` entity id (unused downstream, matching 26.2's own
-    /// `ClientboundPlayerCombatEndPacket`); event `2` (entity died) reads a
+    /// `i32` entity id (unused downstream, matching 26.2's own combat-end
+    /// packet); event `2` (entity died) reads a
     /// VarInt player id, a raw `i32` entity id, then a JSON death-message
     /// string, both ids discarded except the message.
     /// `minecraft:enter_combat_event`, the split packet for the older
@@ -4028,7 +4028,7 @@ impl VersionAdapter for V756Adapter {
             }
             // Both packets identify a recipe by a namespaced string id in
             // this era (`craft_recipe_request.recipe` and
-            // `displayed_recipe.recipeId`, both `string` per minecraft-data's
+            // displayed_recipe's recipe id, both `string` per minecraft-data's
             // 1.16.2 protocol.json) rather than the numeric index the model
             // carries, and this stateless adapter has no recipe registry to
             // resolve one into the other.

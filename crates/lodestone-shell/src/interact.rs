@@ -221,12 +221,12 @@ const REDIRECTABLE_PROJECTILE_PATHS: &[&str] = &["breeze_wind_charge", "fireball
 /// nearest class declaring an is-pickable override. Ten declaring classes cover all 159
 /// types:
 ///
-/// * The living-entity base (`!isRemoved()`), 90 types — every mob, plus the
+/// * The living-entity base (`!is_removed()`), 90 types — every mob, plus the
 ///   player and
 ///   armor-stand types, which narrow it further (see below). Read here out of the
 ///   census's own `is_living` column rather than re-listed.
 /// * The boat, minecart, falling-block and primed-TNT bases
-///   (all `!isRemoved()`); the block-attached-entity, end-crystal, interaction and
+///   (all `!is_removed()`); the block-attached-entity, end-crystal, interaction and
 ///   shulker-bullet types (all `true`) — the 36 entries of
 ///   [`NON_LIVING_PICKABLE_PATHS`].
 /// * The base projectile type — membership in the redirectable-projectile
@@ -269,8 +269,8 @@ pub fn entity_type_can_be_picked(kind: &lodestone_model::ResourceKey) -> bool {
         return false;
     }
     let path = kind.path();
-    // Checked ahead of the living column: the dragon *is* a `LivingEntity` and
-    // overrides `isPickable()` back to `false`.
+    // Checked ahead of the living column: the dragon *is* a living entity and
+    // overrides is pickable back to `false`.
     if path == "ender_dragon" {
         return false;
     }
@@ -319,7 +319,7 @@ pub struct AttackPresses(pub VecDeque<AttackPress>);
 /// Whether the use (right) button has been pressed and not yet released.
 ///
 /// The client-side mirror of vanilla's own client's
-/// `this.player.isUsingItem()`, which gates whether releasing `key.use` sends
+/// player's is using item, which gates whether releasing `key.use` sends
 /// `RELEASE_USE_ITEM` (its own game-mode release-using-item). Vanilla's own
 /// flag comes from a held item's `use()` running identically client- and
 /// server-side (a bow's `use()` calls the living-entity start-using-item on both),
@@ -488,7 +488,7 @@ impl NetHandle {
 /// The source of truth is [`PhysicsState`]'s `sprinting`, which the physics tick
 /// assigns from the movement intent — so what the server hears is what actually
 /// drove this tick's movement, not a re-read of the keyboard. This is the packet
-/// that makes the server set `isSprinting()`, and therefore the packet that makes
+/// that makes the server set is sprinting, and therefore the packet that makes
 /// its `updateSwimming` agree with ours.
 ///
 /// A dead player is not sprinting, nor is one in the shell's free-fly debug cam
@@ -542,7 +542,7 @@ pub fn send_sprint_command(
 
 /// `TickSet::Send`: echo creative flight to the server as
 /// [`ClientAction::SetFlying`], mirroring vanilla's own on-update-abilities →
-/// `ServerboundPlayerAbilitiesPacket`.
+/// Player-abilities packet.
 ///
 /// # Why this exists, and what it closes
 ///
@@ -1229,7 +1229,7 @@ pub fn drive_mining(
         // The break sound, predicted locally for the same reason
         // `drive_placement`'s is: vanilla's own server-side player-game-mode
         // destroy-block calls
-        // `this.level.removeBlock(pos, false)` with no `levelEvent`/`playSound`
+        // level's remove block with no `levelEvent`/`playSound`
         // anywhere in it (`docs/sound-playback.md`), so a player's own dig never
         // produces a `2001` packet for `NetUpdate::BlockDestroyed` to catch —
         // vanilla's own client makes it audible by having its own client-level
@@ -1537,7 +1537,7 @@ pub fn drive_placement(
     // `Sim::use_item_live`'s does — vanilla's own block-item place excludes
     // the placing player from the server's broadcast, so our copy has to come
     // from here or not at all. Tied to `state_id` (the predicted state), not
-    // the held item, because the sound is the *placed* state's `SoundType`.
+    // the held item, because the sound is the *placed* state's sound type.
     if let Some(state) = lodestone_data::block_states::StateId::new(state_id)
         && let Some(sound_name) = lodestone_data::sound_types::place_sound_name(state)
         && let Some(engine) = &mut audio.0

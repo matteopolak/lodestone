@@ -153,7 +153,7 @@ impl Sim {
                     // does when it swaps the backend behind an unbroken socket
                     // (`START_CONFIGURATION`, a configuration round, then a
                     // second `LOGIN`), with no reconnect and no `Respawned`.
-                    // Vanilla's `handleLogin` assigns a whole new `ClientLevel`
+                    // Vanilla's `handleLogin` assigns a whole new client level
                     // for exactly this, dropping every entity and every chunk of
                     // what came before; the client's decoded store is cleared on
                     // the net thread (`lodestone_client`'s own `Login` arm, the
@@ -349,7 +349,7 @@ impl Sim {
                     self.set_camera_entity(EntityNetworkId::from_raw(entity_id));
                 }
                 NetUpdate::BlockEvent { pos, b0, b1 } => {
-                    // Chest lids. `ChestBlockEntity.triggerEvent`
+                    // Chest lids. The chest block entity's trigger event
                     // takes `b0 == 1` and `b1 > 0` as "somebody is looking in
                     // this chest"; `ChestLids` owns both that rule and the
                     // per-tick ramp, so this arm forwards the raw bytes rather
@@ -470,7 +470,7 @@ impl Sim {
                     // Plain text, not styled spans: opening the editor always
                     // shows (and re-committing always overwrites with) a
                     // plain literal per line, the same as vanilla's
-                    // `SignEditScreen` reading `getMessage(idx, false).getString()`
+                    // The sign edit screen reading `getMessage(idx, false).getString()`
                     // — editing discards formatting rather than round-tripping it.
                     let lines = std::array::from_fn(|i| {
                         side.lines[i].iter().map(|span| span.text.as_str()).collect::<String>()
@@ -717,14 +717,14 @@ impl Sim {
                         p.destroy_block([pos.x, pos.y, pos.z], state, [1.0, 1.0, 1.0]);
                     });
                     // The *other* half of vanilla's `case 2001`, which this arm
-                    // used to drop: `playLocalSound(pos, getBreakSound(), …)`.
+                    // used to drop: play local sound.
                     // `Level.destroyBlock` fires the event with **no** excluded
                     // entity, so this is a genuinely
                     // server-sent sound, not a prediction — every client in range
                     // hears it, the breaker included. Note which breaks reach here:
                     // `Level.destroyBlock`'s callers (a torch losing support, fire
                     // spread, an explosion), *not* a player's own dig, which
-                    // `ServerPlayerGameMode.destroyBlock` routes through
+                    // The server player game mode's destroy block routes through
                     // `removeBlock` with no `levelEvent` at all — see the long note
                     // in `interact.rs` on the same asymmetry for the particles.
                     self.play_block_break_sound([pos.x, pos.y, pos.z], state);
@@ -740,7 +740,7 @@ impl Sim {
                     count,
                     options,
                 } => {
-                    // `ClientLevel.doAddParticle`'s render cutoff: a particle
+                    // The client level's do add particle's render cutoff: a particle
                     // farther than 32 blocks (`1024.0` == `32.0` squared) from
                     // the viewer is dropped unless the packet set the
                     // override-limiter flag (`long_distance` here). Vanilla
@@ -886,7 +886,7 @@ impl Sim {
                     self.won = true;
                 }
                 NetUpdate::LanOpened { port } => {
-                    // Vanilla's `menu.multiplayerOptions.publish.started.lan`,
+                    // Vanilla's `menu.multiplayer_options.publish.started.lan`,
                     // which is a chat line rather than a toast — the port has to
                     // stay readable while the host reads it out, and a toast
                     // expires in five seconds.
@@ -999,7 +999,7 @@ impl Sim {
                         }
                     });
                 }
-                // The camera's damage tilt (`GameRenderer.bobHurt`). Filtered to
+                // The camera's damage tilt (the game renderer's bob hurt). Filtered to
                 // the local player here rather than in `net.rs`'s router, matching
                 // the effect arms below: the router forwards every entity's hurt
                 // animation and this is where "is that me" is decided.

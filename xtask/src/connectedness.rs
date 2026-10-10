@@ -722,6 +722,17 @@ const PROTOCOL_INTERNAL_CLIENTBOUND: &[(&str, &str)] = &[
          a renderer to observe at this packet's own edge, the same shape as \
          `CHUNK_BATCH_START` above",
     ),
+    (
+        "ADD_TRANSIENT_BLOCK",
+        "decoded and validated; the block update that precedes it has already placed the \
+         block, so the terrain is correct and the hint only hides a one-frame re-mesh pop-in",
+    ),
+    (
+        "POST_EFFECTS",
+        "decoded; an empty list is the default unfiltered screen, which is what is drawn. A \
+         non-empty list names resource-pack shader chains the renderer has no pipeline for, \
+         and is logged",
+    ),
 ];
 
 /// The reason `packet` is exempt from the stranded verdict, if it is.
@@ -896,21 +907,26 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
             ));
             continue;
         }
-        let adapter_sources = read_adapter_sources(&family_dir, workspace_root)?;
+        // A dialect-only family decodes through its base family's adapter and
+        // hosts through the base's `ServerProtocol`; only the packet-id
+        // denominators are its own.
+        let logic_dir = shared_logic_base(&family)
+            .map_or_else(|| family_dir.clone(), |base| protocol_root.join(base));
+        let adapter_sources = read_adapter_sources(&logic_dir, workspace_root)?;
         if adapter_sources.is_empty() {
             skipped.push((
                 family.clone(),
                 format!(
                     "missing {} or {}",
-                    family_dir
+                    logic_dir
                         .join("src/adapter.rs")
                         .strip_prefix(workspace_root)
-                        .unwrap_or(&family_dir.join("src/adapter.rs"))
+                        .unwrap_or(&logic_dir.join("src/adapter.rs"))
                         .display(),
-                    family_dir
+                    logic_dir
                         .join("src/adapter/mod.rs")
                         .strip_prefix(workspace_root)
-                        .unwrap_or(&family_dir.join("src/adapter/mod.rs"))
+                        .unwrap_or(&logic_dir.join("src/adapter/mod.rs"))
                         .display(),
                 ),
             ));
@@ -947,6 +963,13 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
                 depth_cap,
                 &play_ids.clientbound,
             ));
+            file_arms.extend(classify_named_release_dispatch(
+                content,
+                &functions,
+                rel_path,
+                depth_cap,
+                &play_ids.clientbound,
+            ));
             for (packet, arm) in file_arms {
                 if let Some(previous) = arms.insert(packet.clone(), arm) {
                     bail!(
@@ -963,9 +986,9 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
             .collect::<Vec<_>>()
             .join("\n");
         let serverbound_encoded =
-            encoded_serverbound_packets(&combined_adapter_source, &play_ids.serverbound);
+            encoded_serverbound_packets(&combined_adapter_source, &play_ids.serverbound, &family);
         let serverbound_decode =
-            serverbound_decode_summary(workspace_root, &family_dir, &play_ids.serverbound)?;
+            serverbound_decode_summary(workspace_root, &logic_dir, &play_ids.serverbound)?;
 
         let mut stranded = Vec::new();
         let mut internal = Vec::new();
@@ -1104,6 +1127,22 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
     Ok(ConnectednessReport { families, skipped })
 }
 
+/// Families that carry no adapter or `ServerProtocol` of their own and run on
+/// another family's, keyed by directory name. 26.3 translates packet ids by
+/// name onto the 26.2 adapter.
+const SHARED_LOGIC_BASES: &[(&str, &str)] = &[("26.3", "26.2")];
+
+/// Serverbound packets a shared adapter names by the base family's constant
+/// while the release's table calls them something else: `(family, base name,
+/// release name)`. 26.3 sends its punch packet where 26.2 sends swing.
+const SERVERBOUND_RENAMES: &[(&str, &str, &str)] = &[("26.3", "SWING", "PUNCH")];
+
+fn shared_logic_base(family: &str) -> Option<&'static str> {
+    SHARED_LOGIC_BASES
+        .iter()
+        .find_map(|(f, base)| (*f == family).then_some(*base))
+}
+
 /// A version-family directory name is either the legacy `v<protocol-number>`
 /// form (kept for any future family that stays symmetric) or the era-start
 /// Minecraft-version form the four renamed families now use under
@@ -1240,6 +1279,90 @@ pub(crate) fn classify_clientbound_dispatch(
         search_from = close + 1;
     }
     Ok(arms)
+}
+
+/// Scans for release-specific play arms keyed by packet name rather than id:
+/// `(ConnectionState::Play, Some("minecraft:name")) => ..`. Only names present
+/// in `clientbound` count, so a release whose table lacks the packet reports
+/// nothing for it.
+fn classify_named_release_dispatch(
+    adapter_source: &str,
+    functions: &BTreeMap<String, FunctionBody<'_>>,
+    file: &str,
+    depth_cap: usize,
+    clientbound: &[PlayPacketEntry],
+) -> BTreeMap<String, ClientboundArm> {
+    let needle = "Some(\"minecraft:";
+    let mut arms = BTreeMap::new();
+    let mut search_from = 0;
+    while let Some(relative) = adapter_source[search_from..].find(needle) {
+        let start = search_from + relative;
+        search_from = start + needle.len();
+        let line_start = adapter_source[..start].rfind('\n').map_or(0, |i| i + 1);
+        if !adapter_source[line_start..start].contains("ConnectionState::") {
+            continue;
+        }
+        let name_start = start + needle.len() - "minecraft:".len();
+        let Some(name_len) = adapter_source[name_start..].find('"') else {
+            continue;
+        };
+        let resource = &adapter_source[name_start..name_start + name_len];
+        let after = name_start + name_len;
+        let Some(arrow) = adapter_source[after..].find("=>").map(|o| after + o + 2) else {
+            continue;
+        };
+        if adapter_source[after..arrow - 2].contains('{') {
+            continue;
+        }
+        let Some(entry) = clientbound.iter().find(|e| e.resource_name == resource) else {
+            continue;
+        };
+        let Some((body_start, body_end)) = match_arm_body(adapter_source, arrow) else {
+            continue;
+        };
+        let body = strip_module_paths(&adapter_source[body_start..body_end]);
+        let verdict = classify_body(&body, functions, depth_cap, None);
+        arms.insert(
+            entry.const_name.clone(),
+            ClientboundArm {
+                packet: entry.const_name.clone(),
+                file: file.to_owned(),
+                line: line_number(adapter_source, start),
+                verdict,
+            },
+        );
+    }
+    arms
+}
+
+/// Drops lowercase module qualifiers (`entity::handler(`) so delegate-following,
+/// which treats a `::`-qualified call as an associated function, finds the
+/// free function.
+fn strip_module_paths(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut token_start = 0;
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+            i += 1;
+            continue;
+        }
+        let token = &body[token_start..i];
+        if body[i..].starts_with("::")
+            && !token.is_empty()
+            && token.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        {
+            i += 2;
+        } else {
+            out.push_str(token);
+            out.push(body[i..].chars().next().unwrap_or(' '));
+            i += body[i..].chars().next().map_or(1, char::len_utf8);
+        }
+        token_start = i;
+    }
+    out.push_str(&body[token_start..]);
+    out
 }
 
 /// Scans one adapter source file for **data-driven dispatch tables**, and
@@ -1603,6 +1726,7 @@ fn is_decoded_but_stranded(body: &str) -> bool {
 fn encoded_serverbound_packets(
     adapter_source: &str,
     serverbound: &[PlayPacketEntry],
+    family: &str,
 ) -> BTreeSet<String> {
     let valid = serverbound
         .iter()
@@ -1619,6 +1743,12 @@ fn encoded_serverbound_packets(
         let const_name = &adapter_source[start..end];
         if valid.contains(const_name) {
             encoded.insert(const_name.to_owned());
+        } else if let Some(renamed) = SERVERBOUND_RENAMES
+            .iter()
+            .find_map(|(f, base, new)| (*f == family && *base == const_name).then_some(*new))
+            && valid.contains(renamed)
+        {
+            encoded.insert(renamed.to_owned());
         }
         search_from = end;
     }

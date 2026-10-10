@@ -15,7 +15,7 @@
 //!
 //! [`place_structure_live`] is that entry point: it reads the template's own
 //! bounding box, hydrates a working grid from the **live** source (so a
-//! processor that inspects the world — `RuleProcessor`'s "is there water
+//! processor that inspects the world — the rule processor's "is there water
 //! under this dirt path" check, for one — sees real, already-placed blocks,
 //! not generation-time terrain-in-progress), places the template into it via
 //! the exact same [`StructureTemplate::place`] generation uses, and writes

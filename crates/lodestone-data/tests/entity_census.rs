@@ -145,46 +145,46 @@ const PUSH_MODEL: &[(&str, Effect, &str)] = &[
     (
         "LivingEntity",
         Effect::Reaches,
-        "vanilla's own living-entity class's own crowd pass itself; \
+        "vanilla's living-entity class's crowd pass itself; \
          its own do-push override calls entity.push(this)",
     ),
     (
         "Bat",
         Effect::Blocks,
-        "vanilla's own bat entity class's own push-entities override is \
+        "vanilla's bat entity class's push-entities override is \
          `protected void pushEntities() {}`, an empty body; \
          its own do-push override is likewise empty",
     ),
     (
         "ArmorStand",
         Effect::Blocks,
-        "vanilla's own armour-stand entity class's own push-entities override iterates \
+        "vanilla's armour-stand entity class's push-entities override iterates \
          only RIDABLE_MINECARTS, never a player; its own do-push override is empty",
     ),
     // "do push" declarers that are not also "push entities" declarers.
     (
         "Parrot",
         Effect::Blocks,
-        "vanilla's own parrot entity class's own do-push override is \
+        "vanilla's parrot entity class's do-push override is \
          `if (!(entity instanceof Player)) super.doPush(entity);`, \
          so a parrot pushes everything except a player",
     ),
     (
         "IronGolem",
         Effect::Reaches,
-        "vanilla's own iron-golem entity class's own do-push override may retarget \
+        "vanilla's iron-golem entity class's do-push override may retarget \
          an enemy, then calls super.doPush",
     ),
     (
         "SulfurCube",
         Effect::Reaches,
-        "vanilla's own sulfur-cube entity class's own do-push override calls \
+        "vanilla's sulfur-cube entity class's do-push override calls \
          super.doPush, then applies contact damage",
     ),
     (
         "Warden",
         Effect::Reaches,
-        "vanilla's own warden entity class's own do-push override records a \
+        "vanilla's warden entity class's do-push override records a \
          disturbance, then calls super.doPush",
     ),
 ];
@@ -193,14 +193,14 @@ const PUSH_MODEL: &[(&str, Effect, &str)] = &[
 /// The dump carries the concrete class, so every wood variant follows its
 /// shared boat implementation without a hand-maintained entity-name list.
 const HARD_COLLISION_CLASSES: &[(&str, &str)] = &[
-    ("Boat", "vanilla's own abstract-boat class's own override — unconditional true"),
-    ("ChestBoat", "inherits vanilla's own abstract-boat class's own override"),
-    ("Raft", "inherits vanilla's own abstract-boat class's own override"),
-    ("ChestRaft", "inherits vanilla's own abstract-boat class's own override"),
-    ("Shulker", "vanilla's own shulker entity class's own override — isAlive()"),
+    ("Boat", "vanilla's abstract-boat class's override — unconditional true"),
+    ("ChestBoat", "inherits vanilla's abstract-boat class's override"),
+    ("Raft", "inherits vanilla's abstract-boat class's override"),
+    ("ChestRaft", "inherits vanilla's abstract-boat class's override"),
+    ("Shulker", "vanilla's shulker entity class's override — isAlive()"),
     (
         "HappyGhast",
-        "vanilla's own happy-ghast entity class's own override — true in eligible runtime states",
+        "vanilla's happy-ghast entity class's override — true in eligible runtime states",
     ),
 ];
 
@@ -229,7 +229,7 @@ fn effect_of(class: &str) -> Effect {
 }
 
 /// Whether an entity of this type can shove the local player through
-/// vanilla's own living-entity class's own "push entities" step.
+/// vanilla's living-entity class's "push entities" step.
 ///
 /// The three vanilla facts, in order:
 ///
@@ -243,7 +243,7 @@ fn classify(row: &Row) -> bool {
     if !row.living {
         // Cross-check the dump's own consistency while here: a non-living class
         // cannot declare either method anywhere in its hierarchy, because both
-        // are introduced by `LivingEntity`.
+        // are introduced by the living-entity class.
         assert!(
             row.push_entities_decl.is_none() && row.do_push_decl.is_none(),
             "{} is not a living entity yet declares a crowd-pass method",

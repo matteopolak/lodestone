@@ -208,7 +208,7 @@ pub struct ResolvedSeed {
 /// out of `level.dat` into `<world>/data/minecraft/world_gen_settings.dat`, and
 /// a 26.2 `level.dat` contains no seed field at all. Vanilla's own behaviour
 /// when that file is missing or unreadable is to fall back to
-/// `WorldOptions.defaultWithRandomSeed()` — precisely the bug above — which is
+/// The world options's default with random seed — precisely the bug above — which is
 /// why an unreadable-but-present file here is an **error** rather than a
 /// silent re-roll.
 ///
@@ -241,7 +241,7 @@ pub fn resolve_world_seed(world_dir: &Path, requested: i64) -> Result<ResolvedSe
 /// # Why a world needs one at all
 ///
 /// Region files alone are not a world. **Vanilla will not open a directory
-/// with no `level.dat`** — `LevelStorageSource` reads it before anything else
+/// with no `level.dat`** — the level storage source reads it before anything else
 /// and a missing one is not a world it can list, let alone load. Until this
 /// existed, a Lodestone save was a folder of `.mca` files that only Lodestone
 /// could make sense of, which is a strange thing for a format whose entire
@@ -1950,7 +1950,7 @@ impl WorldSaveHandle {
     /// them.
     ///
     /// Grouping happens here rather than in [`chunk_nbt`] for the reason
-    /// vanilla groups in `SavedTick.filterTickListForChunk` rather than in the
+    /// vanilla groups in SavedTick's filter tick list for chunk rather than in the
     /// codec: the writer of a single chunk should be handed exactly that
     /// chunk's contents, so an entry landing in the wrong file is a bug in one
     /// place instead of two.

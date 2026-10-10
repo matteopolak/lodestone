@@ -319,7 +319,7 @@ fn a_copper_golem_statue_draws_in_its_own_screen_rect_where_no_block_model_could
 }
 
 /// The `standing` and `star` poses are **independently transcribed**
-/// `LayerDefinition`s, not one rig with a pose preset (see
+/// The layer definitions, not one rig with a pose preset (see
 /// `docs/block-entity-renderers.md`'s Copper golem statue section) — a real
 /// risk that `copper_golem_pose` silently resolves the wrong model name and
 /// one pose draws as another. `standing` (unnested seven-part tree) and

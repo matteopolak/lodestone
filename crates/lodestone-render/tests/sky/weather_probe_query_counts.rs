@@ -158,7 +158,7 @@ fn the_reused_column_top_is_still_this_columns_own_height() {
     // A per-column `top`, so the reuse has to be per-column too. Vanilla's span
     // is `(max(cam_y - r, terrain), max(cam_y + r, terrain))` and its light
     // sample is at `max(cam_y, terrain)` — restated here from
-    // `WeatherEffectRenderer`'s own decompiled source's shape rather than from the
+    // the weather effect renderer's source shape rather than from the
     // implementation, so a hoist out of the loop lands on a different answer.
     let radius = DEFAULT_WEATHER_RADIUS;
     let cam = [0.5_f64, 64.5_f64, 0.5_f64];

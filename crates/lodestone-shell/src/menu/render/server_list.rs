@@ -1,4 +1,4 @@
-//! Vanilla's `JoinMultiplayerScreen`/`ServerSelectionList` metrics, its
+//! Vanilla's join multiplayer screen/server selection list metrics, its
 //! header/footer layout block, and the server-list row, icon and scroll
 //! geometry.
 //!
@@ -6,7 +6,7 @@
 
 use super::*;
 
-// -- vanilla's `JoinMultiplayerScreen` / `ServerSelectionList` metrics --------
+// -- vanilla's join multiplayer screen / server selection list metrics --------
 //
 // Every number below is from the decompiled 26.2 client's own multiplayer
 // screen classes. Deliberately its own set of
@@ -27,14 +27,14 @@ pub(super) const SERVER_LIST_FOOTER_H: f32 = 60.0;
 /// Vanilla's own vertical linear layout at spacing 4 and both
 /// horizontal linear layout at spacing 4 rows (`:64,66,67`).
 const SERVER_LIST_FOOTER_SPACING: i32 = 4;
-/// `JoinMultiplayerScreen.TOP_ROW_BUTTON_WIDTH` (`:28`) — Join Server / Direct
+/// The join multiplayer screen's top row button width (`:28`) — Join Server / Direct
 /// Connection / Add Server.
 const SERVER_LIST_TOP_BUTTON_W: f32 = 100.0;
-/// `JoinMultiplayerScreen.LOWER_ROW_BUTTON_WIDTH` (`:29`) — Edit / Delete /
+/// The join multiplayer screen's lower row button width (`:29`) — Edit / Delete /
 /// Refresh / Back.
 const SERVER_LIST_LOWER_BUTTON_W: f32 = 74.0;
 /// The `itemHeight` the list is constructed with: the last argument of
-/// `new ServerSelectionList(…, 36)` (`:61-62`).
+/// `new server selection list(…, 36)` (`:61-62`).
 ///
 /// **Public because `MenuNav::scroll_server_to_show` needs it**:
 /// with the scroll offset in pixels, the keyboard scroll-into-view path has to
@@ -42,9 +42,9 @@ const SERVER_LIST_LOWER_BUTTON_W: f32 = 74.0;
 /// is exactly how the draw and the hit-test drift apart.
 pub const SERVER_LIST_ITEM_H: f32 = 36.0;
 /// Vanilla's own server-selection list's get-row-width accessor — a
-/// 305 px override of `AbstractSelectionList`'s 220.
+/// 305 px override of the abstract selection list's 220.
 pub(super) const SERVER_LIST_ROW_W: f32 = 305.0;
-/// `AbstractSelectionList.Entry.CONTENT_PADDING`.
+/// The abstract selection list's entry.CONTENT_PADDING.
 /// The entry rect is inset by this on each side, so a 36 px row has a **32** px
 /// content box — exactly [`SERVER_ENTRY_ICON`], which is why the favicon fills
 /// the row's height.
@@ -53,39 +53,39 @@ const SERVER_LIST_ENTRY_PADDING: f32 = 2.0;
 /// gap above row 0. A different expression from [`SERVER_LIST_ENTRY_PADDING`]
 /// that happens to be the same 2 — only one of them insets a row.
 const SERVER_LIST_FIRST_ENTRY_Y: f32 = 2.0;
-/// `OnlineServerEntry.ICON_SIZE`.
+/// The online server entry's icon size.
 pub(super) const SERVER_ENTRY_ICON: f32 = 32.0;
-/// `OnlineServerEntry.SPACING` (`:247`) — the gap the status icon and the status
+/// The online server entry's spacing (`:247`) — the gap the status icon and the status
 /// text keep from the content's right edge, and from each other.
 pub(super) const SERVER_ENTRY_SPACING: f32 = 5.0;
-/// `OnlineServerEntry.STATUS_ICON_WIDTH` (`:248`).
+/// The online server entry's status icon width (`:248`).
 const SERVER_STATUS_ICON_W: f32 = 10.0;
-/// `OnlineServerEntry.STATUS_ICON_HEIGHT` (`:249`).
+/// The online server entry's status icon height (`:249`).
 const SERVER_STATUS_ICON_H: f32 = 8.0;
 /// The gap between the favicon and the name/MOTD column: vanilla writes
-/// `getContentX() + 32 + 3` (`:306,310`) — a literal 3, *not*
+/// `get_content_x() + 32 + 3` (`:306,310`) — a literal 3, *not*
 /// [`SERVER_ENTRY_SPACING`]'s 5.
 pub(super) const SERVER_ENTRY_TEXT_GAP: f32 = 3.0;
-/// The first MOTD line's offset below the content's top: `getContentY() + 12`
+/// The first MOTD line's offset below the content's top: `get_content_y() + 12`
 /// (`:310`). Subsequent lines step by [`LINE_H`] (`+ 9 * i`).
 pub(super) const SERVER_ENTRY_MOTD_Y: f32 = 12.0;
 /// How many MOTD lines a row shows — `Math.min(lines.size(), 2)` (`:309`).
 pub(super) const SERVER_ENTRY_MOTD_LINES: usize = 2;
-/// The width the MOTD wraps to: `getContentWidth() - 32 - 2` (`:307`). The 2 is
+/// The width the MOTD wraps to: `get_content_width() - 32 - 2` (`:307`). The 2 is
 /// its own literal, not the content padding.
 pub(super) const SERVER_ENTRY_MOTD_INSET: f32 = SERVER_ENTRY_ICON + 2.0;
-/// A `StringWidget`'s height, which is what the title header is
-/// (vanilla's own string-widget type, `HeaderAndFooterLayout.addTitleHeader`).
+/// A string widget's height, which is what the title header is
+/// (vanilla's own string-widget type, HeaderAndFooterLayout's add title header).
 const SERVER_LIST_TITLE_H: f32 = 9.0;
 
 /// The MOTD and status colour, `-8355712`.
 /// A mid grey — `0xFF808080`.
 pub(super) const SERVER_ENTRY_DIM: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
-/// `CANT_RESOLVE_TEXT`/`CANT_CONNECT_TEXT`'s `withColor(-65536)` (`:68-69`) —
+/// `CANT_RESOLVE_TEXT`/`CANT_CONNECT_TEXT`'s with color (`:68-69`) —
 /// pure red, and a *component* colour, so it overrides the `-8355712` the MOTD
 /// line is otherwise drawn with.
 pub(super) const SERVER_ENTRY_BAD: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
-/// `ChatFormatting.RED`, `0xFF5555` — the version string an incompatible row
+/// The chat formatting's red, `0xFF5555` — the version string an incompatible row
 /// shows where a compatible one shows its player count (`:344-346`).
 pub(super) const SERVER_ENTRY_INCOMPATIBLE: [f32; 4] = [1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0];
 /// The selected row's interior, `-16777216` — opaque black, filled inside the
@@ -96,7 +96,7 @@ pub(super) const SERVER_LIST_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 /// the join/move arrows on top of it readable.
 pub(super) const SERVER_ICON_DARKEN: [f32; 4] = [144.0 / 255.0, 144.0 / 255.0, 144.0 / 255.0, 160.0 / 255.0];
 
-/// `ServerSelectionList.JOIN_SPRITE` and its highlighted twin (`:52-53`).
+/// The server selection list's join sprite and its highlighted twin (`:52-53`).
 pub(super) const SERVER_JOIN_SPRITES: (&str, &str) = ("server_list/join", "server_list/join_highlighted");
 /// `MOVE_UP_SPRITE` / `MOVE_UP_HIGHLIGHTED_SPRITE` (`:54-55`).
 pub(super) const SERVER_MOVE_UP_SPRITES: (&str, &str) =
@@ -104,18 +104,18 @@ pub(super) const SERVER_MOVE_UP_SPRITES: (&str, &str) =
 /// `MOVE_DOWN_SPRITE` / `MOVE_DOWN_HIGHLIGHTED_SPRITE` (`:56-57`).
 pub(super) const SERVER_MOVE_DOWN_SPRITES: (&str, &str) =
     ("server_list/move_down", "server_list/move_down_highlighted");
-/// `FaviconTexture.MISSING_LOCATION`, blitted for a row whose server sent no
+/// The favicon texture's missing location, blitted for a row whose server sent no
 /// usable icon. A **loose** texture, so it reaches the atlas through
 /// [`crate::resources::UNKNOWN_SERVER_TEXTURE`] rather than the sprite glob.
 ///
-/// **Not only this screen's.** `FaviconTexture` is also what `WorldListEntry`
+/// **Not only this screen's.** favicon texture is also what world list entry
 /// holds its thumbnail in, so the same file is the world list's missing-icon
 /// fallback — see [`WORLD_UNKNOWN_ICON`], which aliases this rather than
 /// restating the path.
 pub(super) const SERVER_UNKNOWN_ICON: &str = "misc/unknown_server";
 
 /// The world list's missing-thumbnail fallback, which vanilla shares with the
-/// server list because both rows hold a `FaviconTexture` and its
+/// server list because both rows hold a favicon texture and its
 /// `MISSING_LOCATION` is one file.
 ///
 /// An alias rather than a second constant so the shared-ness is stated in the
@@ -124,19 +124,19 @@ pub(super) const SERVER_UNKNOWN_ICON: &str = "misc/unknown_server";
 /// *server* texture to follow the code.
 pub(super) const WORLD_UNKNOWN_ICON: &str = SERVER_UNKNOWN_ICON;
 
-/// Vanilla's `JoinMultiplayerScreen.init`
+/// Vanilla's join multiplayer screen's init
 /// as a real [`layout::HeaderAndFooterLayout`], arranged for a `width`×`height`
 /// canvas.
 ///
 /// Two notes before changing it:
 ///
 /// - **The title cell is zero-width**, for the reason `world_select_layout`
-///   gives: `addTitleHeader` adds a `StringWidget(title, font)` and there is no
+///   gives: `addTitleHeader adds a string widget(title, font)` and there is no
 ///   font at arrange time, but the header frame centres its child, so a
 ///   zero-width cell lands exactly on the centre a real-width one would be
 ///   centred about.
 /// - **The list is a [`layout::SpacerElement`]**, sized to
-///   `layout.getContentHeight()` exactly as `:61-62` does. It has to take part in
+///   layout's get content height exactly as `:61-62` does. It has to take part in
 ///   the measurement — `HeaderAndFooterLayout`'s content clamp reads the content
 ///   frame's height — and a spacer is measured and never drawn, which is right:
 ///   the list draws through [`draw_server_entry`], not as a widget.
@@ -151,7 +151,7 @@ fn server_list_layout(width: f32, height: f32) -> layout::HeaderAndFooterLayout 
         SERVER_LIST_FOOTER_H,
     );
 
-    // `this.layout.addTitleHeader(this.title, this.font)` (`:49`).
+    // layout's add title header (`:49`).
     root.add_to_header(Box::new(Widget::new(
         0.0,
         0.0,
@@ -255,7 +255,7 @@ impl ServerListBlock {
 /// three sizes and requires every slot to come out identical. The footer column
 /// measures 308 wide at any width (both its rows do — `3 * 100 + 2 * 4` and
 /// `4 * 74 + 3 * 4`), and the content band always begins at the header height,
-/// because the list is sized to `getContentHeight()` exactly.
+/// because the list is sized to get content height exactly.
 fn server_list_block() -> &'static ServerListBlock {
     static BLOCK: std::sync::OnceLock<ServerListBlock> = std::sync::OnceLock::new();
     BLOCK.get_or_init(|| ServerListBlock::at(SERVER_LIST_REF_CANVAS.0, SERVER_LIST_REF_CANVAS.1))
@@ -302,8 +302,8 @@ pub fn server_list_footer_slot(button: super::nav::ServerListButton) -> Slot {
     server_list_block().footer_slot(index)
 }
 
-/// The left edge of every list row: `getRowLeft()`, which is
-/// `getX() + this.width / 2 - getRowWidth() / 2` with `getX() == 0`.
+/// The left edge of every list row: get row left, which is
+/// `getX() + this.width / 2 - get_row_width() / 2` with `getX() == 0`.
 ///
 /// **Not `(width - 305) / 2`.** Vanilla halves each term separately with integer
 /// division, so at an odd width the two differ by a pixel; the `floor`s are that
@@ -347,7 +347,7 @@ pub fn server_row_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32,
 /// A row's *content* rect — the entry rect inset by
 /// [`SERVER_LIST_ENTRY_PADDING`] on each side
 ///. Everything an
-/// `OnlineServerEntry` draws is measured from this, not from the row.
+/// The online server entry draws is measured from this, not from the row.
 #[must_use]
 pub fn server_row_content_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     let (x, y, w, h) = server_row_rect(index, width, scroll);
@@ -361,7 +361,7 @@ pub fn server_row_content_rect(index: usize, width: f32, scroll: f32) -> (f32, f
 
 /// Whether row `index` is inside the list's band on a `height`-tall canvas at
 /// `scroll` **pixels** of offset — `extractListItems`' own visibility test,
-/// `child.getY() + child.getHeight() >= getY() && child.getY() <= getBottom()`.
+/// `child.getY() + child.get_height() >= getY() && child.getY() <= get_bottom()`.
 ///
 /// `row_rect` calls this too (through [`MenuRow::entry`]'s carried `scroll`), so
 /// a click can no longer land on a row that is not on screen — see
@@ -446,7 +446,7 @@ pub fn server_list_spec(entry_count: usize, scroll: f32) -> widget::ListSpec {
 }
 
 /// The largest legal `scroll` for `entry_count` rows at a `height`-tall canvas,
-/// **in pixels** — vanilla's `AbstractScrollArea::maxScrollAmount`,
+/// **in pixels** — vanilla's abstract scroll area's max scroll amount,
 /// `max(0, contentHeight - height)`.
 ///
 /// Delegates to [`server_scroll_model`] rather than recomputing the band, so the
@@ -472,8 +472,8 @@ pub fn server_entry_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f3
 /// The rect of the status icon in row `index`, and the x the status *text* is
 /// right-aligned against.
 ///
-/// `statusIconX = getContentRight() - 10 - 5`,
-/// at `getContentY()` — the icon is **not** vertically centred in the row.
+/// `statusIconX = get_content_right() - 10 - 5`,
+/// at get content y — the icon is **not** vertically centred in the row.
 #[must_use]
 pub fn server_status_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     let (cx, cy, cw, _) = server_row_content_rect(index, width, scroll);

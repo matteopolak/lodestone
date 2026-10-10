@@ -164,8 +164,8 @@ impl HudGeometry {
         // lines sits in the column it does.
         //
         // The right column is right-aligned at `w - margin - text_width(line)`,
-        // which is vanilla's `guiWidth() - 2 - font.width(line)`
-        // (`DebugScreenOverlay.extractLines`), so a long line grows leftwards
+        // which is vanilla's `gui_width() - 2 - font.width(line)`
+        // (the debug screen overlay's extract lines), so a long line grows leftwards
         // instead of off the screen. The width has to come from `b.text_width`,
         // the same measure the draw itself uses — a restated constant would
         // misalign the moment the vanilla font is or is not loaded.
@@ -184,7 +184,7 @@ impl HudGeometry {
         // the XP level number's own comment records one screen over:
         // this function already draws in the `gui_scale`-divided logical canvas,
         // so a ×2 on the text made it twice vanilla's size relative to
-        // everything around it. `DebugScreenOverlay` draws at scale 1 with
+        // everything around it. The debug screen overlay draws at scale 1 with
         // `MARGIN_LEFT == MARGIN_RIGHT == MARGIN_TOP == 2` and a line height of
         // `9` — see [`DEBUG_MARGIN`] and [`DEBUG_LINE_H`].
         if include_debug {
@@ -220,7 +220,7 @@ impl HudGeometry {
         let chat_pose_scale = chat_pose_scale(opts);
         let chat_line_h = chat_line_h(opts, chat_pose_scale);
         // `chat_width_px`/`chat_height_px` are vanilla's own
-        // `ChatComponent.getWidth`/`getHeight` formulas, in the same
+        // The chat component's get width/`getHeight` formulas, in the same
         // logical-canvas pixel unit as `b.w`/`b.h` (see their doc comments),
         // so no further conversion is needed to compare them against `b.w`.
         let chat_box_w = chat_width_px(opts.width_pct.clamp(0.0, 1.0)).min(b.w);
@@ -282,7 +282,7 @@ impl HudGeometry {
                 glyph_h * chat_pose_scale + 2.0 * INPUT_STRIP_PAD * chat_pose_scale,
                 [0.0, 0.0, 0.0, chat_bg_opacity],
             );
-            // `EditBox.extractWidgetRenderState` paints a selection after the
+            // EditBox's extract widget render state paints a selection after the
             // background and before its glyphs. The input owns the same
             // character-index range; convert it with the exact text-width
             // function the following glyph draw uses. Clamp the endpoints to
@@ -343,7 +343,7 @@ impl HudGeometry {
             //    was "it's supposed to be behind [the caret], not pushing it
             //    to the right".
             // 2. **`cursorX` is `font.width(value) + 1`, not `font.width(value)`
-            //    alone.** `EditBox.extractWidgetRenderState` computes
+            //    alone.** EditBox's extract widget render state computes
             //    `drawX += this.font.width(charSequence) + 1;` *before* setting
             //    `cursorX = drawX` — a full pixel reserved after the typed text,
             //    present in the **appended** (non-insert) case this shell always
@@ -428,8 +428,8 @@ impl HudGeometry {
             // real 300ms rate (see [`HudFrame::chat_caret_visible`]).
             //
             // Two shapes, chosen by `insert`, exactly as
-            // `EditBox.extractWidgetRenderState`'s final block chooses between
-            // `TextCursorUtils.extractInsertCursor` and `extractAppendCursor`:
+            // EditBox's extract widget render state's final block chooses between
+            // The text cursor utils's extract insert cursor and `extractAppendCursor`:
             //
             // - **append** (`_`): the literal underscore *character*, drawn as
             //   text at `cursorX`, so it sits under the trailing edge of the
@@ -471,7 +471,7 @@ impl HudGeometry {
         // leaving them flush.
         let chat_bottom = chat_bottom(b.h, chat_pose_scale);
         // How many visual rows fit the configured box height — vanilla's
-        // `ChatComponent.getLinesPerPage` (vanilla's own chat-component rendering,
+        // The chat component's get lines per page (vanilla's own chat-component rendering,
         // `height / lineHeight`), derived from the same `chat_box_h`/
         // `chat_line_h` the draw below actually uses, not a restated
         // constant.
@@ -495,7 +495,7 @@ impl HudGeometry {
                     break;
                 }
                 // The span sibling of `strip_legacy`: vanilla's
-                // `ChatFormatting.stripFormatting` removes every `§`+code pair
+                // The chat formatting's strip formatting removes every `§`+code pair
                 // wholesale (colour and the five format flags alike), which
                 // for a span list already past that decode is "every run
                 // draws with `TextStyle::default()`".
@@ -538,10 +538,10 @@ impl HudGeometry {
             // Each logical entry can wrap into several visual rows, all sharing
             // that entry's age/alpha. Vanilla stacks a wrapped message's *last*
             // split line nearest the bottom edge and its earlier lines above it
-            // (`ChatComponent.addMessageToDisplayQueue`'s per-line `addFirst`,
+            // (the chat component's add message to display queue's per-line `addFirst`,
             // vanilla's own chat-component rendering, combined with `forEachLine`'s
             // `lineIndex → chatBottom - lineIndex * entryHeight`,
-            // vanilla's own chat-component rendering) — reversing each entry's own wrapped
+            // vanilla's chat-component rendering) — reversing each entry's wrapped
             // rows before stacking reproduces that order.
             'entries: for (line, age) in frame.chat.iter().rev() {
                 // While open, every line is fully lit; while closed, lines fade over
@@ -557,7 +557,7 @@ impl HudGeometry {
                     break;
                 }
                 // `options.chat.color == false` strips every legacy code before
-                // wrapping/drawing (`ComponentRenderUtils.stripColor`) rather than
+                // wrapping/drawing (the component render utils's strip color) rather than
                 // just ignoring them while drawing, matching vanilla.
                 let stripped = if opts.colors { None } else { Some(strip_legacy(line)) };
                 let display: &str = stripped.as_deref().unwrap_or(line);
@@ -601,7 +601,7 @@ impl HudGeometry {
         }
 
         // The scrollback's own scroll indicator — vanilla's
-        // `ChatComponent.extractRenderState`'s `if (total > 0 && isForeground)`
+        // The chat component's extract render state's `if (total > 0 && isForeground)`
         // block. Drawn only while open
         // (`isForeground`) and only once there is more history than fits on
         // screen (`virtualHeight != chatHeight`), matching vanilla's own two
@@ -653,7 +653,7 @@ impl HudGeometry {
 
         // The command-suggestion dropdown, last in the chat overlay because it
         // overlaps both the input line above and the scrollback below —
-        // `ChatScreen.extractRenderState` calls `commandSuggestions
+        // The chat screen's extract render state calls `commandSuggestions
         // .extractRenderState` after `super`, i.e. after every widget including
         // the `EditBox`. `draw_command_suggestions`' own doc holds the table of
         // what must still composite above it, and `SUGGESTION_LAYERS` the order
@@ -671,7 +671,7 @@ impl HudGeometry {
         // whatever is behind it, as vanilla's does.
         //
         // `arm`/`thick` reproduce vanilla's actual ink, not its sprite's bounding
-        // box. `Hud.extractCrosshair` blits the 15x15
+        // box. Hud's extract crosshair blits the 15x15
         // `hud/crosshair` sprite (`assets/minecraft/textures/gui/sprites/hud/
         // crosshair.png`) at `((guiWidth-15)/2, (guiHeight-15)/2, 15, 15)` — but
         // that box is mostly transparent padding. Read directly off the PNG's own
@@ -846,7 +846,7 @@ impl HudGeometry {
                     // `line_h` — the same fix [`sprite_vitals`]'s own copy of
                     // this number already documents: `scale` here made it
                     // twice vanilla's size, and `line_h` is this HUD's 5×7
-                    // debug-font stride, not `ContextualBar`'s real `6px` gap
+                    // debug-font stride, not the contextual bar's real `6px` gap
                     // above the bar's top (`by - 6.0`).
                     let s = level.to_string();
                     let tw = b.text_width(&s, 1.0);
@@ -924,7 +924,7 @@ impl HudGeometry {
         }
 
         // The **hotbar-anchored** attack-strength gauge — vanilla's
-        // `AttackIndicatorStatus::HOTBAR` branch, which sits in `Hud`'s hotbar
+        // The attack indicator status's hotbar branch, which sits in `Hud`'s hotbar
         // section rather than beside the crosshair one, and is a genuinely
         // different draw from the crosshair variant: an 18x18 sprite pair
         // filling **bottom-up**, against the crosshair's 16x4 pair filling
@@ -1035,7 +1035,7 @@ impl HudGeometry {
         // Held-item name: the selected hotbar item's styled name,
         // above the hotbar, fading with a server-independent client timer.
         // Unlike the action bar and title, vanilla draws this **unscaled**
-        // (vanilla's own hud rendering, a plain `graphics.textWithBackdrop` call, no
+        // (vanilla's own hud rendering, a plain graphics's text with backdrop call, no
         // ×2) — the same "vanilla's own draw never scales the font" lesson
         // the XP level number's fix already established two
         // blocks up in [`sprite_vitals`]. Using `scale` here would repeat
@@ -1105,7 +1105,7 @@ impl HudGeometry {
         }
 
         // Boss bars: stacked title-over-bar at the top-centre —
-        // `BossHealthOverlay.extractRenderState`/`extractBar`, ported at
+        // The boss health overlay's extract render state/`extractBar`, ported at
         // vanilla's own fixed 182×5 native size and `BOSS_BAR_TEXT_SCALE`
         // (`1.0`) rather than this function's ambient `scale`/`line_h`, the
         // same exemption as [`SIDEBAR_LINE_H`]. An empty slice draws nothing,
@@ -1193,7 +1193,7 @@ impl HudGeometry {
             }
         }
 
-        // Scoreboard sidebar — `Hud.displayScoreboardSidebar`, ported at vanilla's
+        // Scoreboard sidebar — Hud's display scoreboard sidebar, ported at vanilla's
         // own metrics (`SIDEBAR_LINE_H`/`SIDEBAR_TEXT_SCALE`) rather than this
         // function's ambient `scale`/`line_h`, exactly the exemption
         // [`TAB_LINE_H`] documents for the tab list. `width` is the widest of the
@@ -1299,7 +1299,7 @@ impl HudGeometry {
             }
         }
 
-        // The Tab player-list overlay — `PlayerTabOverlay.extractRenderState`,
+        // The Tab player-list overlay — the player tab overlay's extract render state,
         // ported rather than approximated.
         //
         // Read as vanilla's own draw order, because this GUI path has no depth
@@ -1424,7 +1424,7 @@ impl HudGeometry {
 
         // Recipe-unlock toast, top-right. Drawn last so it lands
         // over the sidebar/tab overlays, matching vanilla's own toast layer,
-        // which `ToastManager.render` composites after the HUD entirely.
+        // which the toast manager's render composites after the HUD entirely.
         if let Some(toast) = &frame.recipe_toast {
             draw_recipe_toast(&mut b, toast);
         }

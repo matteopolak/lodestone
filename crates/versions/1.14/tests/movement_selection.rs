@@ -1,4 +1,4 @@
-//! Selection tests for 1.16.5's `LocalPlayer.sendPosition`.
+//! Selection tests for 1.16.5's LocalPlayer's send position.
 
 use lodestone_core::{Ctx, Decode, Reader};
 use lodestone_model::{ClientAction, ConnectionState, Rotation, Vec3, VersionAdapter};

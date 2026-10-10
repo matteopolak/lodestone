@@ -51,7 +51,7 @@ pub(super) struct OpenContainer {
 
 impl OpenContainer {
     /// Bumps and returns the next state id, matching
-    /// `AbstractContainerMenu::incrementStateId`'s exact wrap.
+    /// The abstract container menu's increment state id's exact wrap.
     pub(super) fn next_state_id(&mut self) -> i32 {
         self.state_id = (self.state_id + 1) & 32767;
         self.state_id
@@ -425,7 +425,7 @@ where
 /// `pos` is still carried on the [`OpenContainer`] — not to find slots, but so
 /// breaking the table closes the window, exactly as it already does for a furnace.
 ///
-/// The 46 slots sent are `CraftingMenu`'s own order: result `0`, the 3×3 grid
+/// The 46 slots sent are the crafting menu's own order: result `0`, the 3×3 grid
 /// `1..=9`, main storage `10..=36`, hotbar `37..=45`.
 pub(super) async fn open_crafting_table_screen<T, P>(
     conn: &mut Connection<T>,

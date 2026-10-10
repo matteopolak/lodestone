@@ -10,7 +10,7 @@
 //! vanilla's own block-behaviour "get shade brightness" accessor:
 //!
 //! ```text
-//! return state.isCollisionShapeFullBlock(level, pos) ? 0.2F : 1.0F;
+//! return state's is collision shape full block ? 0.2F : 1.0F;
 //! ```
 //!
 //! — a **collision** question. It is *not* the renderer's face-culling

@@ -19,7 +19,7 @@ fn above_floor() -> Vec3 {
 /// `0.6×1.95` halved is `0.3×0.975` — close enough to the true value that
 /// an assertion only checking "shrank" would pass under either
 /// hypothesis. Predicting the exact literal is what separates a real
-/// `BABY_DIMENSIONS` port from the generic `getAgeScale()` fallback.
+/// `BABY_DIMENSIONS` port from the generic get age scale fallback.
 #[test]
 fn a_baby_zombie_is_the_exact_vanilla_literal_not_a_halved_adult() {
     let world = flat_world();

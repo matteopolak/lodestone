@@ -124,7 +124,7 @@ pub(crate) const HOTBAR_SLOTS: usize = 9;
 ///
 /// # Trap 1: `correct_tool` comes from `tool`, never re-derived from `requires_correct_tool`
 ///
-/// [`BlockHardness::requires_correct_tool`] is `BlockState.requiresCorrectToolForDrops`
+/// [`BlockHardness::requires_correct_tool`] is BlockState's requires correct tool for drops
 /// — a property of the *block* ("does this drop nothing unless mined with a
 /// suitable tool?"). [`ToolMining::correct_tool`] (and, downstream,
 /// [`BreakInputs::correct_tool`]) is `Player.hasCorrectToolForDrops` — a property
@@ -139,7 +139,7 @@ pub(crate) const HOTBAR_SLOTS: usize = 9;
 /// # Trap 2: `submerged` is `eye_in_water`, not `under_water()`
 ///
 /// Vanilla's `getDestroySpeed` gates the 5×-slower underwater factor on
-/// `isEyeInFluid(WATER)` **alone**. [`FluidState::under_water`] is
+/// is eye in fluid **alone**. [`FluidState::under_water`] is
 /// `eye_in_water && in_water()` — the predicate the *fog* wants, and vanilla's
 /// `isUnderWater()`. The two agree in nearly every real pose but are not the
 /// same function, so the mining path reads the raw `eye_in_water` flag.
@@ -799,10 +799,10 @@ pub struct Sim {
     /// ([`crate::config::Options::particles`]), pushed down by
     /// [`Self::set_particle_level`]. Read at the one place vanilla reads it —
     /// the `NetUpdate::Particles` arm in `sim::net_apply`, this client's
-    /// `ClientLevel.doAddParticle`.
+    /// The client level's do add particle.
     particle_level: crate::config::ParticleLevel,
     /// Per-position chest lid animation state — vanilla's
-    /// `ChestLidController`, one per open or closing chest.
+    /// The chest lid controller, one per open or closing chest.
     ///
     /// A plain field rather than an ECS resource for the same reason
     /// [`Self::death_message`] is one: exactly one consumer reads it
@@ -859,7 +859,7 @@ pub struct Sim {
     ///
     /// The sixth block-entity clock, and started by **both** routes at once:
     /// a `NetUpdate::BlockEvent` `b0 == 1` resets its `spawnDelay`
-    /// (`BaseSpawner.onEventTriggered`), and it is also advanced every tick
+    /// (the base spawner's on event triggered), and it is also advanced every tick
     /// purely from world state (a proximity test plus the block entity's own
     /// `SpawnData` NBT), the same way [`enchanting_table_books`](Self::enchanting_table_books)
     /// is. See `crate::block_entities::SpawnerSpins`.
@@ -961,7 +961,7 @@ pub struct AudioEngine(pub Option<ShellAudio>);
 #[derive(Debug, Default, Resource)]
 pub(crate) struct MusicState(pub Option<crate::audio::music::ShellMusic>);
 
-/// Vanilla's `BiomeAmbientSoundsHandler` plus the rain cadence, beside
+/// Vanilla's biome ambient sounds handler plus the rain cadence, beside
 /// [`MusicState`] and for the same reasons: config-scoped (a reconnect must not
 /// re-roll the mood clock, so it must never gain a line in
 /// [`Sim::end_session`]'s reset list) and an `Option` only because
@@ -1724,7 +1724,7 @@ pub(crate) mod block_action_trace;
 // `pub(crate)`, not the bare `mod` every other seam above uses: `entities.rs`
 // reuses `step::{body_yaw_target, tick_head_turn}` for the remote-player body
 // yaw simulation (`tick_remote_body_yaw`) rather than forking a second copy of
-// vanilla's `LivingEntity.tickHeadTurn`. Everything else in this file stays
+// vanilla's living entity's tick head turn. Everything else in this file stays
 // reachable only from `sim`'s descendants, per the comment above.
 pub(crate) mod step;
 mod render_sources;

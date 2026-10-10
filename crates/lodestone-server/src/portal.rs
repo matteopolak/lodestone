@@ -129,7 +129,7 @@ impl Axis {
     }
 
     /// Reads the `axis` property from a validated `nether_portal` state, defaulting to
-    /// `X` — vanilla's own `getOptionalValue(AXIS).orElse(Direction.Axis.X)`.
+    /// `X` — vanilla's own get optional value's get optional value.
     #[must_use]
     pub fn from_state(state: StateId) -> Self {
         if get_str_property(state, PropertyKey::Axis) == Some(BuiltinPropertyValue::Z) {
@@ -1894,7 +1894,7 @@ pub fn ensure_end_platform_if_resident<S: ChunkSource + ?Sized>(
 /// * `arrival` is where the *player* materialises: **one block below**
 ///   `end_spawn_point()` itself, standing on the obsidian floor rather than
 ///   floating over it. Vanilla applies this only for `entity instanceof
-///   ServerPlayer` — `spawnPos.subtract(0.0, 1.0, 0.0)` — every other entity
+///   The server player — `spawnPos.subtract(0.0, 1.0, 0.0)` — every other entity
 ///   arrives a block higher, which this function does not model since this
 ///   crate only teleports players through a portal.
 ///
@@ -2001,7 +2001,7 @@ pub fn ignite_end_portal_frame<S: ChunkSource + ?Sized>(
 /// The 5×5 ring's `(min_x, min_z)` corner for `pos` sitting at lateral
 /// `offset` (1, 2 or 3) along the one edge its `facing` pins it to. `None` for
 /// a non-horizontal facing, which cannot occur for a real `end_portal_frame`
-/// state (its own `FACING` property is `HorizontalDirectionalBlock`'s).
+/// state (its own `FACING` property is the horizontal directional block's).
 fn ring_origin_for(pos: BlockPos, facing: Direction, offset: i32) -> Option<(i32, i32)> {
     match facing {
         // A south-facing frame points into the ring from its north edge
@@ -2019,7 +2019,7 @@ fn ring_origin_for(pos: BlockPos, facing: Direction, offset: i32) -> Option<(i32
 /// centre. `override_pos`/`override_state` stand in for the cell an eye was
 /// just placed into — vanilla writes that state to the world **before**
 /// running the pattern search (`level.setBlock` precedes
-/// `getOrCreatePortalShape().find`), so the search must see it too.
+/// get or create portal shape's get or create portal shape), so the search must see it too.
 fn ring_is_complete<S: ChunkSource + ?Sized>(
     world: &S,
     min_x: i32,
@@ -2937,7 +2937,7 @@ mod tests {
     /// **second**, independent one-block drop — not the same offset applied
     /// twice, and not the two collapsing onto the same `y`. Ties the two
     /// together through a real [`ensure_end_platform`] write, which is the
-    /// assertion that would catch a dropped `ServerPlayer` subtraction: an
+    /// assertion that would catch a dropped server player subtraction: an
     /// arrival left at `end_spawn_point`'s own `y` (50) would read as
     /// "floating one block above the platform," air either way and easy to
     /// miss without checking what is directly underfoot.

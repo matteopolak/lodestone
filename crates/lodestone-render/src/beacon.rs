@@ -1,4 +1,4 @@
-//! The beacon light beam — `BeaconRenderer`'s own decompiled source, ported. Not a cuboid rig:
+//! The beacon light beam — the game's beam renderer, ported. Not a cuboid rig:
 //! vanilla builds this geometry procedurally every frame (a rotating
 //! diamond-section "core" plus an axis-aligned glow square, both scrolling a
 //! shared texture vertically), so this module has no `EntityModelDef` the
@@ -19,8 +19,8 @@
 //!
 //! ## How it works
 //!
-//! [`beacon_beam_vertices`] is the whole port of `BeaconRenderer.
-//! submitBeaconBeam`/`renderPart`/`renderQuad`/`addVertex`: given a beam's
+//! [`beacon_beam_vertices`] is the whole port of the beam renderer's submit,
+//! part, quad and vertex steps: given a beam's
 //! world position, its resolved [`BeamSection`] list, the shared animation
 //! clock and the distance-derived radius scale, it returns two triangle
 //! lists (solid, glow) in world space, ready for a caller to upload
@@ -29,13 +29,13 @@
 //! function rather than left for a caller to reapply.
 //!
 //! [`beacon_beam_color`] and [`average_beam_color`] resolve *what* a beam
-//! section's colour is — `BeaconBlockEntity.tick`'s `state.getBlock()
-//! instanceof BeaconBeamBlock` scan, restated as a lookup over a block's
+//! section's colour is — the beacon block entity's per-tick scan for beam-colour blocks,
+//! restated as a lookup over a block's
 //! registry path rather than a live `instanceof` check, since this crate
 //! has no block-registry trait object to test against. The beacon block
-//! itself is white (`BeaconBlock.getColor()`); every stained-glass
+//! itself is white; every stained-glass
 //! (pane) block is its own dye colour
-//! (`StainedGlassBlock`/`StainedGlassPaneBlock`).
+//! (stained-glass block and pane).
 //!
 //! ## How to change it
 //!
@@ -50,41 +50,41 @@
 //!
 //! ## What is deliberately not ported
 //!
-//! * **Scoping/zoom radius shrink.** `BeaconRenderer.extract`'s
-//!   `player.isScoping() ? 1.0F : max(1.0, dist/96.0)` — this client has no
+//! * **Scoping/zoom radius shrink.** The beam renderer's extract step
+//!   scales the radius by 1.0 while scoping and `max(1.0, dist/96.0)` otherwise — this client has no
 //!   scope/zoom feature, so [`beam_radius_scale`] always takes the unscoped
 //!   arm. The day a zoom key lands, this needs a second argument.
 //! * **Fog.** Unlike the terrain/entity passes, the GPU pass built over this
 //!   module's output does not fold `apply_fog` into the fragment shader —
 //!   the same simplification `gpu/sign_text.rs` already makes for its own
 //!   translucent, jar-sourced-texture pass. A beam is a bright, self-lit
-//!   effect at `setLight(15728880)` (full-bright) in vanilla too, so the
+//!   effect at set light (full-bright) in vanilla too, so the
 //!   missing fog term is the least visible of this module's gaps.
 
 use crate::banner_pattern::DyeColor;
 use glam::Vec3;
 
-/// `BeaconRenderer.SOLID_BEAM_RADIUS`.
+/// The solid beam radius.
 pub const SOLID_BEAM_RADIUS: f32 = 0.2;
-/// `BeaconRenderer.BEAM_GLOW_RADIUS`.
+/// The beam glow radius.
 pub const BEAM_GLOW_RADIUS: f32 = 0.25;
-/// `TheEndGatewayRenderer.submit`'s own hardcoded `solidBeamRadius` argument
+/// The end gateway's own hardcoded solid beam radius argument
 /// to the general `submitBeaconBeam` overload — narrower than a beacon's own
 /// [`SOLID_BEAM_RADIUS`], and (unlike a beacon's) never scaled by distance.
 pub const END_GATEWAY_SOLID_BEAM_RADIUS: f32 = 0.15;
-/// `TheEndGatewayRenderer.submit`'s own hardcoded `beamGlowRadius` argument.
+/// The end gateway's own hardcoded beam glow radius argument.
 pub const END_GATEWAY_BEAM_GLOW_RADIUS: f32 = 0.175;
-/// `BeaconRenderer.MAX_RENDER_Y` — the topmost beam section (the one with no
+/// The maximum render Y — the topmost beam section (the one with no
 /// block above it to bound it) renders as if it reached this world height,
 /// however tall it actually scanned.
 pub const MAX_RENDER_Y: i32 = 2048;
-/// `BeaconRenderer.BEAM_SCALE_THRESHOLD` — the horizontal distance (blocks)
+/// The beam scale threshold — the horizontal distance (blocks)
 /// beyond which the beam's radius grows to stay visible from far away.
 pub const BEAM_SCALE_THRESHOLD: f32 = 96.0;
 
 /// One contiguous run of a beam's colour, resolved by the world scan —
-/// `BeaconBeamOwner.Section`. `color` is `0x00RRGGBB`, gamma-space, always
-/// opaque (every source colour is `ARGB.opaque`d in vanilla — see the
+/// the beam owner's section. `color` is `0x00RRGGBB`, gamma-space, always
+/// opaque (every source colour is made opaque in vanilla — see the
 /// module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BeamSection {
@@ -95,7 +95,7 @@ pub struct BeamSection {
 }
 
 /// A fully resolved beacon beam, ready for [`beacon_beam_vertices`]. `sections`
-/// is already gated the way vanilla's own `getBeamSections()` is: the caller
+/// is already gated the way vanilla's own get beam sections is: the caller
 /// (`lodestone_shell::block_entities::beacon_spawn`) must pass an empty `Vec`
 /// when the base pyramid has no completed level, even if a coloured run
 /// otherwise scans clean above the beacon.
@@ -106,7 +106,7 @@ pub struct BeaconSpawn {
     /// Resolved beam sections, base-to-top; empty when the beam should not
     /// render at all (no completed base level).
     pub sections: Vec<BeamSection>,
-    /// `floorMod(gameTime, 40) + partialTicks` — `BeaconRenderer.extract`.
+    /// `floorMod(gameTime, 40) + partialTicks`, as the beam renderer's extract step computes it.
     pub animation_time: f32,
     /// [`beam_radius_scale`]'s result for this beacon's distance from the
     /// eye this frame.
@@ -114,8 +114,8 @@ pub struct BeaconSpawn {
 }
 
 /// One end gateway's teleport beam, for this frame — vanilla's
-/// `TheEndGatewayRenderer.submit`'s `BeaconRenderer.submitBeaconBeam` call,
-/// shown while `isSpawning()`/`isCoolingDown()`. Everything here is already
+/// the end-gateway renderer's call into the general beam submit,
+/// shown while spawning or cooling down. Everything here is already
 /// resolved by the gather (`lodestone_shell::block_entities::
 /// end_gateway_beam_spawns`) — [`end_gateway_beam_vertices`] is a pure
 /// function of these five fields.
@@ -123,8 +123,8 @@ pub struct BeaconSpawn {
 pub struct EndGatewayBeamSpawn {
     /// The gateway block's own integer corner.
     pub pos: [i32; 3],
-    /// `getSpawnPercent`/`getCooldownPercent`'s result — `sin(clamp(..) *
-    /// PI)` already applied, matching `EndGatewayRenderState.scale`.
+    /// the spawn/cooldown percent result — `sin(clamp(..) *
+    /// PI)` already applied, matching the end-gateway render state's scale.
     pub scale: f32,
     /// `floorMod(gameTime, 40) + partialTicks` — the same scroll/spin clock
     /// [`BeaconSpawn::animation_time`] carries.
@@ -150,19 +150,19 @@ pub struct BeamVertex {
     pub uv: [f32; 2],
 }
 
-/// `Math.max(1.0F, distanceToBeacon / 96.0F)` — the un-scoped arm of
-/// `BeaconRenderer.extract`'s radius scale. See the module doc's "What is
+/// `max(1.0, distance_to_beacon / 96.0)` — the un-scoped arm of
+/// the beam extract step's radius scale. See the module doc's "What is
 /// deliberately not ported" for the scoping arm this omits.
 #[must_use]
 pub fn beam_radius_scale(horizontal_distance: f32) -> f32 {
     (horizontal_distance / BEAM_SCALE_THRESHOLD).max(1.0)
 }
 
-/// `BeaconBlockEntity.tick`'s `state.getBlock() instanceof BeaconBeamBlock`
+/// the beacon block entity's beam-block test,
 /// test, restated as a lookup over a block's bare registry path (no
 /// `minecraft:` prefix — callers strip it the way every other resolver in
 /// this crate's shell consumer does). `"beacon"` itself is always
-/// [`DyeColor::White`] (`BeaconBlock.getColor()`); every
+/// [`DyeColor::White`]; every
 /// `"<colour>_stained_glass"`/`"<colour>_stained_glass_pane"` resolves
 /// through [`DyeColor::from_name`]. Anything else is not a beam block —
 /// `None`.
@@ -208,7 +208,7 @@ fn unpack_rgba(color: u32, alpha: u8) -> [f32; 4] {
     ]
 }
 
-/// `BeaconRenderer.submitBeaconBeam`/`renderPart`/`renderQuad`/`addVertex`,
+/// The beam renderer's submit, part, quad and vertex steps,
 /// ported whole. Returns `(solid, glow)` triangle-list vertices (6 per
 /// vanilla `QUADS` face, triangulated `0,1,2,0,2,3` the way
 /// `gpu/sign_text.rs` already triangulates a ported vanilla quad), in world
@@ -255,20 +255,20 @@ pub fn beacon_beam_vertices(
     (solid, glow)
 }
 
-/// `TheEndGatewayBlockEntity`'s teleport beam — the *general* 9-parameter
-/// `BeaconRenderer.submitBeaconBeam` overload
-/// (`TheEndGatewayRenderer.submit`'s own call site), distinct from beacon's
+/// The end gateway's teleport beam — the *general* 9-parameter
+/// beam-submit overload
+/// (the end-gateway renderer's own call site), distinct from beacon's
 /// own private 6-argument wrapper that [`beacon_beam_vertices`] calls: a
 /// gateway passes its own `scale` (the spawn/cooldown percent, **not**
 /// `1.0`) and its own fixed `0.15`/`0.175` radii rather than beacon's
 /// `0.2`/`0.25` times a distance-derived scale.
 ///
 /// One beam only, spanning `y ∈ [-height, height]` relative to the gateway's
-/// own corner — `submitBeaconBeam(.., -state.height, state.height * 2, ..)`
+/// own corner — submit beacon beam
 /// gives `beamEnd = beamStart + height = -state.height + state.height*2 =
 /// state.height`, i.e. centred on the block and reaching equally up and
 /// down. `height <= 0` (not spawning/cooling down) draws nothing, matching
-/// `TheEndGatewayRenderer.submit`'s own `if (state.height > 0)` guard.
+/// the gateway renderer's own height guard.
 #[must_use]
 pub fn end_gateway_beam_vertices(
     pos: [i32; 3],
@@ -298,8 +298,8 @@ pub fn end_gateway_beam_vertices(
     (solid, glow)
 }
 
-/// The general port of `BeaconRenderer.submitBeaconBeam`
-/// (`renderPart`/`renderQuad`/`addVertex` folded in) — the 9-parameter form,
+/// The general port of the beam submit
+/// (part, quad and vertex steps folded in) — the 9-parameter form,
 /// taking already-final radii and an explicit `scale` rather than deriving
 /// either from a beacon-specific distance term. [`beacon_beam_vertices`] and
 /// [`end_gateway_beam_vertices`] are its two callers, each supplying its own
@@ -320,9 +320,9 @@ fn push_beam_section(
     let height = beam_end - beam_start;
     // `scroll = height < 0 ? animationTime : -animationTime` — a beam
     // section's rendered height is never negative in real use (it is either
-    // a scanned run's own height or the `MAX_RENDER_Y` substitution), so
+    // a scanned run's own height or the max-render-Y substitution), so
     // this always takes the `else` arm; ported as a branch anyway to match
-    // `BeaconRenderer.submitBeaconBeam` exactly.
+    // the beam submit exactly.
     let scroll = if height < 0 {
         animation_time
     } else {
@@ -337,7 +337,7 @@ fn push_beam_section(
     let solid_r = solid_radius;
     let angle = (animation_time * 2.25 - 45.0).to_radians();
     let (sin_a, cos_a) = angle.sin_cos();
-    // `Axis.YP.rotationDegrees` — a right-handed rotation about +Y.
+    // YP's rotation degrees — a right-handed rotation about +Y.
     let rot = |x: f32, z: f32| (x * cos_a + z * sin_a, -x * sin_a + z * cos_a);
     let (wnx, wnz) = rot(0.0, solid_r);
     let (enx, enz) = rot(solid_r, 0.0);
@@ -446,9 +446,9 @@ fn push_beam_quad(
 mod tests {
     use super::*;
 
-    /// `BeaconBlock.getColor()` — white, and the same value `DyeColor::
+    /// The beacon block's colour — white, and the same value `DyeColor::
     /// White.packed_rgb()` already carries for banner patterns and sign text
-    /// (`WHITE(0, "white", 16383998, ...)` — a value shared across all three
+    /// (16383998 — a value shared across all three
     /// consumers is a real cross-check, not a coincidence).
     #[test]
     fn the_beacon_block_itself_is_white() {
@@ -469,8 +469,8 @@ mod tests {
     }
 
     /// Plain (undyed) glass is real vanilla geometry but **not** a
-    /// `BeaconBeamBlock` — only the *stained* variants implement it
-    /// (`StainedGlassBlock`/`StainedGlassPaneBlock`), so an unstained pane
+    /// beam block — only the *stained* variants implement it
+    /// (stained glass and its pane), so an unstained pane
     /// stopping the beam is correct, not a gap.
     #[test]
     fn plain_glass_is_not_a_beam_block() {

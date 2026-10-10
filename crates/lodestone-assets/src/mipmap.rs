@@ -20,7 +20,7 @@
 //!
 //! Because these are CPU pixel operations they belong in this GPU-free crate; the
 //! renderer uploads the resulting per-level bytes. This is exactly vanilla's
-//! split: `SpriteContents` generates a per-sprite mip chain on the CPU and
+//! split: sprite contents generate a per-sprite mip chain on the CPU and
 //! uploads each level into the atlas texture.
 //!
 //! # Determinism
@@ -31,7 +31,7 @@
 use crate::texture::Image;
 
 /// How a texture's mip levels are downsampled, mirroring vanilla's
-/// `MipmapStrategy`.
+/// mipmap strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MipStrategy {
     /// Resolve to [`Cutout`](MipStrategy::Cutout) if the image has any fully

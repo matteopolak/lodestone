@@ -57,7 +57,7 @@
 //!   `WOLVES_SPAWNABLE_ON` and brightness > 8; a bat wants stone below,
 //!   `nextBoolean()`, and brightness ≤ `nextInt(4)`).
 //! * **A predicate that branches over *alternatives* needs [`Special`], not more
-//!   fields.** There is one: `Slime.checkSlimeSpawnRules`, whose swamp-surface and
+//!   fields.** There is one: Slime's check slime spawn rules, whose swamp-surface and
 //!   slime-chunk arms own a Y band and a set of RNG draws each, so a single row of
 //!   conjoined fields structurally cannot express it —
 //!   [`NaturalSpawner::slime_permits`] and `docs/natural-mob-spawning.md`.
@@ -103,7 +103,7 @@ pub const LIGHT_TTL_TICKS: u64 = 200;
 /// within 24 blocks of the nearest player.
 const MIN_PLAYER_DIST_SQR: f64 = 576.0;
 
-/// `BiomeTags.ALLOWS_SURFACE_SLIME_SPAWNS`, flattened —
+/// The biome tags's allows surface slime spawns, flattened —
 /// vanilla's own biome-tag provider adds exactly `swamp` and `mangrove_swamp` and
 /// nothing else, so the tag is two names rather than a lookup.
 const SURFACE_SLIME_BIOMES: &[&str] = &["minecraft:swamp", "minecraft:mangrove_swamp"];
@@ -117,7 +117,7 @@ const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.
 const SLIME_CHUNK_MAX_Y: i32 = 40;
 
 /// How a species is positioned relative to the candidate block —
-/// `SpawnPlacementTypes`.
+/// The spawn placement types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
     /// `ON_GROUND`: a valid spawn surface below, and two blocks of legal empty
@@ -136,12 +136,12 @@ pub enum Placement {
 /// The light condition a species' `check*SpawnRules` applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightRule {
-    /// `Monster.isDarkEnoughToSpawn`: raw sky light must not exceed
+    /// Monster's is dark enough to spawn: raw sky light must not exceed
     /// `nextInt(32)`, block light must be 0 (the overworld's
     /// `monsterSpawnBlockLightLimit`), and the local raw brightness must not
-    /// exceed the overworld's `monsterSpawnLightTest`, `UniformInt(0, 7)`.
+    /// exceed the overworld's `monsterSpawnLightTest, the uniform int(0, 7)`.
     Dark,
-    /// `Animal.isBrightEnoughToSpawn`: raw brightness > 8.
+    /// Animal's is bright enough to spawn: raw brightness > 8.
     Bright,
     /// No light test at all (`checkAnyLightMonsterSpawnRules`, and every
     /// water/ambient species whose predicate omits one).
@@ -155,7 +155,7 @@ pub enum LightRule {
 /// What must be directly below the candidate position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ground {
-    /// `Mob.checkMobSpawnRules`: `BlockState.isValidSpawn`, i.e. a sturdy up-face
+    /// `Mob.checkMobSpawnRules`: BlockState's is valid spawn, i.e. a sturdy up-face
     /// that emits less than 14.
     ValidSpawn,
     /// One of these generated block types (a `*_spawnable_on` tag, flattened —
@@ -203,12 +203,12 @@ pub enum Special {
     TropicalFish,
 }
 
-/// One species' whole spawn condition: `SpawnPlacements`' registered placement
+/// One species' whole spawn condition: the spawn placements' registered placement
 /// type plus the `check*SpawnRules` predicate it registered with, reduced to the
 /// checks this server can actually answer.
 #[derive(Debug, Clone, Copy)]
 pub struct SpawnRule {
-    /// `SpawnPlacements` placement type.
+    /// The spawn placements placement type.
     pub placement: Placement,
     /// The predicate's light test.
     pub light: LightRule,
@@ -245,7 +245,7 @@ impl SpawnRule {
         }
     }
 
-    /// `Monster::checkMonsterSpawnRules` — dark enough, valid surface below.
+    /// Monster's check monster spawn rules — dark enough, valid surface below.
     const fn monster() -> Self {
         Self {
             light: LightRule::Dark,
@@ -262,14 +262,14 @@ impl SpawnRule {
         }
     }
 
-    /// `Monster::checkAnyLightMonsterSpawnRules` — no light test (blaze, breeze,
+    /// Monster's check any light monster spawn rules — no light test (blaze, breeze,
     /// zoglin), and the family every difficulty-only Nether predicate reduces to
     /// (magma cube, sulfur cube, zombified piglin).
     const fn any_light_monster() -> Self {
         Self::base()
     }
 
-    /// `Animal::checkAnimalSpawnRules` and its per-species tag variants: bright
+    /// Animal's check animal spawn rules and its per-species tag variants: bright
     /// enough (> 8) and standing on `on`.
     const fn animal(on: &'static [Block]) -> Self {
         Self {
@@ -366,7 +366,7 @@ const BATS_ON: &[Block] = &[
 /// `AXOLOTLS_SPAWNABLE_ON`.
 const AXOLOTLS_ON: &[Block] = &[Block::Clay];
 
-/// `SpawnPlacements`' registration for every species the bundled overworld
+/// The spawn placements' registration for every species the bundled overworld
 /// and Nether biome spawn lists can name, keyed by path (no `minecraft:`).
 ///
 /// Sorted so [`spawn_rule`] can binary-search it, and so a duplicate is a visible
@@ -696,7 +696,7 @@ pub struct NaturalSpawner {
     world: Option<std::sync::Arc<ChunkWorld>>,
     /// The **world generation seed**, which is a different number from the
     /// spawn-RNG seed `new` takes and is used for exactly one thing:
-    /// `WorldgenRandom.seedSlimeChunk`. See [`with_world_seed`](Self::with_world_seed).
+    /// WorldgenRandom's seed slime chunk. See [`with_world_seed`](Self::with_world_seed).
     world_seed: i64,
     /// The world clock for sky darkening and the surface-slime moon phase.
     day_time: i64,
@@ -738,7 +738,7 @@ impl NaturalSpawner {
             world: None,
             world_seed: 0,
             day_time: 0,
-            // `LevelSettings.DEFAULT`'s difficulty, matching
+            // The level settings's default's difficulty, matching
             // `crate::world_state::WorldState`'s own default, so a spawner nobody
             // sets it on behaves exactly as it did before the guard existed.
             difficulty: Difficulty::Normal,
@@ -749,7 +749,7 @@ impl NaturalSpawner {
     }
 
     /// Records the **world generation** seed, which is what
-    /// `WorldgenRandom.seedSlimeChunk` mixes and therefore what decides which
+    /// WorldgenRandom's seed slime chunk mixes and therefore what decides which
     /// chunks are slime chunks.
     ///
     /// Separate from `new`'s `seed` on purpose. That one seeds the spawn RNG
@@ -780,8 +780,8 @@ impl NaturalSpawner {
     }
 
     /// Sets the world difficulty, which decides whether a candidate species may be
-    /// proposed at all — vanilla's `SpawnPlacements.checkSpawnRules`, whose *first*
-    /// statement is `!type.isAllowedInPeaceful() && level.getDifficulty() ==
+    /// proposed at all — vanilla's spawn placements's check spawn rules, whose *first*
+    /// statement is `!type.is_allowed_in_peaceful() && level.get_difficulty() ==
     /// PEACEFUL → false`.
     ///
     /// # Why refusing at spawn time is not redundant with the peaceful despawn
@@ -1063,9 +1063,9 @@ impl NaturalSpawner {
 
     /// The moon-phase `SURFACE_SLIME_SPAWN_CHANCE` at the current `day_time`.
     ///
-    /// Vanilla's own `EnvironmentAttributes.SURFACE_SLIME_SPAWN_CHANCE`
+    /// Vanilla's own environment attributes's surface slime spawn chance
     /// defaults to **`0.0`** and is raised by exactly one modifier track:
-    /// vanilla's own moon timeline, a `FloatModifier.MAXIMUM`
+    /// vanilla's own moon timeline, a float modifier's maximum
     /// keyframed `CONSTANT` (so a step function, not a ramp) at each phase start to
     /// `MOON_BRIGHTNESS_PER_PHASE[phase] * 0.5`. `max(0.0, that)` is `that`, so the
     /// whole attribute reduces to this expression.
@@ -1078,7 +1078,7 @@ impl NaturalSpawner {
     #[must_use]
     fn surface_slime_spawn_chance(&self) -> f32 {
         // `MoonPhase.PHASE_LENGTH` is 24000 and `MoonPhase.COUNT` is 8; the
-        // timeline's period is `24000 * COUNT` and each phase's `startTick()` is
+        // timeline's period is `24000 * COUNT` and each phase's start tick is
         // `index * 24000`.
         let phase = self.day_time.div_euclid(24_000).rem_euclid(8) as usize;
         MOON_BRIGHTNESS_PER_PHASE[phase] * 0.5
@@ -1104,9 +1104,9 @@ impl NaturalSpawner {
     /// valid spawn surface" — already enforced by the row's
     /// [`Ground::ValidSpawn`], so it is not repeated here.
     ///
-    /// The two omitted clauses: `level.getDifficulty() != PEACEFUL` (the tick loop
+    /// The two omitted clauses: `level.get_difficulty() != PEACEFUL` (the tick loop
     /// gates the whole cycle, and `remove_monsters` evicts anything that slips
-    /// through — see the module doc) and the `EntitySpawnReason.isSpawner` early
+    /// through — see the module doc) and the entity spawn reason's is spawner early
     /// return, which cannot apply to a natural spawn.
     fn slime_permits(&mut self, x: i32, y: i32, z: i32, brightness: u8) -> bool {
         let surface_band = y > 50 && y < 70;
@@ -1143,7 +1143,7 @@ impl NaturalSpawner {
     }
 
     /// One weighted pick out of `category`'s list for the biome at `(x, y, z)`,
-    /// drawing exactly once from the RNG — vanilla's `WeightedList.getRandom`.
+    /// drawing exactly once from the RNG — vanilla's WeightedList's get random.
     fn pick_species(
         &mut self,
         category: MobCategory,
@@ -1219,7 +1219,7 @@ impl NaturalSpawner {
 }
 
 impl SpawnCandidateSource for NaturalSpawner {
-    /// Vanilla `NaturalSpawner.spawnCategoryForChunk` for one chunk and one
+    /// Vanilla NaturalSpawner's spawn category for chunk for one chunk and one
     /// category, returning the whole group it produced.
     ///
     /// The draw order is vanilla's, in vanilla's sequence: the start position,
@@ -1235,7 +1235,7 @@ impl SpawnCandidateSource for NaturalSpawner {
             return out;
         };
         let (sx, sy, sz) = start;
-        // `if (!state.isRedstoneConductor(...))` — a spawn never starts inside a
+        // `if (!state.is_redstone_conductor(...))` — a spawn never starts inside a
         // full solid.
         if is_full_solid_id(world.block_state_id(sx, sy, sz)) {
             return out;
@@ -1296,7 +1296,7 @@ impl SpawnCandidateSource for NaturalSpawner {
                     }
                 }
 
-                // `SpawnPlacements.checkSpawnRules`' first statement, ahead of the
+                // The spawn placements's check spawn rules' first statement, ahead of the
                 // rule's own predicate for the same reason it is first there: the
                 // predicate draws from the RNG (light brightness, the per-species
                 // chance), and vanilla's peaceful refusal happens before any of that.

@@ -991,7 +991,7 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// # Why this cannot be computed by the caller
     ///
     /// The `minecraft:tool` component is only *sometimes* on the wire. A
-    /// clientbound stack carries a `DataComponentPatch` — the delta from the
+    /// clientbound stack carries a component patch — the delta from the
     /// item's built-in prototype — and a pickaxe's `minecraft:tool` lives in
     /// that prototype, so an ordinary pickaxe arrives with
     /// an empty patch and [`ItemComponents::tool`] is

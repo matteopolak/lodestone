@@ -24,7 +24,7 @@
 //!
 //! [`cost_item_stack`] resolves a [`lodestone_model::event::MerchantOffer`]'s
 //! raw `(item registry id, count)` cost pair into a displayable
-//! [`ItemStack`] — the wire carries a registry id, not a name (an `ItemCost`
+//! [`ItemStack`] — the wire carries a registry id, not a name (an item cost
 //! has no component data to build a real stack from), so this is the one
 //! place in the shell that reaches into `lodestone-data`'s generated
 //! protocol-776 item table rather than reading an already-resolved

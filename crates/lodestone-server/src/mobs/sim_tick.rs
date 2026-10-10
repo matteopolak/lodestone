@@ -1124,7 +1124,7 @@ impl<'w> MobSim<'w> {
     /// vanilla's own generic living-entity "push entities" step (queries
     /// pushable neighbours,
     /// then pushes each in turn), called near the end of
-    /// vanilla's own generic living-entity per-tick base update, after that tick's own movement has already
+    /// vanilla's generic living-entity per-tick base update, after that tick's movement has already
     /// been applied — the same ordering `tick_with_terrain` gives this call,
     /// right after the per-mob loop that runs `m.mob.tick(...)`.
     ///

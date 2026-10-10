@@ -323,8 +323,8 @@ fn resolve(
 
     // Leaves, rails (all four) and barrier gained a `waterlogged` property
     // after 1.16.5. Confirmed against the decompiled 26.2 source
-    // (`LeavesBlock`/`BaseRailBlock`/`BarrierBlock` all
-    // `registerDefaultState(...WATERLOGGED, false)`): every one of these
+    // (the leaves, base-rail and barrier blocks all
+    // register default state): every one of these
     // blocks is unambiguously not waterlogged in 1.16.5, because the concept
     // did not exist for them yet — not "unknown, assume false". Same
     // justification `lodestone_canonical::canonical::resolve_canonical`

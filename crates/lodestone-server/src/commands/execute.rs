@@ -311,7 +311,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     register_summon(registrar, execute);
 }
 
-/// `literal("run").redirect(dispatcher.getRoot())` — no modifier, so the
+/// `literal("run").redirect(dispatcher.get_root())` — no modifier, so the
 /// current source set passes through unchanged into a full re-parse of the
 /// whole tree. See this module's doc for why that alone is what makes
 /// `execute as Steve run kill` affect Steve.
@@ -561,7 +561,7 @@ fn register_rotated(registrar: &mut Registrar, execute: NodeId) {
     registrar.redirect(rot_node, execute);
 
     // `rotated as <targets>` — `.fork(execute, c -> byAsRot(c))`, copying the
-    // target's own rotation wholesale (`entity.getRotationVector()`), unlike
+    // target's own rotation wholesale (entity's get rotation vector), unlike
     // the `<rotation>` form above which resolves `~`-relative deltas against
     // the *base* source's rotation.
     let as_lit = registrar.literal(rotated, "as");
@@ -589,7 +589,7 @@ fn register_facing(registrar: &mut Registrar, execute: NodeId) {
 
     // `facing <pos>` — `.redirect(execute, c -> source.facing(pos))`. `<pos>`
     // itself resolves against the plain source position (`Coordinates
-    // .getPosition(source)`, never anchor-adjusted); only the *from* point of
+    // .get_position(source)`, never anchor-adjusted); only the *from* point of
     // the facing computation uses the source's own anchor.
     let (pos_node, pos_key) = registrar.arg(facing, "pos", Vec3Arg::new());
     registrar.modifier(pos_node, false, move |ctx, sources, _parsed| {

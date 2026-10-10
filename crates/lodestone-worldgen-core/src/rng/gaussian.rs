@@ -1,4 +1,4 @@
-//! Marsaglia polar Gaussian, matching vanilla's `MarsagliaPolarGaussian`.
+//! Marsaglia polar Gaussian, as the game implements it.
 //!
 //! Vanilla caches the second value of each generated pair, so the draw pattern
 //! (and therefore which underlying `nextDouble`s are consumed on which call)

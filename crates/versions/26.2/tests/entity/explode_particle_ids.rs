@@ -7,7 +7,7 @@
 //! rejected with *"unmodeled explosionParticle registry id 34"*. The guard was
 //! keyed on the two ids we draw rather than on the question that actually
 //! matters — **does this particle's stream codec read any further bytes** —
-//! and 103 of the 125 registered types are `SimpleParticleType`s that read
+//! and 103 of the 125 registered types are simple particle types that read
 //! none, so the allowlist rejected the large majority of legal packets.
 //!
 //! The discriminating pair below is therefore a *simple* id we never send (34)
@@ -26,7 +26,7 @@ const GUST_EMITTER_SMALL: i32 = 34;
 /// `minecraft:dust` — carries an RGB colour and a scale after its id.
 const DUST: i32 = 21;
 
-/// A complete `ClientboundExplodePacket` payload whose `explosionParticle` is
+/// A complete explode-packet payload whose explosion particle is
 /// `particle_id` followed by `particle_args`, with an inline (holder id 0) sound
 /// so the test depends on no registry index.
 fn explode_payload(particle_id: i32, particle_args: &[u8]) -> Vec<u8> {

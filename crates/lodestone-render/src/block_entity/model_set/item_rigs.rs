@@ -179,7 +179,7 @@ pub fn copper_golem_statue_oxidation_from_item_path(
 }
 
 /// [`decorated_pot_item_rig`]'s result: five opaque draws sharing one
-/// placement, in vanilla's own decorated-pot renderer's own submission order.
+/// placement, in vanilla's decorated-pot renderer's submission order.
 ///
 /// Five rather than two (a banner) or one (a shield) because the thing that
 /// varies here is the **diffuse sheet per quad**, not a tint over one mesh —
@@ -282,7 +282,7 @@ pub fn decorated_pot_item_rig(
 /// the return type's meaning, and a separate entry point is how that is said.
 ///
 /// This mirrors vanilla more closely than folding it in would: every one of
-/// these renderers bakes out of `context.entityModelSet()`, and which corpus a
+/// these renderers bakes out of context's entity model set, and which corpus a
 /// rig happens to live in on our side is our own storage decision, not a
 /// statement about the item.
 ///

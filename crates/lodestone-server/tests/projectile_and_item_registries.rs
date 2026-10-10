@@ -38,9 +38,9 @@ fn rk(s: &str) -> ResourceKey {
     ResourceKey::from_str(s).expect("valid resource key")
 }
 
-/// Vanilla's own `AbstractArrow.tick`: in air, **move -> drag
-/// (`AbstractArrow.getAirDrag` = `0.99`) -> gravity**
-/// (`AbstractArrow.getDefaultGravity` = `0.05`). `Projectile::arrow` already encodes this order and
+/// Vanilla's own abstract arrow's tick: in air, **move -> drag
+/// (the abstract arrow's get air drag = `0.99`) -> gravity**
+/// (the abstract arrow's get default gravity = `0.05`). `Projectile::arrow` already encodes this order and
 /// these constants (that is `lodestone-entity`'s own, already-verified half);
 /// this test's job is only to prove `MobSim` — the thing a real server tick
 /// loop owns — actually advances it, by predicting the exact position 10
@@ -94,7 +94,7 @@ fn mobsim_tick_advances_a_registered_projectile_to_the_exact_predicted_position(
     assert!(got.x > start.x, "it must have moved forward");
 }
 
-/// `ThrowableProjectile.tick`:
+/// The throwable projectile's tick:
 /// **gravity (`0.03`) -> drag (`0.99` air) -> move**, the opposite order and
 /// different constants from the arrow family above — the two must not
 /// converge to the same trajectory from the same start.
@@ -156,10 +156,10 @@ fn remove_projectile_stops_further_ticking_and_drops_wire_metadata() {
     );
 }
 
-/// `ItemEntity.tick` (pickup delay counts down, stops at the
+/// The item entity's tick (pickup delay counts down, stops at the
 /// `32767` never-pickup sentinel it is not here; age counts
 /// up unless the `-32768` infinite sentinel). `ItemLifecycle::newly_dropped`
-/// starts at the vanilla `ItemEntity.setDefaultPickUpDelay` value of `10`,
+/// starts at the vanilla item entity's set default pick up delay value of `10`,
 /// so after exactly 10 ticks pickup delay must
 /// read `0` and age must read `10` — an exact prediction, not "it changed".
 #[test]
@@ -189,7 +189,7 @@ fn mobsim_tick_advances_a_registered_item_lifecycle_to_the_exact_predicted_count
     assert!(after.can_be_picked_up());
 }
 
-/// `ItemEntity.tick`: `this.age >= 6000` discards the entity. Driven
+/// The item entity's tick: `this.age >= 6000` discards the entity. Driven
 /// exclusively through `MobSim::tick`/`item_lifecycle`/`item_count` — never
 /// through `ItemEntityRegistry::tick` directly — so a regression that
 /// un-wires `MobSim::tick` from `self.items.tick()` fails this, not just the
@@ -281,7 +281,7 @@ fn snapshots_include_projectiles_and_items_with_their_own_identity_and_motion() 
     //
     // `EntitySnapshot::entity_type` is an *entity* type key, and a dropped item's
     // is `minecraft:item` — the stack's own identity travels as entity metadata
-    // (`ItemEntity.DATA_ITEM`), not in this field. Setting it to the item key
+    // (the item entity's data item), not in this field. Setting it to the item key
     // meant `v770`'s `encode_add_entity_body` called
     // `entity_type_id("minecraft:diamond")`, which misses because that is not an
     // entity type, and its `.unwrap_or(0)` resolved the miss to network entity

@@ -158,8 +158,8 @@ pub fn other_door_half_pos(pos: BlockPos, state: StateId) -> Option<BlockPos> {
 
 /// The real has-neighbor-signal check as the three
 /// real neighbor-changed hook bodies read it: the best neighbour signal is positive.
-/// For a door, both halves are checked (`hasNeighborSignal(pos) ||
-/// hasNeighborSignal(otherHalf)`) — the "respond to power at either half"
+/// For a door, both halves are checked (`has_neighbor_signal(pos) ||
+/// has_neighbor_signal(otherHalf)`) — the "respond to power at either half"
 /// property this module models; trapdoor/fence gate check only the one
 /// position.
 #[must_use]
@@ -359,8 +359,8 @@ mod tests {
 
     /// The two-high door power check, end to end: a source adjacent to the
     /// *bottom* half must power the door, and a source adjacent to the *top*
-    /// half must power it too — vanilla's `hasNeighborSignal(pos) ||
-    /// hasNeighborSignal(otherHalf)`.
+    /// half must power it too — vanilla's `has_neighbor_signal(pos) ||
+    /// has_neighbor_signal(otherHalf)`.
     #[test]
     fn a_door_powers_from_a_signal_adjacent_to_either_half() {
         let bottom = pos(3, 5, 3);

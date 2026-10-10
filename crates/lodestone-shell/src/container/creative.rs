@@ -1,14 +1,14 @@
 //! The creative-inventory screen: tab strip, item grid, scrollbar,
 //! search.
 //!
-//! Vanilla's `CreativeModeInventoryScreen`, whose contents come from
+//! Vanilla's creative mode inventory screen, whose contents come from
 //! [`super::creative_items::CREATIVE_TABS`] — the hand-transcribed
 //! vanilla creative-tab declarations table that landed ahead of this screen.
 //!
 //! # Why this is not a `MenuKind`
 //!
-//! Vanilla's creative screen is backed by `ItemPickerMenu`, a **client-only**
-//! `AbstractContainerMenu` with no server container behind it, and
+//! Vanilla's creative screen is backed by the item picker menu, a **client-only**
+//! The abstract container menu with no server container behind it, and
 //! `lodestone-game`'s own `menu.rs` says plainly that `MenuKind` must not grow.
 //! So this module owns its own layout, hit test and geometry rather than
 //! extending [`super::layout::slot_layout`]. It reuses everything below that
@@ -33,7 +33,7 @@
 //!   painted slot is then a plain `PICKUP` of that slot, so a click behaves identically
 //!   and only a drag *across several* slots differs. This screen acts on press.
 //! - **The `hotbar` tab is empty.** Vanilla fills it from saved hotbars on disk
-//!   (`HotbarManager`), which this client has no store for. It draws its
+//!   (the hotbar manager), which this client has no store for. It draws its
 //!   background, tab strip and the player's live hotbar row like every other
 //!   tab, and its grid is honestly blank rather than showing something invented.
 //! - **No item tooltips carry the tab-membership lines** vanilla's
@@ -77,7 +77,7 @@ pub const CREATIVE_COLS: usize = 9;
 /// The 45 cells one page of the grid shows.
 pub const CREATIVE_PAGE: usize = CREATIVE_ROWS * CREATIVE_COLS;
 
-/// `new CustomCreativeSlot(CONTAINER, y * 9 + x, 9 + x * 18, 18 + y * 18)`
+/// `new custom creative slot(CONTAINER, y * 9 + x, 9 + x * 18, 18 + y * 18)`
 /// (`:888`).
 const GRID_X0: f32 = 9.0;
 /// See [`GRID_X0`].
@@ -85,7 +85,7 @@ const GRID_Y0: f32 = 18.0;
 /// The slot pitch every container screen in the game shares.
 const SLOT: f32 = 18.0;
 
-/// `addInventoryHotbarSlots(inventory, 9, 112)` (`:892`).
+/// add inventory hotbar slots (`:892`).
 const HOTBAR_Y: f32 = 112.0;
 
 /// `insideScrollbar` (`:650-658`): the track is `(175, 18)` to `(189, 130)`.
@@ -96,7 +96,7 @@ const SCROLL_Y: f32 = 18.0;
 const SCROLL_W: f32 = 14.0;
 /// See [`SCROLL_X`].
 const SCROLL_H: f32 = 112.0;
-/// `blitSprite(..., xscr, yscr + (int)((yscr2 - yscr - 17) * scrollOffs), 12, 15)`
+/// blit sprite
 /// (`:753`). The thumb is 15 tall but travels `SCROLL_H - 17`, so it stops 2 px
 /// short of the track's bottom edge — vanilla's own arithmetic, kept literal.
 const THUMB_W: f32 = 12.0;
@@ -137,9 +137,9 @@ const TAB_ICON_DX: f32 = 5.0;
 /// See [`TAB_ICON_DX`].
 const TAB_ICON_DY: f32 = 8.0;
 
-/// `extractLabels`: `graphics.text(font, selectedTab.getDisplayName(), 8, 6,
+/// `extractLabels`: `graphics.text(font, selectedTab.get_display_name(), 8, 6,
 /// -12566464, false)` (`:483`) — `0xFF404040`, dark grey, unshadowed, and only
-/// when the tab's `showTitle()` is set.
+/// when the tab's show title is set.
 const TITLE_X: f32 = 8.0;
 /// See [`TITLE_X`].
 const TITLE_Y: f32 = 6.0;
@@ -215,20 +215,20 @@ pub enum CreativeTabKind {
 }
 
 impl CreativeTabKind {
-    /// `tab.canScroll()` — only `Type.INVENTORY` calls `noScrollBar()`.
+    /// tab's can scroll — only `Type.INVENTORY` calls no scroll bar.
     #[must_use]
     pub fn scrolls(self) -> bool {
         self != Self::Inventory
     }
 
-    /// `tab.showTitle()` — only the inventory tab calls `hideTitle()`.
+    /// tab's show title — only the inventory tab calls hide title.
     #[must_use]
     pub fn shows_title(self) -> bool {
         self != Self::Inventory
     }
 
     /// The loose `textures/gui/container/creative_inventory/*.png` sheet this
-    /// tab's background blits from — `tab.getBackgroundTexture()`.
+    /// tab's background blits from — tab's get background texture.
     #[must_use]
     pub fn background(self) -> CreativeBackground {
         match self {
@@ -257,7 +257,7 @@ pub enum CreativeBackground {
 /// Keyed on the id rather than on a new field in
 /// [`CreativeTab`](super::creative_items::CreativeTab) so the transcribed table
 /// needs no edit: the four special ids are fixed in 26.2 and named literally in
-/// `CreativeModeTabs.bootstrap`'s own `.type(...)` calls.
+/// The creative mode tabs's bootstrap's own `.type(...)` calls.
 #[must_use]
 pub fn creative_tab_kind(index: usize) -> CreativeTabKind {
     match CREATIVE_TABS.get(index).map(|t| t.id) {
@@ -281,9 +281,9 @@ pub fn creative_tab_title_key(index: usize) -> Option<&'static str> {
     CREATIVE_TABS.get(index).map(|t| t.title_key)
 }
 
-/// `tab.isAlignedRight()`.
+/// tab's is aligned right.
 ///
-/// Derived from the column rather than stored: in 26.2 `alignedRight()` is
+/// Derived from the column rather than stored: in 26.2 aligned right is
 /// called on exactly the four tabs in columns 5 and 6 (vanilla's own creative-tab
 /// declarations), both rows. Re-check this against a newer
 /// version of those declarations if the strip ever grows an eighth column.
@@ -292,7 +292,7 @@ fn aligned_right(tab: &CreativeTab) -> bool {
 }
 
 /// The default tab a freshly opened screen shows — vanilla's
-/// `selectedTab = BUILDING_BLOCKS` (`CreativeModeTabs.getDefaultTab`).
+/// `selectedTab = BUILDING_BLOCKS` (the creative mode tabs's get default tab).
 pub const CREATIVE_DEFAULT_TAB: usize = 0;
 
 /// Persisted creative-screen UI state.
@@ -381,7 +381,7 @@ pub fn row_for_scroll(scroll: f32, item_count: usize) -> usize {
 /// Every item id the tab at `index` shows, in vanilla's own registration order.
 ///
 /// The search tab is the union of every other tab's items in tab order, deduped
-/// (vanilla's `ItemStackLinkedSet` does the same), filtered by `search` as a
+/// (vanilla's item stack linked set does the same), filtered by `search` as a
 /// case-insensitive substring of the id's path. Vanilla matches on the item's
 /// *display name*; the path is what this client can resolve without the language
 /// table, and `search.contains('#')`-style tag queries are not modelled.
@@ -565,7 +565,7 @@ pub fn creative_layout(
     }
 }
 
-/// The inventory tab's own slot table — `selectTab`'s `SlotWrapper` loop
+/// The inventory tab's own slot table — `selectTab`'s slot wrapper loop
 /// (`:568-597`), which re-places the *player inventory* menu's slots into this
 /// narrower panel.
 ///
@@ -795,7 +795,7 @@ pub fn creative_geometry(
 
     // `extractSlot`'s `if (itemStack.isEmpty() && slot.isActive())` empty-slot
     // placeholders — the helmet/chestplate/leggings/boots/shield silhouettes. The
-    // creative screen reaches these through `super.extractBackground`, and its
+    // creative screen reaches these through super's extract background, and its
     // inventory tab is the one tab that shows the slots that declare them. The id
     // comes off `Slot::no_item_icon`, so this loop and `GUI_SPRITES` (which stitches
     // exactly those five) agree by construction rather than by two transcriptions.
@@ -904,7 +904,7 @@ pub fn creative_geometry(
     // ---- the carried stratum ----
     //
     // The cursor stack, above every slot and below the tooltip. It is the shared
-    // `player.inventoryMenu` cursor: vanilla's `ItemPickerMenu.getCarried` delegates
+    // `player.inventoryMenu` cursor: vanilla's item picker menu's get carried delegates
     // there, so this screen and the survival inventory screen show one cursor, not two.
     //
     // `view.cursor` is physical viewport space and this builder draws in the logical
@@ -991,10 +991,10 @@ pub fn creative_geometry(
         //
         // This field used to be `None` with a comment asserting that vanilla's
         // creative screen never calls `extractEntityInInventoryFollowsMouse`. It
-        // does: `CreativeModeInventoryScreen.extractBackground` ends with exactly
+        // does: the creative mode inventory screen's extract background ends with exactly
         // that call, gated on `selectedTab.getType() == Type.INVENTORY`, into a
         // 32x43 recess at `(+73, +6)` at scale 20 — a different rect *and* a
-        // different scale from `InventoryScreen`'s, which is why
+        // different scale from the inventory screen's, which is why
         // `PlayerAvatar::creative` exists rather than reusing `new`.
         player_avatar: (kind == CreativeTabKind::Inventory).then(|| {
             super::PlayerAvatar::creative(layout.panel.x, layout.panel.y, cursor_logical)
@@ -1146,7 +1146,7 @@ fn authored_enchantment_for(base: &str, suffix: &str, model: &mut lodestone_mode
 #[derive(Debug, Clone, PartialEq)]
 pub enum CreativeEffect {
     /// Replace the cursor stack. Client-only — there is no wire verb for the cursor,
-    /// and vanilla's `ItemPickerMenu.setCarried` delegates straight to
+    /// and vanilla's item picker menu's set carried delegates straight to
     /// `player.inventoryMenu`, so the creative screen and the survival inventory
     /// screen share one cursor rather than each having their own.
     SetCarried(Option<ItemStack>),
@@ -1164,7 +1164,7 @@ pub enum CreativeEffect {
     /// `SET_CREATIVE_MODE_SLOT` with vanilla's `-1` "drop" slot.
     Drop(ItemStack),
     /// Empty every player-inventory slot. Vanilla's shift-click on the inventory
-    /// tab's trash slot, which loops `inventoryMenu.getItems()` setting each to empty.
+    /// tab's trash slot, which loops inventory menu's get items setting each to empty.
     ClearInventory,
 }
 
@@ -1172,7 +1172,7 @@ pub enum CreativeEffect {
 /// **window-0 menu index**.
 ///
 /// Vanilla's `buttonNum` here is a *native inventory* index — `0..=8` is the hotbar
-/// and `40` is the off-hand, which is what `AbstractContainerScreen`'s hotbar-key and
+/// and `40` is the off-hand, which is what abstract container screen's hotbar-key and
 /// off-hand-key handlers pass. Window 0 puts the hotbar at menu `36..=44` and the
 /// off-hand at `45`, so the two spaces differ by 36 for the hotbar and are unrelated
 /// for the off-hand. Getting this mapping wrong swaps into a *main inventory* slot and
@@ -1186,7 +1186,7 @@ fn swap_target_menu_index(button: i32) -> Option<usize> {
     }
 }
 
-/// `stack` at its own maximum count — vanilla's `copyWithCount(getMaxStackSize())`.
+/// `stack` at its own maximum count — vanilla's copy with count.
 ///
 /// **Not 64.** The limit is the item's own, which [`stack_of`] has already attached
 /// from the prototype census: a bucket is 1, an ender pearl 16, a snowball 16.
@@ -1203,7 +1203,7 @@ fn with_count(stack: &ItemStack, count: i32) -> ItemStack {
 }
 
 /// A click on one of the 45 **item-list** cells — a transcription of
-/// `CreativeModeInventoryScreen.slotClicked`'s `slot.container == CONTAINER` branch.
+/// The creative mode inventory screen's slot clicked's `slot.container == CONTAINER` branch.
 ///
 /// `clicked` is the list entry under the pointer (`None` on a cell past the end of the
 /// list) and `carried` is the shared cursor. The list is an infinite source, so nothing
@@ -1216,7 +1216,7 @@ fn with_count(stack: &ItemStack, count: i32) -> ItemStack {
 /// (`CreativeModeTab`'s output builds `new ItemStack(item)`), so **one left-click gives
 /// one item** — clicking the same entry again `grow(1)`s the cursor. It is
 /// `QUICK_MOVE` (shift), `CLONE` (middle / pick-item) and `SWAP` (the hotbar number
-/// keys) that yield `getMaxStackSize()`. "Click gives you a full stack" is the
+/// keys) that yield get max stack size. "Click gives you a full stack" is the
 /// plausible wrong reading; the record is explicit and the two disagree on the very
 /// first click.
 #[must_use]
@@ -1228,7 +1228,7 @@ pub fn creative_item_list_click(
 ) -> Vec<CreativeEffect> {
     let quick = input == ContainerInput::QuickMove;
     match input {
-        // `inventory.setItem(buttonNum, clicked.copyWithCount(clicked.getMaxStackSize()))`
+        // `inventory.set_item(buttonNum, clicked.copy_with_count(clicked.get_max_stack_size()))`
         // then `return` — the cursor is untouched and no exchange happens, unlike a
         // swap against a real container slot.
         ContainerInput::Swap => match (clicked, swap_target_menu_index(button)) {
@@ -1238,14 +1238,14 @@ pub fn creative_item_list_click(
             }],
             _ => Vec::new(),
         },
-        // `if (carried.isEmpty() && slot.hasItem()) setCarried(copyWithCount(max))`.
+        // `if (carried.isEmpty() && slot.hasItem()) set_carried(copy_with_count(max))`.
         // A loaded cursor makes this a no-op, which is why middle-clicking with
         // something in hand does nothing rather than swapping.
         ContainerInput::Clone => match (carried, clicked) {
             (None, Some(clicked)) => vec![CreativeEffect::SetCarried(Some(full_stack(clicked)))],
             _ => Vec::new(),
         },
-        // `copyWithCount(buttonNum == 0 ? 1 : maxStackSize)`, dropped into the world.
+        // copy with count, dropped into the world.
         // The cursor is not involved at all.
         ContainerInput::Throw => match clicked {
             Some(clicked) => {
@@ -1255,7 +1255,7 @@ pub fn creative_item_list_click(
             None => Vec::new(),
         },
         // `PICKUP`, `QUICK_MOVE`, and anything else that reaches the branch.
-        // `QUICK_CRAFT` never does: `ItemPickerMenu.canDragTo` refuses every
+        // `QUICK_CRAFT` never does: the item picker menu's can drag to refuses every
         // `CONTAINER` slot, so a drag across the item list distributes nothing.
         _ => match (carried, clicked) {
             (Some(carried), Some(clicked))
@@ -1570,15 +1570,15 @@ mod tests {
     /// The three stack limits every count assertion below is measured against, read off
     /// vanilla's own item-registration declarations rather than assumed.
     ///
-    /// **`minecraft:bucket` stacks to 16 in 26.2**, not 1 — `registerItem(ItemIds.BUCKET,
-    /// … new Item.Properties().stacksTo(16))`. It is `water_bucket`/`lava_bucket`/
-    /// `milk_bucket` that are `stacksTo(1)`. Reaching for "a bucket is unstackable"
+    /// **`minecraft:bucket` stacks to 16 in 26.2**, not 1 — `register item(the item ids's bucket,
+    /// … new Properties's stacks to)`. It is `water_bucket`/`lava_bucket`/
+    /// `milk_bucket` that are stacks to. Reaching for "a bucket is unstackable"
     /// would have been the plausible-round-number failure this repo's own rules warn
     /// about, in the direction that reads as a code bug.
     const STONE_MAX: i32 = 64;
-    /// `SNOWBALL = registerItem(ItemIds.SNOWBALL, SnowballItem::new, …stacksTo(16))`.
+    /// `SNOWBALL = register_item(the item ids's snowball, the snowball item's new, …stacks_to(16))`.
     const SNOWBALL_MAX: i32 = 16;
-    /// `WATER_BUCKET = registerItem(… .craftRemainder(BUCKET).stacksTo(1))`.
+    /// `WATER_BUCKET = register_item(… .craft_remainder(BUCKET).stacks_to(1))`.
     const WATER_BUCKET_MAX: i32 = 1;
 
     fn list_entry(id: &str) -> ItemStack {
@@ -1601,7 +1601,7 @@ mod tests {
             WATER_BUCKET_MAX
         );
         // The equippable component has to survive too, or no creative armour can enter
-        // an armour slot — `ArmorSlot.mayPlace` is `isEquippableInSlot`.
+        // an armour slot — the armor slot's may place is `isEquippableInSlot`.
         assert!(
             list_entry("minecraft:diamond_helmet")
                 .components()
@@ -1612,8 +1612,8 @@ mod tests {
     }
 
     /// The owner's report: "if i hotkey it, it should make a stack of 64 in that slot,
-    /// not 1". The record is `inventory.setItem(buttonNum, clicked.copyWithCount(
-    /// clicked.getMaxStackSize()))`, so the rule is the *limit*, not 64.
+    /// not 1". The record is `inventory.set_item(buttonNum, clicked.copy_with_count(
+    /// clicked's get max stack size))`, so the rule is the *limit*, not 64.
     ///
     /// Two things are pinned here that fail in different ways: the count, and the slot.
     /// Vanilla's `buttonNum` is a **native** inventory index, and window 0 puts hotbar
@@ -1648,7 +1648,7 @@ mod tests {
 
     /// A plain left-click yields `clicked.getCount()`, and the list holds stacks of one,
     /// so **one** item lands on the cursor and a second click grows it to two. Shift
-    /// yields `getMaxStackSize()`. The two readings differ on the very first click,
+    /// yields get max stack size. The two readings differ on the very first click,
     /// which is why this asserts the count rather than "something was picked up".
     #[test]
     fn left_click_takes_one_and_shift_click_takes_a_full_stack() {
@@ -1715,7 +1715,7 @@ mod tests {
     }
 
     /// Dropping a cursor stack into the item-list area **destroys** it. Real vanilla
-    /// behaviour — the `else if (buttonNum == 0) setCarried(EMPTY)` fall-through — and
+    /// behaviour — the `else if (buttonNum == 0) set_carried(EMPTY)` fall-through — and
     /// not a case to guard against: the item list doubles as the screen's bin.
     #[test]
     fn the_item_list_is_the_bin_for_a_loaded_cursor() {

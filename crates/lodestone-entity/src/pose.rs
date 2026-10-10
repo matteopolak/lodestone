@@ -39,9 +39,9 @@ pub const LIMB_SWING_SMOOTHING: f32 = 0.4;
 pub const BABY_LIMB_SCALE: f32 = 3.0;
 /// The default position scale for adults.
 pub const ADULT_LIMB_SCALE: f32 = 1.0;
-/// Maximum head yaw offset from the body, in degrees (`Mob.getMaxHeadYRot`).
+/// Maximum head yaw offset from the body, in degrees (Mob's get max head y rot).
 pub const MAX_HEAD_YAW: f32 = 75.0;
-/// Maximum head pitch, in degrees (`Mob.getMaxHeadXRot`).
+/// Maximum head pitch, in degrees (Mob's get max head x rot).
 pub const MAX_HEAD_PITCH: f32 = 40.0;
 /// Default arm-swing duration in ticks for an empty hand.
 ///
@@ -178,7 +178,7 @@ impl WalkAnimation {
 }
 
 /// Clamps a head yaw to within `limit` degrees of the body yaw, mirroring
-/// `Mob.clampHeadRotationToBody`. Returns the clamped absolute head yaw.
+/// Mob's clamp head rotation to body. Returns the clamped absolute head yaw.
 #[must_use]
 pub fn clamp_head_to_body(body_yaw: f32, head_yaw: f32, limit: f32) -> f32 {
     let delta = wrap_degrees(body_yaw - head_yaw);
@@ -187,7 +187,7 @@ pub fn clamp_head_to_body(body_yaw: f32, head_yaw: f32, limit: f32) -> f32 {
 }
 
 /// Interpolates between two angles along the shortest arc, like vanilla's
-/// `Mth.rotLerp`. `partial` is in `0.0..=1.0`; the result is `from` when
+/// Mth's rot lerp. `partial` is in `0.0..=1.0`; the result is `from` when
 /// `partial == 0` and `to` when `partial == 1`, wrapping across ±180°.
 #[must_use]
 pub fn rot_lerp(partial: f32, from: f32, to: f32) -> f32 {

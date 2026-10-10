@@ -280,7 +280,7 @@ const fn armor_modifier_id(slot: EquipmentSlot) -> &'static str {
 pub const BASE_ATTACK_DAMAGE_ID: &str = "base_attack_damage";
 
 /// The published attack-damage modifier amount for a weapon item id, if it is
-/// one — already `attackDamageBaseline + material.attackDamageBonus()`, which is
+/// one — already `attackDamageBaseline + material.attack_damage_bonus()`, which is
 /// the value vanilla actually puts in the component.
 ///
 /// `None` for anything that publishes no attack-damage modifier, which includes

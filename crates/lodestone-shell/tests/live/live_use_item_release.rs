@@ -13,7 +13,7 @@
 //! 2. `Sim::use_item_live` returned without sending anything whenever the
 //!    crosshair was over *any* entity (the common combat case: aiming a bow
 //!    at a mob) or over nothing at all, instead of falling through to the
-//!    generic use-item send vanilla's own `Minecraft.startUseItem` reaches.
+//!    generic use-item send vanilla's own Minecraft's start use item reaches.
 //!
 //! This gate drives the real production path end to end against a real
 //! server: aim a drawn bow at a live (summoned) entity, hold, release, and
@@ -128,9 +128,9 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
     // Give the bow, seeded directly (the selected-slot default is unreliable
     // across joins, the same reasoning `live_dig_place.rs` uses for its
     // placement invariant).
-    // `BowItem.use()` refuses to start a draw at all without ammo in
-    // inventory (`player.getProjectile(itemstack).isEmpty()` and not
-    // creative) — server-side `InteractionResult.FAIL`, no draw, no arrow,
+    // The bow item's use refuses to start a draw at all without ammo in
+    // inventory (get projectile's get projectile and not
+    // creative) — server-side interaction result's fail, no draw, no arrow,
     // regardless of how correct the client's packet sequence is. Give both.
     rcon.cmd("item replace entity @a weapon.mainhand with minecraft:bow");
     rcon.cmd("give @a minecraft:arrow 16");
@@ -237,7 +237,7 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
 
     // **Not** "does an arrow entity still exist": a normal (non-piercing)
     // arrow that hits and damages something is `discard()`ed by
-    // `AbstractArrow.onHitEntity` (vanilla's decompiled abstract-arrow source, 26.2)
+    // The abstract arrow's on hit entity (vanilla's decompiled abstract-arrow source, 26.2)
     // within the same tick it lands, and the pig sits only ~2 blocks away —
     // well under one full tick of flight at a fully-drawn bow's velocity. An
     // arrow-presence poll raced that discard and always lost, which is

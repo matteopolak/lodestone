@@ -3,16 +3,16 @@
 //! Vanilla's own clientbound chunks-biomes packet (confirmed against the
 //! decompiled 26.2 source) carries a VarInt-prefixed
 //! list of `(ChunkPos, byte[])` entries, where each byte array is, per
-//! `vanilla's own chunk biome data's own extract chunk data`, every section's
+//! the chunk-biome extraction, every section's
 //! biome-container encoder output **back to back with no other
 //! framing** — no non-air/fluid counts, no block-state container, just
 //! `section_count` biome containers in ascending section order. `ChunkPos` is
-//! `readChunkPos`/`vanilla's own chunk pos's own pack`: a raw `i64` with `x` in the low 32 bits and
+//! the chunk-position packing: a raw `i64` with `x` in the low 32 bits and
 //! `z` in the high 32, the same layout `forget_level_chunk` (id `0x21` at this
 //! protocol) already unpacks.
 //!
-//! Vanilla's only sender is `vanilla's own chunk map's own resend biomes for chunks`, whose only
-//! caller is `FillBiomeCommand` (`/fillbiome`) — it *updates* a chunk a player
+//! The only sender is the chunk map's biome-resend path, whose only
+//! caller is `/fillbiome` — it *updates* a chunk a player
 //! already has loaded; the client never needs it to *create* one, which is why
 //! [`lodestone_world::World::merge_biomes`] is a no-op for an absent chunk. See
 //! `crates/versions/26.2/src/adapter.rs`'s `CHUNKS_BIOMES` arm.
@@ -40,12 +40,12 @@ fn var_i32(value: i32) -> Vec<u8> {
     out
 }
 
-/// `vanilla's own chunk pos's own pack`: x in the low 32 bits, z in the high 32.
+/// Chunk-position packing: x in the low 32 bits, z in the high 32.
 fn pack_chunk_pos(x: i32, z: i32) -> i64 {
     (i64::from(x) & 0xFFFF_FFFF) | (i64::from(z) << 32)
 }
 
-/// Builds one `ChunkBiomeData` entry's byte array: `section_count` biome
+/// Builds one chunk-biome entry's byte array: `section_count` biome
 /// containers back to back, where section `marked_section` is single-valued
 /// `marked_biome` and every other section is single-valued `default_biome`.
 fn encode_chunk_biome_data(shape: &ChunkShape, marked_section: usize, marked_biome: u32) -> Vec<u8> {
@@ -139,7 +139,7 @@ fn chunks_biomes_overwrites_the_named_section_and_leaves_blocks_untouched() {
 #[test]
 fn chunks_biomes_is_a_noop_for_a_chunk_the_client_does_not_hold() {
     // Vanilla only ever sends this for a chunk a player already has loaded
-    // (`vanilla's own chunk map's own resend biomes for chunks` iterates `getPlayers`), so a chunk we
+    // (the biome-resend path iterates the chunk's tracking players), so a chunk we
     // do not hold must be dropped rather than fabricated from biomes alone —
     // biomes carry no shape (min-Y, section count, palettes) to build one from.
     let shape = ChunkShape::overworld_1_21();

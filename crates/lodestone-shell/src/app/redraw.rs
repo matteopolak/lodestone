@@ -1494,7 +1494,7 @@ impl WindowApp {
         );
         // Cave ambience, the biome/dimension loop and the rain cadence, on the
         // same clock as the music for the same reason — all three are vanilla's
-        // 20 Hz `BiomeAmbientSoundsHandler`/`tickWeatherEffects` bookkeeping, and
+        // 20 Hz biome ambient sounds handler/`tickWeatherEffects` bookkeeping, and
         // `ShellAmbience::advance` derives whole ticks from this instant rather
         // than running once per frame.
         self.sim.tick_ambience(now, weather_state.as_ref());
@@ -1590,7 +1590,7 @@ impl WindowApp {
                         // now keeps rain out of a room or a cave (see
                         // `ShellWeatherProbe`'s doc) — there is deliberately no
                         // camera-level "can I see the sky" gate here any more,
-                        // matching vanilla's own `WeatherEffectRenderer`.
+                        // matching vanilla's own weather effect renderer.
                         handle: self.sim.net().and_then(|n| n.shared_handle().get().cloned()),
                         biome_climates: self.sim.net().map(crate::net::NetClient::shared_biome_climates),
                         // Fresh every frame, by construction — see the field doc.
@@ -1950,7 +1950,7 @@ impl WindowApp {
         // 100-entry limit — `lodestone_game::chat::ChatFeed`'s own cap) so the
         // scroll window and the new-arrival sync below have everything to
         // work with. Closed cannot be scrolled at all (there is no
-        // `ChatScreen` to hold a position while the box is not up), so the
+        // The chat screen to hold a position while the box is not up), so the
         // small fixed fetch from before this feature is untouched and
         // unaffected by anything below.
         // The feed hands back owned spans (the hex-carrying sibling of the
@@ -2020,7 +2020,7 @@ impl WindowApp {
             total: chat_spans_owned.len(),
             new_message_since_scroll: self.chat_input.scroll().new_message_since_scroll(),
         });
-        // Rows, header and footer together — the whole `PlayerTabOverlay` frame.
+        // Rows, header and footer together — the whole player tab overlay frame.
         // Read only while the overlay is up, because it is a world clone.
         let tab_view = self.tab_held.then(|| self.sim.tab_list_view());
         let health = self.sim.health();
@@ -2035,7 +2035,7 @@ impl WindowApp {
         let boss_bars = self.sim.boss_bars();
         // The locator bar's dots, from the exact eye camera the
         // 3-D pass above renders with — vanilla resolves the locator bar
-        // against `gameRenderer.mainCamera()`, not any third-person offset.
+        // against game renderer's main camera, not any third-person offset.
         let locator_dots = self.sim.locator_dots(camera.position, camera.yaw);
         // Two different questions, and they used to share one boolean named
         // `crosshair` — which is why the hotbar vanished behind the pause menu
@@ -2060,7 +2060,7 @@ impl WindowApp {
         // nothing drew a tooltip from it). Gated on `chat_open` the same way
         // `dispatch_chat_click_under_cursor`'s own call site gates clicks —
         // vanilla has no interactive text at all on the passive, fading
-        // closed-chat overlay, only inside the open `ChatScreen`.
+        // closed-chat overlay, only inside the open chat screen.
         //
         // Not routed through `Self::chat_interaction`: that method takes
         // `&self` as a whole and `self.render.as_mut()` is already a live
@@ -2117,7 +2117,7 @@ impl WindowApp {
         // frame is built because the draw borrows it as a slice.
         //
         // `screen_shows_active_effects` is `Hud.extractEffects`' own
-        // `screen() == null || !screen().showsActiveEffects()` guard: with a
+        // `screen() == null || !screen().shows_active_effects()` guard: with a
         // screen up that draws the effects itself, the overlay must not paint,
         // or the top-right icons and the inventory column show the same effects
         // at once. It is resolved here rather than at the old overlay's call
@@ -2385,7 +2385,7 @@ impl WindowApp {
             // reason `menu_type_title_anchor` no longer excludes it. Keyed
             // off `open.menu.special_layout()`, not the wire `menu_type`
             // string: if the server ever sends a `merchant` menu whose size
-            // does not match `MerchantMenu`'s three slots, `Menus::build_menu`
+            // does not match merchant menu's three slots, `Menus::build_menu`
             // has already fallen back to a plain generic container, and this
             // must agree with that fallback rather than re-deriving it.
             let title = if open.menu.special_layout() == Some(lodestone_game::menu::SpecialLayout::Merchant)
@@ -2402,7 +2402,7 @@ impl WindowApp {
             (Some(&open.menu), title)
         } else if self.ui.is_container_open() {
             player_menu = self.sim.player_menu();
-            // **"Crafting"**, not "Inventory". `InventoryScreen`
+            // **"Crafting"**, not "Inventory". The inventory screen
             // passes `translatable("container.crafting")` as its title
             // — it names the 2x2 grid — and the
             // literal `"Inventory"` that used to sit here was wrong twice: wrong
@@ -2469,7 +2469,7 @@ impl WindowApp {
             // The beacon screen's pending primary/secondary power selection
             // (`SetBeaconEffects` remainder).
             // `BeaconSelection::sync` is vanilla's own
-            // `ContainerListener::dataChanged` — it re-derives the local
+            // The container listener's data changed — it re-derives the local
             // selection from `container_data` properties `1`/`2` exactly
             // when that pair changes (menu open, and every successful
             // confirm), and otherwise leaves a pending local click alone.
@@ -2728,7 +2728,7 @@ impl WindowApp {
                         // **One residual divergence, recorded rather than
                         // fixed.** Vanilla's tooltips are deferred
                         // (`setTooltipForNextFrame`) and composited after
-                        // everything, so `recipeBookComponent.extractTooltip`
+                        // everything, so recipe book component's extract tooltip
                         // lands above the carried stack too. Ours rides the tail
                         // of this one geometry blob, which has no tooltip split
                         // marker, so a player *carrying* a stack while hovering a
@@ -2858,7 +2858,7 @@ impl WindowApp {
             }
         }
 
-        // The resource-pack prompt (a server's own `ClientboundResourcePackPushPacket`,
+        // The resource-pack prompt (a server's own resource-pack-push packet,
         // not a menu button) follows the same overlay shape as Death/Paused
         // immediately above, for the same reason: it must not itself stop the
         // world from rendering or the session from ticking. It differs from
@@ -2889,7 +2889,7 @@ impl WindowApp {
         // shows through while this is up.
         //
         // The predicate is `Sim::world_wait`, which is **two** rules and not
-        // one. The terrain half is vanilla's own `LevelLoadTracker`
+        // one. The terrain half is vanilla's own level load tracker
         // readiness rule (the chunk column under the player is loaded); the
         // asset half holds the screen while a server-pushed resource pack is
         // still downloading or has not yet been applied to the block atlas.

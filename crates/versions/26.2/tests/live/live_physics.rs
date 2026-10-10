@@ -35,7 +35,7 @@
 //! misreading (see the `restituteMovementAfterCollisions` near-miss, plan
 //! §12.31). This gate removes that ceiling: the **server itself** is the
 //! authority. Vanilla runs its own movement validation
-//! (`vanilla's own server game packet listener impl's own handle move player`) and, whenever the position
+//! (the move-player handler) and, whenever the position
 //! a client reports disagrees with what the server re-simulates, it sends a
 //! `player_position` (a *corrective teleport*) to snap the client back. So
 //! "we walked for N ticks and received zero corrective teleports" is the server
@@ -48,13 +48,13 @@
 //!    the server's absolute spawn position from the initial (expected)
 //!    `player_position`, ACKing it with `accept_teleportation`.
 //! 2. Sends `player_loaded` so the server actually *validates* our movement.
-//!    (Without it, `hasClientLoaded()` stays false for 60 ticks and the server
+//!    (Without it, has client loaded stays false for 60 ticks and the server
 //!    silently ignores movement instead of validating it — a green result that
 //!    proves nothing. This gate makes the server do the work.)
 //! 3. Drives [`lodestone_physics::tick`] on a synthetic flat-ground
 //!    [`CollisionView`] seeded at the exact spawn Y, walking forward, and sends
 //!    `move_player_pos_rot` at vanilla's own send cadence
-//!    (`lengthSqr(delta) > (2e-4)²` OR `positionReminder >= 20`).
+//!    (`length_sqr(delta) > (2e-4)²` OR `positionReminder >= 20`).
 //! 4. Asserts **zero** corrective `player_position` packets arrive after the
 //!    spawn sync. Any correction is reported with its magnitude — divergence is
 //!    the valuable result, so we surface it rather than hide it.
@@ -197,7 +197,7 @@ async fn accept_teleport(conn: &mut Connection<TcpStream>, id: i32) {
 
 /// Sends a `move_player_pos_rot`: three doubles, yaw+pitch floats, then a flags
 /// byte (bit0 = on_ground, bit1 = horizontal_collision), exactly as vanilla's
-/// `vanilla's own local player's own send position` does when both position and rotation are dirty.
+/// the local player's position-send rule does when both position and rotation are dirty.
 async fn send_move(
     conn: &mut Connection<TcpStream>,
     pos: Vec3d,
@@ -494,7 +494,7 @@ async fn server_does_not_correct_a_walking_player() {
         using_item: None,
     };
 
-    // Vanilla's send-cadence state (vanilla's own local player's own send position).
+    // Vanilla's send-cadence state (the local player's position-send rule).
     let mut last_sent = player.position;
     let mut position_reminder: u32 = 0;
 

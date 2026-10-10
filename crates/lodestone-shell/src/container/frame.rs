@@ -43,7 +43,7 @@ pub struct ContainerFrame<'a> {
     /// inventory screen omits it (its own label-extract routine).
     pub inventory_label: &'a str,
     /// The player's active status effects, as
-    /// `EffectsInInventory` would draw them beside the panel — already sorted,
+    /// The effects in inventory would draw them beside the panel — already sorted,
     /// **translated** and duration-formatted by
     /// [`crate::effects::inventory_rows`].
     ///
@@ -218,7 +218,7 @@ pub struct ContainerFrame<'a> {
     /// checking `window_id` before passing this in, since a `ContainerFrame`
     /// has no window id of its own to compare against. `None` (the default)
     /// draws the bundle tooltip's grid with nothing singled out, matching
-    /// `BundleContents::NO_SELECTED_ITEM_INDEX`. See
+    /// The bundle contents's no selected item index. See
     /// [`with_bundle_selection`](Self::with_bundle_selection) and
     /// `super::tooltip`'s bundle-image drawing.
     pub bundle_selection: Option<crate::container::bundle::BundleSelection>,
@@ -808,7 +808,7 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
 ///
 /// **`merchant` has its own branch below, not a table row.** Two things set it
 /// apart from the "centred" family: its centring formula has a `49` offset
-/// vanilla's own default centring does not (vanilla's own merchant screen:
+/// vanilla's default centring does not (vanilla's merchant screen:
 /// `49 + this.imageWidth / 2 - this.font.width(this.title) / 2`, vs. the
 /// plain `(imageWidth - width) / 2` the furnace family etc. use), and its
 /// *title text itself* is composed from the trader's level

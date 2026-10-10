@@ -99,13 +99,13 @@ pub fn riptide_spin_attack_strength(level: u32) -> f32 {
 /// Vanilla's own "can glide" check, together with the player's own override
 /// for it.
 ///
-/// `!flying && !onGround && !isPassenger && !hasEffect(LEVITATION)` plus "some
+/// `!flying && !onGround && !isPassenger && !has_effect(LEVITATION)` plus "some
 /// equipment slot holds a glider". The last conjunct is **not** physics state —
 /// vanilla walks every equipment slot looking for a glider component — so
 /// the caller resolves it and passes the answer in, the same division of
 /// labour [`apply_riptide`] uses for the enchantment gate.
 ///
-/// This engine has no riding state on [`PlayerState`], so the `!isPassenger()`
+/// This engine has no riding state on [`PlayerState`], so the `!is_passenger()`
 /// conjunct is the caller's too (the ECS driver holds it as a component); it is
 /// vacuous here.
 #[must_use]
@@ -120,8 +120,8 @@ pub fn can_glide(state: &PlayerState, glider_equipped: bool) -> bool {
 /// **client-predicted** start of an elytra glide.
 ///
 /// ```text
-/// if (!this.isFallFlying() && this.canGlide() && !this.isInWater()) {
-///    this.startFallFlying();   // setSharedFlag(7, true)
+/// if (!this's is fall flying && this's can glide && !this's is in water) {
+///    this's start fall flying;   // set shared flag
 ///    return true;
 /// }
 /// ```
@@ -226,7 +226,7 @@ fn block_jump_factor(position: Vec3d, view: &dyn CollisionView) -> f32 {
 /// sneaking player never auto-jumps. The "is moving" check reads the
 /// *input* move-vector, not the actual movement — the detector still fires
 /// for a standing player pressing forward into a step. This engine has no
-/// riding state, so the `!isPassenger()` conjunct is vacuous.
+/// riding state, so the `!is_passenger()` conjunct is vacuous.
 fn can_auto_jump(state: &PlayerState, input: MovementInput, view: &dyn CollisionView) -> bool {
     let (mv_x, mv_y) = normalized_move_vector(input);
     state.auto_jump_enabled

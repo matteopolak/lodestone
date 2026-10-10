@@ -454,8 +454,8 @@ fn baked_quad_sprite_index_names_the_sprite_its_own_uvs_were_baked_against() {
 /// and fails `is_full_cube`'s exactly-six test, and (b) the decal's binary-alpha
 /// sprite drags the whole block's [`RenderLayer`] to `Cutout`. The old
 /// `is_full_cube(quads) && layer == Solid` therefore called a solid dirt block
-/// see-through. Vanilla does not consult textures at all: `BlockBehaviour`'s
-/// `initCache` sets the occlusion shape from `canOcclude`, a `Properties` flag
+/// see-through. Vanilla does not consult textures at all: the block behaviour's
+/// cache setup sets the occlusion shape from a can-occlude property flag
 /// cleared only by `noOcclusion()`/`noCollision()`, and `GRASS_BLOCK`'s properties
 /// call neither.
 ///

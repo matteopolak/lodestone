@@ -29,7 +29,7 @@ pub enum Origin {
     /// as [`Origin::ScreenTop`] for x. Both are Java integer division, hence
     /// both `floor`s (only the y one used to be here).
     TitleTop,
-    /// The top-left of vanilla `PauseScreen`'s **arranged** `GridLayout`:
+    /// The top-left of vanilla pause screen's **arranged** `GridLayout`:
     /// `(floor((w - 212) / 2), floor((h - 166) / 4))`.
     ///
     /// That comes from vanilla's own align-in-rectangle frame-layout helper
@@ -59,7 +59,7 @@ pub enum Origin {
     /// `(floor(w / 2), h)` — bottom-centre, for the footer band of the account
     /// screen (Add Account / Select / Remove / Back) and the multiplayer
     /// screen's seven. Not vanilla-sourced like the others above: nothing in
-    /// `TitleScreen`/`PauseScreen` anchors a widget row to the bottom edge. Since
+    /// `TitleScreen`/pause screen anchors a widget row to the bottom edge. Since
     /// That fix it is where both `HeaderAndFooterLayout` footers are pinned, which is
     /// canvas-independent even though the arranged rects are not — see
     /// [`ACCOUNTS_REF_CANVAS`]. `floor`ed for the same reason as
@@ -72,7 +72,7 @@ pub enum Origin {
     /// screen's one centred line.
     ///
     /// Not vanilla-sourced like the others above: nothing in `TitleScreen`/
-    /// `PauseScreen` anchors a widget to the canvas centre (the loading screens
+    /// The pause screen anchors a widget to the canvas centre (the loading screens
     /// vanilla *does* have centre their text differently — see `loading_frame`'s
     /// doc on why this client's is deliberately simpler). Added for the one
     /// screen whose text should sit at the middle of whatever canvas the
@@ -87,8 +87,8 @@ pub enum Origin {
     /// scrolled**, none of which anything downstream of [`frame_for`] knows —
     /// this enum is precisely the seam where a canvas-dependent term gets to
     /// live, and the scroll rides along with it. The three shapes it covers are
-    /// `OptionsScreen`'s arranged `HeaderAndFooterLayout`, an
-    /// `OptionsSubScreen`'s footer band, and an `OptionsList` row; see
+    /// The options screen's arranged `HeaderAndFooterLayout`, an
+    /// The options sub screen's footer band, and an options list row; see
     /// [`super::options::Placement`].
     Settings(super::options::Placement),
     /// A widget of the Key Binds screen, resolved by
@@ -100,19 +100,19 @@ pub enum Origin {
     /// [`Origin::Settings`]/[`super::options::Placement`] — see
     /// [`super::key_binds`]'s module docs on why this screen's list geometry
     /// (a flat 20 px row height, two right-anchored buttons per row) does not
-    /// fit `OptionsList`'s shape.
+    /// fit options list's shape.
     KeyBinds(super::key_binds::KeyPlacement),
     /// A widget of the Social Interactions screen, resolved by
     /// [`super::social::placement_anchor`]. A third data-carrying variant for
     /// the same reason [`Origin::KeyBinds`] is one: this screen's rows are not
-    /// `OptionsList` geometry either (a name label plus two right-anchored
-    /// buttons, not `OptionsList`'s two-column captions).
+    /// The options list geometry either (a name label plus two right-anchored
+    /// buttons, not the options list's two-column captions).
     Social(super::social::SocialPlacement),
     /// A widget of the Language screen, resolved by
     /// [`super::language::placement_anchor`]. A fourth data-carrying variant
     /// for the same reason [`Origin::Social`] is one — this screen's rows are
     /// a third geometry entirely (a single centred line per row, not
-    /// `OptionsList`'s or `KeyBindsList`'s shapes).
+    /// The options list's or the key binds list's shapes).
     Language(super::language::LanguagePlacement),
     /// A widget of the Telemetry screen's **header**, resolved
     /// by [`super::telemetry::placement_anchor`]. The footer reuses
@@ -132,7 +132,7 @@ pub enum Origin {
     /// for the reason that makes this screen safe at all: the "a second click
     /// where Delete was cannot press Yes" property is a statement about two
     /// **arranged** rects, and a restated offset could be right while the drawn
-    /// rect was not. `ConfirmScreen.repositionElements` arranges the tree and then
+    /// rect was not. The confirm screen's reposition elements arranges the tree and then
     /// `centerInRectangle`s it, so the canvas is an
     /// input and the tree has to be run.
     Confirm(super::confirm::ConfirmPlacement),
@@ -148,7 +148,7 @@ pub enum Origin {
     /// buttons too.
     CommandBlockFooter,
     /// One row of the command block screen's tab-completion popup (issue
-    /// That fix): vanilla's `CommandSuggestions.SuggestionsList` — see
+    /// That fix): vanilla's command suggestions's suggestions list — see
     /// [`command_block_frame`]'s own doc for why `dx`/`popup_w` are computed
     /// there rather than carried as a fixed offset like every other row on
     /// this screen.
@@ -157,8 +157,8 @@ pub enum Origin {
     /// anchor (the command box's own `text_x`, plus the fixed advance of
     /// everything before the completed word); `popup_w` is the widest
     /// candidate's measured width. Both are needed to reproduce vanilla's own
-    /// clamp (`CommandSuggestions.showSuggestions`: `Mth.clamp(x, 0,
-    /// input.getScreenX(0) + innerWidth - maxSuggestionWidth)`), which is an
+    /// clamp (the command suggestions's show suggestions: `Mth.clamp(x, 0,
+    /// input's get screen x + innerWidth - maxSuggestionWidth)`), which is an
     /// **absolute-screen** bound this variant's `anchor` is the only place
     /// that knows `width` in order to express.
     CommandBlockSuggestion {
@@ -171,7 +171,7 @@ pub enum Origin {
     /// [`super::create_world::game_rule_placement_anchor`] (More
     /// tab). A data-carrying variant for the same reason
     /// [`Origin::KeyBinds`]/[`Origin::Language`] are: this screen's rows are a
-    /// `-`/`+` step pair plus a label, not `OptionsList`'s or `KeyBindsList`'s
+    /// `-`/`+` step pair plus a label, not the options list's or the key binds list's
     /// shape — see [`super::create_world::GameRulesEditor`]'s own module doc.
     CreateWorldGameRules(super::create_world::GameRulePlacement),
     /// A row of Create New World's Data Packs sub-screen, resolved by
@@ -195,7 +195,7 @@ impl Origin {
     /// ([`Quads::with_clip`]) — and it did so for the three screens whose rows are
     /// **list entries** (`MenuRow::entry`/`account`/`world`) and for
     /// [`MenuFrame::list_labels`], but *not* for a row that reaches the draw as a
-    /// slotted widget. Every settings-tree list is that shape: an `OptionsList`
+    /// slotted widget. Every settings-tree list is that shape: an options list
     /// control row is a `MenuRow` with a [`Slot`], so it went down `draw_widget`'s
     /// unclipped path and a row scrolled past the band's bottom painted straight
     /// over the footer's Done button.
@@ -211,7 +211,7 @@ impl Origin {
     ///
     /// Exactly the list-row variants of the data-carrying origins whose screens
     /// declare a [`widget::ListSpec`]. A footer button, a title, a search field and
-    /// `OptionsScreen`'s own arranged grid are **not** list rows: they live outside
+    /// The options screen's own arranged grid are **not** list rows: they live outside
     /// the band by construction, and clipping them to it would erase them. That
     /// asymmetry is why this is a predicate on the placement rather than "clip every
     /// slotted row on a screen that has a list".
@@ -252,7 +252,7 @@ impl Origin {
         match self {
             // -- rows of a real band --------------------------------------
             //
-            // `OptionsList`'s two shapes; every `KeyBindsList` and
+            // The options list's two shapes; every key binds list and
             // `SocialInteractions` placement (both enums are *only* rows); the
             // language list's entries; and a pack row plus the move button that
             // rides on it.
@@ -284,7 +284,7 @@ impl Origin {
             // -- outside the band by construction -------------------------
             //
             // Titles, search fields, warnings, column headers, footer bands and
-            // `OptionsScreen`'s arranged grid. Clipping any of these to the band
+            // The options screen's arranged grid. Clipping any of these to the band
             // would erase them.
             Origin::Settings(Placement::Root(_) | Placement::Footer { .. })
             | Origin::Language(
@@ -338,7 +338,7 @@ impl Origin {
             Origin::ScreenBottom => ((width * 0.5).floor(), height),
             Origin::Centre => ((width * 0.5).floor(), (height * 0.5).floor()),
             // Unlike every arm above, this one *runs a layout* rather than
-            // evaluating an expression — `OptionsScreen`'s tree cannot be
+            // evaluating an expression — the options screen's tree cannot be
             // arranged once per process the way `pause_block` is, because
             // `HeaderAndFooterLayout` places its content band from the canvas
             // height. See `super::options::root_widget_rects`.
@@ -370,7 +370,7 @@ impl Origin {
             }
             Origin::CommandBlockSuggestion { dx, popup_w } => {
                 let cx = (width * 0.5).floor();
-                // `input.getScreenX(0) + innerWidth - maxSuggestionWidth`:
+                // `input.get_screen_x(0) + innerWidth - maxSuggestionWidth`:
                 // the command box's left text edge (`cx + COMMAND_DX +
                 // BORDER_INSET`) plus its inner width (`COMMAND_W - 2 *
                 // BORDER_INSET`), minus the popup's own width. `.max(0.0)`
@@ -385,7 +385,7 @@ impl Origin {
                 (
                     (cx + dx).clamp(0.0, upper),
                     // `y - (bordered ? 1 : 0)`, `y == 72` (not anchored to
-                    // bottom) — `CommandSuggestions.showSuggestions`/
+                    // bottom) — the command suggestions's show suggestions/
                     // `SuggestionsList`'s constructor.
                     71.0,
                 )

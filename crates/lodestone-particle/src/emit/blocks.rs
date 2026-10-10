@@ -247,8 +247,8 @@ pub fn block_fragment(
 /// — the flecks a creaking heart and a trial-spawner ejection shed off a block.
 ///
 /// A [`terrain_particle`] whose velocity is then **discarded entirely** and
-/// whose lifetime is re-rolled short: `setParticleSpeed(0, 0, 0)` and
-/// `setLifetime(nextInt(10) + 1)`, so a crumb hangs where it was placed for at
+/// whose lifetime is re-rolled short: set particle speed and
+/// set lifetime, so a crumb hangs where it was placed for at
 /// most half a second. The construction still happens with the packet's
 /// velocity — vanilla builds the particle first and overrides afterwards — so
 /// the RNG draws that jitter it are made and thrown away, exactly as there.
@@ -334,7 +334,7 @@ pub fn block_marker(engine: &mut ParticleEngine, pos: [f64; 3], state: StateId) 
 ///
 /// `tint` is that colour, already resolved by the caller. Vanilla resolves it
 /// through a three-step chain — vanilla's own falling-block dust-color accessor, else the block's
-/// tint source, else `state.getMapColor(level, pos).col` — and this client has
+/// tint source, else get map color's get map color — and this client has
 /// data for the middle step only, so an untinted block arrives here as white
 /// rather than as its map colour. See `docs/particle-catalogue.md`; the visible
 /// consequence is that a sand mote is pale rather than sand-coloured, not that
@@ -371,7 +371,7 @@ pub fn falling_dust(engine: &mut ParticleEngine, pos: [f64; 3], tint: [f32; 3]) 
     let rot_speed = (rng_next(engine) - 0.5) * 0.1;
     p.roll = rng_next(engine) * core::f32::consts::TAU;
     p.behaviour = Behaviour::FallingDust { rot_speed };
-    // Vanilla's constructor also calls `setSpriteFromAge(sprites)`. That is a
+    // Vanilla's constructor also calls set sprite from age. That is a
     // no-op at construction — `frame_for_age` at age 0 is frame 0 for every
     // sheet, which is what `Sheet::Generic`'s first texture already is — so it
     // is deliberately not repeated here rather than accidentally omitted.
@@ -493,7 +493,7 @@ pub fn spawn_item_particles(
             eye_y + py,
             eye_z + pz,
             dx,
-            // `addParticle(..., d.y + 0.05, ...)` — the bias is applied at the
+            // add particle — the bias is applied at the
             // call site, not inside the rotation.
             dy + 0.05,
             dz,

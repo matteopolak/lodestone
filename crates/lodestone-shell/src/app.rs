@@ -856,8 +856,8 @@ fn should_background_pace(config: &Config) -> bool {
 /// buttons some mice send), which the container screen has no use for.
 ///
 /// **Deliberately not routed through [`crate::keybinds`]**, and vanilla agrees:
-/// `AbstractContainerScreen` tests raw button indices 0/1/2 rather than
-/// consulting a `KeyMapping`. Slot-click gestures are container-UI chrome, not
+/// The abstract container screen tests raw button indices 0/1/2 rather than
+/// consulting a key mapping. Slot-click gestures are container-UI chrome, not
 /// gameplay bindings — the same boundary that keeps the arrow keys out of the
 /// keybind table (see that module's docs).
 fn menu_button_for(button: MouseButton) -> Option<MenuButton> {
@@ -1488,7 +1488,7 @@ pub(crate) struct WindowApp {
     /// slots and keeps the remainder, and a direction reversal drops
     /// whatever was carried in the old direction rather than fighting it.
     /// Not persisted — vanilla's own accumulator does not survive a restart
-    /// either, being a field on a `MouseHandler` that is rebuilt with the
+    /// either, being a field on a mouse handler that is rebuilt with the
     /// window.
     scroll_accum: f64,
     /// When the left button last pressed on the container screen, for
@@ -1524,7 +1524,7 @@ pub(crate) struct WindowApp {
     /// open, and the search/tab/page the user last left it on.
     ///
     /// Persisted across frames *and* across container open/close, deliberately:
-    /// vanilla's own recipe-book-panel state lives on the client's own recipe
+    /// vanilla's recipe-book-panel state lives on the client's recipe
     /// book, not on the screen, so reopening a crafting table keeps the
     /// book open with the same tab. Rebuilding it per frame would reset the
     /// search box on every mouse move.
@@ -1540,7 +1540,7 @@ pub(crate) struct WindowApp {
     /// more: `decode_recipe_book_add` exists, folds into `SessionRecipeBook`,
     /// and now has a reader.
     recipe_toasts: lodestone_game::recipe::RecipeToastQueue,
-    /// `RecipeDisplayId`s [`WindowApp::sync_recipe_toasts`] has already toasted
+    /// The recipe display ids [`WindowApp::sync_recipe_toasts`] has already toasted
     /// (or, for the very first sync, seeded without toasting — see that
     /// method's doc for why the first `RecipeBookAdded` after connecting must
     /// not fire N toasts for a fresh join's whole unlock history).
@@ -1552,7 +1552,7 @@ pub(crate) struct WindowApp {
     /// re-seed and any later real unlock would be silently treated as "already
     /// seen".
     recipe_toast_synced: bool,
-    /// `RecipeDisplayId`s [`WindowApp::sync_recipe_book_seen`] has already
+    /// The recipe display ids [`WindowApp::sync_recipe_book_seen`] has already
     /// reported to the server this session (vanilla's own "recipe book seen"
     /// packet), so a recipe whose button stays on screen for many frames is
     /// reported exactly once rather than every frame the panel stays open on

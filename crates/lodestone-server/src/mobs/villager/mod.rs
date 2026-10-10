@@ -725,13 +725,13 @@ pub fn find_and_claim_bell(origin: BlockPos, world: &ChunkWorld, claims: &mut Be
 /// level spans.
 const NEXT_LEVEL_XP_THRESHOLDS: [i32; 5] = [0, 10, 70, 150, 250];
 
-/// `VillagerData.canLevelUp`: every level except the level-5 mastery cap.
+/// VillagerData's can level up: every level except the level-5 mastery cap.
 #[must_use]
 pub fn can_level_up(level: i32) -> bool {
     (1..5).contains(&level)
 }
 
-/// `VillagerData.getMaxXpPerLevel` — the xp threshold this level advances at,
+/// VillagerData's get max xp per level — the xp threshold this level advances at,
 /// or `0` past mastery.
 #[must_use]
 pub fn max_xp_for_level(level: i32) -> i32 {
@@ -742,11 +742,11 @@ pub fn max_xp_for_level(level: i32) -> i32 {
     }
 }
 
-/// `Villager.shouldIncreaseLevel`/`increaseMerchantCareer`, applied
+/// Villager's should increase level/`increaseMerchantCareer`, applied
 /// repeatedly in case `xp` clears more than one threshold at once.
 ///
 /// **The comparison is `>=`, not `>`** — vanilla's own gate reads
-/// `this.villagerXp >= VillagerData.getMaxXpPerLevel(currentLevel)`
+/// `this.villagerXp >= VillagerData.get_max_xp_per_level(currentLevel)`
 /// (vanilla's own should-increase-level check), so a villager whose xp lands
 /// **exactly** on a threshold levels up the same tick, not one xp later.
 #[must_use]

@@ -149,7 +149,7 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
             slots.push(slot(1, 35.0, 47.0));
         }
         // All three furnace-family menus share these coordinates
-        // (`AbstractFurnaceMenu` is the common constructor); only the
+        // (the abstract furnace menu is the common constructor); only the
         // background art differs, which `background_kind` selects on.
         (SpecialLayout::Furnace | SpecialLayout::BlastFurnace | SpecialLayout::Smoker, 3) => {
             slots.push(slot(0, 56.0, 17.0));

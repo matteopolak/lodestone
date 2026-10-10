@@ -374,7 +374,7 @@ fn a_selected_rows_fallback_icon_paints_over_its_selection_fill() {
 /// The hover scrim goes **under** the icon's overlay sprites, which is the same
 /// cause one step further on: `SERVER_ICON_DARKEN` is a translucent grey rect and
 /// vanilla fills it before blitting the join / move arrows over it
-/// (`ServerSelectionList.OnlineServerEntry.extractContent`), so the pre-fix
+/// (the server selection list's online server entry.extract_content), so the pre-fix
 /// ordering washed all three arrows out.
 #[test]
 fn the_hover_scrim_is_painted_under_the_icon_overlay_sprites() {

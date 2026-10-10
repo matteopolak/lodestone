@@ -224,8 +224,8 @@ fn sneak_cancels_sprint_on_land_but_not_under_water() {
     );
 }
 
-/// The server derives the swimming pose itself, from `isSprinting()` — and it
-/// only learns that from `ServerboundPlayerCommandPacket`, never from the input
+/// The server derives the swimming pose itself, from is sprinting — and it
+/// only learns that from player-command packet, never from the input
 /// packet's `sprint` bit. So the sprint *edge* has to reach the wire as a
 /// `PlayerCommand`, exactly once per change.
 #[test]
@@ -766,7 +766,7 @@ fn begin_attack_live_spectates_the_entity_target_instead_of_attacking() {
 
 /// The other half of the same gate: a spectator's left-click with no entity
 /// target (a block, or nothing at all) sends `SpectatorAction(None)` —
-/// `MultiPlayerGameMode.spectatorNoAction`. Distinct from the miss-swings-the-arm
+/// The multi player game mode's spectator no action. Distinct from the miss-swings-the-arm
 /// case a non-spectator hits, matching vanilla's own "neither arm swings"
 /// behaviour.
 #[test]

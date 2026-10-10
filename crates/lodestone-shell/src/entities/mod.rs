@@ -29,7 +29,7 @@
 //! # Why the window is three ticks, not one
 //!
 //! Vanilla eases entity movement over **three** ticks, not one. Its
-//! `InterpolationHandler` (26.2 client) sets `DEFAULT_INTERPOLATION_STEPS = 3`
+//! The interpolation handler (26.2 client) sets `DEFAULT_INTERPOLATION_STEPS = 3`
 //! and `interpolateTo` resets the step counter to 3 on every position packet,
 //! then `interpolate()` consumes `1/steps` of the remaining gap each of the next
 //! three client ticks. The consequence is load-bearing: the server only sends a
@@ -60,11 +60,11 @@
 //!
 //! Sampling the drawn position once per 20 Hz tick measures `v` instead, because
 //! that is what vanilla is measuring: on the client the entity's own position has
-//! already been advanced by `InterpolationHandler`, so `getX() - xo` is the
+//! already been advanced by the interpolation handler, so `getX() - xo` is the
 //! *interpolated* step, not the packet delta. The two agree under dense packets
 //! and under sparse ones, which the gap measure never does. That sampling is
 //! [`tick_walk_animation`], and it runs on a fixed 20 Hz clock rather than per
-//! frame, because `WalkAnimationState` is a tick-rate state machine and driving
+//! frame, because walk animation state is a tick-rate state machine and driving
 //! it per frame would make swing speed depend on frame rate.
 //!
 //! This module is deliberately GPU-free, so the interpolation is unit-testable
@@ -78,8 +78,8 @@
 //! # Why dropped items get their own physics, not just an ease
 //!
 //! A **dropped item is not eased between position packets like every other
-//! entity** — it is simulated. `ItemEntity`'s `EntityType` registers
-//! `updateInterval(20)` and vanilla's own entity-changes broadcast only
+//! entity** — it is simulated. The item entity's `EntityType` registers
+//! update interval and vanilla's own entity-changes broadcast only
 //! re-evaluates whether to send a position/motion packet at all once every
 //! `updateInterval` ticks (or immediately on a ground-state change, or when
 //! `needsSync`/dirty metadata forces it) — so **an airborne item gets exactly
@@ -224,7 +224,7 @@ fn to_glam_vec3(v: lodestone_model::Vec3) -> Vec3 {
 /// clamp that actually mattered.
 const TICK: f32 = lodestone_ecs::TICK_PERIOD as f32;
 
-/// Vanilla's `InterpolationHandler::DEFAULT_INTERPOLATION_STEPS`: entity moves
+/// Vanilla's interpolation handler's default interpolation steps: entity moves
 /// ease over three ticks, not one. See the module docs for why a one-tick window
 /// reads as "not interpolated" against the server's sparse move packets.
 const INTERP_STEPS: f32 = 3.0;
@@ -609,7 +609,7 @@ fn projectile_inertia(entity_type: Option<EntityType>) -> f64 {
 ///
 /// Like [`ITEM_ENTITY_TYPE_PATH`], it has no
 /// [`entity_models`](lodestone_render::EntityModelSet) entry and never will:
-/// `ExperienceOrbRenderer` is one camera-facing quad, not a cuboid part rig, so
+/// The experience orb renderer is one camera-facing quad, not a cuboid part rig, so
 /// `EntityModelSet::resolve` skips it and `RenderState::prepare_orbs` picks it out
 /// by type path and draws it through the orb billboard pipeline instead.
 pub const EXPERIENCE_ORB_TYPE_PATH: &str = "experience_orb";
@@ -728,7 +728,7 @@ impl Default for InterpClock {
     }
 }
 
-/// Vanilla's `WalkAnimationState`, ticked at 20 Hz by [`tick_walk_animation`].
+/// Vanilla's walk animation state, ticked at 20 Hz by [`tick_walk_animation`].
 #[derive(Component, Debug, Clone, Copy)]
 pub struct WalkAnim {
     /// The animation state itself.
@@ -971,7 +971,7 @@ pub fn tick_swim_ramp(
     }
 }
 
-/// The lagged "cloak" position vanilla's `ClientAvatarState` tracks per
+/// The lagged "cloak" position vanilla's client avatar state tracks per
 /// avatar (`xCloak`/`yCloak`/`zCloak`, `26.2`) — the position the cape's
 /// pivot chases, easing 25% of the remaining gap toward the entity's real
 /// per-tick position every tick, with a 10-block teleport snap. The gap
@@ -1009,7 +1009,7 @@ pub struct CapeLag {
 
 impl CapeLag {
     /// A freshly tracked entity starts with its cloak pinned to wherever it
-    /// first appears — `ClientAvatarState`'s fields all default to `0.0`, but
+    /// first appears — the client avatar state's fields all default to `0.0`, but
     /// unlike vanilla (which only ever constructs one per real player, at a
     /// real position) a spawned track can appear anywhere, so pinning here
     /// avoids one tick of the cape lunging in from the world origin. `bob`
@@ -1094,7 +1094,7 @@ pub fn tick_cape_lag(
 /// `270` is not a rare fixture here — it is spawn-facing).
 ///
 /// `fall_flying_scale` (vanilla multiplies `capeLean` by
-/// `1.0 - state.fallFlyingScale()`) is not threaded through: no draw in this
+/// `1.0 - state.fall_flying_scale()`) is not threaded through: no draw in this
 /// codebase currently resolves elytra-flight scale for a remote entity, so
 /// this is the identity case (`fall_flying_scale == 0.0`) unconditionally —
 /// correct for every grounded/walking/swimming player, and a slightly wider
@@ -1226,7 +1226,7 @@ struct TrackedStack {
 }
 
 impl TrackedStack {
-    /// The client item-definition id that `ItemModelResolver` selects for this
+    /// The client item-definition id that the item model resolver selects for this
     /// stack. The base id remains stored for gameplay-component ownership.
     fn render_definition(&self) -> &ResourceLocation {
         self.item_model.as_ref().unwrap_or(&self.id)
@@ -1294,7 +1294,7 @@ pub struct ExtractedDraws(Vec<EntityDraw>);
 ///
 /// The second case is not a hypothetical: `"<empty>"` is Mojang's own
 /// `toString()` convention for "this value is absent" — `HashedStack`,
-/// `SlotDisplay` and `CommandResultCallback` (`.cache/mc/26.2/…`) each use
+/// `SlotDisplay` and the command result callback (`.cache/mc/26.2/…`) each use
 /// this *exact* string for their own no-value case, so a plugin (a common
 /// source of `type=player` NPC entities, which need a registered tab-list
 /// profile to carry a skin) that serialises an "absent name" sentinel the
@@ -1708,7 +1708,7 @@ fn resolve_entity_facts(
 }
 
 /// The skin one player uuid resolves to against `tab_list`, with the whole
-/// fallback ladder vanilla's `SkinManager` has: the declared `textures`
+/// fallback ladder vanilla's skin manager has: the declared `textures`
 /// property, then this session's last resolution for that uuid, then the
 /// uuid-hash built-in identity.
 ///
@@ -1805,7 +1805,7 @@ fn default_remote_skin(uuid: uuid::Uuid) -> crate::remote_skins::RemoteSkin {
         url: String::new(),
         model: skin.model,
         // The 18 hash-picked built-in identities carry no cape — vanilla's
-        // `DefaultPlayerSkin` has none either.
+        // The default player skin has none either.
         cape: None,
         elytra: None,
         // The whole point of the pick, and until this field existed it was
@@ -2741,8 +2741,8 @@ impl EntityInterpolator {
             // `tick_item_physics` runs as part of this schedule
             // (`TickSet::Physics`, ordered before `tick_walk_animation`'s
             // `TickSet::Animate`) — the server itself only *corrects* a
-            // dropped item's position roughly once a second (`ItemEntity`'s
-            // `updateInterval(20)`), so the arc has to come from here, not
+            // dropped item's position roughly once a second (the item entity's
+            // update interval), so the arc has to come from here, not
             // from easing toward a sparse packet.
             self.world.run_schedule(GameTick);
         }
@@ -4121,7 +4121,7 @@ mod tests {
         /// The server-side NPC helper reported on DemocracyCraft is an
         /// invisible player-type entity with an otherwise ordinary tab-list
         /// profile. This is deliberately a metadata rule rather than a server
-        /// name heuristic: vanilla's `LivingEntityRenderer` hides every
+        /// name heuristic: vanilla's living entity renderer hides every
         /// invisible player name, whatever its profile says.
         #[test]
         fn an_invisible_player_has_no_tab_list_name_tag() {
@@ -4384,7 +4384,7 @@ mod tests {
             arm_pose_for("skeleton", &bow_in_main_hand(), None, true, false).pose,
             ArmPose::BowAndArrow
         );
-        // Every `AbstractSkeletonRenderer` subclass, so the type set is not just
+        // Every abstract skeleton renderer subclass, so the type set is not just
         // "skeleton" with the others assumed.
         for kind in ["wither_skeleton", "stray", "bogged", "parched"] {
             assert_eq!(
@@ -4394,9 +4394,9 @@ mod tests {
             );
         }
         // It lands in the main hand for a right-handed mob: vanilla's
-        // `getMainArm() == arm` term.
+        // `get_main_arm() == arm` term.
         assert!(!arm_pose_for("skeleton", &bow_in_main_hand(), None, true, false).left_hand);
-        // ...and in the *left* hand once `Mob.isLeftHanded()` is set — the term
+        // ...and in the *left* hand once Mob's is left handed is set — the term
         // this used to hardcode a right-handed answer for.
         assert!(arm_pose_for("skeleton", &bow_in_main_hand(), None, true, true).left_hand);
 
@@ -4406,8 +4406,8 @@ mod tests {
             arm_pose_for("skeleton", &bow_in_main_hand(), None, false, false).pose,
             ArmPose::Empty
         );
-        // Aggressive, bow, wrong renderer family. `AbstractZombieRenderer` and
-        // `IllagerRenderer` have no such override, so a humanoid mob's arms hang.
+        // Aggressive, bow, wrong renderer family. The abstract zombie renderer and
+        // The illager renderer have no such override, so a humanoid mob's arms hang.
         for kind in ["zombie", "husk", "drowned", "pillager"] {
             assert_eq!(
                 arm_pose_for(kind, &bow_in_main_hand(), None, true, false).pose,
@@ -4416,7 +4416,7 @@ mod tests {
             );
         }
         // An avatar is the other kind of "wrong renderer family", and its expected
-        // pose is NOT `Empty`: `AvatarRenderer` has no aggressive-bow override
+        // pose is NOT `Empty`: the avatar renderer has no aggressive-bow override
         // either, so a bow-holding player falls through to the ordinary held-item
         // raise. Asserting `Empty` here would be asserting the mob answer for the
         // one renderer that does not give it.
@@ -4428,7 +4428,7 @@ mod tests {
             );
         }
         // Aggressive skeleton, bow in the *off* hand: vanilla reads
-        // `getMainHandItem()`, so this is the rest pose.
+        // get main hand item, so this is the rest pose.
         let off_hand = vec![(
             EquipmentSlot::OffHand,
             "minecraft:bow".parse::<ResourceLocation>().expect("key"),
@@ -4567,7 +4567,7 @@ mod tests {
                 false,
             ),
             // Humanoid MOBS, the rows the two hypotheses disagree on. Every one of
-            // these overrides `getArmPose` and delegates to `HumanoidMobRenderer`'s
+            // these overrides `getArmPose` and delegates to the humanoid mob renderer's
             // `EMPTY` tail.
             (
                 "zombie",
@@ -4599,8 +4599,8 @@ mod tests {
                 ArmPose::Empty,
                 false,
             ),
-            // An armour stand is a `LivingEntity` with equipment and a humanoid rig,
-            // and `ArmorStandRenderer` sets no arm pose at all. It is the row that
+            // An armour stand is a living entity with equipment and a humanoid rig,
+            // and the armor stand renderer sets no arm pose at all. It is the row that
             // makes the universal reading visibly wrong: every decorative stand
             // holding a sword would have lifted its arm.
             (
@@ -5575,8 +5575,8 @@ mod tests {
     /// [`snap`] reports the same yaw for both `Rotation` and `HeadYaw`
     /// (`head_yaw: yaw` in its own literal), which is exactly a mob's
     /// spawn-time convention *and* a real player's wire convention every
-    /// tick (vanilla's own entity-changes broadcast sends `getYRot()` and
-    /// `getYHeadRot()` — equal for a `Player`, since nothing ever moves the
+    /// tick (vanilla's own entity-changes broadcast sends get y rot and
+    /// get y head rot — equal for a `Player`, since nothing ever moves the
     /// latter independently). Only the `type_path` differs from [`snap`]'s
     /// `"pig"`, which is what routes `tick_remote_body_yaw` at all — see
     /// [`BodyYawState`]'s own doc for why a `"pig"` must never take this
@@ -6483,12 +6483,12 @@ mod tests {
 
     // ---- ballistic item drops (the reported defect) ----------------------
     //
-    // Vanilla's `ItemEntity` registers `updateInterval(20)`
-    // (vanilla's own item entity type), so vanilla's own entity-changes
+    // Vanilla's item entity registers update interval
+    // (vanilla's item entity type), so vanilla's entity-changes
     // broadcast only re-evaluates a
     // position/motion send once every 20 ticks while the item is airborne —
     // roughly one correction per second, not one per tick. These tests feed a
-    // spawn (with vanilla's real pop velocity, `ItemEntity`'s zero-arg
+    // spawn (with vanilla's real pop velocity, the item entity's zero-arg
     // constructor: `vy = 0.2`, `vx/vz` up to `±0.1` blocks/tick) and then keep
     // driving the clock **without** any further position snapshot, exactly
     // matching that sparse-correction reality, and check the render position
@@ -6669,10 +6669,10 @@ mod tests {
         let floor: Arc<dyn CollisionSource> = Arc::new(FlatFloor { floor_y });
         let profile = PhysicsProfile::mc_1_21();
         let spawn = Vec3::new(0.5, 66.0, 0.5);
-        // A real pop velocity (`ItemEntity`'s zero-arg constructor draws
+        // A real pop velocity (the item entity's zero-arg constructor draws
         // `vy = 0.2`, small horizontal jitter), reported once and never again
         // — no further snapshot arrives for the rest of the test, matching
-        // `updateInterval(20)`'s roughly-one-correction-per-second reality.
+        // update interval's roughly-one-correction-per-second reality.
         let vel = Vec3::new(0.02, 0.2, 0.0);
         item_snap_moving(9, spawn, Some(vel), false).apply(interp.world_mut());
         interp.update_with_view(
@@ -6855,7 +6855,7 @@ mod tests {
     // ---- the item-pickup fly-to-collector animation ----------
 
     /// The interpolant is **quadratic** in the age fraction, and the midpoint is
-    /// where that matters: `ItemPickupParticleGroup` computes
+    /// where that matters: the item pickup particle group computes
     /// `time = (life + partial) / 3; time *= time`.
     ///
     /// A linear lerp — the obvious wrong reading, and the one the issue's own
@@ -7311,7 +7311,7 @@ mod tests {
 
     const RIDING_VEHICLE_ID: i32 = 42;
     const RIDING_OWN_ID: i32 = 7;
-    /// A plain boat's real box height (`EntityTypes`' boat block,
+    /// A plain boat's real box height (the entity types' boat block,
     /// `sized(1.375F, 0.5625F)`) — the same constant
     /// `lodestone_ecs::riding`'s own `a_raft_seats_higher_than_a_boat_of_the_same_box`
     /// test cites.

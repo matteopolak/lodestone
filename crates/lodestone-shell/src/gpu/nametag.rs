@@ -9,8 +9,8 @@
 //! Reconciled against the real 26.2 client, its own render-pipelines and
 //! render-types definitions, not guessed:
 //!
-//! * **Normal pass** (`RenderPipelines.TEXT`, via `WORLD_TEXT_SNIPPET`):
-//!   `DepthStencilState.DEFAULT = new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true)`
+//! * **Normal pass** (the render pipelines's text, via `WORLD_TEXT_SNIPPET`):
+//!   `DepthStencilState.DEFAULT = new DepthStencilState(the compare op's greater than or equal, true)`
 //!   — depth-tested **and depth-written**.
 //!   Vanilla's reversed-Z convention makes "closer" `GREATER_THAN_OR_EQUAL`,
 //!   and this renderer is reversed-Z too, so the port is
@@ -19,8 +19,8 @@
 //!   `gpu/debug_lines.rs` use, just with write turned **on** here
 //!   (a nearer tag's glyphs must win over a farther, overlapping one, exactly
 //!   as vanilla's write-enabled pass does).
-//! * **See-through pass** (`RenderPipelines.TEXT_SEE_THROUGH`):
-//!   `.withDepthStencilState(Optional.empty())`
+//! * **See-through pass** (the render pipelines's text see through):
+//!   `.with_depth_stencil_state(Optional.empty())`
 //!   — **no depth attachment use at all**, neither tested nor written. There
 //!   is no comparison operator to port here, so there is no sign to get
 //!   backwards — but `wgpu` itself has no "this pipeline ignores the pass's
@@ -36,7 +36,7 @@
 //!
 //! # What each pass carries, and why the plate is in only one of them
 //!
-//! `SubmitNodeCollection.submitNameTag` makes **two different submissions**
+//! The submit node collection's submit name tag makes **two different submissions**
 //! depending on `!isDiscrete`, and the two differ in *three* things at once —
 //! glyph colour, background colour and which group they land in. Transcribed
 //! from that method rather than inferred from the symptom:
@@ -48,15 +48,15 @@
 //!
 //! So the plate is drawn exactly once per tag, in whichever group carries it,
 //! and for a non-sneaking tag that is the **see-through** group — which
-//! `FeatureRenderDispatcher.executeTranslucent` runs *first*, before the
+//! The feature render dispatcher's execute translucent runs *first*, before the
 //! depth-tested `nameTags` phase. [`NameTagRenderer::draw`] matches that, and
 //! its own doc records why the earlier reading (the field declaration order
-//! in `SubmitNodeCollection`) was the wrong source. The resulting composite
+//! in the submit node collection) was the wrong source. The resulting composite
 //! for a non-sneaking tag is the plate and a faded full-bright copy laid
 //! down first, with the lit opaque copy painting over both wherever the tag
 //! is not occluded — the familiar bright-name-on-dark-slab look, and behind a
 //! wall only the faded copy survives. Both groups are plain
-//! `BlendFunction.TRANSLUCENT` (`wgpu::BlendState::ALPHA_BLENDING` here).
+//! The blend function's translucent (`wgpu::BlendState::ALPHA_BLENDING` here).
 //!
 //! # Light: only one of the two groups samples a lightmap
 //!
@@ -69,7 +69,7 @@
 //! light.
 //!
 //! That group's light is not the raw sample either:
-//! `SubmitNodeCollection.submitNameTag` passes
+//! The submit node collection's submit name tag passes
 //! vanilla's own light-coords-with-emission helper applied to `(lightCoords, 2)` for the
 //! non-discrete case — both halves floored at 2 — and the raw coords for the
 //! discrete (sneaking) one, which is a second thing that submission carries
@@ -80,7 +80,7 @@
 //! its vertex stage too.
 //!
 //! **The plate is drawn before the glyphs within its own group**, matching
-//! `Font.PreparedTextBuilder.visit`, which emits the background effect first
+//! The font's prepared text builder's visit, which emits the background effect first
 //! and every glyph after it. Vanilla additionally pushes the plate `-0.01`
 //! along local `z`; nothing here does, and nothing needs to — a nametag
 //! billboard's plane is perpendicular to the view axis, so every vertex in it
@@ -94,7 +94,7 @@
 //!
 //! # The plate's alpha is a linear-blend divergence, not a wrong constant
 //!
-//! The plate colour is black at `getBackgroundOpacity(0.25F)`, and that
+//! The plate colour is black at get background opacity, and that
 //! accessor returns its **fallback** `0.25` unless `backgroundForChatOnly`
 //! is turned off — an option vanilla defaults *on* and this crate does not
 //! model at all, exactly as `gpu/display_text.rs`'s `DEFAULT_BACKGROUND_ARGB`
@@ -129,12 +129,12 @@
 //! # Anchor height and distance cutoff
 //!
 //! * **Distance cutoff**: `64.0` blocks, squared-distance compared against
-//!   camera-to-*feet* (`EntityRenderer.extractNameTags`'s default
+//!   camera-to-*feet* (EntityRenderer's extract name tags's default
 //!   `nameTagDistance` argument, vanilla's own entity renderer, tested at
 //!   vanilla's own entity renderer).
 //! * **Anchor**: `feet.y + base_height * scale + 0.5`. The `+0.5` is
 //!   vanilla's own submit-node collection's `nameTagAttachment.y + 0.5`; the
-//!   `base_height` term is `EntityAttachment.NAME_TAG`'s fallback point,
+//!   `base_height` term is the entity attachment's name tag's fallback point,
 //!   `AT_HEIGHT = (width, height) -> (0, height, 0)`
 //!   (vanilla's own entity-attachment declarations, `:25`) — the entity's own hitbox height,
 //!   from the real jar-derived census (`lodestone_data::entity_dimensions`),
@@ -156,7 +156,7 @@
 //!   in the dark — this renderer draws plain full-bright white unconditionally,
 //!   which is a close approximation of that emission override rather than a
 //!   divergence from it.
-//! * **`EntityAttachment` per-type overrides**, the crosshair-look-at
+//! * **entity attachment per-type overrides**, the crosshair-look-at
 //!   override to `shouldShowName`, scoreboard
 //!   team colouring/prefixes and the `belowName` scoreboard line — all
 //!   explicitly out of scope per the issue.
@@ -193,7 +193,7 @@ struct NameTagVertex {
     color: [f32; 4],
 }
 
-/// `LightCoordsUtil.FULL_BRIGHT` (`15728880` = sky 15, block 15) in this
+/// The light coords util's full bright (`15728880` = sky 15, block 15) in this
 /// renderer's one-byte `sky << 4 | block` layout.
 ///
 /// **Not** [`lodestone_render::ENTITY_FULLBRIGHT`], which is `15 << 4` — sky
@@ -291,7 +291,7 @@ const ATTACHMENT_PADDING: f32 = 0.5;
 const FALLBACK_HEIGHT: f32 = 1.8;
 
 /// Opaque white — vanilla's `-1`, and the colour of **only** the
-/// non-discrete normal-pass submission (`SubmitNodeCollection.submitNameTag`).
+/// non-discrete normal-pass submission (the submit node collection's submit name tag).
 /// Only its alpha (`1.0`) is read: the RGB half of a `StyledRect` is
 /// already resolved (white when a span's own colour is unspecified, real
 /// per-span colour otherwise) by [`layout_styled_ink_runs`] — see the module
@@ -308,7 +308,7 @@ const SEE_THROUGH_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 129.0 / 255.0];
 /// The background plate's packed ARGB: black at
 /// vanilla's own get-background-opacity accessor applied to `0.25F`, which resolves to its `0.25`
 /// fallback on an unconfigured client — vanilla's own ARGB-color helper applied to `(0.25F, -16777216)` =
-/// `as8BitChannel(0.25) << 24` = `64 << 24`. See the module doc for why the
+/// `as_8b_it_channel(0.25) << 24` = `64 << 24`. See the module doc for why the
 /// option is not read here, and for the linear-blend divergence this value
 /// is *not* responsible for.
 ///
@@ -320,7 +320,7 @@ const SEE_THROUGH_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 129.0 / 255.0];
 const BACKGROUND_ARGB: i32 = 0x4000_0000_u32 as i32;
 
 /// The plate's padding left of the pen and above the line's top edge, in
-/// logical font pixels — `Font.PreparedTextBuilder.markBackground`'s
+/// logical font pixels — the font's prepared text builder's mark background's
 /// `x - 1.0F` / `y - 1.0F`. Its right edge is the line's full advance and its
 /// bottom edge is `y + 9.0F` ([`metrics::LINE_HEIGHT`]), with no padding on
 /// either, so the rect is deliberately **not** symmetric.
@@ -351,7 +351,7 @@ pub(super) struct StyledRect {
     /// text outline — vanilla's own glyph-info shadow-offset accessor for a run of glyph ink
     /// (1 px for a sheet glyph, 0.5 for a unihex one), and **`0.0` for an
     /// underline/strikethrough bar or a background plate**, because
-    /// `Font.prepare8xTextOutline` ends in `outlineOutput.discardEffects()`
+    /// Font's prepare 8x text outline ends in outline output's discard effects
     /// and so outlines the glyphs only.
     ///
     /// One field rather than a `glyph: bool` plus a separate offset: the two
@@ -543,7 +543,7 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// doc for the alignment defect this was written to close.
 ///
 /// Underline/strikethrough are emitted **per glyph**, matching
-/// vanilla's own font rendering's own unconditional per-glyph effect bar (including
+/// vanilla's font rendering's unconditional per-glyph effect bar (including
 /// for whitespace) rather than one bar merged across a run — simpler to keep
 /// obviously correct against the source, at the cost of more (touching,
 /// visually identical) rects. Obfuscated spans are sampled by
@@ -554,12 +554,12 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// number [`layout_styled_ink_runs`] returns as its second element, without
 /// walking a single texel.
 ///
-/// This is vanilla's `StringSplitter` measure rather than its `Font` draw:
-/// `new StringSplitter((codepoint, style) -> ...getGlyph(codepoint).info()
-/// .getAdvance(style.isBold()))`, the measure `Font.split` wraps against. It
+/// This is vanilla's string splitter measure rather than its `Font` draw:
+/// `new string splitter((codepoint, style) -> ...get glyph(codepoint).info()
+/// .get advance(style's is bold))`, the measure `Font.split` wraps against. It
 /// exists because a wrap calls its measure once per candidate row, and
 /// rasterising a `ttf` glyph (`RasterFont::raster` bakes on demand) to learn a
-/// number that lives on `GlyphInfo` would make wrapping cost more than
+/// number that lives on the glyph info would make wrapping cost more than
 /// drawing.
 ///
 /// `GlyphRaster::advance` and `Glyph::advance` are the same three arms over
@@ -806,7 +806,7 @@ where
     (rects, cursor)
 }
 
-/// `BakedSheetGlyph.shearTop`/`shearBottom` (vanilla's own baked-sheet-glyph type, both
+/// The baked sheet glyph's shear top/`shearBottom` (vanilla's own baked-sheet-glyph type, both
 /// `1.0F - 0.25F * v`) evaluated at one texel row's own local `v` — the same
 /// per-row shear `hud/vanilla_font.rs::draw_ink` already applies, transcribed
 /// here rather than called cross-module for the same "small, self-contained"
@@ -850,7 +850,7 @@ fn entity_name_height(draw: &EntityDraw) -> f32 {
 /// world space, billboarded with the frame's shared `right`/`up` basis —
 /// every nametag this frame shares the same basis, matching vanilla's single
 /// `camera.orientation` applied identically to each
-/// (vanilla's own submit-node collection: `poseStack.mulPose(camera.orientation)`,
+/// (vanilla's own submit-node collection: pose stack's mul pose,
 /// *before* any per-entity translation).
 ///
 /// No culling is configured on either pipeline (`cull_mode: None`, `wgpu`'s
@@ -950,7 +950,7 @@ fn push_entity_quads(
     let half_width = total_width / 2.0;
 
     // The plate, in the same local logical-pixel space the ink runs are laid
-    // out in. `Font.PreparedTextBuilder.markBackground` seeds the rect at the
+    // out in. The font's prepared text builder's mark background seeds the rect at the
     // pen (`x - 1`, `y - 1`, `x + 0`, `y + 9`) and grows its right edge by
     // each glyph's advance; this layout starts its pen at local `(0, 0)`, so
     // the finished rect is `(-1, -1)` to `(total_width, 9)`.
@@ -964,7 +964,7 @@ fn push_entity_quads(
     };
     // The tag's own packed light, exactly as every other entity pass resolves
     // it (eye-height probe, fire forcing the block half) — `submitNameTag`
-    // takes `state.lightCoords`, the same field `LivingEntityRenderer` hands
+    // takes state's light coords, the same field living entity renderer hands
     // its model.
     //
     // The **normal** group's non-discrete submission takes
@@ -978,7 +978,7 @@ fn push_entity_quads(
     } else {
         packed
     });
-    // `RenderTypes.textSeeThrough`'s shader is `text.vsh` compiled with
+    // The render types's text see through's shader is `text.vsh` compiled with
     // `IS_SEE_THROUGH`, and that branch is literally `vertexColor = Color` —
     // it declares no `UV2` input and samples no lightmap, so a see-through
     // name tag is full-bright in vanilla *by construction*, whatever
@@ -1031,9 +1031,9 @@ fn push_entity_quads(
         // background colour of literally `0`; the plate travels with the
         // faded see-through copy. `NameTagRenderer::draw` records the
         // see-through group **first** and the depth-tested one over it, which
-        // is the order `FeatureRenderDispatcher.executeTranslucent` runs the
+        // is the order feature render dispatcher's execute translucent runs the
         // two phases in — see that method's doc for why the field
-        // declaration order in `SubmitNodeCollection` is not it.
+        // declaration order in the submit node collection is not it.
         glyph_quads(normal_out, NORMAL_COLOR[3], normal_tint);
         plate_quad(see_through_out, see_through_tint);
         glyph_quads(see_through_out, SEE_THROUGH_COLOR[3], see_through_tint);
@@ -1045,7 +1045,7 @@ fn push_entity_quads(
     }
 }
 
-/// `LightCoordsUtil.lightCoordsWithEmission`, in this renderer's one-byte
+/// The light coords util's light coords with emission, in this renderer's one-byte
 /// layout: each half of `packed` floored at `emission` independently.
 ///
 /// Vanilla's is `pack(max(block, e), max(sky, e))` on a 32-bit light
@@ -1340,11 +1340,11 @@ impl NameTagRenderer {
     ///
     /// # The see-through group draws FIRST
     ///
-    /// `FeatureRenderDispatcher.executeTranslucent` runs
-    /// `executePhase(collection.seeThroughNameTags)` and *then*
-    /// `executePhase(collection.nameTags)`. This file used to record the
+    /// The feature render dispatcher's execute translucent runs
+    /// execute phase and *then*
+    /// execute phase. This file used to record the
     /// opposite order, citing the field **declaration** order in
-    /// `SubmitNodeCollection` (`nameTags` then `seeThroughNameTags`) — the
+    /// The submit node collection (`nameTags` then `seeThroughNameTags`) — the
     /// same trap as reading a packet's wire order off its record's field
     /// list rather than off its `write` method. The dispatcher is the one
     /// that runs.
@@ -2025,7 +2025,7 @@ mod tests {
     }
 
     /// **The bold control**, same fixture: a bold run must draw its ink
-    /// *twice* (`BakedSheetGlyph.renderChar`'s second, offset pass — see
+    /// *twice* (the baked sheet glyph's render char's second, offset pass — see
     /// [`layout_styled_ink_runs`]'s doc) and must measure a wider advance
     /// (vanilla's own glyph-info advance accessor at bold weight) than the identical codepoint unstyled —
     /// the exact width difference `gpu/display_text.rs`'s alignment fix
@@ -2414,7 +2414,7 @@ mod tests {
     /// **The plate gate.** A non-sneaking named mob must draw a background
     /// plate, and vanilla puts it in a specific place: the depth-tested
     /// submission carries `backgroundColor = 0` and the see-through one
-    /// carries the real colour (`SubmitNodeCollection.submitNameTag`, the
+    /// carries the real colour (the submit node collection's submit name tag, the
     /// module doc's table). So the discriminating assertion is not "a plate
     /// exists somewhere" — it is that the normal pass has **none** and the
     /// see-through pass leads with exactly one, before its glyphs.
@@ -2481,7 +2481,7 @@ mod tests {
     }
 
     /// The plate's rect, predicted from
-    /// `Font.PreparedTextBuilder.markBackground` rather than eyeballed, with
+    /// The font's prepared text builder's mark background rather than eyeballed, with
     /// the plausible wrong hypothesis evaluated at the same input: a plate
     /// sized to the ink's own bounds (`0 .. total_width` by `0 ..
     /// LINE_HEIGHT`) instead of vanilla's asymmetric one-pixel lead-in on the

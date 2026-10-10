@@ -13,7 +13,7 @@
 //! Neither `registries.json` nor `blocks.json` can answer this: the first is a
 //! flat list of item *names* with no item→block relation at all, the second is
 //! block properties with no item side. The relation exists only as a field on
-//! the `BlockItem` instance, constructed at bootstrap. So, as with collision
+//! the block-item instance, constructed at bootstrap. So, as with collision
 //! shapes and hardness, "boot the jar and ask it" is the only authoritative
 //! source, and the dump is committed as the external anchor (§ "an expected
 //! value must originate outside the code under test").
@@ -66,7 +66,7 @@ fn placed_block_name(item: &str) -> Option<&'static str> {
 const DUMP: &str = include_str!("support/block_items_jvm.txt");
 
 /// One authoritative row: item registry id, item name, and the block it places
-/// (`None` for an item that is not a `BlockItem`).
+/// (`None` for an item that is not a block item).
 struct Row {
     id: usize,
     item: String,
@@ -280,7 +280,7 @@ fn the_census_disagrees_with_a_name_match_exactly_where_the_game_does() {
     }
 
     // False positives of a name match: a block of this name exists, but the
-    // item is not a `BlockItem` and places nothing.
+    // item is not a block item and places nothing.
     for item in ["minecraft:wheat", "minecraft:air"] {
         let block_of_that_name = (0..lodestone_data::block_states::STATE_COUNT)
             .any(|state| lodestone_data::block_states::block_name(state) == Some(item));
@@ -333,7 +333,7 @@ fn plain_blocks_resolve_to_themselves_and_tools_resolve_to_nothing() {
 /// [`block_items::item_for_block`], the inverse this issue's server-side half
 /// needs: pairwise-distinct blocks so a transposition in the `OnceLock`
 /// build (`table[placed as usize] = ...`) cannot survive, plus the two `None`
-/// shapes — a block with no `BlockItem` at all, and an out-of-range `Block`
+/// shapes — a block with no block item at all, and an out-of-range `Block`
 /// cannot occur since `Block` is exhaustive, so only the first shape is real.
 #[test]
 fn item_for_block_inverts_block_for_item_for_ordinary_blocks() {
@@ -352,12 +352,12 @@ fn item_for_block_inverts_block_for_item_for_ordinary_blocks() {
     }
 }
 
-/// A block no `BlockItem` targets at all — fluids and technical blocks a
+/// A block no block item targets at all — fluids and technical blocks a
 /// player can never hold as an item — must report `None` rather than a
 /// fabricated item. (`minecraft:redstone_wire` is *not* such a block: the
 /// census's own false-negative example, `minecraft:redstone` places it, so
 /// `item_for_block` correctly answers `Some(Redstone)` there — this test
-/// picks blocks with no `BlockItem` pointing at them by any name.)
+/// picks blocks with no block item pointing at them by any name.)
 #[test]
 fn item_for_block_is_none_for_a_block_with_no_block_item() {
     for name in ["minecraft:water", "minecraft:fire", "minecraft:air", "minecraft:nether_portal"] {

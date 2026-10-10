@@ -64,7 +64,7 @@
 //! **That failure is only sometimes fatal to [`complete`], and getting this
 //! wrong was this module's own first bug.** Since the text these are handed
 //! always ends at the caret, a failing token that is *also the last thing
-//! typed* is still being typed — vanilla's own `CommandSuggestions` colours
+//! typed* is still being typed — vanilla's own command suggestions colours
 //! it `UNPARSED_STYLE` and offers suggestions for it **in the same pass**
 //! (`updateCommandInfo`/`formatText` both read the same `currentParse`;
 //! neither waits for the other to decide the text is "valid" first). Typing
@@ -356,11 +356,11 @@ impl ChatInput {
         Self::default()
     }
 
-    /// The chat box's own [`EditBox`], configured as `ChatScreen.init`
+    /// The chat box's own [`EditBox`], configured as the chat screen's init
     /// configures vanilla's.
     ///
     /// Three of the four settings are vanilla's literally: `setMaxLength(256)`,
-    /// `setBordered(false)`, `setCanLoseFocus(false)`. The fourth —
+    /// set bordered, set can lose focus. The fourth —
     /// `widget.focused` — stands for `setInitialFocus(this.input)`, and it has
     /// to be set here rather than on open because this shell has no `Screen`
     /// focus layer around the chat prompt: `EditBox::handle_key` declines
@@ -389,7 +389,7 @@ impl ChatInput {
 
     /// Seed the buffer (e.g. a leading `/` when chat is opened with the command
     /// key). Replaces any current contents, leaving the caret at the end —
-    /// `EditBox.setValue`'s own `moveCursorToEnd`.
+    /// EditBox's set value's own `moveCursorToEnd`.
     pub fn set(&mut self, text: impl Into<String>) {
         self.buf.set_value(text.into());
         // A wholesale replacement is a different line, so any list and any
@@ -398,7 +398,7 @@ impl ChatInput {
     }
 
     /// Insert typed or pasted text **at the caret**, replacing any selection —
-    /// `EditBox.insertText`. Characters vanilla's chat filter rejects (the C0
+    /// EditBox's insert text. Characters vanilla's chat filter rejects (the C0
     /// controls, DEL, and the `§` used by legacy colour codes) are dropped, and
     /// the whole insertion is truncated to what [`MAX_CHAT_LENGTH`] still
     /// allows, so a paste or an IME cannot inject either.
@@ -441,14 +441,14 @@ impl ChatInput {
         self.buf.value()
     }
 
-    /// The caret's position, as a **`char`** index — `EditBox.getCursorPosition`.
+    /// The caret's position, as a **`char`** index — EditBox's get cursor position.
     #[must_use]
     pub fn cursor_position(&self) -> usize {
         self.buf.cursor_position()
     }
 
     /// The selection as a `char` range, or `None` when the caret is a plain
-    /// insertion point. Ordered — `EditBox.highlightPos` may sit either side of
+    /// insertion point. Ordered — EditBox's highlight pos may sit either side of
     /// the caret, depending on which way the selection was dragged.
     #[must_use]
     pub fn selection(&self) -> Option<(usize, usize)> {
@@ -469,8 +469,8 @@ impl ChatInput {
     }
 
     /// The line up to the caret — vanilla's
-    /// `input.getValue().substring(0, input.getCursorPosition())`, which is what
-    /// `CommandSuggestions` completes against rather than the whole value.
+    /// `input.getValue().substring(0, input.get_cursor_position())`, which is what
+    /// The command suggestions completes against rather than the whole value.
     #[must_use]
     fn partial(&self) -> &str {
         &self.buf.value()[..self.cursor_byte()]
@@ -515,7 +515,7 @@ impl ChatInput {
         self.history_pos = usize::MAX;
         self.history_buffer.clear();
         let line = self.buf.value().to_owned();
-        // `setValue("")` rather than a `mem::take` of a bare `String`: the caret
+        // set value rather than a `mem::take` of a bare `String`: the caret
         // and the selection are part of the line's state now, and leaving them
         // pointing into text that no longer exists is the trap `on_value_change`
         // exists to close.
@@ -530,7 +530,7 @@ impl ChatInput {
     /// it from the live tab list instead, which keeps this module free of a
     /// client handle exactly as its own header requires. Pass **every** entry,
     /// listed or not: vanilla's provider reads `getOnlinePlayers()`, not
-    /// `getListedOnlinePlayers()`, so a player hidden from the tab overlay is
+    /// get listed online players, so a player hidden from the tab overlay is
     /// still completable.
     pub fn set_online_players(&mut self, names: Vec<String>) {
         self.online_players = names;
@@ -579,7 +579,7 @@ impl ChatInput {
     ///   coming back restores it, so a half-written message survives a look
     ///   through the history;
     /// * moving onto a stored entry cancels any suggestion list
-    ///   (`setAllowSuggestions(false)`), because the recalled line is not one the
+    ///   (set allow suggestions), because the recalled line is not one the
     ///   player is mid-way through typing.
     fn move_in_history(&mut self, dir: i32) -> bool {
         let max = self.history.len();
@@ -1033,7 +1033,7 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
         // token is *also the last thing typed* (`unparsed_end == len`),
         // vanilla's own dispatcher is in exactly this state too — Brigadier
         // tries to match/parse it, throws, and leaves the reader's cursor
-        // at `token_start` — and `CommandSuggestions` still asks that
+        // at `token_start` — and the command suggestions still asks that
         // *parent* node's children for suggestions filtered by the
         // unmatched text as a live prefix, while simultaneously colouring
         // the same text with its own unparsed style (vanilla's own
@@ -1165,7 +1165,7 @@ struct PendingSuggestionRequest {
 }
 
 /// Tracks the request/response round trip [`Completion::NeedsServer`] hands
-/// off to. Mirrors vanilla's own `ClientSuggestionProvider`: a monotonically
+/// off to. Mirrors vanilla's own client suggestion provider: a monotonically
 /// increasing transaction id, and a reply is honoured only when its id
 /// matches the one currently in flight (`completeCustomSuggestions`'s own
 /// check) — a reply to a request the input has since outgrown is dropped
@@ -1333,7 +1333,7 @@ pub const SUGGESTION_LINE_LIMIT: usize = 10;
 /// separately is what keeps that from reading as an off-by-one.
 pub const SUGGESTION_LINE_START_OFFSET: usize = 1;
 
-/// The dropdown itself — vanilla's `CommandSuggestions.SuggestionsList`,
+/// The dropdown itself — vanilla's command suggestions's suggestions list,
 /// transcribed field for field.
 ///
 /// # The three pieces of state, and why each is separate
@@ -1346,7 +1346,7 @@ pub const SUGGESTION_LINE_START_OFFSET: usize = 1;
 ///   why hover and click do not jump the window under the pointer.
 /// * `tab_cycles` is what makes one key do two jobs. Vanilla's
 ///   `SuggestionsList.keyPressed` runs `if (tabCycles) cycle(...)` *before*
-///   `useSuggestion()`, and only `useSuggestion` sets the flag: so the **first**
+///   use suggestion, and only `useSuggestion` sets the flag: so the **first**
 ///   Tab commits the highlighted row without moving, and every Tab after that
 ///   moves first. The arrows clear it (`tabCycles = false`), so browsing with
 ///   Up/Down and then pressing Tab commits what you are looking at rather than
@@ -1523,7 +1523,7 @@ impl SuggestionsList {
     }
 
     /// Byte offset into the line the candidates replace from — the popup's own x
-    /// anchor, `suggestions.getRange().getStart()`.
+    /// anchor, get range's get start.
     #[must_use]
     pub fn start(&self) -> usize {
         self.start
@@ -1699,7 +1699,7 @@ impl ChatInput {
     /// # It completes the line **up to the caret**, not the whole line
     ///
     /// `updateCommandInfo` reads `int cursorPosition = this.input.
-    /// getCursorPosition()` and hands *that* to `getCompletionSuggestions`;
+    /// get_cursor_position()` and hands *that* to `getCompletionSuggestions`;
     /// the player-name branch is explicit about it —
     /// `command.substring(0, cursorPosition)` — and `sortSuggestions` ranks
     /// against the same prefix. While the caret sat permanently at the end of
@@ -1778,7 +1778,7 @@ impl ChatInput {
         self.recompute_suggestions(tree)
     }
 
-    /// `SuggestionsList.useSuggestion`: splice the highlighted candidate into
+    /// SuggestionsList's use suggestion: splice the highlighted candidate into
     /// the line and arm the next Tab to cycle.
     ///
     /// The list survives the edit — vanilla's `keepSuggestions = true` around
@@ -1794,7 +1794,7 @@ impl ChatInput {
         list.tab_cycles = true;
         self.buf.set_value(applied);
         // `setValue` leaves the caret at the end of the whole line; vanilla
-        // follows it with `setCursorPosition(end)`/`setHighlightPos(end)`, which
+        // follows it with set cursor position/set highlight pos, which
         // is only the same place when the completion was an append.
         self.buf.set_cursor_position(cursor);
         self.buf.set_highlight_pos(cursor);
@@ -1815,7 +1815,7 @@ impl ChatInput {
         }
     }
 
-    /// Down in the popup — the `event.isDown()` arm. See [`Self::suggestion_up`].
+    /// Down in the popup — the event's is down arm. See [`Self::suggestion_up`].
     pub fn suggestion_down(&mut self) -> bool {
         match self.completion.list.as_mut() {
             Some(list) => {
@@ -1827,7 +1827,7 @@ impl ChatInput {
         }
     }
 
-    /// Escape in the popup — the `event.isEscape()` arm: hide the list and drop
+    /// Escape in the popup — the event's is escape arm: hide the list and drop
     /// the ghost preview, consuming the key.
     ///
     /// Consuming it is the point. Vanilla's own suggestion-popup key handling
@@ -1842,7 +1842,7 @@ impl ChatInput {
         true
     }
 
-    /// The mouse wheel over the popup — `SuggestionsList.mouseScrolled`. The
+    /// The mouse wheel over the popup — SuggestionsList's mouse scrolled. The
     /// caller has already established the pointer is inside the rect.
     pub fn suggestion_scroll(&mut self, notches: i32) -> bool {
         match self.completion.list.as_mut() {
@@ -1989,7 +1989,7 @@ impl ChatInput {
 /// add-message-to-display-queue checks whether chat is focused and
 /// compensates the instant a message is queued
 /// (`if (chatting && chatScrollbarPos > 0) { newMessageSinceScroll = true;
-/// scrollChat(1); }`). This crate's received log ([`lodestone_game::chat::
+/// scroll chat; }`). This crate's received log ([`lodestone_game::chat::
 /// ChatLog`]) is deliberately version- and UI-free and holds no notion of
 /// "is the chat box open" — so [`Self::sync`] is called once per frame
 /// instead, with the box's current open/closed state and its full history,
@@ -2434,7 +2434,7 @@ mod tests {
     /// Up from the live slot recalls the **newest** line, not the oldest.
     ///
     /// The inversion this pins is the whole reason `recentChat` is a deque with
-    /// `addLast`: `moveInHistory(-1)` steps from `size()` to `size() - 1`, so the
+    /// `addLast`: move in history steps from `size()` to `size() - 1`, so the
     /// first Up must land on the last thing sent. A store that pushed newest-first
     /// would answer `"first"` here and look perfectly reasonable doing it.
     #[test]
@@ -2503,7 +2503,7 @@ mod tests {
     }
 
     /// The store normalises before comparing, so two sends differing only in
-    /// spacing are the same entry — `normalizeSpace(msg.trim())`.
+    /// spacing are the same entry — normalize space.
     #[test]
     fn the_store_normalises_whitespace_before_recording() {
         let mut input = ChatInput::new();
@@ -2968,7 +2968,7 @@ mod tests {
         /// two literal siblings under the root, one of which has a single
         /// `minecraft:gamemode` argument child with no custom suggestions
         /// provider (so its four values are enumerable from
-        /// [`local_domain`] alone, matching `GameModeArgument`'s real
+        /// [`local_domain`] alone, matching game mode argument's real
         /// `listSuggestions`).
         fn gamemode_and_give_tree() -> CommandTree {
             let nodes = vec![
@@ -3045,7 +3045,7 @@ mod tests {
 
         /// An argument node whose `suggestions` provider is present (here,
         /// `minecraft:ask_server`, the only provider id vanilla's own
-        /// `SuggestionProviders` maps every *unrecognised* id to as well —
+        /// The suggestion providers maps every *unrecognised* id to as well —
         /// see this module's own doc) must defer to the round trip rather
         /// than guess.
         #[test]

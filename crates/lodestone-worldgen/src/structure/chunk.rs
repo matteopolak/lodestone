@@ -107,7 +107,7 @@ pub const BEARD_REACH: i32 = 12;
 /// can regenerate and clip its portion of the skirt.
 pub(crate) const PORTAL_TERRAIN_REACH: i32 = 14;
 
-/// `BuriedTreasurePieces.BuriedTreasurePiece.postProcess` — walk a cursor down
+/// The buried-treasure piece's post-processing — walk a cursor down
 /// from the ocean-floor height at `(origin.x, origin.z)` until the block
 /// *below* it is one of the five stone-family materials, fill the walk
 /// position's six air/liquid neighbours (stone-family straight down, the
@@ -134,7 +134,7 @@ pub(crate) fn place_buried_treasure_chest(
         return;
     }
     let top = min_y + size_y - 1;
-    // `level.getHeight(OCEAN_FLOOR_WG, x, z)`: one above the topmost block that
+    // level's get height: one above the topmost block that
     // is neither air nor a fluid, scanned against the *real* grid — sand,
     // sandstone and every surface-rule product are visible here, unlike at
     // structure-start time.

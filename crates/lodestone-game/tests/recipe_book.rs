@@ -100,7 +100,7 @@ fn loads_the_whole_vanilla_corpus() {
 fn nested_item_tags_keep_their_subdirectory_in_the_id() {
     let book = book();
     // `tags/item/enchantable/weapon.json` -> `minecraft:enchantable/weapon`, the
-    // same id vanilla's FileToIdConverter produces. A flat read_dir would have
+    // same id vanilla's file-to-id converter produces. A flat read_dir would have
     // called this `minecraft:weapon` (or dropped it).
     let weapon = id("minecraft:enchantable/weapon");
     // Directly listed in that file.

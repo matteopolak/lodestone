@@ -24,7 +24,7 @@
 //! `poll_net`/`fold_entities`/`Extract`.
 //! Around it sit the things that must happen once per *frame* rather than
 //! once per tick and so cannot be systems -- `apply_mouse` (vanilla's
-//! `MouseHandler.turnPlayer` is off the render loop too), `update_target` and
+//! The mouse handler's turn player is off the render loop too), `update_target` and
 //! `update_entity_target` (the pick ray, cast from the already-interpolated
 //! camera), the mesh drains `app.rs` uploads from, and `refresh_stats`.
 //! `drain_action_queue` is here because it is the tail of each tick: the one
@@ -57,7 +57,7 @@ use super::*;
 #[cfg(not(target_arch = "wasm32"))]
 use lodestone_game::click::{Click, PlayerCtx};
 
-/// `LivingEntity.tick`'s per-tick candidate for the body yaw *before* easing:
+/// The living entity's tick's per-tick candidate for the body yaw *before* easing:
 /// `yBodyRotT`. Defaults to the body's own unchanged yaw (no candidate this
 /// tick, so [`tick_head_turn`]'s catch-up term is a no-op), becomes the
 /// **walking** direction once the feet moved far enough to matter
@@ -93,13 +93,13 @@ pub(crate) fn body_yaw_target(body_yaw: f32, look_yaw: f32, dx: f64, dz: f64, at
     target
 }
 
-/// `LivingEntity.tickHeadTurn`: eases the body yaw 30% of the way toward
+/// The living entity's tick head turn: eases the body yaw 30% of the way toward
 /// `target` this tick, then clamps so the look yaw never ends up more than
 /// `max_head_rotation` degrees from the eased body — forcing an instant snap
 /// of the body (not the head, which is never clamped here) when the head
 /// would otherwise exceed it. `max_head_rotation` is
 /// `getMaxHeadRotationRelativeToBody()`: `50.0` by default
-/// (`LivingEntity`), narrowed to `15.0` while a `Player` blocks with a
+/// (the living entity), narrowed to `15.0` while a `Player` blocks with a
 /// shield (`Player`'s override — see [`Sim::is_blocking`]).
 ///
 /// `pub(crate)`, for the same reuse as [`body_yaw_target`] just above.
@@ -181,7 +181,7 @@ impl Sim {
     /// Apply accumulated mouse motion to the view angles.
     ///
     /// Deliberately **not** a `GameTick` system: mouse-look is per-frame in
-    /// vanilla too (`MouseHandler.turnPlayer` runs off the render loop, not the
+    /// vanilla too (the mouse handler's turn player runs off the render loop, not the
     /// tick), so binding it to 20 Hz would make aiming feel stepped at high
     /// frame rates.
     pub fn apply_mouse(&mut self) {
@@ -258,7 +258,7 @@ impl Sim {
     /// Push vanilla's `options.particles` down from the menu layer — the
     /// particle-density filter, stored here and read by the
     /// `NetUpdate::Particles` arm in `crate::sim::net_apply`, which is this
-    /// client's `ClientLevel.doAddParticle`.
+    /// client's client level's do add particle.
     ///
     /// A push polled per presented frame like [`Self::set_auto_jump`], not a
     /// one-shot on the settings write: `Sim` is rebuilt on every session start
@@ -285,7 +285,7 @@ impl Sim {
     /// # Also the animation half of every queued swing
     ///
     /// A [`ClientAction::SwingArm`] on this queue is the *same* event vanilla's
-    /// `LivingEntity.swing` handles: it both sends `ClientboundAnimatePacket` to
+    /// The living entity's swing handles: it both sends animate packet to
     /// everyone else **and** starts the swinger's own animation clock. This is the
     /// single funnel every tick-driven swing passes through — notably
     /// `interact.rs`'s hold-to-mine loop via `lodestone_game::mining`, which is
@@ -312,11 +312,11 @@ impl Sim {
             //
             // **`ClientAction::EndClientTick` had no producer outside a test**:
             // v770 encodes it and nothing sent it, the `SetFlying` shape. It is
-            // not cosmetic. `ServerGamePacketListenerImpl.handleClientTickEnd`
+            // not cosmetic. The server game packet listener impl's handle client tick end
             // (`:2195-2202`) sets `knownMovement` to `Vec3.ZERO` when **no**
             // movement packet arrived that tick, so without this the server keeps
             // our last movement vector forever — `resetLastActionTime` (the AFK
-            // clock) and every server-side `getKnownMovement()` reader see a
+            // clock) and every server-side get known movement reader see a
             // player still travelling after they stop.
             //
             // Appended here rather than by a `TickSet::Send` system for two
@@ -459,7 +459,7 @@ impl Sim {
         }
     }
 
-    /// Start the local player's arm-swing animation, like `LivingEntity.swing`.
+    /// Start the local player's arm-swing animation, like the living entity's swing.
     ///
     /// Idempotent within the first half of a running swing — [`EntityPose::start_swing`]
     /// swallows a restart before its half-way point, which is what turns
@@ -468,7 +468,7 @@ impl Sim {
     ///
     /// # One-tick offset from vanilla, and why it is left alone
     ///
-    /// Vanilla calls `swing()` from `Minecraft.handleKeybinds`, which runs
+    /// Vanilla calls `swing()` from Minecraft's handle keybinds, which runs
     /// *before* `updateSwingTime` in the same tick, so `swingTime` reaches `0` on
     /// the tick the click happened. Here [`Self::step`] ticks `body_pose` before
     /// draining the action queue, so the clock starts on the **next** tick — a
@@ -625,7 +625,7 @@ impl Sim {
             let nearby = self.tick_nearby_entities();
             // The walk bob's amplitude reads the state vanilla's `updateBob` sees,
             // which is the state **before** this tick's movement: `aiStep` calls
-            // `updateBob()` and only then `super.aiStep()`, so `getDeltaMovement()`
+            // update bob and only then super's ai step, so get delta movement
             // is still last tick's post-friction velocity there. Captured here,
             // before the `GameTick` write guard, for that reason and not merely
             // for lock hygiene.
@@ -644,7 +644,7 @@ impl Sim {
             // it for no reason other than symmetry with the three resources
             // below — the value is frame-stable either way.
             let auto_jump = lodestone_ecs::player::AutoJump(self.auto_jump);
-            // The equipment half of `LivingEntity.canGlide`.
+            // The equipment half of the living entity's can glide.
             let glider = lodestone_ecs::player::GliderEquipped(self.glider_equipped());
             self.write(|w| {
                 w.insert_resource(collision);
@@ -684,7 +684,7 @@ impl Sim {
             // `tickHeadTurn` itself. Feeding it the raw look yaw for *both*
             // body and head (as this used to) collapses the two: the body
             // then always faces exactly where the camera does, with no lag
-            // and no clamp, which is `LivingEntity.tickHeadTurn`'s entire
+            // and no clamp, which is the living entity's tick head turn's entire
             // job left undone.
             //
             // `self.body_pose.body_yaw` here is still *last* tick's result —
@@ -737,7 +737,7 @@ impl Sim {
             self.tick_footstep(pre_position, &p);
             // **Auto-jump used to live here, and that was that fix's defect.**
             // `lodestone_physics::update_auto_jump` is a complete port of
-            // `LocalPlayer.updateAutoJump` — swept look-ahead probe, headroom
+            // LocalPlayer's update auto jump — swept look-ahead probe, headroom
             // raycast, the `-0.15` facing-vs-moving dot product and all — and it
             // runs inside `tick_air` every tick. This file held a *second*,
             // deliberately simplified probe in front of it, gated on
@@ -765,7 +765,7 @@ impl Sim {
             self.tick_particles();
             // The portal-transition screen effect, on the same fixed 20 Hz for the
             // same reason the lids and bells below are: vanilla's
-            // `LocalPlayer.handlePortalTransitionEffect` ramps by +0.0125 and
+            // LocalPlayer's handle portal transition effect ramps by +0.0125 and
             // decays by -0.05 **per tick**, so advancing it per frame would make
             // the four-second ramp-in a function of the frame rate — 1.3 s at
             // 60 fps. After the physics run above, because the predicate is "does
@@ -839,7 +839,7 @@ impl Sim {
                     crate::block_entities::conduit_scan_frame(&handle, pos)
                 });
                 // Spawner/trial-spawner spin, on the same fixed 20 Hz:
-                // `BaseSpawner.clientTick`'s own rate term
+                // The base spawner's client tick's own rate term
                 // (`1000 / (spawnDelay + 200)`) is a per-tick advance, so a
                 // per-frame one would spin every cage faster at 60 fps than
                 // at 20. `spawner_tick_candidates` reads world state (a
@@ -893,7 +893,7 @@ impl Sim {
     /// cross-plants (`short_grass`, ferns, flowers, kelp) an empty collision shape —
     /// you walk through grass — while picking them still works, because vanilla's
     /// `clip`/`clipWithInteractionOverride` walks a *separate* outline/interaction
-    /// shape (`BlockBehaviour.getShape` / `getInteractionShape`), not the collision
+    /// shape (the block behaviour's get shape / `getInteractionShape`), not the collision
     /// shape.
     ///
     /// The whole question therefore lives in one place,
@@ -910,7 +910,7 @@ impl Sim {
     /// box was already drawn from the real outline census. Leaf litter therefore
     /// stayed targetable with the crosshair well above it. The closure now emits
     /// the cell's real outline boxes and [`raycast`] clips against them, which is
-    /// vanilla's `ClipContext.Block.OUTLINE`.
+    /// vanilla's clip context's block.OUTLINE.
     pub fn update_target(&mut self, aspect: f32) {
         let cam = self.camera(aspect);
         let origin = [

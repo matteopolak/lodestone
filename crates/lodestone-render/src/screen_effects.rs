@@ -18,7 +18,7 @@
 //!
 //! # Screen-space, not world-space
 //!
-//! Vanilla submits both quads through a small local `PoseStack` under a
+//! Vanilla submits both quads through a small local pose stack under a
 //! perspective `hud3dProjection`, at a fixed depth (`z = -0.5`) with a size
 //! chosen so it fills the frame regardless of FOV. Reproducing that exact
 //! perspective would buy nothing here — the quads have no other 3-D content to
@@ -57,7 +57,7 @@
 //! # Underwater: a tint, not a second fog
 //!
 //! `submitWater` multiplies the `underwater.png` texel by a **grayscale**
-//! colour (`ARGB.colorFromFloat(0.1F, brightness, brightness, brightness)`,
+//! colour (ARGB's color from float,
 //! vanilla's own screen-effect renderer) at alpha `0.1` — not blue; whatever blue
 //! cast the overlay has comes entirely from the texture's own pixels. This is
 //! wholly independent of the dimension fog this codebase already models
@@ -118,7 +118,7 @@ pub const UNDERWATER_TILE_COUNT: f32 = 4.0;
 /// it cannot disagree about how bright the water is.
 ///
 /// This used to be a local `0.2 + 0.8 * max(sky, block)` approximation with the
-/// comment "`Lightmap.getBrightness` is a per-dimension gamma-corrected curve
+/// comment "Lightmap's get brightness is a per-dimension gamma-corrected curve
 /// table this codebase has not ported". It is ported now (see
 /// [`crate::light`]'s module docs), so the approximation is gone; note the
 /// consequence that a fully dark cell now tints **black** rather than at the
@@ -136,7 +136,7 @@ pub fn underwater_brightness(packed_light: u8) -> f32 {
 }
 
 /// Builds the underwater overlay's one NDC quad. `yaw_degrees`/`pitch_degrees`
-/// are the camera's look direction (matching vanilla's `getYRot()`/`getXRot()`
+/// are the camera's look direction (matching vanilla's get y rot/get x rot
 /// convention: yaw about `+Y`, `0` facing `+Z`); the UV scroll formula and
 /// vertex/UV pairing are transcribed unchanged from
 /// vanilla's water-submit and generic quad-building functions.
@@ -151,7 +151,7 @@ pub fn underwater_overlay_quad(
     let u0 = -yaw_degrees / 64.0;
     let v0 = pitch_degrees / 64.0;
     let (u1, v1) = (u0 + UNDERWATER_TILE_COUNT, v0 + UNDERWATER_TILE_COUNT);
-    // `buildQuad(x0,y0,x1,y1, u0=u1,v0=v1, u1=u0,v1=v0)` — vanilla passes the
+    // build quad — vanilla passes the
     // *far* UV corner as its own `u0`/`v0` parameter; transcribed literally
     // rather than renamed, so this stays checkable against the source line.
     [
@@ -205,7 +205,7 @@ pub const FIRE_TILE_COUNT: u32 = 4;
 pub const FIRE_STRIP_TOP: f32 = -0.3;
 
 /// Vanilla's sprite-quad builder's own local unit-square half-extent and fixed `z`
-/// (its fire-overlay submit function: `buildSpriteQuad(..., -0.5F, -0.5F,
+/// (its fire-overlay submit function: `build sprite quad(..., -0.5F, -0.5F,
 /// 0.5F, 0.5F, -0.5F, ...)`).
 const FIRE_QUAD_HALF_EXTENT: f32 = 0.5;
 const FIRE_QUAD_LOCAL_Z: f32 = -0.5;
@@ -349,8 +349,8 @@ pub fn border_warning_overlay_triangles(strength: f32) -> [ScreenOverlayVertex; 
 
 // ---------------------------------------------------------------------------
 // Freeze overlay: vanilla's HUD camera-overlays extraction function's
-// `player.getTicksFrozen() > 0` branch:
-// `extractTextureOverlay(POWDER_SNOW_OUTLINE_LOCATION, player.getPercentFrozen())`.
+// `player.get_ticks_frozen() > 0` branch:
+// extract texture overlay.
 // The freeze *mechanic* (`frozen_ticks`/`percent_frozen`) lives in
 // `lodestone_physics::player::PlayerState`; this is only the
 // overlay half.
@@ -358,7 +358,7 @@ pub fn border_warning_overlay_triangles(strength: f32) -> [ScreenOverlayVertex; 
 
 /// Builds the freeze overlay's static full-screen NDC quad, same shape as
 /// [`pumpkin_overlay_triangles`] — a static, untiled, unscrolled blit — but
-/// with `percent` (vanilla's `Entity.getPercentFrozen()`, already `0.0..=1.0`
+/// with `percent` (vanilla's Entity's get percent frozen, already `0.0..=1.0`
 /// by construction, see `PlayerState::percent_frozen`) as the vertex alpha
 /// instead of pumpkin's fixed `1.0`: vanilla's HUD texture-overlay extraction function's `alpha`
 /// parameter is `ARGB.white(alpha)`, i.e. an opaque-white texel multiplied by
@@ -398,7 +398,7 @@ pub fn vision_obscuration_triangles(strength: f32) -> [ScreenOverlayVertex; 6] {
 // ---------------------------------------------------------------------------
 // Spyglass overlay: vanilla's HUD spyglass-overlay extraction
 // function. Not the generic `camera_overlay` component path
-// pumpkin uses — `player.isScoping()` gates a *dedicated* method with its own
+// pumpkin uses — player's is scoping gates a *dedicated* method with its own
 // geometry (a centred lens + four solid-black letterbox bars), checked
 // against the jar rather than assumed to be a two-line table addition.
 // ---------------------------------------------------------------------------
@@ -441,7 +441,7 @@ pub fn spyglass_lens_half_extent(aspect: f32) -> (f32, f32) {
 
 /// The spyglass lens's textured quad — `spyglass_scope.png`, centred, sized
 /// by [`spyglass_lens_half_extent`]. Opaque white tint: vanilla's
-/// `graphics.blit(RenderPipelines.GUI_TEXTURED, SPYGLASS_SCOPE_LOCATION, ...)`
+/// textured GUI blit of the spyglass scope texture
 /// call (vanilla's HUD spyglass-overlay extraction function) is the 9-argument overload with no colour
 /// parameter, which defaults to full white at full alpha, the same as
 /// [`PUMPKIN_TINT`].
@@ -457,7 +457,7 @@ pub fn spyglass_lens_triangles(aspect: f32) -> [ScreenOverlayVertex; 6] {
     [q[0], q[1], q[2], q[2], q[3], q[0]]
 }
 
-/// Opaque black — vanilla's four `graphics.fill(RenderPipelines.GUI, ...,
+/// Opaque black — vanilla's four GUI fill calls around the lens (same HUD spyglass-overlay extraction
 /// -16777216)` calls around the lens (same HUD spyglass-overlay extraction
 /// function; `-16777216` is
 /// ARGB opaque black).
@@ -531,7 +531,7 @@ pub fn spyglass_letterbox_triangles(aspect: f32) -> [ScreenOverlayVertex; 24] {
 ///
 /// Tint is vanilla's `red = 0.2 * strength, green = 0.4 * strength, blue =
 /// 0.2 * strength` (same confusion-overlay extraction function) at alpha `1.0`
-/// (`ARGB.colorFromFloat(1.0F, red, green, blue)`) — a green-biased tint,
+/// (ARGB's color from float) — a green-biased tint,
 /// unlike every other overlay in this pass, which is why it is not folded
 /// into a shared "tint from strength" helper with anything else here.
 #[must_use]
@@ -1225,9 +1225,9 @@ impl ScreenEffectRenderer {
 
     /// Draws the freeze overlay as its own `Load` render pass,
     /// for the reasons on [`Self::draw_underwater`]. `percent` is vanilla's
-    /// `Entity.getPercentFrozen()` (see [`freeze_overlay_triangles`]) — the
+    /// Entity's get percent frozen (see [`freeze_overlay_triangles`]) — the
     /// caller is expected to have already checked `percent > 0.0`
-    /// (vanilla's own `getTicksFrozen() > 0` guard), but this draws
+    /// (vanilla's own `get_ticks_frozen() > 0` guard), but this draws
     /// unconditionally like every other method here; gating is
     /// [`super::ScreenEffects`]'s job, one layer up.
     pub fn draw_freeze(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, percent: f32) {

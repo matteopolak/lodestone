@@ -19,12 +19,12 @@
 //! Nothing here invents a width. [`lodestone_assets::font`] parses vanilla's own
 //! `font/default.json` provider chain and derives each glyph's advance from the
 //! **rightmost non-transparent column of its sheet cell**, exactly as
-//! `BitmapProvider.getActualGlyphWidth` does; `RasterFont` adds the decoded
+//! The bitmap provider's get actual glyph width does; `RasterFont` adds the decoded
 //! sheets so the same cells can be drawn as well as measured. The pen advances
 //! by that number, the shadow is `+1` logical px at 25 % of the text colour
 //! (vanilla's own ARGB-scale-RGB helper applied to `(color, 0.25F)` in its own prepared-text-builder's get-shadow-color accessor),
 //! and a glyph's box sits `7 - ascent` logical px below the line's top
-//! (`GlyphBitmap.getTop`).
+//! (the glyph bitmap's get top).
 //!
 //! # How it draws, and why not a texture
 //!
@@ -234,7 +234,7 @@ fn bidi_visual_order(text: &str) -> Vec<usize> {
 }
 
 /// Vanilla's missing-glyph box: a 5×8 hollow rectangle with a 1 px edge, advance
-/// `5 + 1`. Mirrors `SpecialGlyphs.MISSING` in the 26.2 client.
+/// `5 + 1`. Mirrors the special glyphs's missing in the 26.2 client.
 const MISSING_W: u32 = 5;
 /// Height of the missing-glyph box, in logical pixels.
 const MISSING_H: u32 = 8;
@@ -244,7 +244,7 @@ const MISSING_H: u32 = 8;
 pub struct VanillaFont {
     raster: RasterFont,
     /// `§k` obfuscated text's replacement pool: drawable codepoints grouped by
-    /// `ceil(advance)`, mirroring `FontSet.glyphsByWidth`
+    /// `ceil(advance)`, mirroring font set's glyphs by width
     ///. Vanilla's own pool is built from *every*
     /// active provider (including `space`), but only bitmap glyphs are
     /// drawable here, so this is restricted to codepoints
@@ -858,8 +858,8 @@ impl VanillaFont {
     /// `§` control pairs are consumed here and never become a
     /// [`ResolvedGlyph`], which is what keeps them out of
     /// [`bidi_reorder_glyphs`]: the Unicode Bidirectional Algorithm reorders
-    /// **visible** text, and vanilla's own `Language.getVisualOrder` likewise
-    /// runs over an already-decomposed `FormattedCharSequence`, not a raw
+    /// **visible** text, and vanilla's own Language's get visual order likewise
+    /// runs over an already-decomposed formatted char sequence, not a raw
     /// `§`-coded string.
     fn resolve_legacy(&self, s: &str, base: [f32; 3]) -> Vec<ResolvedGlyph> {
         let mut out = Vec::with_capacity(s.len());
@@ -1069,7 +1069,7 @@ impl VanillaFont {
         // Vanilla's own glyph-info advance accessor: `advance + boldOffset` when bold,
         // unchanged otherwise. Vanilla applies this to *every* glyph, drawable
         // or not — a bold space is wider too. The offset is **per glyph**, not a
-        // font constant: `UnihexProvider.Glyph.info` overrides `getBoldOffset`
+        // font constant: the unihex provider's glyph.info overrides `getBoldOffset`
         // to 0.5F because a unihex glyph is drawn at oversample 2, so bold CJK
         // shifts one source texel rather than two.
         let bold_extra = font.font().bold_offset(cp);
@@ -1083,7 +1083,7 @@ impl VanillaFont {
         }
 
         if let Some(base_ink) = base_ink {
-            // `§k` (and not a space, per `Font.getGlyph`'s `codepoint != 32`
+            // `§k` (and not a space, per Font's get glyph's `codepoint != 32`
             // guard, which space satisfies here by having no raster at all):
             // substitute a same-width-class glyph's pixels, but keep drawing
             // at `ch`'s own metrics.
@@ -1095,7 +1095,7 @@ impl VanillaFont {
             self.draw_ink(cs, &draw_ink, x, y, scale, c, style.italic);
             if style.bold {
                 // The second, offset pass that actually makes bold read as
-                // bold (`BakedSheetGlyph.renderChar`, vanilla's own baked-sheet-glyph type)
+                // bold (the baked sheet glyph's render char, vanilla's own baked-sheet-glyph type)
                 // — not a font-weight variant, the same glyph redrawn shifted.
                 self.draw_ink(
                     cs,
@@ -1146,7 +1146,7 @@ impl VanillaFont {
     /// logical-pixel offset from the line's top (matching what
     /// [`CachedGlyphInk::top`] records for the glyph's top edge), and the row
     /// shifts in `x` by `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`
-    /// (`BakedSheetGlyph.shearTop`/`shearBottom`,
+    /// (the baked sheet glyph's shear top/`shearBottom`,
     /// vanilla's own baked-sheet-glyph type, both `1.0F - 0.25F * v`). Vanilla shears
     /// the whole glyph as one quad with two sheared edges (a continuous linear
     /// interpolation between the top and bottom edge's shear); this evaluates
@@ -1205,7 +1205,7 @@ impl VanillaFont {
 
     /// Picks a cached `§k` replacement from [`obfuscation_pool`](VanillaFont::obfuscation_pool),
     /// keyed by `ceil(original_advance)` — vanilla's own width class
-    /// (vanilla's own font-set type, `Mth.ceil(glyph.info().getAdvance(false))`), and
+    /// (vanilla's own font-set type, `Mth.ceil(glyph.info().get_advance(false))`), and
     /// advances the free-running picker once. `None` only when this font has
     /// no drawable glyph at all of that exact rounded width.
     fn obfuscated_ink(&self, original_advance: f32) -> Option<Arc<CachedGlyphInk>> {
@@ -1325,7 +1325,7 @@ fn recover_poisoned_lock<T>(result: Result<T, PoisonError<T>>) -> T {
 }
 
 /// Groups every codepoint this font can actually draw pixels for by
-/// `ceil(advance)`, mirroring `FontSet.glyphsByWidth`
+/// `ceil(advance)`, mirroring font set's glyphs by width
 /// restricted to codepoints
 /// [`RasterFont::raster`] returns coverage for. Built once at load time so
 /// `§k` never rebuilds it mid-draw.
@@ -2129,7 +2129,7 @@ mod tests {
         let raster = bitmap_raster_scaled("AB", 32, 20, &rgba);
         let font = font_with_raster(raster);
 
-        // Vanilla's own formula (`BitmapProvider.Definition.load`): actual=32
+        // Vanilla's own formula (the bitmap provider's definition.load): actual=32
         // (fully opaque, rightmost column has ink), pixel_scale=0.625 ->
         // `(int)(0.5 + 32*0.625) + 1` = `(int)(20.5) + 1` = 21.
         let a_advance = font.raster.advance('A' as u32).expect("A resolves");
@@ -2466,7 +2466,7 @@ mod styling_tests {
         x1 - x0
     }
 
-    /// **Bold**: `BakedSheetGlyph.renderChar`
+    /// **Bold**: the baked sheet glyph's render char
     /// redraws the same glyph a second time, offset `+boldOffset` in x. Ink's
     /// bounding box must therefore widen by *exactly* `BOLD_OFFSET` (at
     /// `scale = 1.0`, device px == logical px) — not "wider", the specific
@@ -2505,7 +2505,7 @@ mod styling_tests {
     /// **Italic**: each ink row shears in x by
     /// `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`, `v` being that row's own
     /// logical-pixel offset from the line's top
-    /// (`BakedSheetGlyph.shearTop`/`shearBottom`, vanilla's own baked-sheet-glyph type).
+    /// (the baked sheet glyph's shear top/`shearBottom`, vanilla's own baked-sheet-glyph type).
     /// This predicts the exact x offset between the topmost and bottommost ink
     /// row of an italic `'|'` (a single-column vertical stroke with **no**
     /// serif — verified directly against `RasterFont::raster('|')`'s ink
@@ -2703,7 +2703,7 @@ mod styling_tests {
         );
     }
 
-    /// **Obfuscated**: `Font.getGlyph` swaps in a random
+    /// **Obfuscated**: Font's get glyph swaps in a random
     /// same-width-class glyph every time it is asked, from a `RandomSource`
     /// that is never reseeded — so two draws of the *same*
     /// `§k` string must produce **different** ink, which is what makes it read

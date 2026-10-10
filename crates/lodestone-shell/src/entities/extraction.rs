@@ -46,10 +46,10 @@ const PICKUP_LIFE_TICKS: f32 = 3.0;
 /// the collector's eye height.
 ///
 /// Vanilla's own pickup-particle position update targets
-/// `(target.getY() + target.getEyeY()) / 2.0`, and its own eye-Y accessor is
+/// `(target.getY() + target.get_eye_y()) / 2.0`, and its own eye-Y accessor is
 /// `position.y + eyeHeight` — an **absolute** Y, not an
 /// offset. So the midpoint is `y + eyeHeight / 2`, i.e. this constant times the
-/// eye height above the feet. Reading `getEyeY()` as a relative offset instead
+/// eye height above the feet. Reading get eye y as a relative offset instead
 /// would target `y + (y + 1.62)/2`, which for a player at y = 64 is 32 blocks
 /// below the floor.
 pub(crate) const PICKUP_TARGET_EYE_FRACTION: f32 = 0.5;
@@ -74,7 +74,7 @@ pub(crate) const REMOTE_COLLECTOR_EYE_HEIGHT: f32 = lodestone_physics::player::D
 ///
 /// This is the part that is easy to get backwards. Vanilla does **not** keep the
 /// item entity alive and lerp it: its own take-item-entity packet handling
-/// extracts the item's render state (`extractEntity(from, 1.0F)`), hands that
+/// extracts the item's render state (extract entity), hands that
 /// *copy* to a new pickup particle, and then calls
 /// its own remove-entity with a discarded reason in the
 /// same breath. The entity is gone before the animation starts; what flies is a
@@ -107,7 +107,7 @@ pub struct PickupAnimation {
     /// The item's render scale at capture.
     pub scale: f32,
     /// Where the item was **drawn** when the pickup arrived — not its last
-    /// reported position. `ItemPickupParticle` is constructed from the extracted
+    /// reported position. The item pickup particle is constructed from the extracted
     /// render state, which is the interpolated pose, so this is the same quantity.
     pub start: Vec3,
     /// Frozen `ageInTicks`, so the bob/spin stop the instant the copy is taken —
@@ -320,8 +320,8 @@ pub fn extract_pickup_draws(
             },
             name_tag: None,
             hurt: false,
-            // An item entity is not a `LivingEntity`, so it has no `deathTime` to
-            // topple over — vanilla's fall-over lives on `LivingEntityRenderer`, and
+            // An item entity is not a living entity, so it has no `deathTime` to
+            // topple over — vanilla's fall-over lives on the living entity renderer, and
             // an item's renderer never calls `setupRotations` at all.
             death_time: 0.0,
             // A flying pickup is an item entity, not a living one: nothing can be
@@ -332,7 +332,7 @@ pub fn extract_pickup_draws(
             // An item entity is never a creeper.
             creeper_swelling: 0.0,
             // An item entity never swims — vanilla's own swim-amount update is a
-            // `LivingEntity` behaviour and `ItemEntity` is not one.
+            // The living entity behaviour and the item entity is not one.
             swim_amount: 0.0,
             // A pickup-flight animation is synthetic (this pass's own item, not
             // a tracked entity with `EntityFlags`) and vanishes in 3 ticks — not
@@ -534,7 +534,7 @@ pub fn extract_entity_draws(
         Query<&lodestone_ecs::entity::ProjectileOwner>,
         // `VehicleHurt` lives on the ingest entity too
         // (`lodestone_ecs::ingest::apply_entity_metadata` merges
-        // `VehicleEntity`'s hurt/hurt-dir/damage triple into it), bridged the
+        // The vehicle entity's hurt/hurt-dir/damage triple into it), bridged the
         // same way and nested here for the same `SystemParam`-arity reason.
         Query<&lodestone_ecs::entity::VehicleHurt>,
         // Player model-layer customization is metadata on the ingest entity,
@@ -710,14 +710,14 @@ pub fn extract_entity_draws(
         // The using-item state behind the bow/crossbow arm pose. `None` for an
         // entity that has never reported the byte (`ItemUse` absent, like
         // `AttackSwing`), which `arm_pose_for` reads as "not using anything".
-        // `Mob.isAggressive()`. `false` for an entity that has never reported the
+        // Mob's is aggressive. `false` for an entity that has never reported the
         // mob-flags byte (`MobState` absent) — which includes every non-`Mob`
         // entity permanently, because the adapter withholds index 15 for those.
         let aggressive = index
             .get(id.0)
             .and_then(|entity| mob_states.get(entity).ok())
             .is_some_and(|state| state.aggressive);
-        // `Mob.getMainArm() == LEFT` — same bridge as `aggressive` above, off
+        // `Mob.get_main_arm() == LEFT` — same bridge as `aggressive` above, off
         // the same `MobState` component, `false` for the same absent case.
         let main_arm_left = index
             .get(id.0)
@@ -981,7 +981,7 @@ pub fn extract_entity_draws(
         // ordering statement rather than a precedence rule, and it keeps one
         // field meaning "the sheet this entity binds instead of its model's".
         //
-        // This is what makes `DefaultPlayerSkin`'s hash pick visible at all.
+        // This is what makes default player skin's hash pick visible at all.
         // Until it existed the pick's `.model` chose the rig and its `.texture`
         // was dropped, so all eighteen identities drew the pack's two plain
         // sheets: every skinless player was Steve or Alex.

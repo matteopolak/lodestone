@@ -3,7 +3,7 @@
 //!
 //! `tests/live_registry_data.rs` already proved (in its own module docs) that
 //! a real server sends exactly the 29 registries named in
-//! `RegistryDataLoader::SYNCHRONIZED_REGISTRIES`, and persisted fixtures for
+//! the synchronised-registries list, and persisted fixtures for
 //! two of them (`dimension_type`, `world_clock`) that this crate's own decoder
 //! already parses into typed data. This file is the sibling that persists a
 //! fixture for **every** synchronized registry, plus `update_tags`, so
@@ -54,7 +54,7 @@ const REPAIR: &str = "recreate the creative oracle with: ./scripts/live-oracles/
 
 const CTX: Ctx = Ctx { version: 776 };
 
-/// The 29 entries of vanilla's own registry-data loader's own
+/// The 29 entries of the registry-data loader's
 /// synchronized-registries list,
 /// read directly off the decompiled source rather than
 /// `generated/reports/registries.json` — that file is authoritative about

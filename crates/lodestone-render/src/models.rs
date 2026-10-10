@@ -653,7 +653,7 @@ pub trait ModelSectionView {
     /// `dir` — the light of the **neighbouring cell the face opens into**.
     ///
     /// This is vanilla's rule (its block-model renderer reads
-    /// `getLightColor(level, state, pos.relative(quad.getDirection()))`), and it
+    /// `getLightColor(level, state, pos.relative(quad.get_direction()))`), and it
     /// is not a refinement: sampling the block's own cell renders every opaque
     /// block at its stored light, which the light engine defines as `0`. A world
     /// meshed that way is uniformly dark, and a *just-placed* block — whose cell
@@ -695,7 +695,7 @@ pub trait ModelSectionView {
     /// is a *rendering* predicate (does an opaque quad cover the boundary on all
     /// six faces), which is the right question for `cullface` and the wrong one
     /// here: vanilla's is a *collision* predicate,
-    /// `state.isCollisionShapeFullBlock(..) ? 0.2F : 1.0F`, with seven class
+    /// `state.is_collision_shape_full_block(..) ? 0.2F : 1.0F`, with seven class
     /// overrides. The two agree on stone, on slabs, on water and — by
     /// coincidence, via the transparent-block family's override — on glass, and they
     /// disagree on **every full collision cube whose model does not occlude for
@@ -710,7 +710,7 @@ pub trait ModelSectionView {
     /// Only the **AO** half of [`quad_corner_sample`] consults this. The
     /// *light* half keeps using [`occludes_at`](Self::occludes_at), because
     /// vanilla's smooth-light substitution is keyed on a third predicate again
-    /// (`translucentN` = `!isViewBlocking || getLightDampening() == 0`, plus
+    /// (`translucentN` = `!isViewBlocking || get_light_dampening() == 0`, plus
     /// vanilla's smooth-light-blend function's packed-light-is-zero test) which
     /// `occludes_at` is much the nearer stand-in for. Swapping both would make
     /// a leaf cell hand its own darkness to its neighbours' *light*, which
@@ -762,7 +762,7 @@ pub trait ModelSectionView {
     /// bucketing, and the thing that decides both which mesh the quad lands in
     /// and whether the fragment shader's cutout discard runs on it.
     ///
-    /// Vanilla's section-compiler class sends every quad to `quad.materialInfo().layer()`,
+    /// Vanilla's section-compiler class sends every quad to material info's material info,
     /// which vanilla's transparency-bucketing function derives from the transparency
     /// of that quad's *own* sprite. So a block state that mixes sprites is
     /// split across passes: `grass_block`'s six opaque cube faces draw through
@@ -1595,8 +1595,8 @@ pub fn mesh_item_quads(quads: &[BakedQuad], pose: Mat4, gui_light: GuiLight) -> 
 /// falling-block special case:
 ///
 /// * vanilla's falling-block renderer's submit function, whose whole body is
-///   `poseStack.translate(-0.5, 0, -0.5)` then `submitMovingBlock`.
-/// * `PistonHeadRenderer`, which draws the head and the pushed block the same
+///   a translate of `(-0.5, 0, -0.5)` then a moving-block submit.
+/// * The piston head renderer, which draws the head and the pushed block the same
 ///   way. Like the campfire, it bakes no layer and owns no cuboid rig, so it
 ///   needs this rather than [`EntityPipeline`](crate::EntityPipeline).
 ///
@@ -1621,7 +1621,7 @@ pub fn mesh_item_quads(quads: &[BakedQuad], pose: Mat4, gui_light: GuiLight) -> 
 /// pose bug.
 ///
 /// `light` is one byte for the whole mesh because that is what vanilla does —
-/// `MovingBlockRenderState` carries a single `blockPos` and the light is sampled
+/// the moving-block render state carries a single block position and the light is sampled
 /// there once, not per corner. Sampling per corner would need neighbour data this
 /// path does not have.
 #[must_use]
@@ -1658,7 +1658,7 @@ pub fn mesh_moving_block_quads_with_white_flash(
                 tint,
                 anim: quad.anim,
                 cutout_bypass: 0,
-                // No biome override: `MovingBlockRenderState` does carry a
+                // No biome override: the moving-block render state does carry a
                 // `biome`, but resolving it needs the position-keyed biome grid
                 // the terrain mesher owns and this path has no access to. The
                 // frame-shared palette at `quad.tint_index` is what a
@@ -1700,8 +1700,8 @@ pub trait FluidSectionView {
     }
     /// The still/flow sprite rects for a fluid kind, into the model atlas.
     fn fluid_sprites(&self, kind: FluidKind) -> FluidSprites;
-    /// Whether the block at `(x, y, z)` is a `HalfTransparentBlock` or
-    /// `LeavesBlock` in vanilla terms (glass, ice, honey, slime, tinted glass,
+    /// Whether the block at `(x, y, z)` is a half-transparent block or
+    /// leaves block in vanilla terms (glass, ice, honey, slime, tinted glass,
     /// leaves) — the neighbour family vanilla's fluid-face tesselation function checks to swap a
     /// touching fluid side face onto the `water_overlay` material and suppress
     /// its back copy.
@@ -2008,13 +2008,13 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                     let c = grid.get(xi + dx, yi + dy, zi + dz);
                     c.kind_bits() != kb && !c.occludes()
                 };
-                // Vanilla's `isFaceOccludedByNeighbor(UP, min(corners), aboveState)`
+                // Vanilla's is face occluded by neighbor
                 // only culls the top face when the *fully occluding* fast path
                 // (`Shapes.block()`) also has `height == 1.0`, which needs every
                 // corner at a full column — not merely a solid block above.
                 let up_occluded =
                     grid.get(xi, yi + 1, zi).occludes() && corners.iter().all(|&h| h >= 1.0);
-                // A side face's `isFaceOccludedByNeighbor(dir, max(h0, h1), state)`
+                // A side face's is face occluded by neighbor
                 // general branch (`Shapes.blockOccludes`, non-full-cube occluder):
                 // for the scoped single-box, full-`x`/`z`-footprint case this
                 // collapses to "does the occluder's own y-range fully cover
@@ -3399,7 +3399,7 @@ mod tests {
     /// The user's report was: water "shows the 'flowing down' effect on the edges
     /// that touch non-water blocks". Vanilla's fluid-face tesselation function culls a
     /// fluid side face whose neighbour occludes it
-    /// (`!isFaceOccludedByNeighbor(faceDir, max(h0, h1), faceState)`, and for a
+    /// (`!is_face_occluded_by_neighbor(faceDir, max(h0, h1), faceState)`, and for a
     /// `Shapes.block()` occluder that test is `direction != UP` — i.e. always true
     /// for a horizontal face). So a pool walled in solid blocks must emit **only**
     /// its top surface, and that surface must be level: vanilla's fluid-height function
@@ -3759,7 +3759,7 @@ mod tests {
     }
 
     /// No quads means an empty mesh rather than a panic — the answer for air and for
-    /// every `RenderShape.INVISIBLE` block, which callers read as "draw nothing".
+    /// every invisible-render-shape block, which callers read as "draw nothing".
     #[test]
     fn moving_block_quads_of_nothing_is_an_empty_mesh() {
         let mesh = mesh_moving_block_quads(&[], Mat4::IDENTITY, 0xF0);

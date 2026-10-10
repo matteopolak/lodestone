@@ -58,7 +58,7 @@ fn block_action_start_destroy_is_byte_exact() {
     let mut want = Vec::new();
     want.extend_from_slice(&varint(0)); // START_DESTROY_BLOCK
     want.extend_from_slice(&pack_block_pos(10, 70, -3).to_be_bytes());
-    want.push(1); // vanilla's own direction's own up's own get3 d data value()
+    want.push(1); // direction UP's 3D data value
     want.extend_from_slice(&varint(7));
     assert_eq!(bytes, want);
 }
@@ -110,8 +110,8 @@ fn item_actions_map_to_player_action_with_zeroed_target() {
         assert_eq!(id, play::serverbound::PLAYER_ACTION);
         let mut want = Vec::new();
         want.extend_from_slice(&varint(ordinal));
-        want.extend_from_slice(&0i64.to_be_bytes()); // vanilla's own block pos's own zero
-        want.push(0); // vanilla's own direction's own down
+        want.extend_from_slice(&0i64.to_be_bytes()); // block position zero
+        want.push(0); // direction DOWN
         want.extend_from_slice(&varint(0)); // sequence 0
         assert_eq!(bytes, want, "payload for {action:?}");
     }
@@ -125,18 +125,15 @@ fn item_actions_map_to_player_action_with_zeroed_target() {
 /// so what these eleven bytes mean stopped being academic. The expected value
 /// comes from the jar's own declarations, not from our encoder:
 ///
-/// * **Ordinal 6.** `vanilla's own serverbound player action packet's own action` declares, in order,
+/// * **Ordinal 6.** The player-action packet's action enum declares, in order,
 ///   `START_DESTROY_BLOCK, ABORT_DESTROY_BLOCK, STOP_DESTROY_BLOCK,
 ///   DROP_ALL_ITEMS, DROP_ITEM, RELEASE_USE_ITEM, SWAP_ITEM_WITH_OFFHAND, STAB`
-///   (`vanilla's own serverbound player action packet's own java`), and `writeEnum` writes the
-///   ordinal as a VarInt.
-/// * **Field order.** `write` is `writeEnum(action)`, `writeBlockPos(pos)`,
-///   `writeByte(direction.get3DDataValue())`, `writeVarInt(sequence)`
-///   (`:37-42`).
-/// * **The zeros.** The sender passes `vanilla's own block pos's own zero, vanilla's own direction's own down`
-///   (`vanilla's own minecraft's own java`); `vanilla's own direction's own down`'s `data3d` is `0`
-///   (`vanilla's own direction's own java`); and the three-argument constructor defaults
-///   `sequence` to `0` (`:26-28`).
+///   and the enum writer writes the ordinal as a VarInt.
+/// * **Field order.** The action enum, the block position, the face's 3D data value byte,
+///   then the sequence VarInt.
+/// * **The zeros.** The sender passes block position zero and direction DOWN
+///   and DOWN's 3D data value is `0`; the three-argument constructor defaults
+///   `sequence` to `0`.
 /// * **Packet id 41.** `generated/reports/packets.json`'s
 ///   `minecraft:player_action`.
 ///
@@ -154,8 +151,8 @@ fn swap_item_with_offhand_is_byte_exact_against_the_jars_enum_order() {
         bytes,
         vec![
             0x06, // VarInt SWAP_ITEM_WITH_OFFHAND
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // vanilla's own block pos's own zero
-            0x00, // vanilla's own direction's own down's own get3 d data value()
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // block position zero
+            0x00, // direction DOWN's 3D data value
             0x00, // VarInt sequence
         ],
         "the eleven bytes vanilla's own keybind handler sends"
@@ -201,7 +198,7 @@ fn use_item_on_is_byte_exact() {
     let mut want = Vec::new();
     want.extend_from_slice(&varint(1)); // off hand
     want.extend_from_slice(&pack_block_pos(1, 2, 3).to_be_bytes());
-    want.extend_from_slice(&varint(3)); // vanilla's own direction's own south
+    want.extend_from_slice(&varint(3)); // direction SOUTH
     want.extend_from_slice(&0.5_f32.to_be_bytes());
     want.extend_from_slice(&0.25_f32.to_be_bytes());
     want.extend_from_slice(&0.75_f32.to_be_bytes());
@@ -374,7 +371,7 @@ fn container_click_pickup_is_byte_exact_with_hashed_stacks() {
     want.extend_from_slice(&varint(7)); // state id
     want.extend_from_slice(&36i16.to_be_bytes()); // slot num
     want.push(0); // button num
-    want.extend_from_slice(&varint(0)); // vanilla's own container input's own pickup
+    want.extend_from_slice(&varint(0)); // container input PICKUP
     want.extend_from_slice(&varint(1)); // one changed slot
     want.extend_from_slice(&36i16.to_be_bytes()); // changed slot key
     want.push(1); // HashedStack present
@@ -477,10 +474,9 @@ fn interaction_actions_are_ignored_outside_play() {
 /// away.
 ///
 /// The expected values come from the jar's own enum declaration, not from our
-/// encoder: `vanilla's own serverbound player action packet's own action` is `START_DESTROY_BLOCK,
+/// encoder: the player-action packet's action enum is `START_DESTROY_BLOCK,
 /// ABORT_DESTROY_BLOCK, STOP_DESTROY_BLOCK, DROP_ALL_ITEMS, DROP_ITEM,
 /// RELEASE_USE_ITEM, SWAP_ITEM_WITH_OFFHAND, STAB`
-/// (`vanilla's own serverbound player action packet's own java`).
 ///
 /// **The transposition is the whole reason this asserts both rows.** `3` is the
 /// *whole stack* and `4` is *one item*, which reads backwards from the key
@@ -494,8 +490,8 @@ fn the_drop_ordinals_decode_to_item_dropped_with_the_stack_flag_the_right_way_ro
     let proto = lodestone_v26_2::V770ServerProtocol;
     let body = |ordinal: i32| {
         let mut payload = varint(ordinal);
-        payload.extend_from_slice(&0i64.to_be_bytes()); // vanilla's own block pos's own zero
-        payload.push(0); // vanilla's own direction's own down
+        payload.extend_from_slice(&0i64.to_be_bytes()); // block position zero
+        payload.push(0); // direction DOWN
         payload.extend_from_slice(&varint(0)); // sequence
         payload
     };

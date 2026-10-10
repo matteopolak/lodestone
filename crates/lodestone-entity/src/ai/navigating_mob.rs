@@ -61,7 +61,7 @@ impl MainHandItem for String {
     }
 }
 
-/// Vanilla `Animal::setInLove`'s love-mode duration, in ticks
+/// Vanilla Animal's set in love's love-mode duration, in ticks
 /// (`this.inLove = 600;`).
 pub const LOVE_TICKS: i32 = 600;
 
@@ -83,7 +83,7 @@ pub const PARENT_AGE_AFTER_BREEDING: i32 = 6000;
 /// ticks: [`swell`](NavigatingMob::swell) climbs by
 /// [`swell_dir`](MobController::swell_dir) once per [`advance`](NavigatingMob::advance)
 /// call, and reaching this value is detonation
-/// (`Creeper::tick`, `explodeCreeper()`).
+/// (`Creeper::tick`, explode creeper).
 pub const MAX_SWELL: i32 = 30;
 
 /// How long a mob remembers who hurt it, in ticks. Vanilla drops
@@ -238,7 +238,7 @@ pub struct MobBody {
     rng: SplitMix64,
     attack_target: Option<Vec3>,
     /// The bare item id (e.g. `"trident"`) this mob spawned holding in its
-    /// main hand, if any — vanilla's `getMainHandItem()` narrowed to the one
+    /// main hand, if any — vanilla's get main hand item narrowed to the one
     /// question the drowned's trident-attack activation check asks.
     /// Set once by the host from
     /// [`crate::spawn_equipment::populate_default_equipment_slots`]; nothing
@@ -383,7 +383,7 @@ pub struct MobBody {
     /// Vanilla `Animal.inLove`: remaining love-mode ticks, set to
     /// [`LOVE_TICKS`] by [`set_in_love`](Self::set_in_love) and decremented
     /// once per [`advance`](Self::advance) regardless of what any goal does
-    /// (vanilla `Animal::aiStep` ages it unconditionally). `> 0` is
+    /// (vanilla Animal's ai step ages it unconditionally). `> 0` is
     /// "in love" ([`MobController::is_in_love`]).
     love_ticks: i32,
     /// Host injection point, refreshed once per tick before
@@ -438,7 +438,7 @@ pub struct MobBody {
     /// (`Creeper::tick`), distinct from `FuseGoal`, which only ever
     /// decides the *direction*.
     swell: i32,
-    /// Vanilla `Creeper::isIgnited` / `DATA_IS_IGNITED`. `true` forces
+    /// Vanilla Creeper's is ignited / `DATA_IS_IGNITED`. `true` forces
     /// [`swell_dir`](Self::swell_dir) to `1` every tick regardless of what
     /// [`FuseGoal`](super::goals::FuseGoal) would otherwise choose
     /// (`Creeper::tick`). Set by [`ignite`](Self::ignite); no
@@ -448,7 +448,7 @@ pub struct MobBody {
     ignited: bool,
     /// Drained by [`take_detonated`](Self::take_detonated): `true` for
     /// exactly one call, the tick [`swell`](Self::swell) first reaches
-    /// [`MAX_SWELL`] (`Creeper::tick`, `explodeCreeper()`). Mirrors
+    /// [`MAX_SWELL`] (`Creeper::tick`, explode creeper). Mirrors
     /// [`bred`](Self::bred)'s "flag the host drains" shape — this seam has no
     /// notion of triggering an explosion, only of the *event* happening.
     detonated: bool,
@@ -460,7 +460,7 @@ pub struct MobBody {
     /// Host-injected for the same reason as
     /// [`partner_candidate`](Self::partner_candidate): `lodestone-entity` has
     /// no concept of a *player*, let alone a population of them, so vanilla's
-    /// `level.getNearestPlayer(lookAtContext, mob, x, eyeY, z)`
+    /// level's get nearest player
     /// (`WatchPlayerGoal::canUse`) is the host's search to run. The
     /// goal still applies its own `lookDistance` cut-off on top, so a host
     /// that over-reports is merely wasteful, not wrong.
@@ -614,7 +614,7 @@ pub struct MobBody {
     /// ([`PANIC_DAMAGE_TICKS`]). Set by [`note_hurt`](Self::note_hurt) for
     /// **every** hit, including one with no identifiable attacker, because
     /// vanilla's `shouldPanic` reads the damage *source* rather than the
-    /// attacking mob (`FleeInPanicGoal::shouldPanic`). Read by
+    /// attacking mob (FleeInPanicGoal's should panic). Read by
     /// [`MobController::is_panicking`].
     damage_ticks: i32,
     /// This mob's `FOLLOW_RANGE` attribute value, in blocks — the range cut
@@ -743,7 +743,7 @@ pub struct MobBody {
     /// [`attacks`](Self::attacks)/[`launches`](Self::launches) shape, for the
     /// same reason: health lives on the host, so this crate can only record
     /// the *intent*. The bee's sting self-destruct is the production consumer
-    /// (`Bee::customServerAiStep`).
+    /// (Bee's custom server ai step).
     self_damage: Vec<f32>,
 }
 
@@ -1020,8 +1020,8 @@ impl<'w> NavigatingMob<'w> {
     /// Overwrites the mob's body yaw directly — the rotation half of
     /// [`set_position`](Self::set_position), for the same ridden-mount case:
     /// vanilla drives a ridden horse's yaw from the rider's own
-    /// reported yaw (`Player.setYRot` propagating through
-    /// `Entity.positionRider`), not from [`advance`]'s movement-direction
+    /// reported yaw (Player's set y rot propagating through
+    /// Entity's position rider), not from [`advance`]'s movement-direction
     /// derivation.
     pub fn set_body_yaw(&mut self, yaw: f32) -> &mut Self {
         self.body_yaw = yaw;
@@ -1149,7 +1149,7 @@ impl<'w> NavigatingMob<'w> {
         std::mem::take(&mut self.shoulder_ride_requested)
     }
 
-    /// The block position this mob occupies — vanilla `mob.blockPosition()`,
+    /// The block position this mob occupies — vanilla mob's block position,
     /// the floor of its feet position.
     #[must_use]
     pub fn block_position(&self) -> BlockPos {
@@ -1396,7 +1396,7 @@ impl<'w> NavigatingMob<'w> {
         self.age_locked
     }
 
-    /// Enters love mode for [`LOVE_TICKS`] (vanilla `Animal::setInLove`).
+    /// Enters love mode for [`LOVE_TICKS`] (vanilla Animal's set in love).
     pub fn set_in_love(&mut self) -> &mut Self {
         self.love_ticks = LOVE_TICKS;
         self
@@ -1408,13 +1408,13 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
-    /// Remaining love-mode ticks (vanilla `Animal.getInLoveTime`).
+    /// Remaining love-mode ticks (vanilla Animal's get in love time).
     #[must_use]
     pub fn love_time(&self) -> i32 {
         self.love_ticks
     }
 
-    /// Ends love mode immediately (vanilla `Animal::resetLove`).
+    /// Ends love mode immediately (vanilla Animal's reset love).
     pub fn reset_love(&mut self) -> &mut Self {
         self.love_ticks = 0;
         self
@@ -1646,7 +1646,7 @@ impl<'w> NavigatingMob<'w> {
     /// visited budget (`floor(follow_range * 16)`). Leaving it at
     /// [`DEFAULT_FOLLOW_RANGE`] is correct for most species and *wrong for the
     /// zombie family*, whose `35.0` is more than twice it
-    /// (`Zombie::createAttributes`).
+    /// (Zombie's create attributes).
     pub fn set_follow_range(&mut self, blocks: f64) -> &mut Self {
         self.follow_range = blocks;
         self
@@ -3340,10 +3340,10 @@ impl MobController for NavigatingMob<'_> {
     /// classifies its blocks. Between ticks it keeps the last sensed value.
     ///
     /// **Scope cut, disclosed:** vanilla is
-    /// `isInWater() && getFluidHeight(WATER) > getFluidJumpThreshold()`
+    /// `is_in_water() && get_fluid_height(WATER) > get_fluid_jump_threshold()`
     /// (`StayAfloatGoal::canUse`), where `isInWater` is a bounding-box
-    /// sweep (`Entity::isInWater`, `wasTouchingWater`) and the threshold is
-    /// `getEyeHeight() < 0.4 ? 0.0 : 0.4` (`Entity::getFluidJumpThreshold`). This
+    /// sweep (Entity's is in water, `wasTouchingWater`) and the threshold is
+    /// `get_eye_height() < 0.4 ? 0.0 : 0.4` (Entity's get fluid jump threshold). This
     /// composition has no fluid-height model at all — `PathWorld` exposes
     /// per-cell classification and collision tops, not fluid levels — so the
     /// feet cell being water stands in for both halves. The practical
@@ -3853,7 +3853,7 @@ impl MobController for NavigatingMob<'_> {
 
     fn nearest_in_range(&mut self) -> Option<Vec3> {
         let player = self.nearest_player?;
-        // `modifier` is `target.getVisibilityPercent(targeter)`, which is 1.0
+        // `modifier` is target's get visibility percent, which is 1.0
         // for a plainly visible player and only shrinks for an invisible or
         // sneaking one — neither modelled at this seam. The `max(…, 2.0)` floor
         // is vanilla's own and applies regardless.
@@ -4008,7 +4008,7 @@ impl MobController for NavigatingMob<'_> {
                 }
                 let landing_y = f64::from(by) + top;
                 // Vanilla's second-stage `level.noCollision(this) &&
-                // !containsAnyLiquid(...)`: the mob's own footprint at the
+                // !contains_any_liquid(...)`: the mob's own footprint at the
                 // landing spot must not overlap a block — e.g. the random
                 // offset landed the feet on solid ground but the body inside
                 // a wall or ceiling above it.
@@ -4081,9 +4081,9 @@ impl MobController for NavigatingMob<'_> {
     }
 
     fn breed(&mut self) {
-        // Vanilla `Animal::finalizeSpawnChildFromBreeding` calls
-        // `resetLove()` on both parents immediately.
-        // The age cooldown (`setAge(PARENT_AGE_AFTER_BREEDING)`, the same
+        // Vanilla Animal's finalize spawn child from breeding calls
+        // reset love on both parents immediately.
+        // The age cooldown (set age, the same
         // method) and the child itself are the host's job — this seam
         // has no notion of the partner's identity or of creating an entity —
         // so the host applies `set_age(PARENT_AGE_AFTER_BREEDING)` to both
@@ -4157,7 +4157,7 @@ impl BrainMob for NavigatingMob<'_> {
     /// The follower's own monotonic tick counter, advanced once per
     /// [`advance`](NavigatingMob::advance).
     ///
-    /// Vanilla's brain compares behaviour timeouts against `level.getGameTime()`,
+    /// Vanilla's brain compares behaviour timeouts against level's get game time,
     /// a world clock this crate has no access to. A per-mob counter is
     /// interchangeable for that purpose because **every** comparison a brain makes
     /// is a difference between two readings of this same clock — `end_timestamp =
@@ -4195,7 +4195,7 @@ impl BrainMob for NavigatingMob<'_> {
         self.navigator.is_done()
     }
 
-    /// Vanilla's `navigation.isStuck()`, which `MoveToTargetSink::stop` reads to
+    /// Vanilla's navigation's is stuck, which `MoveToTargetSink::stop` reads to
     /// decide whether to arm its retry cooldown. The goal system exposes the same
     /// state as [`NavigatingMob::is_stuck`]; leaving this at the trait's `false`
     /// default would have made a wedged brain mob re-search A\* on every tick it
@@ -4790,7 +4790,7 @@ mod tests {
             }
         }
         // Vanilla resets love on both parents immediately
-        // (`Animal::finalizeSpawnChildFromBreeding`) — proven through the seam,
+        // (Animal's finalize spawn child from breeding) — proven through the seam,
         // not asserted by calling `breed()` again.
         assert!(!a.is_in_love(), "breeding must end this mob's love mode");
         assert!(!b.is_in_love(), "breeding must end this mob's love mode");
@@ -5309,7 +5309,7 @@ mod tests {
     }
 
     /// The boundary at the enderman's own parameters (`coneSize` `0.025`,
-    /// `adjustForDistance` `true` — `EnderMan::isBeingStaredBy`), re-derived from the
+    /// `adjustForDistance` `true` — EnderMan's is being stared by), re-derived from the
     /// formula itself rather than guessed: at 10 blocks the threshold is
     /// `1.0 - 0.025 / 10.0 = 0.9975` exactly, so a dot of `0.998` is just
     /// inside the cone and `0.997` is just outside it.
@@ -5322,7 +5322,7 @@ mod tests {
     fn is_in_view_cone_boundary_at_the_endermans_own_cone_size() {
         let eye = Vec3::new(0.0, 0.0, 0.0);
         let look = Vec3::new(0.0, 0.0, 1.0);
-        const CONE_SIZE: f64 = 0.025; // EnderMan::isBeingStaredBy
+        const CONE_SIZE: f64 = 0.025; // EnderMan's is being stared by
         const DIST: f64 = 10.0;
         // threshold = 1.0 - CONE_SIZE / DIST = 0.9975
 
@@ -5820,8 +5820,8 @@ mod tests {
 
         let mut ai = GoalSelector::new();
         // Vanilla puts `RetaliateGoal` at target-priority 1 everywhere it
-        // appears (`Zombie::addBehaviourGoals`,
-        // `ZombifiedPiglin::addBehaviourGoals`).
+        // appears (Zombie's add behaviour goals,
+        // ZombifiedPiglin's add behaviour goals).
         ai.add(0, Box::new(RetaliateGoal::new()));
 
         mob.tick(&mut ai);
@@ -5926,7 +5926,7 @@ mod tests {
     #[test]
     fn attacker_less_damage_panics_without_giving_the_mob_anything_to_chase() {
         // Vanilla's panic reads the damage *source*, not the attacking mob
-        // (`FleeInPanicGoal::shouldPanic` vs
+        // (FleeInPanicGoal's should panic vs
         // `RetaliateGoal::canUse`), so fall damage panics a
         // cow and gives it no retaliation target. `note_hurt(None)` is that
         // case; without this test the two records could be one field.
@@ -5950,7 +5950,7 @@ mod tests {
         // eligible where vanilla suppresses it. No dead-code warning could
         // fire for this — the goal simply behaved wrong.
         //
-        // Vanilla: `checkNoActionTime && mob.getNoActionTime() >= 100`
+        // Vanilla: `checkNoActionTime && mob.get_no_action_time() >= 100`
         // (`WanderGoal::canUse`). Predict the boundary rather
         // than asserting a direction: 99 must still allow, 100 must suppress.
         let world = FluidArena::dry();

@@ -11,8 +11,8 @@
 //!
 //! | | predicate | reached through | default | living entity |
 //! |---|---|---|---|---|
-//! | **push** (soft, velocity) | vanilla's own "is pushable" check | vanilla's own pushable-by selector → the level's pushable-entities query → the crowd-push pass | `false` | **overridden**: `isAlive() && !isSpectator() && !onClimbable()` |
-//! | **collide** (hard, blocks movement) | vanilla's own "can be collided with" check | vanilla's own "can collide with" → the level's entity-collisions query → collide / no-collision | `false` | **not overridden** |
+//! | **push** (soft, velocity) | vanilla's "is pushable" check | vanilla's pushable-by selector → the level's pushable-entities query → the crowd-push pass | `false` | **overridden**: `isAlive() && !is_spectator() && !on_climbable()` |
+//! | **collide** (hard, blocks movement) | vanilla's "can be collided with" check | vanilla's "can collide with" → the level's entity-collisions query → collide / no-collision | `false` | **not overridden** |
 //!
 //! So a player or a mob is *pushable* and **not** *collidable*. Two players walk
 //! through each other and shove each other apart; they never clip. Exhaustively,
@@ -36,7 +36,7 @@
 //!
 //! Vanilla's own entity push is **symmetric**: it computes one horizontal
 //! vector from the two positions and hands `-v` to `this` and `+v` to the
-//! other entity, each gated independently on `!isVehicle() && isPushable()`.
+//! other entity, each gated independently on `!is_vehicle() && is_pushable()`.
 //! A ridden entity (vanilla's own "is vehicle" check) absorbs the shove and passes it to
 //! nobody.
 //!
@@ -182,7 +182,7 @@ pub struct NearbyEntity {
     /// a collidable entity, *is* the collider handed to the movement sweep.
     pub bounding_box: Aabb,
     /// Vanilla's own "is pushable" check. For a living entity that is
-    /// `isAlive() && !isSpectator() && !onClimbable()` — note the **ladder
+    /// `isAlive() && !is_spectator() && !on_climbable()` — note the **ladder
     /// veto**: a mob on a ladder neither pushes nor is pushed. `false` for
     /// the base entity type, so an arrow, an item or an armour stand never
     /// participates.
@@ -214,7 +214,7 @@ pub struct NearbyEntity {
     /// This entity's team `CollisionRule`; [`CollisionRule::Always`] when it has
     /// no team.
     pub collision_rule: CollisionRule,
-    /// `ownTeam.isAlliedTo(theirTeam)` — `false` whenever *either* side is
+    /// own team's is allied to — `false` whenever *either* side is
     /// team-less, because vanilla guards it with `ownTeam != null`.
     pub allied: bool,
 }
@@ -378,11 +378,11 @@ fn pair_admitted(
     if self_no_physics || other.no_physics {
         return false;
     }
-    // Vanilla's own entity push: `!this.isPassengerOfSameVehicle(entity)`.
+    // Vanilla's own entity push: `!this.is_passenger_of_same_vehicle(entity)`.
     if other.same_vehicle {
         return false;
     }
-    // Vanilla's own pushable-by selector: `if (!input.isPushable()) return
+    // Vanilla's own pushable-by selector: `if (!input.is_pushable()) return
     // false;` — the *pushee*'s pushability is a list-membership condition,
     // not just a receive gate. It is therefore checked twice in vanilla and
     // the second check is redundant; kept here so the two call sites read
@@ -410,7 +410,7 @@ fn accumulate_pushes(
     self_pushable: bool,
     nearby: &[NearbyEntity],
 ) {
-    // Vanilla's own per-tick player update: `noPhysics = isSpectator()`.
+    // Vanilla's own per-tick player update: `noPhysics = is_spectator()`.
     let self_no_physics = self_flags.spectator;
     for other in nearby {
         if !pair_admitted(
@@ -425,7 +425,7 @@ fn accumulate_pushes(
         let Some(v) = pair_push_vector(self_pos, other.position) else {
             continue;
         };
-        // `if (!this.isVehicle() && this.isPushable()) this.push(-xa, 0.0, -za);`
+        // `if (!this.is_vehicle() && this.is_pushable()) this.push(-xa, 0.0, -za);`
         if self_flags.is_vehicle || !self_pushable {
             continue;
         }
@@ -509,7 +509,7 @@ pub fn reciprocal_push_impulse(
 }
 
 /// Vanilla's own "is pushable" check for the local entity:
-/// `isAlive() && !isSpectator() && !onClimbable()`.
+/// `isAlive() && !is_spectator() && !on_climbable()`.
 ///
 /// The "on climbable" term is why this needs a [`CollisionView`]: it is
 /// vanilla's own "on climbable" check, the climbable tag at the entity's
@@ -569,7 +569,7 @@ pub fn apply_entity_push(
 /// * the query box is `testArea.inflate(1.0E-7)`, an inflation the *push* pair test
 ///   pointedly does not have;
 /// * the predicate is vanilla's own "no spectators, and can collide with"
-///   check, i.e. `other.canBeCollidedWith(us) && !us.isPassengerOfSameVehicle(other)`.
+///   check, i.e. `other.can_be_collided_with(us) && !us.is_passenger_of_same_vehicle(other)`.
 ///   It is [`NearbyEntity::collidable`] and **not** [`NearbyEntity::pushable`];
 ///   a mob contributes nothing here no matter how solid it looks.
 ///
@@ -592,7 +592,7 @@ pub fn entity_collision_boxes(test_area: Aabb, nearby: &[NearbyEntity], out: &mu
 }
 
 /// Vanilla's own "no entity collision" check —
-/// `getEntityCollisions(...).isEmpty()`.
+/// )'s get entity collisions.
 #[must_use]
 pub fn no_entity_collision(test_area: Aabb, nearby: &[NearbyEntity]) -> bool {
     let mut boxes = Vec::new();
@@ -815,7 +815,7 @@ mod tests {
         let self_box = body(0.5, 1.0, 0.5);
         let mut them = NearbyEntity::living(Vec3d::new(0.65, 1.0, 0.5), body(0.65, 1.0, 0.5));
 
-        // `!entity.isVehicle()` gates only *their* half; ours still lands.
+        // `!entity.is_vehicle()` gates only *their* half; ours still lands.
         them.is_vehicle = true;
         let ours = entity_push_impulse(us, self_box, PushSelf::LIVING_PLAYER, true, &[them]);
         assert!(ours.x < 0.0);
@@ -824,7 +824,7 @@ mod tests {
             Vec3d::ZERO
         );
 
-        // `!this.isVehicle()` gates ours; theirs still lands.
+        // `!this.is_vehicle()` gates ours; theirs still lands.
         them.is_vehicle = false;
         let ridden = PushSelf {
             is_vehicle: true,

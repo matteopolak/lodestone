@@ -13,11 +13,11 @@
 //!
 //! # The three-clause invulnerable "emerging" phase, each clause cited
 //!
-//! `WitherBoss.makeInvulnerable`/`customServerAiStep`'s invulnerable branch:
+//! WitherBoss's make invulnerable/`customServerAiStep`'s invulnerable branch:
 //!
-//! 1. `this.setInvulnerableTicks(220); this.setHealth(this.getMaxHealth() / 3.0F);`
+//! 1. `this.set_invulnerable_ticks(220); this.set_health(this.get_max_health() / 3.0F);`
 //!    — [`spawn_health`], [`INVULNERABLE_TICKS`].
-//! 2. Every tick: `newCount = ticks - 1; bossEvent.setProgress(1.0F - newCount / 220.0F);`
+//! 2. Every tick: `newCount = ticks - 1; bossEvent.set_progress(1.0F - newCount / 220.0F);`
 //!    — [`invulnerable_tick`], [`boss_bar_progress_while_invulnerable`].
 //! 3. `if (this.tickCount % 10 == 0) this.heal(10.0F);` — a **10 HP heal every
 //!    10 ticks while invulnerable**, distinct from the 1 HP/20 ticks the
@@ -35,8 +35,8 @@
 //!
 //! # The active phase
 //!
-//! `else { super.customServerAiStep(level); ...; if (tickCount % 20 == 0)
-//! heal(1.0F); bossEvent.setProgress(health / maxHealth); }` —
+//! `else { super.custom_server_ai_step(level); ...; if (tickCount % 20 == 0)
+//! heal(1.0F); boss event's set progress; }` —
 //! [`should_heal_while_active`], [`boss_bar_progress_while_active`].
 //! `isPowered()` (`health <= maxHealth / 2.0F`) gates two things: the
 //! "wither armor" that makes the wither immune to arrows and wind charges
@@ -45,25 +45,25 @@
 //!
 //! # Damage/invulnerability gates, from `hurtServer`
 //!
-//! * `if (this.getInvulnerableTicks() > 0 && !source.is(BYPASSES_INVULNERABILITY)) return false;`
+//! * `if (this.get_invulnerable_ticks() > 0 && !source.is(BYPASSES_INVULNERABILITY)) return false;`
 //!   — [`blocked_by_emerging_invulnerability`].
-//! * `if (this.isPowered()) { if (directEntity instanceof AbstractArrow || WindCharge) return false; }`
+//! * `if (this.isPowered()) { if (directEntity instanceof abstract arrow || WindCharge) return false; }`
 //!   — [`blocks_projectile_while_powered`].
 //! * `if (sourceEntity != null && sourceEntity.is(WITHER_FRIENDS)) return false;`
-//!   and `if (source.getEntity() instanceof WitherBoss) return false;` — both
+//!   and `if (source.get_entity() instanceof WitherBoss) return false;` — both
 //!   are targeting/friendly-fire exemptions this module does not model (no
 //!   entity-tag registry or wither-vs-wither identity check reaches this
 //!   crate); disclosed rather than silently applied.
 //!
 //! # `WitherSkull`'s own numbers
 //!
-//! `onHitEntity`: `hurtServer(..., damageSources().witherSkull(this, owner), 8.0F)`
+//! `onHitEntity`: `hurtServer(..., damage_sources().witherSkull(this, owner), 8.0F)`
 //! when the shooter is a living owner ([`SKULL_DAMAGE_WITH_OWNER`]), the
 //! `5.0F` no-owner case ([`SKULL_DAMAGE_NO_OWNER`]) is unreachable in this
 //! sim's production wiring (every skull this crate spawns has a real owner —
 //! see `mobs::wither`'s own doc). A killing hit heals the owner
 //! [`OWNER_HEAL_ON_KILL`] `5.0F`. A landed hit additionally applies
-//! `MobEffects.WITHER` at `Normal` = 10s / `Hard` = 40s, amplifier `1`
+//! The mob effects's wither at `Normal` = 10s / `Hard` = 40s, amplifier `1`
 //! ([`wither_effect_ticks`]). `onHit` (any surface, not just an entity)
 //! always explodes at [`SKULL_EXPLOSION_POWER`] `1.0F`, `MOB` interaction,
 //! then discards the skull — [`WitherEffect::SkullImpactBlast`].
@@ -76,7 +76,7 @@
 //!   for, matching `crate::dragon::fight`'s own "no block-write authority"
 //!   scope note. Not the same mechanic as the emergence blast above.
 //! * **The three independently-targeting heads.** Vanilla tracks
-//!   `DATA_TARGET_A/B/C` (three `EntityDataAccessor<Integer>`s, indices 16-18
+//!   `DATA_TARGET_A/B/C` (three entity data accessor<Integer>s, indices 16-18
 //!   per the committed
 //!   `crates/protocol/v770/tests/support/entity_data_index_jvm.txt` dump —
 //!   see `mobs::wither`'s own doc for the full collision census) and fires
@@ -93,13 +93,13 @@
 /// `WitherBoss.INVULNERABLE_TICKS` — the "emerging" phase's duration.
 pub const INVULNERABLE_TICKS: i32 = 220;
 
-/// `WitherBoss.makeInvulnerable`'s heal-tick interval while invulnerable —
+/// WitherBoss's make invulnerable's heal-tick interval while invulnerable —
 /// **not** the same interval the active phase uses below.
 pub const HEAL_INTERVAL_INVULNERABLE_TICKS: i64 = 10;
 /// The heal amount that interval applies — `this.heal(10.0F)`.
 pub const HEAL_AMOUNT_INVULNERABLE: f32 = 10.0;
 
-/// `WitherBoss.customServerAiStep`'s active-phase heal interval —
+/// WitherBoss's custom server ai step's active-phase heal interval —
 /// `this.tickCount % 20 == 0`. Four times sparser than the invulnerable-phase
 /// interval above; a gate predicting one from the other would be checking the
 /// wrong constant, which is exactly why both are named separately rather than
@@ -114,10 +114,10 @@ pub const EMERGE_EXPLOSION_POWER: f32 = 7.0;
 /// `WitherSkull.onHit`'s own `explode(..., 1.0F, false, MOB)`.
 pub const SKULL_EXPLOSION_POWER: f32 = 1.0;
 
-/// `WitherSkull.onHitEntity`'s damage when the shooter is a living owner —
+/// WitherSkull's on hit entity's damage when the shooter is a living owner —
 /// the case this sim's production skull spawns always hit (see module doc).
 pub const SKULL_DAMAGE_WITH_OWNER: f32 = 8.0;
-/// The no-owner case — `hurtServer(..., damageSources().magic(), 5.0F)`.
+/// The no-owner case — `hurtServer(..., damage_sources().magic(), 5.0F)`.
 /// Unreachable in production (see module doc); kept as a named constant
 /// rather than a bare literal so a future dispenser-fired skull (vanilla
 /// supports firing a wither skull from a dispenser) has somewhere correct to
@@ -126,7 +126,7 @@ pub const SKULL_DAMAGE_NO_OWNER: f32 = 5.0;
 /// `livingOwner.heal(5.0F)` — the owner's reward for a killing skull hit.
 pub const OWNER_HEAL_ON_KILL: f32 = 5.0;
 
-/// `WitherSkull.performRangedAttack`'s `head == 0 && random.nextFloat() < 0.001F` —
+/// WitherSkull's perform ranged attack's `head == 0 && random.nextFloat() < 0.001F` —
 /// the main head's own tiny chance of firing a "dangerous" (blue, block-
 /// breaking) skull even at a real target, independent of the idle-random-fire
 /// branch this module does not port (see module doc).
@@ -138,7 +138,7 @@ pub fn is_powered(health: f32, max_health: f32) -> bool {
     health <= max_health / 2.0
 }
 
-/// `WitherBoss.makeInvulnerable`'s `setHealth(maxHealth / 3.0F)` — the health
+/// WitherBoss's make invulnerable's set health — the health
 /// a freshly-summoned wither starts at, **not** full health (it heals up to
 /// full over the 220-tick emergence, `HEAL_AMOUNT_INVULNERABLE` at a time).
 #[must_use]
@@ -160,7 +160,7 @@ pub enum WitherEffect {
     SkullImpactBlast,
 }
 
-/// One tick of the invulnerable countdown — `WitherBoss.customServerAiStep`'s
+/// One tick of the invulnerable countdown — WitherBoss's custom server ai step's
 /// invulnerable branch, minus the heal (see [`should_heal_while_invulnerable`],
 /// applied separately since it needs the entity's own age, not this
 /// countdown). Returns the new tick count and, on the tick it reaches zero,
@@ -184,7 +184,7 @@ pub fn invulnerable_tick(ticks: i32) -> (i32, Option<WitherEffect>) {
     }
 }
 
-/// `bossEvent.setProgress(1.0F - newCount / 220.0F)` — the boss bar fills as
+/// boss event's set progress — the boss bar fills as
 /// the countdown empties. `ticks_remaining` is the value **after**
 /// [`invulnerable_tick`]'s decrement (`newCount`), matching vanilla's own
 /// read order (the progress line runs immediately after `setInvulnerableTicks`
@@ -194,7 +194,7 @@ pub fn boss_bar_progress_while_invulnerable(ticks_remaining: i32) -> f32 {
     1.0 - (ticks_remaining as f32) / (INVULNERABLE_TICKS as f32)
 }
 
-/// `bossEvent.setProgress(health / maxHealth)` — the active-phase bar.
+/// boss event's set progress — the active-phase bar.
 #[must_use]
 pub fn boss_bar_progress_while_active(health: f32, max_health: f32) -> f32 {
     (health / max_health).clamp(0.0, 1.0)
@@ -213,7 +213,7 @@ pub fn should_heal_while_active(entity_age: i64) -> bool {
 }
 
 /// `WitherBoss.hurtServer`'s invulnerability gate:
-/// `getInvulnerableTicks() > 0 && !source.is(BYPASSES_INVULNERABILITY)`.
+/// `get_invulnerable_ticks() > 0 && !source.is(BYPASSES_INVULNERABILITY)`.
 /// Returns `true` when the hit must be refused.
 #[must_use]
 pub fn blocked_by_emerging_invulnerability(invulnerable_ticks: i32, bypasses_invulnerability: bool) -> bool {
@@ -221,17 +221,17 @@ pub fn blocked_by_emerging_invulnerability(invulnerable_ticks: i32, bypasses_inv
 }
 
 /// `WitherBoss.hurtServer`'s powered-armor gate:
-/// `isPowered() && (directEntity instanceof AbstractArrow || WindCharge)`.
+/// `isPowered() && (directEntity instanceof abstract arrow || WindCharge)`.
 /// Returns `true` when the hit must be refused. `is_arrow_or_wind_charge` is
 /// the caller's own classification of the *direct* damage source entity
 /// (not, e.g., a thrown trident, which is a distinct type from
-/// `AbstractArrow` in vanilla despite riding the same flight code).
+/// The abstract arrow in vanilla despite riding the same flight code).
 #[must_use]
 pub fn blocks_projectile_while_powered(is_powered_now: bool, is_arrow_or_wind_charge: bool) -> bool {
     is_powered_now && is_arrow_or_wind_charge
 }
 
-/// `WitherSkull.onHitEntity`'s wither-effect duration by difficulty —
+/// WitherSkull's on hit entity's wither-effect duration by difficulty —
 /// `Normal -> 10s, Hard -> 40s, else -> 0` (no effect applied), always
 /// amplifier `1`. Returns ticks (`20 * seconds`), `0` meaning "do not apply".
 #[must_use]
@@ -244,7 +244,7 @@ pub fn wither_effect_ticks(difficulty: lodestone_model::Difficulty) -> i32 {
     }
 }
 
-/// `MobEffectInstance(MobEffects.WITHER, ticks, 1)`'s amplifier — always `1`
+/// `MobEffectInstance(the mob effects's wither, ticks, 1)`'s amplifier — always `1`
 /// (displayed as "Wither II"), regardless of difficulty.
 pub const WITHER_EFFECT_AMPLIFIER: u32 = 1;
 

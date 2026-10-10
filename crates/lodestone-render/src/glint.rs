@@ -314,9 +314,9 @@ pub fn glint_texture_matrix(
         * glam::Mat4::from_scale(glam::Vec3::new(a.x, a.y, 1.0))
 }
 
-/// Vanilla's baked `ENCHANTMENT_GLINT_OVERRIDE` item-prototype flag, for the
+/// Vanilla's baked enchantment-glint-override item-prototype flag, for the
 /// seven items whose item-properties registration sets
-/// `.component(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true)`.
+/// glint-override component set to true.
 ///
 /// `item` is the full identifier, e.g. `"minecraft:enchanted_book"`.
 ///
@@ -486,7 +486,7 @@ impl GlintPipeline {
     /// Build the pipeline for a colour target of `format` and the model pass's
     /// depth format.
     ///
-    /// `cull_mode` is `None`, matching vanilla's `withCull(false)`
+    /// `cull_mode` is `None`, matching vanilla's with cull
     /// on its glint render-pipeline declaration. That is not incidental: the item slab's back
     /// face is drawn by the model pass, and a culled glint pass would leave it
     /// unshimmered.
@@ -648,7 +648,7 @@ impl GlintPipeline {
 /// The sampler both glint textures resolve to: `REPEAT` on both axes, `LINEAR`
 /// min and mag, no mipmaps.
 ///
-/// Derived rather than chosen: `withTexture("Sampler0", …)` supplies a `null`
+/// Derived rather than chosen: with texture supplies a `null`
 /// sampler (vanilla's render-setup declaration), so the sampler comes from the texture's
 /// own `.mcmeta`, which for both glint textures is
 /// `{"texture":{"blur":true}}` — no `clamp`. Vanilla's reloadable-texture loading maps

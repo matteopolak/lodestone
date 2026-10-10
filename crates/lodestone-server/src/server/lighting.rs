@@ -21,9 +21,9 @@ use super::*;
 /// and 62 M instructions of `encode_chunk`, per placed torch, on the connection
 /// task. `ServerProtocol::encode_light_update` is the real packet — a few KiB of
 /// nibble arrays — and it needs no chunk batch, because vanilla's
-/// `PlayerChunkSender` flow control counts chunk *batches* and `light_update` is
+/// The player chunk sender flow control counts chunk *batches* and `light_update` is
 /// not one. Vanilla sends it the same way, ungated, from
-/// `ChunkMap`'s light listener.
+/// The chunk map's light listener.
 ///
 pub(super) async fn resend_column_for_light<T, P, S>(
     conn: &mut Connection<T>,

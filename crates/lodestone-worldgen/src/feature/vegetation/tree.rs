@@ -1231,7 +1231,7 @@ pub(super) fn update_leaf_distances(
                 if filled.contains(&neighbor_key) {
                     continue;
                 }
-                // The real `bounds.isInside(neighborPos)` gate — see this
+                // The real bounds's is inside gate — see this
                 // function's own doc comment on why this must be the
                 // tree's own bbox, not the grid's whole footprint.
                 if !inside(nx, ny, nz) {
@@ -1692,7 +1692,7 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
     /// leaves-row placement calls the
     /// signed wrapper, never the plain predicate). For every placer except
     /// [`FoliagePlacerCfg::DarkOak`] this is exactly the wrapper's default:
-    /// `shouldSkipLocation(|dx|, |dz|)` — identical to what the callers
+    /// should skip location — identical to what the callers
     /// previously passed to [`Self::should_skip_location`] directly, so no
     /// draw-count or result changes for oak/birch/spruce/pine/acacia.
     ///
@@ -2099,7 +2099,7 @@ fn place_leaves_row_with_hanging_leaves_below<R: RandomSource>(
 /// The base kind's own hanging-leaf extension attempt — one hanging-leaf roll, bounded to
 /// within 7 Manhattan blocks of `log_pos`. Draws `next_float()`
 /// unconditionally once the distance gate passes (matching a faithful implementation's `random
-/// .nextFloat() > chance ? false : tryPlaceLeaf(...)`, which evaluates the
+/// .nextFloat() > chance ? false : try_place_leaf(...)`, which evaluates the
 /// comparison before short-circuiting to [`try_place_leaf`]).
 #[allow(clippy::too_many_arguments)]
 fn try_place_extension<R: RandomSource>(

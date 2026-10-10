@@ -1,5 +1,5 @@
 //! Vanilla's **screen input layer** — focus, Tab/arrow traversal, and event
-//! dispatch to children: `GuiEventListener`, `ContainerEventHandler`,
+//! dispatch to children: the gui event listener, the container event handler,
 //! `ComponentPath`, `FocusNavigationEvent` and the
 //! `gui/navigation/Screen{Axis,Direction,Position,Rectangle}` geometry they
 //! navigate over.
@@ -19,14 +19,14 @@
 //! vanilla's own screen base, and the order is load-bearing:
 //!
 //! ```text
-//! 1. event.isEscape() && shouldCloseOnEsc()  -> onClose(), return true
+//! 1. event's is escape && should close on esc  -> on close, return true
 //! 2. super.keyPressed(event)                 -> the FOCUSED CHILD ONLY
 //! 3. only if that returned false:            -> 258 Tab / 262..265 arrows
 //!                                               become focus navigation
 //! ```
 //!
-//! Step 2 is `ContainerEventHandler.keyPressed`, which is
-//! `getFocused() != null && getFocused().keyPressed(event)` — it **never
+//! Step 2 is the container event handler's key pressed, which is
+//! `get_focused() != null && get_focused().keyPressed(event)` — it **never
 //! iterates children**. So a focused text field swallows Left/Right *before*
 //! they can move focus, and that falls out of the ordering rather than from a
 //! special case anywhere. [`FocusSet::screen_key_pressed`] is this, transcribed.
@@ -40,15 +40,15 @@
 //!
 //! ### 2. Tab does not wrap in `handleTabNavigation` — the wrap is in `Screen`
 //!
-//! This one contradicts the obvious reading. `ContainerEventHandler`'s tab walk
+//! This one contradicts the obvious reading. The container event handler's tab walk
 //! runs off the end of the sorted child list and returns `null`; there is no
 //! modular arithmetic anywhere in it. The wrap is a **retry** one layer up
 //!:
 //!
 //! ```text
 //! ComponentPath focusPath = super.nextFocusPath(navigationEvent);
-//! if (focusPath == null && navigationEvent instanceof TabNavigation) {
-//!     this.clearFocus();                            // forget where we were
+//! if (focusPath == null && navigationEvent instanceof tab navigation) {
+//!     this's clear focus;                            // forget where we were
 //!     focusPath = super.nextFocusPath(navigationEvent);   // start from the end
 //! }
 //! ```
@@ -58,7 +58,7 @@
 //! child. Two consequences that a hand-rolled `(i + 1) % n` gets wrong:
 //!
 //! - **Arrow navigation does not wrap at all.** The retry is gated on
-//!   `instanceof TabNavigation`. Arrow off the edge and focus simply stays.
+//!   instanceof tab navigation. Arrow off the edge and focus simply stays.
 //! - **The wrap clears focus first**, so a widget that refuses focus when it is
 //!   already focused (every [`super::widget::Widget`] — `takes_focus` is
 //!   `isActive() && !isFocused()`) becomes eligible again. In a one-focusable-
@@ -67,7 +67,7 @@
 //!
 //! ## Tab order is insertion order until something says otherwise
 //!
-//! `handleTabNavigation` sorts `children()` by `getTabOrderGroup()`
+//! `handleTabNavigation` sorts `children()` by get tab order group
 //! (vanilla's own tab-ordered-element interface, default `0`) with `Collections.sort`, which is
 //! **stable** — so an all-default screen tabs in the order widgets were added.
 //! [`FocusTarget::tab_order_group`] has the same default and
@@ -101,7 +101,7 @@
 //! | `addWidget` | **no** | yes |
 //! | `addRenderableOnly` | yes | **no** |
 //!
-//! `ContainerEventHandler`'s dispatch reads `children()`, which only
+//! The container event handler's dispatch reads `children()`, which only
 //! `addWidget` appends to. So a widget in the wrong list is unit-testable,
 //! correct, registered, and **never clickable** — or invisible — with nothing
 //! failing loudly. That is `CLAUDE.md`'s dominant defect class in miniature,
@@ -111,7 +111,7 @@
 //!
 //! ## `getChildAt` is first-match, not topmost
 //!
-//! `ContainerEventHandler.getChildAt` returns the **first** child in
+//! The container event handler's get child at returns the **first** child in
 //! `children()` whose `isMouseOver` is true (`:28-36`) — insertion order, no z
 //! ordering, no reverse iteration. Two overlapping widgets means the older one
 //! wins every click, forever, and vanilla simply does not overlap them.
@@ -138,7 +138,7 @@
 //!   the jar line by line. [`super::nav::MenuKey`] is mapped onto it at the one
 //!   boundary ([`KeyEvent::from_menu_key`]).
 //! - **The edit-shortcut modifier is Cmd on macOS, not Ctrl.**
-//!   `InputQuirks.EDIT_SHORTCUT_KEY_MODIFIER` is `8` (SUPER) on OSX and `2`
+//!   The input quirks's edit shortcut key modifier is `8` (SUPER) on OSX and `2`
 //!   (CONTROL) everywhere else, and *every* `isCut`/`isCopy`/`isPaste`/
 //!   `isSelectAll` goes through it. A port that
 //!   hardcodes Ctrl gives Mac users a client where Cmd+V does nothing — and this
@@ -146,18 +146,18 @@
 //!
 //! ## Not here, on purpose
 //!
-//! - **Narration.** `Screen.addWidget` also registers the widget for narration,
+//! - **Narration.** Screen's add widget also registers the widget for narration,
 //!   but nothing in this shell speaks, so [`FocusSet`] does not retain a third
-//!   list with no consumer. A `NarratableEntry` port would reach zero pixels
+//!   list with no consumer. A narratable entry port would reach zero pixels
 //!   and zero audio.
 //! - **Mouse drag and scroll.** Drag events need a drag state machine and a
 //!   scrolling container. [`FocusSet::mouse_clicked`] is here because it is
 //!   what *sets* focus, which is the subject.
 //! - **`setInitialFocus`.** It is gated on
-//!   `minecraft.getLastInputType().isKeyboard()` — a
+//!   get last input type's is keyboard — a
 //!   piece of state this shell does not track. [`super::nav::EditForm`] focuses
 //!   its first field explicitly instead, which is what
-//!   `setInitialFocus(GuiEventListener)` does.
+//!   `setInitialFocus(the gui event listener)` does.
 //!
 //! ## Dependencies
 //!
@@ -168,7 +168,7 @@ use super::layout::ipx;
 use super::widget::Widget;
 
 // GLFW key codes, spelled as vanilla's `switch` labels spell them so a port can
-// be diffed against vanilla's own edit-box widget and vanilla's own screen base directly.
+// be diffed against vanilla's edit-box widget and vanilla's screen base directly.
 /// `GLFW_KEY_ESCAPE`.
 pub const KEY_ESCAPE: i32 = 256;
 /// `GLFW_KEY_ENTER`.
@@ -193,7 +193,7 @@ pub const KEY_UP: i32 = 265;
 pub const KEY_HOME: i32 = 268;
 /// `GLFW_KEY_END`.
 pub const KEY_END: i32 = 269;
-/// GLFW `GLFW_KEY_F5`, the code `JoinMultiplayerScreen.keyPressed` compares
+/// GLFW `GLFW_KEY_F5`, the code join multiplayer screen's key pressed compares
 /// against to refresh the server list.
 pub const KEY_F5: i32 = 294;
 /// `GLFW_KEY_A` — Ctrl/Cmd+A is select-all.
@@ -214,12 +214,12 @@ pub const MOD_ALT: i32 = 4;
 /// `GLFW_MOD_SUPER` — the Command key on macOS.
 pub const MOD_SUPER: i32 = 8;
 
-/// `InputQuirks.EDIT_SHORTCUT_KEY_MODIFIER`: the modifier bit every text-editing
+/// The input quirks's edit shortcut key modifier: the modifier bit every text-editing
 /// shortcut (`isSelectAll`/`isCopy`/`isPaste`/`isCut`) tests, which vanilla
 /// swaps to **Super** on macOS and leaves as **Control** elsewhere.
 ///
 /// Resolved at compile time from `target_os`, which is the closest thing to
-/// vanilla's own platform-utility type's `getPlatform()` available without a runtime probe. Hardcoding
+/// vanilla's own platform-utility type's get platform available without a runtime probe. Hardcoding
 /// [`MOD_CONTROL`] would ship a client where Cmd+V silently does nothing on the
 /// platform this repo is developed on.
 pub const EDIT_SHORTCUT_MODIFIER: i32 = if cfg!(target_os = "macos") {
@@ -229,10 +229,10 @@ pub const EDIT_SHORTCUT_MODIFIER: i32 = if cfg!(target_os = "macos") {
 };
 
 /// Vanilla's own `KeyEvent` record plus the
-/// `InputWithModifiers` predicates the GUI actually asks it for.
+/// The input with modifiers predicates the GUI actually asks it for.
 ///
-/// `scancode` is dropped: nothing in `Screen`, `AbstractWidget` or `EditBox`
-/// reads it — only `KeyMapping` does, and key *bindings* are `keybinds.rs`'s
+/// `scancode` is dropped: nothing in `Screen`, the abstract widget or `EditBox`
+/// reads it — only the key mapping does, and key *bindings* are `keybinds.rs`'s
 /// problem, not the menu's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct KeyEvent {
@@ -255,31 +255,31 @@ impl KeyEvent {
         Self { key, modifiers }
     }
 
-    /// `isEscape()`.
+    /// is escape.
     #[must_use]
     pub const fn is_escape(self) -> bool {
         self.key == KEY_ESCAPE
     }
 
-    /// `isCycleFocus()` — Tab, whichever direction Shift makes it.
+    /// is cycle focus — Tab, whichever direction Shift makes it.
     #[must_use]
     pub const fn is_cycle_focus(self) -> bool {
         self.key == KEY_TAB
     }
 
-    /// `hasShiftDown()`.
+    /// has shift down.
     #[must_use]
     pub const fn has_shift_down(self) -> bool {
         self.modifiers & MOD_SHIFT != 0
     }
 
-    /// `hasAltDown()`.
+    /// has alt down.
     #[must_use]
     pub const fn has_alt_down(self) -> bool {
         self.modifiers & MOD_ALT != 0
     }
 
-    /// `hasControlDownWithQuirk()`: [`EDIT_SHORTCUT_MODIFIER`], i.e. Cmd on
+    /// has control down with quirk: [`EDIT_SHORTCUT_MODIFIER`], i.e. Cmd on
     /// macOS and Ctrl elsewhere. This is the one `EditBox` tests for word-wise
     /// cursor motion and whole-word delete.
     #[must_use]
@@ -287,19 +287,19 @@ impl KeyEvent {
         self.modifiers & EDIT_SHORTCUT_MODIFIER != 0
     }
 
-    /// `isSelectAll()`: the quirked modifier and *neither* Shift nor Alt.
+    /// is select all: the quirked modifier and *neither* Shift nor Alt.
     #[must_use]
     pub const fn is_select_all(self) -> bool {
         self.is_edit_shortcut(KEY_A)
     }
 
-    /// `isCopy()`.
+    /// is copy.
     #[must_use]
     pub const fn is_copy(self) -> bool {
         self.is_edit_shortcut(KEY_C)
     }
 
-    /// `isPaste()`.
+    /// is paste.
     #[must_use]
     pub const fn is_paste(self) -> bool {
         self.is_edit_shortcut(KEY_V)
@@ -355,7 +355,7 @@ impl KeyEvent {
             // the multiplayer screen's own `keyPressed` see it.
             MenuKey::Refresh => Self::new(KEY_F5),
             // `EDIT_SHORTCUT_MODIFIER` is Cmd on macOS and Ctrl elsewhere
-            // (`InputQuirks.EDIT_SHORTCUT_KEY_MODIFIER`), and these four GLFW
+            // (the input quirks's edit shortcut key modifier), and these four GLFW
             // key codes plus that one bit are exactly `isSelectAll`/`isCopy`/
             // `isCut`/`isPaste` — see [`Self::is_select_all`] and its
             // siblings, and `EditBox::handle_key`'s `_` arm for what each does.
@@ -391,7 +391,7 @@ impl ScreenAxis {
         }
     }
 
-    /// `getPositive()` — Right for horizontal, Down for vertical.
+    /// get positive — Right for horizontal, Down for vertical.
     #[must_use]
     pub const fn positive(self) -> ScreenDirection {
         match self {
@@ -400,7 +400,7 @@ impl ScreenAxis {
         }
     }
 
-    /// `getNegative()` — Left for horizontal, Up for vertical.
+    /// get negative — Left for horizontal, Up for vertical.
     #[must_use]
     pub const fn negative(self) -> ScreenDirection {
         match self {
@@ -424,7 +424,7 @@ pub enum ScreenDirection {
 }
 
 impl ScreenDirection {
-    /// `getAxis()`.
+    /// get axis.
     #[must_use]
     pub const fn axis(self) -> ScreenAxis {
         match self {
@@ -433,7 +433,7 @@ impl ScreenDirection {
         }
     }
 
-    /// `getOpposite()`.
+    /// get opposite.
     #[must_use]
     pub const fn opposite(self) -> Self {
         match self {
@@ -444,13 +444,13 @@ impl ScreenDirection {
         }
     }
 
-    /// `isPositive()` — Down and Right travel toward larger coordinates.
+    /// is positive — Down and Right travel toward larger coordinates.
     #[must_use]
     pub const fn is_positive(self) -> bool {
         matches!(self, Self::Down | Self::Right)
     }
 
-    /// `isAfter(a, b)`: is `a` further along this direction than `b`?
+    /// is after: is `a` further along this direction than `b`?
     #[must_use]
     pub const fn is_after(self, a: i32, b: i32) -> bool {
         if self.is_positive() { a > b } else { b > a }
@@ -462,7 +462,7 @@ impl ScreenDirection {
         if self.is_positive() { a < b } else { b < a }
     }
 
-    /// `coordinateValueComparator()`: orders coordinates so "earlier along this
+    /// coordinate value comparator: orders coordinates so "earlier along this
     /// direction" sorts first, which for Up/Left means *descending*.
     #[must_use]
     pub fn compare_coordinates(self, a: i32, b: i32) -> core::cmp::Ordering {
@@ -519,7 +519,7 @@ impl ScreenPosition {
         }
     }
 
-    /// `getCoordinate(axis)`.
+    /// get coordinate.
     #[must_use]
     pub const fn coordinate(self, axis: ScreenAxis) -> i32 {
         match axis {
@@ -528,7 +528,7 @@ impl ScreenPosition {
         }
     }
 
-    /// Squared distance to `other`, as `Vector2i.distanceSquared` — the
+    /// Squared distance to `other`, as Vector2i's distance squared — the
     /// tiebreak in `nextFocusPathVaguelyInDirection`. `i64` because vanilla's is
     /// a `long`: two 32-bit coordinate deltas squared overflow an `i32`.
     #[must_use]
@@ -567,7 +567,7 @@ impl ScreenRectangle {
         }
     }
 
-    /// `empty()`, which is also vanilla's own gui-event-listener interface's `getRectangle()`'s default —
+    /// `empty()`, which is also vanilla's own gui-event-listener interface's get rectangle's default —
     /// and therefore what a widget that forgets to report its bounds navigates
     /// as.
     #[must_use]
@@ -619,7 +619,7 @@ impl ScreenRectangle {
         }
     }
 
-    /// `getBoundInDirection(direction)`: the **inclusive** far edge along
+    /// get bound in direction: the **inclusive** far edge along
     /// `direction`.
     #[must_use]
     pub const fn bound_in_direction(self, direction: ScreenDirection) -> i32 {
@@ -631,7 +631,7 @@ impl ScreenRectangle {
         }
     }
 
-    /// `getBorder(direction)`: the 1 px sliver just *outside* this rect's
+    /// get border: the 1 px sliver just *outside* this rect's
     /// `direction` edge — what arrow navigation from an unfocused screen starts
     /// from.
     #[must_use]
@@ -643,7 +643,7 @@ impl ScreenRectangle {
         Self::of(direction.axis(), start_first, start_second, 1, length).step(direction)
     }
 
-    /// `overlapsInAxis(other, axis)`, on inclusive bounds.
+    /// overlaps in axis, on inclusive bounds.
     #[must_use]
     pub const fn overlaps_in_axis(self, other: Self, axis: ScreenAxis) -> bool {
         let this_lower = self.bound_in_direction(axis.negative());
@@ -655,7 +655,7 @@ impl ScreenRectangle {
         lower <= higher
     }
 
-    /// `getCenterInAxis(axis)`, on inclusive bounds and truncating like Java's
+    /// get center in axis, on inclusive bounds and truncating like Java's
     /// `int` division.
     #[must_use]
     pub const fn center_in_axis(self, axis: ScreenAxis) -> i32 {
@@ -666,21 +666,21 @@ impl ScreenRectangle {
 /// `gui/navigation/FocusNavigationEvent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusNavigationEvent {
-    /// `TabNavigation(forward)`.
+    /// The tab navigation(forward).
     Tab {
         /// Shift+Tab is backward.
         forward: bool,
     },
-    /// `ArrowNavigation(direction, previousFocus)`.
+    /// The arrow navigation(direction, previousFocus).
     Arrow {
         /// Which way the arrow points.
         direction: ScreenDirection,
         /// The rect focus is travelling *from*, threaded down so a nested
         /// container can navigate as if focus were outside it
-        /// (`ArrowNavigation.with`). `None` at the top of a fresh arrow press.
+        /// (the arrow navigation's with). `None` at the top of a fresh arrow press.
         previous_focus: Option<ScreenRectangle>,
     },
-    /// `InitialFocus` — what `setInitialFocus(target)` sends a widget to ask
+    /// The initial focus — what `setInitialFocus(target)` sends a widget to ask
     /// whether it wants focus at all.
     Initial,
 }
@@ -735,7 +735,7 @@ impl ComponentPath {
         }
     }
 
-    /// `leafComponent()`: the id at the bottom of the path, in the innermost
+    /// leaf component: the id at the bottom of the path, in the innermost
     /// container's own id space.
     #[must_use]
     pub fn leaf_id(&self) -> usize {
@@ -787,13 +787,13 @@ impl Registry {
     }
 }
 
-/// `GuiEventListener` + `TabOrderedElement`: what [`FocusSet`] needs of a child.
+/// The gui event listener + tab ordered element: what [`FocusSet`] needs of a child.
 ///
-/// [`Self::takes_focus`] is `AbstractWidget.nextFocusPath`'s predicate rather
+/// [`Self::takes_focus`] is the abstract widget's next focus path's predicate rather
 /// than the method itself, because a leaf cannot build a
 /// [`ComponentPath::Leaf`] without knowing its own id — the container does that.
 pub trait FocusTarget: core::fmt::Debug {
-    /// `getRectangle()`.
+    /// get rectangle.
     fn rectangle(&self) -> ScreenRectangle;
 
     /// `isActive()` — `visible && active`.
@@ -802,36 +802,36 @@ pub trait FocusTarget: core::fmt::Debug {
     /// `isFocused()`.
     fn is_focused(&self) -> bool;
 
-    /// `setFocused(boolean)`.
+    /// set focused.
     fn set_focused(&mut self, focused: bool);
 
-    /// The predicate inside `AbstractWidget.nextFocusPath`
+    /// The predicate inside abstract widget's next focus path
     ///: a leaf offers itself only when it is
     /// active and not *already* focused.
     fn takes_focus(&self) -> bool {
         self.is_active() && !self.is_focused()
     }
 
-    /// `getTabOrderGroup()` — `0` for everything vanilla ships except the
+    /// get tab order group — `0` for everything vanilla ships except the
     /// widgets that deliberately jump the queue.
     fn tab_order_group(&self) -> i32 {
         0
     }
 
-    /// `shouldTakeFocusAfterInteraction()`:
+    /// should take focus after interaction:
     /// `true` by default, and `false` for a widget that wants a click to *do*
     /// something without keeping the keyboard.
     fn should_take_focus_after_interaction(&self) -> bool {
         true
     }
 
-    /// `isMouseOver(x, y)` — for `AbstractWidget` this is
-    /// `isActive() && areCoordinatesInRectangle(..)`, so a disabled widget is
+    /// is mouse over — for the abstract widget this is
+    /// `isActive() && are_coordinates_in_rectangle(..)`, so a disabled widget is
     /// not merely unclickable but *invisible* to `getChildAt`.
     fn is_mouse_over(&self, x: f32, y: f32) -> bool;
 
     /// `mouseClicked` on the child: did it consume the click?
-    /// `AbstractWidget.mouseClicked` returns `false` for an inactive widget or a
+    /// The abstract widget's mouse clicked returns `false` for an inactive widget or a
     /// click outside its bounds.
     fn mouse_clicked(&mut self, x: f32, y: f32) -> bool {
         self.is_mouse_over(x, y)
@@ -844,25 +844,25 @@ pub trait FocusTarget: core::fmt::Debug {
         false
     }
 
-    /// `charTyped(CharacterEvent)`.
+    /// `charTyped(the character event)`.
     fn char_typed(&mut self, ch: char) -> bool {
         let _ = ch;
         false
     }
 
-    /// `getBorderForArrowNavigation(opposite)`.
+    /// get border for arrow navigation.
     fn border_for_arrow_navigation(&self, opposite: ScreenDirection) -> ScreenRectangle {
         self.rectangle().border(opposite)
     }
 
-    /// `getCurrentFocusPath()`, told its own `id` because a leaf cannot name
+    /// get current focus path, told its own `id` because a leaf cannot name
     /// itself here. A container child overrides to descend.
     fn current_focus_path(&self, id: usize) -> ComponentPath {
         ComponentPath::Leaf(id)
     }
 
-    /// `ComponentPath.Path.applyFocus`'s recursion into a container child. The
-    /// default is `Leaf.applyFocus`, which is correct for every leaf and is why
+    /// Path's apply focus's recursion into a container child. The
+    /// default is Leaf's apply focus, which is correct for every leaf and is why
     /// a screen with no nested container never calls the other arm.
     fn apply_focus(&mut self, path: &ComponentPath, focused: bool) {
         let _ = path;
@@ -903,7 +903,7 @@ impl FocusTarget for Widget {
 /// shape suits it (named fields, a `Vec`, a mix of types) and implements this to
 /// hand them over. Ids need not be contiguous and need not be indices —
 /// `get`/`get_mut` returning `None` for an unknown id is fine and is treated as
-/// "this child no longer exists", the same as `Screen.removeWidget`.
+/// "this child no longer exists", the same as Screen's remove widget.
 pub trait FocusChildren {
     /// The child with this id, or `None`.
     fn get(&self, id: usize) -> Option<&dyn FocusTarget>;
@@ -919,14 +919,14 @@ pub trait FocusChildren {
 /// including a navigation event that moved focus (vanilla's own screen base;
 /// the final `return false` is after the navigation block). That is fine in
 /// vanilla, where the caller only asks "should this fall through to a
-/// `KeyMapping`", and useless to a caller that has to decide whether the screen
+/// The key mapping", and useless to a caller that has to decide whether the screen
 /// still needs to interpret the key itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyOutcome {
-    /// The Escape branch fired: `shouldCloseOnEsc()` was true and the screen
+    /// The Escape branch fired: should close on esc was true and the screen
     /// should close. Vanilla's only `return true`.
     Close,
-    /// The focused child consumed it (`ContainerEventHandler.keyPressed`).
+    /// The focused child consumed it (the container event handler's key pressed).
     Consumed,
     /// It was Tab or an arrow and focus moved.
     FocusMoved,
@@ -935,7 +935,7 @@ pub enum KeyOutcome {
     Declined,
 }
 
-/// `Screen`'s focus bookkeeping and `ContainerEventHandler`'s dispatch, over the
+/// `Screen`'s focus bookkeeping and the container event handler's dispatch, over the
 /// ids of children the caller owns.
 ///
 /// Holds the two registries in their *own* insertion orders, because
@@ -949,10 +949,10 @@ pub struct FocusSet {
     children: Vec<usize>,
     /// `Screen.renderables` order — draw order.
     renderables: Vec<usize>,
-    /// `AbstractContainerEventHandler.focused`.
+    /// The abstract container event handler's focused.
     focused: Option<usize>,
-    /// vanilla's own screen base's `shouldCloseOnEsc()`. `true` in vanilla's base class
-    ///; `DeathScreen` is the notable `false`.
+    /// vanilla's own screen base's should close on esc. `true` in vanilla's base class
+    ///; the death screen is the notable `false`.
     close_on_esc: bool,
 }
 
@@ -960,7 +960,7 @@ impl Default for FocusSet {
     /// **Not** `derive`d, for the same reason [`Widget`]'s is not: a derived
     /// `Default` would give `close_on_esc = false`, i.e. every screen built from
     /// `..Default::default()` would silently swallow Escape and trap the player.
-    /// Vanilla's own screen base's `shouldCloseOnEsc()` returns `true`.
+    /// Vanilla's own screen base's should close on esc returns `true`.
     fn default() -> Self {
         Self::new()
     }
@@ -978,7 +978,7 @@ impl FocusSet {
         }
     }
 
-    /// `shouldCloseOnEsc() == false` — the death-screen shape, where Escape must
+    /// `should_close_on_esc() == false` — the death-screen shape, where Escape must
     /// be swallowed entirely rather than routed anywhere.
     #[must_use]
     #[cfg(test)]
@@ -987,18 +987,18 @@ impl FocusSet {
         self
     }
 
-    /// `Screen.addRenderableWidget`: drawn and interactive.
+    /// Screen's add renderable widget: drawn and interactive.
     pub fn add_renderable_widget(&mut self, id: usize) {
         self.renderables.push(id);
         self.add_widget(id);
     }
 
-    /// `Screen.addWidget`: interactive and **not drawn**.
+    /// Screen's add widget: interactive and **not drawn**.
     pub fn add_widget(&mut self, id: usize) {
         self.children.push(id);
     }
 
-    /// `Screen.addRenderableOnly`: drawn and **inert**. It never enters
+    /// Screen's add renderable only: drawn and **inert**. It never enters
     /// `children()`, so it cannot be clicked or focused — deliberate for a
     /// decoration, and a silent island for anything else.
     #[cfg(test)]
@@ -1027,17 +1027,17 @@ impl FocusSet {
         &self.children
     }
 
-    /// `getFocused()`.
+    /// get focused.
     #[must_use]
     pub fn focused(&self) -> Option<usize> {
         self.focused
     }
 
-    /// vanilla's own abstract container-event-handler base's `setFocused(child)`: unfocus the outgoing
+    /// vanilla's own abstract container-event-handler base's set focused: unfocus the outgoing
     /// child, focus the incoming one, and do neither when nothing changed.
     ///
     /// The no-op-when-equal guard is not an optimisation:
-    /// vanilla's own edit-box widget's `setFocused(true)` resets the caret blink phase
+    /// vanilla's own edit-box widget's set focused resets the caret blink phase
     ///, so re-setting the same focus would restart it.
     pub fn set_focused(&mut self, kids: &mut dyn FocusChildren, next: Option<usize>) {
         if self.focused == next {
@@ -1056,7 +1056,7 @@ impl FocusSet {
         self.focused = next;
     }
 
-    /// `getCurrentFocusPath()`, minus the implicit screen at its head.
+    /// get current focus path, minus the implicit screen at its head.
     #[must_use]
     pub fn current_focus_path(&self, kids: &dyn FocusChildren) -> Option<ComponentPath> {
         let id = self.focused?;
@@ -1064,7 +1064,7 @@ impl FocusSet {
         child.is_focused().then(|| child.current_focus_path(id))
     }
 
-    /// vanilla's own component-path type's `applyFocus(focused)` for a path this set produced.
+    /// vanilla's own component-path type's apply focus for a path this set produced.
     pub fn apply_focus(
         &mut self,
         kids: &mut dyn FocusChildren,
@@ -1072,10 +1072,10 @@ impl FocusSet {
         focused: bool,
     ) {
         let head = path.head();
-        // `Path.applyFocus`: the container points at (or forgets) the child…
+        // Path's apply focus: the container points at (or forgets) the child…
         self.set_focused(kids, if focused { Some(head) } else { None });
         // …and then the path recurses. For a `Leaf` that recursion *is*
-        // `component.setFocused(focused)`, which `set_focused` above has
+        // component's set focused, which `set_focused` above has
         // already done for the `true` case but not for `false` when the head
         // was not the currently focused child.
         if let Some(child) = kids.get_mut(head) {
@@ -1086,12 +1086,12 @@ impl FocusSet {
         }
     }
 
-    /// vanilla's own screen base's `clearFocus()`.
+    /// vanilla's own screen base's clear focus.
     pub fn clear_focus(&mut self, kids: &mut dyn FocusChildren) {
         if let Some(path) = self.current_focus_path(&*kids) {
             self.apply_focus(kids, &path, false);
         } else {
-            // `getCurrentFocusPath()` is null when the child disagrees about
+            // get current focus path is null when the child disagrees about
             // being focused; the container's own pointer still has to go.
             self.set_focused(kids, None);
         }
@@ -1106,7 +1106,7 @@ impl FocusSet {
     }
 
     /// vanilla's own screen base's `setInitialFocus(target)`: offer `id` an
-    /// `InitialFocus` event and take the focus there if it accepts.
+    /// The initial focus event and take the focus there if it accepts.
     pub fn set_initial_focus(&mut self, kids: &mut dyn FocusChildren, id: usize) {
         let accepts = kids.get(id).is_some_and(|c| c.takes_focus());
         if accepts {
@@ -1115,7 +1115,7 @@ impl FocusSet {
         }
     }
 
-    /// vanilla's own container-event-handler interface's `getChildAt(x, y)`: the **first** child in
+    /// vanilla's own container-event-handler interface's get child at: the **first** child in
     /// `children()` order whose `isMouseOver` is true. Not the topmost — see the
     /// module docs.
     #[must_use]
@@ -1126,11 +1126,11 @@ impl FocusSet {
             .find(|&id| kids.get(id).is_some_and(|c| c.is_mouse_over(x, y)))
     }
 
-    /// `ContainerEventHandler.mouseClicked` (`:38-55`), minus the drag state.
+    /// The container event handler's mouse clicked (`:38-55`), minus the drag state.
     ///
     /// Returns whether a child was *hit* — which is vanilla's return value, and
     /// is **not** the same as "focus moved": a child that consumes the click but
-    /// reports `shouldTakeFocusAfterInteraction() == false` is clicked without
+    /// reports `should_take_focus_after_interaction() == false` is clicked without
     /// being focused, and one that declines the click is hit without either.
     pub fn mouse_clicked(&mut self, kids: &mut dyn FocusChildren, x: f32, y: f32) -> bool {
         let Some(id) = self.child_at(&*kids, x, y) else {
@@ -1149,7 +1149,7 @@ impl FocusSet {
         true
     }
 
-    /// `ContainerEventHandler.keyPressed` (`:80-83`): the focused child, and
+    /// The container event handler's key pressed (`:80-83`): the focused child, and
     /// **only** the focused child. Never iterates.
     pub fn key_pressed(&mut self, kids: &mut dyn FocusChildren, event: KeyEvent) -> bool {
         let Some(id) = self.focused else {
@@ -1159,7 +1159,7 @@ impl FocusSet {
             .is_some_and(|child| child.key_pressed(event))
     }
 
-    /// `ContainerEventHandler.charTyped` (`:90-93`).
+    /// The container event handler's char typed (`:90-93`).
     pub fn char_typed(&mut self, kids: &mut dyn FocusChildren, ch: char) -> bool {
         let Some(id) = self.focused else {
             return false;
@@ -1211,7 +1211,7 @@ impl FocusSet {
         }
     }
 
-    /// `ContainerEventHandler.nextFocusPath` (`:126-140`): ask the focused child
+    /// The container event handler's next focus path (`:126-140`): ask the focused child
     /// first — which is how a nested container keeps focus inside itself — then
     /// fall back to this container's own traversal.
     #[must_use]
@@ -1248,7 +1248,7 @@ impl FocusSet {
         child.takes_focus().then(|| child.current_focus_path(id))
     }
 
-    /// `ContainerEventHandler.handleTabNavigation` (`:142-169`).
+    /// The container event handler's handle tab navigation (`:142-169`).
     ///
     /// Two details a rewrite loses: the sort is **stable** so equal
     /// `tabOrderGroup`s keep insertion order, and `newIndex` is
@@ -1279,7 +1279,7 @@ impl FocusSet {
         }
     }
 
-    /// `ContainerEventHandler.handleArrowNavigation` (`:171-184`).
+    /// The container event handler's handle arrow navigation (`:171-184`).
     fn arrow_navigation(
         &self,
         kids: &dyn FocusChildren,
@@ -1319,7 +1319,7 @@ impl FocusSet {
 
     /// The union of this container's children, standing in for the screen's own
     /// rect. Vanilla asks `getBorderForArrowNavigation` on the *screen*, whose
-    /// `getRectangle()` is the whole viewport; this shell's screens do not carry
+    /// get rectangle is the whole viewport; this shell's screens do not carry
     /// one, and the union is the smallest thing that makes
     /// `border(direction.opposite())` land outside every child, which is all the
     /// unfocused arrow case needs.
@@ -1345,7 +1345,7 @@ impl FocusSet {
         }
     }
 
-    /// `ContainerEventHandler.nextFocusPathInDirection` (`:186-233`) — the
+    /// The container event handler's next focus path in direction (`:186-233`) — the
     /// strict pass, falling through to [`Self::focus_path_vaguely_in_direction`].
     fn focus_path_in_direction(
         &self,
@@ -1408,7 +1408,7 @@ impl FocusSet {
             .or_else(|| self.focus_path_vaguely_in_direction(kids, from, direction, excluded, event))
     }
 
-    /// `ContainerEventHandler.nextFocusPathVaguelyInDirection` (`:235-269`): the
+    /// The container event handler's next focus path vaguely in direction (`:235-269`): the
     /// overlap requirement dropped, nearest by squared distance between the
     /// focused rect's leading-edge centre and each candidate's trailing-edge
     /// centre.
@@ -1458,21 +1458,21 @@ impl FocusSet {
     }
 }
 
-/// `MouseHandler.DOUBLE_CLICK_THRESHOLD_MS`: the exact
+/// The mouse handler's double click threshold ms: the exact
 /// wire vanilla checks with `currentTime - lastClick.time() < 250L` —
 /// **strict** less-than, so a click exactly 250 ms after the last one is not a
 /// double.
 pub const DOUBLE_CLICK_THRESHOLD_MS: u64 = 250;
 
-/// `MouseHandler.onButton`'s double-click detector,
+/// The mouse handler's on button's double-click detector,
 /// pulled out as a reusable primitive rather than re-derived per screen.
 ///
 /// ## Why this exists here and not in `container.rs` or `widget.rs`
 ///
-/// Vanilla's own detector is not a widget method at all — `AbstractSelectionList`
+/// Vanilla's own detector is not a widget method at all — the abstract selection list
 /// and `EditBox` both just *receive* an already-computed `doubleClick: bool` on
 /// `mouseClicked`/`onClick`; the clock and the 250 ms comparison live one layer
-/// up, in `MouseHandler`, and every consumer downstream is a plain `if
+/// up, in the mouse handler, and every consumer downstream is a plain `if
 /// (doubleClick)`. That is the shape this type copies: one small, clock-fed
 /// tracker that any screen's click handler can hold, rather than a per-screen
 /// reimplementation of the same subtraction. `container.rs` already has its own
@@ -1520,7 +1520,7 @@ impl<T: Copy + PartialEq> DoubleClickTracker<T> {
     /// with the previous one, is a double-click.
     ///
     /// Always records `(target, now_ms)` as the new "last click", double or
-    /// not — matching `MouseHandler`'s own unconditional re-arm on every
+    /// not — matching mouse handler's own unconditional re-arm on every
     /// consumed click. This is what lets a fast triple-click report a double on
     /// clicks 2-and-3 as well as clicks 1-and-2, exactly as vanilla's pairwise
     /// comparison does.
@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     fn tab_order_group_overrides_insertion_order_but_ties_keep_it() {
-        // `handleTabNavigation` sorts by `getTabOrderGroup()` with a *stable*
+        // `handleTabNavigation` sorts by get tab order group with a *stable*
         // sort, so group wins and insertion order breaks ties. Vanilla's
         // default group is 0, so this is only observable once something
         // overrides it — which is why the shipped behaviour cannot prove the
@@ -1749,7 +1749,7 @@ mod tests {
 
     #[test]
     fn a_single_focusable_child_re_lands_on_itself_because_the_wrap_clears_focus() {
-        // The subtle consequence of the wrap being `clearFocus()` + retry
+        // The subtle consequence of the wrap being clear focus + retry
         // rather than modular arithmetic: `takes_focus` is
         // `isActive() && !isFocused()`, so the only child refuses the first
         // pass and accepts the second.
@@ -1764,7 +1764,7 @@ mod tests {
     #[test]
     fn arrow_navigation_does_not_wrap_where_tab_does() {
         // `Screen.keyPressed`'s retry is gated on
-        // `instanceof TabNavigation`, so falling off the bottom with Down
+        // instanceof tab navigation, so falling off the bottom with Down
         // leaves focus where it was.
         let mut kids = column(3);
         let mut set = FocusSet::new();
@@ -1900,7 +1900,7 @@ mod tests {
 
     #[test]
     fn a_disabled_child_is_invisible_to_get_child_at() {
-        // `isMouseOver` is `isActive() && areCoordinatesInRectangle(..)`, so a
+        // `isMouseOver` is `isActive() && are_coordinates_in_rectangle(..)`, so a
         // disabled widget stacked over an enabled one does not eat the click.
         let mut kids = Kids(vec![
             Widget::button(0.0, 0.0, 100.0, 20.0, "disabled"),
@@ -2027,7 +2027,7 @@ mod tests {
             "the greedy field never sees Escape — it is answered first, which is \
              why a text field cannot lock a player out of the pause menu"
         );
-        // `shouldCloseOnEsc() == false` (the death screen) hands it on instead,
+        // `should_close_on_esc() == false` (the death screen) hands it on instead,
         // and then the greedy child *does* see it.
         let mut set = FocusSet::new().without_close_on_esc();
         set.add_renderable_widget(0);

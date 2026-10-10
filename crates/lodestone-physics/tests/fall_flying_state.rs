@@ -74,7 +74,7 @@ fn every_missing_conjunct_refuses_the_start() {
 
 #[test]
 fn an_already_gliding_player_does_not_restart() {
-    // The `!isFallFlying()` guard is what stops a held jump key sending one
+    // The `!is_fall_flying()` guard is what stops a held jump key sending one
     // START_FALL_FLYING per tick for the whole descent.
     let mut state = airborne();
     state.fall_flying = true;

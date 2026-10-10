@@ -152,7 +152,7 @@ pub fn painting_variant_name(name: &str) -> Option<&'static str> {
 /// The jar path of the variant `name`'s own sprite, namespaced or bare.
 ///
 /// Spends the `asset_id == "minecraft:" + name` equality [`PAINTING_VARIANTS`]
-/// records: vanilla resolves `variant.assetId()` through the paintings atlas,
+/// records: vanilla resolves variant's asset id through the paintings atlas,
 /// and every one of the 51 asset ids is its own registry name.
 #[must_use]
 pub fn painting_texture_path(name: &str) -> String {

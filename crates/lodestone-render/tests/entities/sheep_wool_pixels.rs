@@ -176,7 +176,7 @@ const WOOL_PARTS: [&str; 6] = [
 ];
 
 /// Render one sheep. `wool_tint` is `None` for "sheared" (the wool draw is
-/// skipped entirely, matching vanilla's `if (!state.isSheared)` gate) or
+/// skipped entirely, matching vanilla's `if (!state.is_sheared)` gate) or
 /// `Some(rgb)` to draw the wool layer tinted that colour.
 fn render_sheep(gpu: &Gpu, models: &EntityModelSet, wool_tint: Option<[u8; 3]>) -> Vec<u8> {
     let device = &gpu.device;
@@ -247,7 +247,7 @@ fn render_sheep(gpu: &Gpu, models: &EntityModelSet, wool_tint: Option<[u8; 3]>) 
     // only, since this pass does not own the file that type lives in
     // (`lodestone-render/src/entity.rs`; see `docs/entity-rendering.md`).
     // `None` (the "sheared" case) builds none of this and issues no wool draw
-    // at all, matching vanilla's `if (!state.isSheared)` gate exactly.
+    // at all, matching vanilla's `if (!state.is_sheared)` gate exactly.
     let wool_view_sampler = wool_tint.map(|_| flat_texture(device, queue, [200, 200, 200, 255]));
     let wool_tex_bg = wool_view_sampler
         .as_ref()

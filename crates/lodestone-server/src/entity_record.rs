@@ -248,7 +248,7 @@ pub(crate) fn read_rotation(nbt: Option<&Nbt>) -> Option<Rotation> {
     Some(Rotation::new(get(0)?, get(1)?))
 }
 
-/// Vanilla's `NbtUtils.createUUID`: the 128 bits as four big-endian `int`s, most
+/// Vanilla's nbt utils's create uuid: the 128 bits as four big-endian `int`s, most
 /// significant first. Not a string, and not two longs — a `.dat` written with
 /// either is silently unreadable by the real game.
 pub(crate) fn uuid_to_ints(uuid: Uuid) -> Vec<i32> {

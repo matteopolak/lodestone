@@ -1,4 +1,4 @@
-//! Mob spawn equipment — vanilla's `Mob.populateDefaultEquipmentSlots` and the
+//! Mob spawn equipment — vanilla's Mob's populate default equipment slots and the
 //! per-species overrides that replace or extend it.
 //!
 //! # What it is
@@ -11,28 +11,28 @@
 //! blocker this module exists to remove: a drowned's `RangedStrikeGoal` trident
 //! builder ([`crate::ai::roster::ranged::trident_attack`]) has existed for a
 //! while with zero producers of "is this drowned holding a trident", and
-//! vanilla's generic armour-upgrade roll (`Mob.populateDefaultEquipmentSlots`)
+//! vanilla's generic armour-upgrade roll (Mob's populate default equipment slots)
 //! had no caller for [`crate::equipment`]'s numbers to feed at all.
 //!
 //! # How it works
 //!
 //! [`populate_default_equipment_slots`] is one function per species, table-
 //! shaped like [`crate::ai::roster`]'s per-species goal tables, transcribed
-//! from each class's own `populateDefaultEquipmentSlots(RandomSource,
+//! from each class's own `populate default equipment slots(RandomSource,
 //! DifficultyInstance)` override:
 //!
-//! * **`Mob.populateDefaultEquipmentSlots`** (the fallback every unlisted
+//! * **Mob's populate default equipment slots** (the fallback every unlisted
 //!   species takes) — [`base_armor_roll`]. A `0.15 * specialMultiplier` chance
 //!   of any armour at all, then an `armorType` in `0..=5` (`nextInt(3)` plus up
 //!   to three `+1` bumps at 10.87% each), then walks
 //!   `[Head, Chest, Legs, Feet]` in that order, stopping early after the first
 //!   slot with a per-difficulty chance (`10%` Hard, `25%` otherwise) and never
 //!   overwriting a slot that already holds something.
-//! * **`Zombie.populateDefaultEquipmentSlots`** calls `super` (the roll above)
+//! * **Zombie's populate default equipment slots** calls `super` (the roll above)
 //!   then rolls a `1%`/`5%` (Hard) chance of an iron weapon: sword, spear or
 //!   shovel at `1/6, 1/6, 4/6`. `Husk` and `ZombieVillager` declare no override
 //!   of their own, so they share this arm.
-//! * **`Drowned.populateDefaultEquipmentSlots`** does **not** call `super` — no
+//! * **Drowned's populate default equipment slots** does **not** call `super` — no
 //!   armour roll at all, just a `10%` chance of a main-hand weapon, `10/16` of
 //!   that a trident and the rest a fishing rod. This is the one this module
 //!   exists for: `10% * 10/16 = 6.25%` of drowned spawns get a trident, which
@@ -41,9 +41,9 @@
 //! * **Skeleton** calls `super` then
 //!   sets a bow **unconditionally** — no roll. `Skeleton`, `Stray`, `Bogged`
 //!   and `Parched` declare no override, so they share this arm.
-//! * **`WitherSkeleton.populateDefaultEquipmentSlots`** does **not** call
+//! * **WitherSkeleton's populate default equipment slots** does **not** call
 //!   `super` — no armour roll, just an unconditional stone sword.
-//! * **`Pillager.populateDefaultEquipmentSlots`** does **not** call `super`
+//! * **Pillager's populate default equipment slots** does **not** call `super`
 //!   either — just an unconditional crossbow.
 //!
 //! # How to change it
@@ -65,7 +65,7 @@
 //!
 //! `special_multiplier` is [`DifficultyInstance::special_multiplier`]-shaped —
 //! `0.0` below effective difficulty `2.0`, `1.0` above `4.0`, linear between —
-//! and `hard` is `getDifficulty() == Difficulty.HARD` (**not** the same
+//! and `hard` is `get_difficulty() == Difficulty.HARD` (**not** the same
 //! predicate as `special_multiplier == 1.0`; a saturated Normal-difficulty
 //! world can reach `special_multiplier` `1.0` while `hard` stays `false`,
 //! which is exactly why [`base_armor_roll`] takes both rather than deriving one
@@ -161,7 +161,7 @@ const EQUIPMENT_POPULATION_ORDER: [EquipmentSlot; 4] = [
     EquipmentSlot::Feet,
 ];
 
-/// `Mob.getEquipmentForSlot` — the six-tier armour ladder in vanilla's own
+/// Mob's get equipment for slot — the six-tier armour ladder in vanilla's own
 /// (non-monotonic-in-defence) order: leather, copper, golden, chainmail, iron,
 /// diamond. `None` outside `0..=5`, which [`base_armor_roll`]'s own `armor_type`
 /// never produces (`nextInt(3)` plus at most three `+1`s tops out at `5`), and
@@ -197,7 +197,7 @@ fn equipment_for_slot(slot: EquipmentSlot, armor_type: i32) -> Option<Item> {
     })
 }
 
-/// `Mob.populateDefaultEquipmentSlots` — the generic armour-upgrade roll every
+/// Mob's populate default equipment slots — the generic armour-upgrade roll every
 /// species takes unless its own override skips calling `super` (`Drowned`,
 /// `WitherSkeleton`, `Pillager`, all transcribed as *not* calling this).
 ///
@@ -237,7 +237,7 @@ pub fn base_armor_roll(
     }
 }
 
-/// Vanilla's `populateDefaultEquipmentSlots(RandomSource, DifficultyInstance)`
+/// Vanilla's populate default equipment slots
 /// for one generated entity type. An unlisted species takes
 /// [`base_armor_roll`] alone, which is the honest default: every species this
 /// module does not name individually still extends `Mob` and inherits its
@@ -254,7 +254,7 @@ pub fn populate_default_equipment_slots(
 ) -> EquipmentSlots {
     let mut slots = EquipmentSlots::default();
     match species {
-        // `Zombie.populateDefaultEquipmentSlots`: `super` first, then a
+        // Zombie's populate default equipment slots: `super` first, then a
         // 1%/5%(Hard) chance of an iron weapon at 1/6 sword, 1/6 spear, 4/6
         // shovel. `Husk` and `ZombieVillager` declare no override, so they
         // share this arm; `Drowned` overrides fully and gets its own arm.
@@ -270,7 +270,7 @@ pub fn populate_default_equipment_slots(
                 slots.set(EquipmentSlot::MainHand, item);
             }
         }
-        // `Drowned.populateDefaultEquipmentSlots` does not call `super` — no
+        // Drowned's populate default equipment slots does not call `super` — no
         // armour, just the trident/fishing-rod roll: 10% * 10/16 = 6.25% of
         // spawns get a trident, 10% * 6/16 = 3.75% a fishing rod, 90% neither.
         EntityType::Drowned => {
@@ -289,12 +289,12 @@ pub fn populate_default_equipment_slots(
             base_armor_roll(rng, special_multiplier, hard, &mut slots);
             slots.set(EquipmentSlot::MainHand, Item::Bow);
         }
-        // `WitherSkeleton.populateDefaultEquipmentSlots`: no `super`, just an
+        // WitherSkeleton's populate default equipment slots: no `super`, just an
         // unconditional stone sword.
         EntityType::WitherSkeleton => {
             slots.set(EquipmentSlot::MainHand, Item::StoneSword);
         }
-        // `Pillager.populateDefaultEquipmentSlots`: no `super`, just an
+        // Pillager's populate default equipment slots: no `super`, just an
         // unconditional crossbow.
         EntityType::Pillager => {
             slots.set(EquipmentSlot::MainHand, Item::Crossbow);

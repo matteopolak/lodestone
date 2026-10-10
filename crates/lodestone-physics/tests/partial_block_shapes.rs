@@ -18,7 +18,7 @@
 //!
 //! # Why the amounts matter, and are not cosmetic
 //!
-//! 26.2's server replays our movement delta through `move(MoverType.PLAYER, …)`
+//! 26.2's server replays our movement delta through its player-mover-type move
 //! and rubber-bands whenever horizontal disagreement exceeds **0.25 blocks in a
 //! single packet, with no accumulator** (`docs/baritone-port.md` §3.2). The
 //! errors measured below are `0.5` blocks on a slab and `1.0` on a fence — 2× and

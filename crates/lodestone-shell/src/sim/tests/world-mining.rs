@@ -427,7 +427,7 @@ fn an_explicit_wire_tool_override_survives_the_lift_to_the_version_seam() {
 #[test]
 fn submerged_reads_eye_in_water_not_the_fogs_under_water() {
     // Vanilla's `getDestroySpeed` gates the 5x underwater penalty on
-    // `isEyeInFluid(WATER)` alone; `FluidState::under_water()` additionally
+    // is eye in fluid alone; `FluidState::under_water()` additionally
     // requires `in_water()` and is what the *fog* selects on. The two
     // disagree exactly here — an eye in water whose box is not — so reading
     // the fog's predicate would silently drop the penalty in that pose.
@@ -920,7 +920,7 @@ async fn live_bare_hand_stone_timing_survives_the_real_hardness_seam() {
         }
     }
 
-    // Clear the server's `hasClientLoaded()` gate, which drops every
+    // Clear the server's has client loaded gate, which drops every
     // `player_action` for ~60 ticks after join. A hardness-0 block breaks on
     // START alone, so retrying it until it vanishes both proves the
     // instant-break branch and tells us the gate is open — without it the

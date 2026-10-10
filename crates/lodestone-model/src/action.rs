@@ -430,8 +430,8 @@ pub enum ClientAction {
         use_max_items: bool,
     },
     /// Client-initiated round-trip latency probe, sent periodically during
-    /// play by the F3 debug overlay's network graph (vanilla's
-    /// `PingDebugMonitor`), independent of the server-initiated
+    /// play by the F3 debug overlay's network graph (vanilla's ping
+    /// monitor), independent of the server-initiated
     /// [`ClientAction::PongResponse`] reply.
     PingRequest {
         /// Client's local clock reading in milliseconds, echoed back by the
@@ -466,7 +466,7 @@ pub enum ClientAction {
     /// [`crate::event::ClientEvent::CookieStored`] for this `key`, which the wire
     /// carries as a nullable byte array rather than an error. Present in the
     /// Login, Configuration and Play states alike (`minecraft:cookie_response`
-    /// is a `ServerCookiePacketListener` packet, shared by all three).
+    /// is a cookie-listener packet, shared by all three).
     CookieResponse {
         /// Cookie key, echoed from the matching
         /// [`crate::event::ClientEvent::CookieRequested`].
@@ -662,7 +662,7 @@ pub enum ClientAction {
 }
 
 /// A test instance block's configuration, as `set_test_instance_block`'s
-/// `TestInstanceBlockEntity.Data` carries it.
+/// data payload carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestInstanceData {
     /// The test to run, or `None` for an unconfigured block.
@@ -682,7 +682,7 @@ pub struct TestInstanceData {
 }
 
 /// Which button of the structure block screen was pressed
-/// (`StructureBlockEntity.UpdateType`).
+/// (the structure block screen's update type).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructureBlockUpdateType {
     /// Just save the settings.
@@ -695,7 +695,7 @@ pub enum StructureBlockUpdateType {
     ScanArea,
 }
 
-/// A structure block's mode (`StructureMode`).
+/// A structure block's mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructureBlockMode {
     /// Save mode.

@@ -89,7 +89,7 @@ pub(crate) struct Food {
     pub use_ticks: i32,
 }
 
-/// `Consumables.defaultFood()`/`defaultDrink()`'s shared `consumeSeconds(1.6F)`,
+/// Consumables's default food/default drink's shared consume seconds,
 /// in ticks. Only **two** items in 26.2 differ — `DRIED_KELP` (`0.8F`) and
 /// `HONEY_BOTTLE` (`2.0F`) — and each is spelled out in [`FOODS`], which says the
 /// same thing correctly. This line said "three" and disagreed with its own table.
@@ -111,8 +111,8 @@ pub(crate) fn food_for_item(item: &str) -> Option<Food> {
         .map(|idx| FOODS[idx].1)
 }
 
-/// `Player.canEat(canAlwaysEat)` — `abilities.invulnerable || canAlwaysEat ||
-/// foodData.needsFood()`, where `needsFood()` is `foodLevel < 20`.
+/// Player's can eat — `abilities.invulnerable || canAlwaysEat ||
+/// foodData.needs_food()`, where needs food is `foodLevel < 20`.
 ///
 /// This is the gate whose absence is very visible: without it a full player eats
 /// steak after steak for nothing.
@@ -180,17 +180,17 @@ pub(crate) struct EquipSwap {
 /// `count <= 1`: the hand receives the *previously equipped* stack, or keeps its
 /// own if the slot was empty, and creative **copies** the held stack into the
 /// slot instead of clearing the hand
-/// (`player.isCreative() ? inHand.copy() : inHand.copyAndClear()`).
+/// (`player.is_creative() ? inHand.copy() : inHand.copy_and_clear()`).
 ///
 /// `count > 1`: only **one** is taken from the hand
-/// (`inHand.consumeAndReturn(1, player)`, which is itself creative-gated), the
+/// (in hand's consume and return, which is itself creative-gated), the
 /// hand keeps the rest, and the previously-equipped stack goes to the
 /// **inventory** — or on the floor if it does not fit. A gate written against a
 /// single helmet cannot see this branch at all.
 ///
-/// The refusal that is easy to miss: `!ItemStack.isSameItemSameComponents(inHand,
+/// The refusal that is easy to miss: `!ItemStack.is_same_item_same_components(inHand,
 /// inEquipmentSlot)`, so re-equipping the identical piece is a no-op rather than
-/// a pointless swap. `EnchantmentHelper.has(…, PREVENT_ARMOR_CHANGE)` is the
+/// a pointless swap. The enchantment helper's has is the
 /// other guard and there is no enchantment model here, so it cannot fire.
 pub(crate) fn swap_with_equipment_slot(
     inventory: &mut PlayerInventory,
@@ -200,7 +200,7 @@ pub(crate) fn swap_with_equipment_slot(
     let in_hand = inventory.native(hand_native)?.clone();
     let (_, equipment_native) = swappable_equip_slot(&in_hand.item.to_string())?;
     let in_slot = inventory.native(equipment_native).cloned();
-    // `ItemStack.isSameItemSameComponents`: this crate's `ItemStack` carries the
+    // ItemStack's is same item same components: this crate's `ItemStack` carries the
     // item and the count, so "same item" is the whole comparison it can make.
     if in_slot.as_ref().is_some_and(|equipped| {
         equipped.item == in_hand.item && equipped.components == in_hand.components
@@ -276,7 +276,7 @@ static UNSWAPPABLE: &[&str] = &[
 /// `consumeSeconds`, which in 26.2 is only `HONEY_BOTTLE` (`2.0F`) and
 /// `DRIED_KELP` (`0.8F`).
 ///
-/// `Foods.stew(n)` expands to `nutrition(n).saturationModifier(0.6F)`, which is
+/// `Foods.stew(n)` expands to nutrition's saturation modifier, which is
 /// why the four stews all carry `0.6`.
 static FOODS: &[(&str, Food)] = &[
     ("minecraft:apple", Food { nutrition: 4, saturation_modifier: 0.3, can_always_eat: false, use_ticks: DEFAULT_CONSUME_TICKS }),
@@ -593,7 +593,7 @@ mod tests {
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
-    /// `Player.canEat`'s three disjuncts, each shown to be the deciding one.
+    /// Player's can eat's three disjuncts, each shown to be the deciding one.
     #[test]
     fn can_eat_refuses_ordinary_food_on_a_full_bar_only() {
         let steak = food_for_item("minecraft:cooked_beef").unwrap();
@@ -728,7 +728,7 @@ mod tests {
         );
     }
 
-    /// `!ItemStack.isSameItemSameComponents(inHand, inEquipmentSlot)` — the
+    /// `!ItemStack.is_same_item_same_components(inHand, inEquipmentSlot)` — the
     /// no-op refusal. Without it, right-clicking the helmet you are already
     /// wearing shuffles it pointlessly.
     #[test]
@@ -746,7 +746,7 @@ mod tests {
 
     /// [`clone_item_stack_for_block`]'s default arm: an ordinary block clones
     /// to itself, a state with properties still resolves by its base name,
-    /// and a block with no `BlockItem` (water) or no such block at all is
+    /// and a block with no block item (water) or no such block at all is
     /// `None`.
     #[test]
     fn clone_item_stack_for_block_resolves_the_default_arm() {

@@ -1,4 +1,4 @@
-//! Bit-exact wire gate for `ClientboundRecipeBookAddPacket`.
+//! Bit-exact wire gate for the recipe-book-add packet.
 //!
 //! A recipe book is a packet a *real vanilla client* parses, and the failure mode
 //! of a wrong layout is not a visibly wrong recipe — it is a desync partway
@@ -6,14 +6,14 @@
 //! about some unrelated later field. So the layout is asserted byte for byte
 //! against the stream codecs read as record definitions:
 //!
-//! * `vanilla's own recipe display entry's own stream codec` — id, display, `OPTIONAL_VAR_INT` group,
+//! * The recipe display entry stream codec — id, display, `OPTIONAL_VAR_INT` group,
 //!   `recipe_book_category` registry id, optional ingredient list.
-//! * `vanilla's own slot display's own stream codec` — `vanilla's own byte buf codecs's own registry(SLOT_DISPLAY)` dispatch
-//!   then the variant body, with `vanilla's own slot displays's own bootstrap`'s registration order as
+//! * The slot display stream codec — a registry dispatch
+//!   then the variant body, with the slot displays' registration order as
 //!   the id assignment.
-//! * `vanilla's own item stack template's own stream codec` — item **then** count, the opposite field
-//!   order from `vanilla's own item stack's own optional stream codec`.
-//! * `vanilla's own byte buf codecs's own holder set` — `0` means "a tag reference follows", `n + 1`
+//! * The item stack template stream codec — item **then** count, the opposite field
+//!   order from the optional item-stack stream codec.
+//! * The holder-set codec — `0` means "a tag reference follows", `n + 1`
 //!   means "`n` direct entries follow". Every ingredient list here takes the
 //!   direct form, so every count is one more than its length.
 //!
@@ -92,7 +92,7 @@ fn shaped_entry_matches_the_stream_codecs_byte_for_byte() {
 
     let mut want: Vec<u8> = Vec::new();
     want.extend(varint(1)); // one entry
-    want.extend(varint(7)); // vanilla's own recipe display id's own index
+    want.extend(varint(7)); // recipe display id index
     want.extend(varint(1)); // recipe_display: crafting_shaped
     want.extend(varint(2)); // width
     want.extend(varint(2)); // height
@@ -124,7 +124,7 @@ fn shaped_entry_matches_the_stream_codecs_byte_for_byte() {
     want.extend(varint(12));
     // recipe_book_category: crafting_redstone is registration index 1.
     want.extend(varint(1));
-    // craftingRequirements: present, two ingredients, each a direct HolderSet.
+    // crafting requirements: present, two ingredients, each a direct holder set.
     want.push(1);
     want.extend(varint(2));
     want.extend(varint(2)); // 1 entry + 1

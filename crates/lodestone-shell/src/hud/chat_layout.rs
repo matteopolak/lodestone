@@ -24,13 +24,13 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChatDisplayOptions {
     /// `options.chat.scale`, `0.0..=1.0` — vanilla's
-    /// `ChatComponent.getScale`. This is the *entire* pose scale every chat
+    /// The chat component's get scale. This is the *entire* pose scale every chat
     /// draw multiplies by ([`chat_pose_scale`]); there is no HUD-side factor
-    /// layered on top, matching `ChatComponent.extractRenderState`'s
+    /// layered on top, matching chat component's extract render state's
     /// `pose.scale(scale, scale)`.
     pub scale: f32,
     /// `options.chat.width`, `0.0..=1.0`. Fed
-    /// through [`chat_width_px`] (vanilla's `ChatComponent.getWidth`,
+    /// through [`chat_width_px`] (vanilla's chat component's get width,
     /// vanilla's own chat-component rendering) to size the chat box.
     pub width_pct: f32,
     /// `options.chat.height.unfocused`, `0.0..=1.0`
@@ -53,7 +53,7 @@ pub struct ChatDisplayOptions {
     pub background_opacity: f32,
     /// `options.chat.color`. `false` strips every
     /// legacy `§` code before drawing a scrollback line
-    /// (`ComponentRenderUtils.stripColor`, vanilla's own component-render-utils helper) —
+    /// (the component render utils's strip color, vanilla's own component-render-utils helper) —
     /// it never touches the input line, which cannot carry codes
     /// ([`crate::chat::ChatInput::push_char`] filters `§` on the way in).
     pub colors: bool,
@@ -74,7 +74,7 @@ impl Default for ChatDisplayOptions {
     }
 }
 
-/// Vanilla's `ChatComponent.getWidth`: maps the
+/// Vanilla's chat component's get width: maps the
 /// `0.0..=1.0` `chatWidth` option onto `40.0..=320.0` **screen** pixels — the
 /// same logical-canvas unit [`crate::menu::render::logical_canvas`] returns
 /// (see [`HudGeometry::build_inner`]'s own doc on why that canvas *is*
@@ -85,7 +85,7 @@ pub fn chat_width_px(pct: f32) -> f32 {
     (pct * 280.0 + 40.0).floor()
 }
 
-/// As [`chat_width_px`], vanilla's `ChatComponent.getHeight`
+/// As [`chat_width_px`], vanilla's chat component's get height
 ///: maps `0.0..=1.0` onto `20.0..=180.0` screen
 /// pixels.
 #[must_use]
@@ -119,7 +119,7 @@ pub fn chat_input_top(canvas_h: f32, pose_scale: f32) -> f32 {
     canvas_h - HUD_MARGIN - font::GLYPH_H as f32 * pose_scale
 }
 
-/// The scrollback's own anchor — vanilla's `ChatComponent.extractRenderState`
+/// The scrollback's own anchor — vanilla's chat component's extract render state
 ///: `final int chatBottom = Mth.floor((screenHeight -
 /// 40) / scale);`, computed in the pose's *local* (unscaled-by-chat-scale)
 /// coordinates and then carried back to screen/canvas pixels by the very
@@ -131,7 +131,7 @@ pub fn chat_input_top(canvas_h: f32, pose_scale: f32) -> f32 {
 ///
 /// **Independent of the input box.** `extractRenderState` computes this one
 /// expression before it ever branches on `displayMode.foreground`, and the
-/// `EditBox` (`this.height - 12`, `ChatScreen.init`) is a wholly separate
+/// `EditBox` (`this.height - 12`, the chat screen's init) is a wholly separate
 /// literal in a different class — vanilla never derives one from the other.
 /// So this takes `canvas_h` and the chat scale only, not [`chat_input_top`]:
 /// coupling the two (as this HUD used to, computing `chat_bottom` from
@@ -167,7 +167,7 @@ pub fn chat_line_h(opts: ChatDisplayOptions, pose_scale: f32) -> f32 {
 }
 
 /// How many scrollback rows fit the configured chat box height — vanilla's
-/// `ChatComponent.getLinesPerPage` (`height / lineHeight`, vanilla's own chat-component rendering),
+/// The chat component's get lines per page (`height / lineHeight`, vanilla's own chat-component rendering),
 /// at this crate's entry-granularity approximation of a "row" (see
 /// [`crate::chat::ChatScroll`]'s own doc). Shared by the draw and by
 /// [`crate::chat::ChatScroll::scroll`]'s callers so a resize cannot leave the
@@ -184,7 +184,7 @@ pub fn chat_lines_per_page(opts: ChatDisplayOptions, pose_scale: f32, chat_open:
     (box_h / line_h).floor().max(1.0) as usize
 }
 
-/// Vanilla's `CommandSuggestions.LINE_HEIGHT` is `12`, decomposed: the 9px font
+/// Vanilla's command suggestions's line height is `12`, decomposed: the 9px font
 /// draws at `rect.getY() + 2 + 12 * i`, so the row is 2px of lead, the glyph,
 /// and 1px of trail. Ours keeps the padding and substitutes this HUD's own glyph
 /// height, rather than restating `12` against a 7px font.
@@ -193,15 +193,15 @@ pub(super) const SUGGESTION_ROW_PAD_TOP: f32 = 2.0;
 pub(super) const SUGGESTION_ROW_PAD_BOTTOM: f32 = 1.0;
 /// The gap between the popup's bottom edge and the input line —
 /// `SuggestionsList`'s `y - 3 - rows * 12` when `anchorToBottom` is set, which
-/// `ChatScreen.init` does.
+/// The chat screen's init does.
 pub(super) const SUGGESTION_LIST_GAP: f32 = 3.0;
 /// The 1px left inset the row text draws at (`rect.getX() + 1`), which is also
 /// why the rect is `maxWidth + 1` wide and starts one pixel left of the anchor
-/// (`listX = x - 1` for an unbordered `EditBox`, and `ChatScreen` sets
-/// `setBordered(false)`).
+/// (`listX = x - 1` for an unbordered `EditBox`, and the chat screen sets
+/// set bordered).
 pub(super) const SUGGESTION_TEXT_INSET: f32 = 1.0;
 
-/// `CommandSuggestions.fillColor` as `ChatScreen.init` passes it:
+/// The command suggestions's fill color as the chat screen's init passes it:
 /// `-805306368` == `0xD0000000`.
 pub(super) const SUGGESTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 208.0 / 255.0];
 /// The highlighted row's text colour — `-256` == `0xFFFFFF00`.
@@ -211,7 +211,7 @@ pub(super) const SUGGESTION_TEXT_UNSELECTED: [f32; 4] = [170.0 / 255.0, 170.0 / 
 /// `EditBox.extractRenderState`'s ghost-suffix colour — `-8355712` ==
 /// `0xFF808080`, drawn at `cursorX - 1`.
 pub(super) const SUGGESTION_GHOST: [f32; 4] = [0.5019608, 0.5019608, 0.5019608, 1.0];
-/// `GuiGraphicsExtractor.textHighlight`'s opaque blue selection pass. Vanilla
+/// The gui graphics extractor's text highlight's opaque blue selection pass. Vanilla
 /// also inverts its glyphs through a dedicated GUI pipeline; the colour stream
 /// has no equivalent pipeline, so this pass remains behind the white glyphs.
 pub(super) const CHAT_SELECTION: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
@@ -255,7 +255,7 @@ pub struct ChatScrollbar {
 pub struct SuggestionPopup<'a> {
     /// The input line the candidates replace a tail of — needed because the
     /// popup's x anchor is the pixel `line[..start]` ends at, vanilla's
-    /// `input.getScreenX(suggestions.getRange().getStart())`.
+    /// `input.get_screen_x(suggestions.get_range().get_start())`.
     pub line: &'a str,
     /// Byte offset into [`Self::line`] the candidate text replaces from.
     pub start: usize,
@@ -350,7 +350,7 @@ impl SuggestionLayout {
     }
 }
 
-/// Lay the popup out — `CommandSuggestions.showSuggestions` plus
+/// Lay the popup out — the command suggestions's show suggestions plus
 /// `SuggestionsList`'s constructor, against this HUD's own chat geometry.
 ///
 /// `text_width` measures at the frame's chat pose scale, i.e. it is exactly what
@@ -376,7 +376,7 @@ pub fn suggestion_layout(
         .fold(0.0_f32, f32::max);
     let row_h = (SUGGESTION_ROW_PAD_TOP + font::GLYPH_H as f32 + SUGGESTION_ROW_PAD_BOTTOM)
         * pose_scale;
-    // `input.getScreenX(range.getStart())` — the pixel the replaced span starts
+    // `input.get_screen_x(range.get_start())` — the pixel the replaced span starts
     // at, measured through the *same* metrics the line was drawn with. The
     // `min(start, len)` is defensive against a server-supplied `start`; the
     // char-boundary case cannot reach here because `ChatCompletion::show`
@@ -388,7 +388,7 @@ pub fn suggestion_layout(
     // came to hang two pixels right of the token it was completing.
     let anchor =
         CHAT_TEXT_INSET * pose_scale + text_width(popup.line.get(..head_end).unwrap_or(""));
-    // Vanilla clamps to `0 ..= getScreenX(0) + innerWidth - maxWidth`, and for
+    // Vanilla clamps to `0 ..= get_screen_x(0) + innerWidth - maxWidth`, and for
     // the chat box that collapses to `screenWidth - maxWidth`: the input is at
     // x=4 with `innerWidth == width - 4`. So this is "do not run off the right
     // edge", not a chat-box-width clamp — the popup is a `Screen` widget and is

@@ -176,8 +176,8 @@ pub fn dragon_head_model() -> EntityModelDef {
 ///   (-2, -4, -5)   4x4x1  texOffs(31, 1)     the snout plate
 ///   ( 2, -2, -5)   1x2x1  texOffs( 2, 4)     left tusk
 ///   (-3, -2, -5)   1x2x1  texOffs( 2, 0)     right tusk
-///   left_ear   offsetAndRotation( 4.5, -6, 0, 0, 0, -PI/6)  ( 0, 0, -2) 1x5x4 texOffs(51, 6)
-///   right_ear  offsetAndRotation(-4.5, -6, 0, 0, 0,  PI/6)  (-1, 0, -2) 1x5x4 texOffs(39, 6)
+///   left_ear   offset and rotation  ( 0, 0, -2) 1x5x4 texOffs(51, 6)
+///   right_ear  offset and rotation  (-1, 0, -2) 1x5x4 texOffs(39, 6)
 /// ```
 ///
 /// **Ten texels wide, not eight** — a piglin head is not a cube, so nothing
@@ -185,7 +185,7 @@ pub fn dragon_head_model() -> EntityModelDef {
 /// piglin sheet.
 ///
 /// The two ears carry an authored `±PI/6` rest rotation that the renderer then
-/// **overrides**: `PiglinHeadModel.setupAnim` assigns `zRot` unconditionally,
+/// **overrides**: the piglin head's animation assigns the Z rotation unconditionally,
 /// so a placed piglin head never shows `±PI/6` — it shows
 /// `lodestone_render::block_entity::piglin_head_ear_z_rots`'s value. The
 /// authored pose is kept faithful here anyway, because it is what the jar
@@ -244,7 +244,7 @@ pub fn piglin_head_model() -> EntityModelDef {
     }
 }
 
-/// `SkullModel.createHumanoidHeadLayer`'s `new CubeDeformation(0.25F)` on the
+/// The humanoid head layer's `0.25` grow on the
 /// `"hat"` overlay, in model texels.
 ///
 /// Named because it is load-bearing twice over: it is what separates the two

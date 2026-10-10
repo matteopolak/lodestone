@@ -116,7 +116,7 @@ pub const ARMOUR_SHEET_WIDTH: u32 = 64;
 /// Armour sheet height — see [`ARMOUR_SHEET_WIDTH`].
 pub const ARMOUR_SHEET_HEIGHT: u32 = 32;
 
-/// `Dyeable.colorWhenUndyed` for leather, as gamma-space sRGB bytes.
+/// Dyeable's color when undyed for leather, as gamma-space sRGB bytes.
 ///
 /// `equipment/leather.json` declares `-6265536` = `0xFF_A0_65_40`;
 /// `ARGB::opaque` forces the alpha, leaving `(160, 101, 64)`.
@@ -143,7 +143,7 @@ pub enum ArmourSlot {
 }
 
 impl ArmourSlot {
-    /// All four slots, in vanilla's own humanoid-armor-layer submit step's own draw order
+    /// All four slots, in vanilla's humanoid-armor-layer submit step's draw order
     /// (chest, legs, feet, head).
     ///
     /// The order matters for coplanar layers: it is the order vanilla submits
@@ -205,9 +205,8 @@ impl ArmourSlot {
     }
 }
 
-/// An `EquipmentClientInfo.LayerType` — the sub-directory an equipment texture
-/// lives in and the key its layer list is stored under
-/// (`EquipmentClientInfo.LayerType`).
+/// An equipment layer type — the sub-directory an equipment texture
+/// lives in and the key its layer list is stored under.
 ///
 /// The three humanoid-armour types are modelled: the adult pair and
 /// `humanoid_baby`, which every slot of a baby wearer draws from (with its own
@@ -235,19 +234,19 @@ impl ArmourLayerType {
     }
 }
 
-/// One `EquipmentClientInfo.Layer`: a texture name plus, if the layer is
+/// One equipment layer: a texture name plus, if the layer is
 /// dyeable, the colour to use when the stack carries no dye.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArmourLayer {
     /// The layer's texture name within its layer-type directory (the `texture`
     /// field of `equipment/<asset>.json`, namespace stripped).
     pub texture: &'static str,
-    /// `Dyeable.colorWhenUndyed` as gamma-space sRGB bytes, or `None` for a
+    /// Dyeable's color when undyed as gamma-space sRGB bytes, or `None` for a
     /// layer with no `dyeable` block at all.
     ///
-    /// `EquipmentLayerRenderer.getColorForLayer` returns `-1` (white, i.e. no
-    /// tint) for a non-dyeable layer and `dyeColor != 0 ? dyeColor :
-    /// colorWhenUndyed` for a dyeable one. A stack's own
+    /// The equipment layer renderer returns `-1` (white, i.e. no
+    /// tint) for a non-dyeable layer and the stack's dye colour when set, else the
+    /// undyed colour for a dyeable one. A stack's own
     /// `minecraft:dyed_color` overrides this, and that component *is* decoded
     /// through to the renderer, so this is the fallback for an undyed piece
     /// rather than the only colour leather can draw with.
@@ -468,7 +467,7 @@ pub fn armour_item(item_path: &str) -> Option<(ArmourSlot, &'static ArmourAsset)
 }
 
 /// The in-jar texture path for one layer of one layer type — vanilla's
-/// `EquipmentClientInfo.getTextureLocation`, with the namespace fixed to
+/// the equipment layer lookup, with the namespace fixed to
 /// `minecraft` because every layer in [`ARMOUR_ASSETS`] is unnamespaced.
 #[must_use]
 pub fn armour_texture_path(layer: &ArmourLayer, layer_type: ArmourLayerType) -> String {
@@ -480,7 +479,7 @@ pub fn armour_texture_path(layer: &ArmourLayer, layer_type: ArmourLayerType) -> 
 }
 
 /// Clear the cubes of every child not named in `keep`, recursing into the ones
-/// that were cleared — vanilla's `PartDefinition.retainPartsAndChildren`.
+/// that were cleared — vanilla's retain-parts-and-children.
 ///
 /// A retained part keeps **its whole subtree**, which is the difference from
 /// [`retain_exact`] and the reason a helmet carries `hat`.
@@ -495,8 +494,8 @@ fn retain_with_children(part: &mut PartDef, keep: &[&str]) {
 
 /// Clear the cubes of every child not named in `keep`, and clear the entire
 /// subtree of the ones that *are* — vanilla's
-/// `PartDefinition.retainExactParts`, where a
-/// retained part is `clearRecursively()`d so only its own cubes survive.
+/// retain-exact-parts, where a
+/// retained part has its descendants cleared so only its own cubes survive.
 fn retain_exact(part: &mut PartDef, keep: &[&str]) {
     for (name, child) in &mut part.children {
         if keep.contains(&name.as_str()) {
@@ -509,7 +508,7 @@ fn retain_exact(part: &mut PartDef, keep: &[&str]) {
 }
 
 /// Empty every descendant's cube list, keeping this part's own — vanilla's
-/// `PartDefinition.clearRecursively`.
+/// clear-recursively.
 fn clear_subtree(part: &mut PartDef) {
     for (_, child) in &mut part.children {
         child.cubes.clear();

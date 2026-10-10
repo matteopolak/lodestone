@@ -39,7 +39,7 @@ fn empty_world() -> ChunkWorld {
 /// raw impact damage directly.
 ///
 /// Deliberately not a zombie, which is the obvious choice and the wrong one:
-/// `Zombie.createAttributes` adds `Attributes.ARMOR, 2.0`, so a zombie reduces
+/// Zombie's create attributes adds `Attributes.ARMOR, 2.0`, so a zombie reduces
 /// every hit it takes. That is real behaviour rather than a nuisance — it is what
 /// [`a_zombies_own_species_armour_already_reduces_an_arrow`] gates — but it means
 /// a zombie cannot be used to read raw damage off a health delta. Measuring 5.904
@@ -55,10 +55,10 @@ fn spawn_cow(sim: &mut MobSim<'_>, pos: Vec3) -> i32 {
 /// deals exactly **6.0**, and the cow is left on 4.0 of 10.0.
 ///
 /// The number is the jar's, computed outside this workspace:
-/// `AbstractArrow.onHitEntity` is
+/// The abstract arrow's on hit entity is
 /// `Mth.ceil(Mth.clamp(deltaMovement.length() * baseDamage, 0, Integer.MAX_VALUE))`,
 /// `baseDamage` initialises to `2.0` (`ARROW_BASE_DAMAGE`), and the arrow is
-/// launched at `3.0` blocks/tick — which is `BowItem.releaseUsing`'s own
+/// launched at `3.0` blocks/tick — which is the bow item's release using's own
 /// `pow * 3.0` at full charge. So `ceil(3.0 * 2.0) == 6`.
 ///
 /// Three wrong hypotheses are each excluded by magnitude rather than direction:
@@ -210,8 +210,8 @@ fn a_wall_stops_the_arrow_before_it_reaches_the_mob() {
 /// shooter's bounding box.
 ///
 /// Both halves of vanilla's guard are exercised: the owner exclusion
-/// (`Projectile.canHitEntity`) and the zero hitbox margin for the first two ticks
-/// (`ProjectileUtil.computeMargin`). The control is a *second* mob standing in the
+/// (Projectile's can hit entity) and the zero hitbox margin for the first two ticks
+/// (the projectile util's compute margin). The control is a *second* mob standing in the
 /// identical spot with no ownership relation, which must be hit — so this is not
 /// measuring "the impact pass ignores mobs at the origin".
 #[test]
@@ -247,7 +247,7 @@ fn a_projectile_never_hits_its_own_shooter() {
 /// `bypasses_armor` tag, unlike `minecraft:generic`.
 ///
 /// A raw 6.0 arrow against armour 20 / toughness 8 (a full diamond set): the
-/// jar's `CombatRules.getDamageAfterAbsorb` gives `toughness = 2 + 8/4 = 4`,
+/// jar's combat rules's get damage after absorb gives `toughness = 2 + 8/4 = 4`,
 /// `realArmor = clamp(20 - 6/4, 4, 20) = 18.5`, `frac = 18.5/25 = 0.74`, so
 /// `6 * 0.26 = 1.56`. Recomputed here for a raw of 6.0 rather than reused from the
 /// live-verified 10.0 case — those are different inputs and quoting `3.0` here
@@ -285,7 +285,7 @@ fn armour_reduces_an_arrow_hit_by_the_real_combat_rules_amount() {
 /// involved — the feed `combat_defaults` already had and which the impact pass now
 /// exercises for the first time.
 ///
-/// `Zombie.createAttributes` adds `Attributes.ARMOR, 2.0`, toughness `0.0`. Against
+/// Zombie's create attributes adds `Attributes.ARMOR, 2.0`, toughness `0.0`. Against
 /// a raw 6.0: `toughness = 2 + 0/4 = 2`,
 /// `realArmor = clamp(2 - 6/2, 2 * 0.2, 20) = clamp(-1, 0.4, 20) = 0.4`,
 /// `frac = 0.4 / 25 = 0.016`, so `6 * 0.984 = 5.904`.
@@ -370,9 +370,9 @@ fn a_lethal_arrow_removes_the_mob_and_rolls_its_loot() {
 ///
 /// The expected value is a **bracket derived from outside constants**, not a
 /// re-run of this workspace's integrator: the goal launches at
-/// `ARROW_POWER = 1.6` blocks/tick (`AbstractSkeleton`'s own figure), and air drag
+/// `ARROW_POWER = 1.6` blocks/tick (the abstract skeleton's own figure), and air drag
 /// is `0.99` per tick with gravity pulling the vertical component, so the speed at
-/// impact is at most the launch speed. `AbstractArrow.onHitEntity`'s
+/// impact is at most the launch speed. The abstract arrow's on hit entity's
 /// `ceil(speed * 2.0)` is therefore in `1 ..= ceil(1.6 * 2.0) = 4`. Any damage in
 /// that window is consistent with the jar; zero is not, and more than 4 would mean
 /// the launch power or the base damage is wrong.
@@ -381,7 +381,7 @@ fn a_skeleton_with_a_target_shoots_an_arrow_that_damages_it() {
     // A real floor under both mobs. This is the one test in this file that
     // ticks the sim 40 times rather than once, and `NavigatingMob::advance`
     // now applies gravity unconditionally to idle mobs (matching vanilla
-    // `LivingEntity.travel`) -- an `empty_world()` void would let the cow
+    // The living entity's travel) -- an `empty_world()` void would let the cow
     // and skeleton fall out from under each other over those 40 ticks,
     // opening a vertical gap the arrow's arc cannot bridge and turning a
     // "does the arrow hit" gate into an accidental "did the mobs desync
@@ -441,7 +441,7 @@ fn a_skeleton_with_a_target_shoots_an_arrow_that_damages_it() {
 }
 
 /// A snowball is a real hit that consumes the projectile and deals nothing —
-/// `Snowball.onHitEntity`'s `entity instanceof Blaze ? 3 : 0`. The distinction
+/// Snowball's on hit entity's `entity instanceof Blaze ? 3 : 0`. The distinction
 /// this pins is "harmless hit" versus "no hit", which a damage-only assertion
 /// cannot see.
 #[test]

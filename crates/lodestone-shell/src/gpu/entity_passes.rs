@@ -53,7 +53,7 @@ use super::{
 /// A special rig normally owns a static sheet, but a player-head stack's
 /// `minecraft:profile` replaces only that sheet. The producer emits this
 /// channel only for the underlying `minecraft:player_head` item, matching
-/// 26.2's `PlayerHeadSpecialRenderer.extractArgument`; its `item_model`
+/// 26.2's player head special renderer's extract argument; its `item_model`
 /// component may retarget the definition but does not change the profile's
 /// owner. The URL remains slot-scoped because an entity can hold two distinct
 /// custom heads.
@@ -84,7 +84,7 @@ fn dropped_special_texture(
         .map_or(fallback, |url| lodestone_render::BlockEntityTexture::PlayerSkin(Arc::clone(url)))
 }
 
-/// Vanilla's `CustomHeadLayer` scale for a raw humanoid skull.
+/// Vanilla's custom head layer scale for a raw humanoid skull.
 const WORN_PLAYER_HEAD_SCALE: f32 = 1.1875;
 
 /// Choose the first installed custom sheet for an elytra wearer.
@@ -126,7 +126,7 @@ fn worn_player_head_item(draw: &EntityDraw) -> Option<&lodestone_assets::Resourc
     })
 }
 
-/// Apply `CustomHeadLayer`'s raw-skull scale after the animated head pose.
+/// Apply custom head layer's raw-skull scale after the animated head pose.
 fn worn_player_head_placement(head_transform: glam::Mat4) -> glam::Mat4 {
     head_transform * glam::Mat4::from_scale(glam::Vec3::splat(WORN_PLAYER_HEAD_SCALE))
 }
@@ -261,13 +261,13 @@ fn is_player_draw(draw: &EntityDraw) -> bool {
 /// tail after leaving water, so that explicit condition is the only no-op
 /// guarantee.
 ///
-/// # Player only, not every `LivingEntity`
+/// # Player only, not every living entity
 ///
-/// Vanilla's base `LivingEntityRenderer.setupRotations` has **no** swim
-/// branch at all; only `AvatarRenderer` (the player) and `DrownedRenderer`
+/// Vanilla's base living entity renderer's setup rotations has **no** swim
+/// branch at all; only the avatar renderer (the player) and the drowned renderer
 /// override it, and they use two different formulas — a plain rotation about
 /// the origin for the player, a `rotateAround` the vertical centre for a
-/// drowned zombie. Porting one formula to every `LivingEntity` would be
+/// drowned zombie. Porting one formula to every living entity would be
 /// wrong for the entities that report `Pose.SWIMMING` and are not a player.
 /// `EntityDraw::swim_amount` is populated for every entity kind (see
 /// `crate::entities::SwimRamp`), so the type gate lives at the call site in
@@ -279,9 +279,9 @@ fn is_player_draw(draw: &EntityDraw) -> bool {
 /// `A * flip_scale * lift` for `A = T(feet) · Ry(180 − yaw) · Rz(fall_over)`
 /// — `dying_entity_model_matrix`'s own documented decomposition, bit for
 /// bit. Vanilla inserts the swim rotation exactly between the yaw/fall-over
-/// term and the Y-down flip (`AvatarRenderer.setupRotations` calls
-/// `super.setupRotations` — which applies the `Ry`/`Rz` terms — and *then*
-/// `mulPose(Axis.XP.rotationDegrees(xAngle))`, before `render`'s
+/// term and the Y-down flip (the avatar renderer's setup rotations calls
+/// super's setup rotations — which applies the `Ry`/`Rz` terms — and *then*
+/// mul pose, before `render`'s
 /// `poseStack.scale(-1, -1, 1)`), so left-multiplying every already-baked
 /// matrix by `A · Rx(xAngle) · A⁻¹` reproduces `A · Rx(xAngle) · flip_scale
 /// · lift` exactly, without decomposing the baked matrices back into their
@@ -292,7 +292,7 @@ fn is_player_draw(draw: &EntityDraw) -> bool {
 /// # Two vanilla pieces not ported, both because the input is not available
 /// at this call site
 ///
-/// * `AvatarRenderer.setupRotations`'s `targetXRot` is `isInWater ? -90 −
+/// * The avatar renderer's setup rotations's `targetXRot` is `isInWater ? -90 −
 ///   xRot : -90`; this always takes the water branch. `PlayerState::swimming`
 ///   (the producer behind the ramp) requires `FluidState::in_water`/
 ///   `under_water` to ever become true, so for the overwhelming majority of
@@ -318,7 +318,7 @@ fn apply_swim_rotation(
     let a = glam::Mat4::from_translation(feet)
         * glam::Mat4::from_rotation_y((180.0 - yaw_deg).to_radians())
         * glam::Mat4::from_rotation_z(fall_over_deg.to_radians());
-    // `AvatarRenderer.setupRotations`: `Mth.lerp(swimAmount, 0.0F, -90.0F - xRot)`.
+    // The avatar renderer's setup rotations: `Mth.lerp(swimAmount, 0.0F, -90.0F - xRot)`.
     let x_angle_deg = swim_amount * (-90.0 - pitch_deg);
     let rx = glam::Mat4::from_rotation_x(x_angle_deg.to_radians());
     let extra = a * rx * a.inverse();
@@ -354,7 +354,7 @@ fn apply_swim_rotation(
     instance.aabb_max = feet + glam::Vec3::splat(radius);
 }
 
-/// `AbstractBoatRenderer.submit`'s hull roll — the rocking a punched boat does
+/// The abstract boat renderer's submit's hull roll — the rocking a punched boat does
 /// — applied on top of whatever
 /// [`lodestone_render::non_living_vehicle_matrix`] already placed. A no-op
 /// while the hurt clock is not running, which is every boat in the world almost
@@ -373,9 +373,9 @@ fn apply_swim_rotation(
 /// `non_living_vehicle_matrix` documents its own product as
 /// `T(feet) · T(0, bob, 0) · Ry(180 − yaw) · S(−s, −s, s) · Ry(extra)`, and
 /// vanilla inserts the roll **between** the yaw term and the flip
-/// (`AbstractBoatRenderer.submit` does `translate`, `mulPose(YP, 180 − yRot)`,
-/// then the hurt `mulPose(XP, …)`, and only then `scale(-1, -1, 1)` and the
-/// trailing `mulPose(YP, 90)`). So with `A = T(feet) · T(0, bob, 0) ·
+/// (the abstract boat renderer's submit does `translate`, mul pose,
+/// then the hurt mul pose, and only then `scale(-1, -1, 1)` and the
+/// trailing mul pose). So with `A = T(feet) · T(0, bob, 0) ·
 /// Ry(180 − yaw)`, left-multiplying every baked matrix by `A · Rx(roll) · A⁻¹`
 /// reproduces `A · Rx(roll) · S · Ry(extra)` exactly, without decomposing the
 /// baked matrices back into their factors. `A` is rebuilt here from the same
@@ -389,7 +389,7 @@ fn apply_swim_rotation(
 /// # What is not ported
 ///
 /// The bubble-column tilt (`state.bubbleAngle`) that vanilla applies right after
-/// this one. `AbstractBoat.DATA_ID_BUBBLE_TIME` is not streamed by this
+/// this one. The abstract boat's data id bubble time is not streamed by this
 /// workspace's server and not decoded by its client, so there is no value to
 /// apply — an absence, not an approximation.
 fn apply_boat_rock(
@@ -441,9 +441,9 @@ fn apply_boat_rock(
 /// `ArmorStand.DATA_CLIENT_FLAGS` byte — remaining half, once
 /// the byte itself reaches `EntityDraw::armor_stand`.
 ///
-/// Vanilla toggles `ModelPart.visible` directly
-/// (`ArmorStandModel.setupAnim`: `leftArm.visible = state.showArms`,
-/// `basePlate.visible = state.showBasePlate`). This renderer has no
+/// Vanilla toggles model part's visible directly
+/// (the armor stand model's setup anim: `leftArm.visible = state.show_arms`,
+/// `basePlate.visible = state.show_base_plate`). This renderer has no
 /// per-part visibility flag — [`lodestone_render::EntityInstance`] carries
 /// one *matrix* per part, not a flag — so "invisible" is expressed as "this
 /// part's own matrix collapses every one of its vertices to a single point",
@@ -533,9 +533,9 @@ fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
 ///
 /// # Where these come from
 ///
-/// `EntityType.Builder.eyeHeight` calls in `EntityTypes`' registration block —
+/// Builder's eye height calls in the entity types' registration block —
 /// 102 of the 158 registered types. The other 56 name none and take
-/// `EntityDimensions.defaultEyeHeight`, which is `height * 0.85F`; that is the
+/// EntityDimensions's default eye height, which is `height * 0.85F`; that is the
 /// fallback [`eye_probe_offset`] computes rather than a row here, so a type
 /// only appears below when vanilla actually disagrees with the default.
 ///
@@ -678,7 +678,7 @@ const EYE_HEIGHTS: &[(&str, f32)] = &[
 /// wrong one". Both halves of that were wrong, which is why the owner saw
 /// shadows that were simply too big:
 ///
-/// * `EntityRenderer.shadowRadius`'s own field default is **`0.0F`** — no
+/// * EntityRenderer's shadow radius's own field default is **`0.0F`** — no
 ///   shadow at all — and **35 of the 157 registered types take it**: every
 ///   arrow and thrown item, item frames, paintings, armour stands, shulkers,
 ///   `interaction`/`marker`, the whole projectile family. A flat `0.5` drew a
@@ -862,7 +862,7 @@ const SHADOW_RADII: &[(&str, f32)] = &[
     ("zombified_piglin", 0.5),
 ];
 
-/// The handful of types overriding `EntityRenderer.shadowStrength`'s `1.0F`
+/// The handful of types overriding EntityRenderer's shadow strength's `1.0F`
 /// default — generated alongside [`SHADOW_RADII`] by the same script, and
 /// exactly two entries in 26.2. Read it with [`shadow_strength`]; anything
 /// absent takes `1.0`.
@@ -903,8 +903,8 @@ const SHADOW_RADIUS_FALLBACK: f32 = 0.5;
 
 
 /// Whether block-state `id`'s collision shape fills the entire cell —
-/// vanilla's `Block.isShapeFullBlock`/`BlockState.isCollisionShapeFullBlock`,
-/// the gate `EntityRenderer.extractShadowPiece` puts on the block a shadow
+/// vanilla's Block's is shape full block/BlockState's is collision shape full block,
+/// the gate EntityRenderer's extract shadow piece puts on the block a shadow
 /// piece sits on.
 ///
 /// Approximated as "at least one of the state's collision boxes spans the
@@ -982,7 +982,7 @@ fn push_shadow_quad(
 
 /// How far above its feet this entity type's **light probe** sits, in blocks.
 ///
-/// Vanilla's `Entity.getLightProbePosition` is `getEyePosition`, so the eye
+/// Vanilla's Entity's get light probe position is `getEyePosition`, so the eye
 /// height *is* the probe offset. `age_scale` is [`EntityDraw::scale`] — vanilla
 /// scales the whole `EntityDimensions`, eye height included
 /// (`EntityDimensions.scale`), so a baby's probe is half an adult's.
@@ -994,7 +994,7 @@ fn eye_probe_offset(type_path: &str, age_scale: f32) -> f32 {
     if let Ok(i) = EYE_HEIGHTS.binary_search_by(|(name, _)| (*name).cmp(type_path)) {
         return EYE_HEIGHTS[i].1 * age_scale;
     }
-    // `EntityDimensions.defaultEyeHeight`: `height * 0.85F`, off the same base
+    // EntityDimensions's default eye height: `height * 0.85F`, off the same base
     // dimensions table `flame_hitbox_width` reads. Same binary-search resolve
     // as that function, for the same reason.
     lodestone_data::entity_type::EntityType::from_name(type_path)
@@ -1005,7 +1005,7 @@ fn eye_probe_offset(type_path: &str, age_scale: f32) -> f32 {
 /// How far above its feet the **fishing line's** owner keeps its eye, in blocks.
 ///
 /// Vanilla's `getPlayerHandPos` builds its offset from
-/// `owner.getEyePosition(partialTicks)`, and `getEyePosition` reads the eye
+/// owner's get eye position, and `getEyePosition` reads the eye
 /// height of the entity's **current pose** — so a crouching caster's line leaves
 /// 0.35 blocks lower than a standing one's, on top of the separate `-0.1875`
 /// crouch term the offset itself carries.
@@ -1039,10 +1039,10 @@ fn fishing_owner_eye_offset(owner: &EntityDraw) -> f32 {
 ///   vanilla; it never was.
 /// * **Fire forces the block half to 15, and only the block half.**
 ///   Vanilla's own get-block-light-level entity renderer accessor is
-///   `entity.isOnFire() ? 15 : level.getBrightness(BLOCK, pos)`, while
+///   `entity.isOnFire() ? 15 : level.get_brightness(BLOCK, pos)`, while
 ///   `getSkyLightLevel` has no such branch — so a burning mob in a pitch-dark
 ///   cave lights itself without also acquiring a daytime sky, which is what
-///   forcing the whole byte would do. `LightCoordsUtil.withBlock` is the vanilla
+///   forcing the whole byte would do. The light coords util's with block is the vanilla
 ///   spelling; here the block half is the low nibble, so it is `| 0x0F`.
 ///
 /// `BlockPos.containing` floors, and so does the sampler on the other side of
@@ -1068,14 +1068,14 @@ pub(super) fn entity_light(source: &super::EntityLightSource, draw: &EntityDraw)
 /// The probe is the entity's own position and not an eye-height offset: an item
 /// frame's `EntityDimensions` eye height is `0.0` (see `EYE_HEIGHTS`), and the
 /// entity sits inside the air cell it hangs in rather than in the wall — that is
-/// what `ItemFrame.createBoundingBox`'s `-0.46875` leaves it 1/32 short of.
+/// what ItemFrame's create bounding box's `-0.46875` leaves it 1/32 short of.
 #[must_use]
 pub(super) fn item_frame_light(
     source: &super::EntityLightSource,
     draw: &EntityDraw,
     glow: bool,
 ) -> u8 {
-    /// `ItemFrameRenderer.GLOW_FRAME_BRIGHTNESS`.
+    /// The item frame renderer's glow frame brightness.
     const GLOW_FRAME_BRIGHTNESS: u8 = 5;
     let packed = source.sample(draw.feet);
     if glow {
@@ -1089,7 +1089,7 @@ pub(super) fn item_frame_light(
 /// frame's own [`item_frame_light`].
 ///
 /// A glow frame lights what it holds *fully*, not merely to its own floor:
-/// `getLightCoords(state.isGlowFrame, 15728880, state.lightCoords)` substitutes
+/// `getLightCoords(state.isGlowFrame, 15728880, state.light_coords)` substitutes
 /// `15728880` — sky 15, block 15 — for the sampled value in the item branch. So
 /// the body of a glow frame in a dark room is dim-but-visible and the item in it
 /// is at full brightness, which is two different numbers from one sample and the
@@ -1267,7 +1267,7 @@ impl RenderState {
         // `groups`: the same resolved instance, grouped by `(hurt, overlay sheet)`.
         let mut overlay_groups: Vec<(bool, bool, &'static str, [u8; 3], Vec<_>)> = Vec::new();
         for e in entities {
-            // `LivingEntityRenderer.submit`'s `isBodyVisible` gate on its own
+            // The living entity renderer's submit's `isBodyVisible` gate on its own
             // `submitModel` call: an invisible entity draws no body/rig at
             // all, full stop, for *this* pass. Armour (`prepare_armour`) and
             // held items (`merge_held_items`/`special_item_instances`) are
@@ -1317,8 +1317,8 @@ impl RenderState {
                 continue;
             };
             let mut instance = apply_named_orientation(e, instance);
-            // `AbstractBoatRenderer.submit`'s hull roll — and
-            // `AbstractMinecartRenderer.submit`'s, which is the identical
+            // The abstract boat renderer's submit's hull roll — and
+            // The abstract minecart renderer's submit's, which is the identical
             // formula about the identical axis at the identical point in the
             // pose stack. Gated on the *placement* rather than on the type
             // path, because that is what decides the matrix this conjugates
@@ -1330,8 +1330,8 @@ impl RenderState {
             {
                 apply_boat_rock(&mut instance, e.feet, e.yaw, vertical_offset, e.anim.boat_hurt);
             }
-            // `ArmorStandModel.setupAnim`'s `leftArm.visible = state.showArms`
-            // and `basePlate.visible = state.showBasePlate`. See
+            // The armor stand model's setup anim's `leftArm.visible = state.show_arms`
+            // and `basePlate.visible = state.show_base_plate`. See
             // `hide_armor_stand_parts`'s own doc for why a matrix, not a flag,
             // is how this renderer expresses "invisible part".
             if let Some(flags) = e.armor_stand
@@ -1372,8 +1372,8 @@ impl RenderState {
                 let layer = layer.with_light(entity_light(&self.entity_light, e));
                 push_overlay(&mut overlay_groups, (false, e.hurt, gear.sheet, gear.tint), layer);
             }
-            // `CreeperRenderer.getWhiteOverlayProgress` through
-            // `OverlayTexture`'s 16-column quantise. Suppressed while `hurt` is on
+            // The creeper renderer's get white overlay progress through
+            // The overlay texture's 16-column quantise. Suppressed while `hurt` is on
             // because vanilla's overlay texture puts red and white on **mutually
             // exclusive rows** (the red row ignores the white column entirely), so
             // red always wins — a creeper hurt mid-fuse flashes red, never pink.
@@ -1399,9 +1399,9 @@ impl RenderState {
             // the owner report "placing down a boat still shows water through
             // the bottom". `ends_with("_boat")` also matches `_chest_boat`
             // (`"oak_chest_boat".ends_with("_boat")` is `true`), which is
-            // exactly right: vanilla's `BoatRenderer` submits this mask for
+            // exactly right: vanilla's boat renderer submits this mask for
             // both. `_raft`/`_chest_raft` never match, matching
-            // `RaftRenderer`'s own empty `submitTypeAdditions` — see
+            // The raft renderer's own empty `submitTypeAdditions` — see
             // `lodestone_assets::entity_models::boat_water_patch_model`'s doc
             // for why rafts get none of this. The patch is accumulated in a
             // separate phase, never in `groups`: even pushing it after this
@@ -1705,7 +1705,7 @@ impl RenderState {
             let wearer_rig = instance.model;
             // The wearer's own light, eye-probed and fire-forced — armour is one
             // of the wearer's model layers in vanilla, drawn from the *same*
-            // `state.lightCoords` its body is, so the two can never disagree.
+            // state's light coords its body is, so the two can never disagree.
             let light = u32::from(entity_light(&self.entity_light, draw));
 
             // Walk the *slots* rather than the equipment list, so the draw order
@@ -1763,7 +1763,7 @@ impl RenderState {
                     }
                     let texture = ArmourTextureKey::Sheet(sheet);
                     // Vanilla's overlay is sampled by every layer of a
-                    // `LivingEntityRenderer`'s model, armour included — a hurt
+                    // The living entity renderer's model, armour included — a hurt
                     // mob whose breastplate stayed its own colour would read as
                     // a rendering fault, not as damage.
                     //
@@ -1899,7 +1899,7 @@ impl RenderState {
                 continue;
             }
             // The entity's **own** hitbox width, which is vanilla's
-            // `EntityRenderState.boundingBoxWidth` — its type's base width times
+            // The entity render state's bounding box width — its type's base width times
             // its age scale. `EntityDraw::scale` is exactly that age scale
             // (`0.5` for a `Baby`, `1.0` otherwise), and it scales the box
             // uniformly, so it does not disturb the mesh's layer count.
@@ -1982,7 +1982,7 @@ impl RenderState {
     /// `is_full_solid_ground` says its collision shape fills the whole cell.
     ///
     /// That is where this port departs from vanilla on purpose. Vanilla asks
-    /// for `belowState.getShape(..)`'s real `VoxelShape` and paints a piece
+    /// for `belowState.getShape(..)`'s real voxel shape and paints a piece
     /// shaped exactly like it — so a shadow on a slab is a half-height piece
     /// and a shadow at a stair's edge follows the step. This scan instead
     /// gates on "is the block below a full cube" and draws nothing at all for
@@ -2014,7 +2014,7 @@ impl RenderState {
 
         for draw in entities {
             // Vanilla's own gate — `minecraft.options.entityShadows().get() &&
-            // !state.isInvisible`; the option half is checked once, above.
+            // !state.is_invisible`; the option half is checked once, above.
             if draw.invisible {
                 continue;
             }
@@ -2053,11 +2053,11 @@ impl RenderState {
                         }
                         // Vanilla samples brightness at `pos` itself (the open
                         // cell above the ground), not at the ground below it —
-                        // `EntityRenderer.extractShadowPiece`'s own `pos`.
+                        // EntityRenderer's extract shadow piece's own `pos`.
                         let probe = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
                         let packed = self.entity_light.sample(probe);
                         let raw = ((packed >> 4) & 0x0F).max(packed & 0x0F);
-                        // `level.getMaxLocalRawBrightness(pos) > 3` — vanilla's own
+                        // `level.get_max_local_raw_brightness(pos) > 3` — vanilla's own
                         // floor before a piece is added at all.
                         if raw <= 3 {
                             continue;
@@ -2070,7 +2070,7 @@ impl RenderState {
                         }
                         let rel_x = x as f32 - feet.x;
                         let rel_z = z as f32 - feet.z;
-                        // `ShadowFeatureRenderer.prepare`'s own UV formula —
+                        // The shadow feature renderer's prepare's own UV formula —
                         // `-x / 2.0 / radius + 0.5`, and the `z` sibling.
                         let u0 = -rel_x / (2.0 * radius) + 0.5;
                         let u1 = -(rel_x + 1.0) / (2.0 * radius) + 0.5;
@@ -2101,7 +2101,7 @@ impl RenderState {
     }
 
     /// Resolve this frame's experience orbs into per-sprite-cell instance
-    /// buffers — `ExperienceOrbRenderer`, which is one camera-facing quad each.
+    /// buffers — the experience orb renderer, which is one camera-facing quad each.
     ///
     /// No pack, no sheet, nothing to draw, and no synthetic fallback — the same
     /// asymmetry `EntityRenderer::flame_texture`/`wool_texture` document.
@@ -2173,7 +2173,7 @@ impl RenderState {
             // `entity_light` is the shared eye-probe (and fire-force) every other
             // entity layer here uses; the `+7` boost is applied on top of its
             // result, which is exactly where vanilla's override sits — it wraps
-            // `super.getBlockLightLevel`, it does not replace the probe.
+            // super's get block light level, it does not replace the probe.
             lights.push(u32::from(lodestone_render::experience_orb_light(
                 entity_light(&self.entity_light, draw),
             )));
@@ -2314,7 +2314,7 @@ impl RenderState {
             .filter(|(_, (transforms, _))| !transforms.is_empty())
             .filter_map(|(sprite, (transforms, lights))| {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
-                // Both vanilla renderers pass `setColor(-1)`, i.e. plain white,
+                // Both vanilla renderers pass set color, i.e. plain white,
                 // so there is no per-instance tint to carry — an empty slice
                 // leaves every instance at `EntityInstanceRaw`'s untinted
                 // default.
@@ -2351,7 +2351,7 @@ impl RenderState {
     ///
     /// # Resolving the anchor, which is the whole of the interesting part
     ///
-    /// Vanilla forks on `getCameraType().isFirstPerson() && owner ==
+    /// Vanilla forks on `get camera type.isFirstPerson() && owner ==
     /// (vanilla's own client-instance-accessor's player)`: our own rod seen from our own eyes gets
     /// a near-plane projection, everything else gets an offset off the owner
     /// entity's body. This reproduces that fork **without** knowing our own
@@ -2493,7 +2493,7 @@ impl RenderState {
     /// * **Sheared sheep.** `draw.wool.sheared` is checked here, not filtered
     ///   upstream — [`EntityDraw::wool`]'s own doc explains why the data stays
     ///   honest about what the server reported. This is vanilla's own
-    ///   `if (!state.isSheared)` gate (`SheepWoolLayer.submit`), applied at
+    ///   `if (!state.is_sheared)` gate (the sheep wool layer's submit), applied at
     ///   exactly the point that draws the mesh.
     /// * **The pig/cow trap.** [`WoolMesh::attach`]'s `wearer_model` argument
     ///   is `instance.model` — the *resolved* model name — never
@@ -2612,11 +2612,11 @@ impl RenderState {
 
     /// Resolve this frame's **player capes** into per-URL instance buffers.
     ///
-    /// `CapeLayer.submit` (`26.2`), transcribed: `!invisible && showCape &&
-    /// skin.cape() != null && !hasLayer(chestEquipment, WINGS)`. The last
+    /// The cape layer's submit (`26.2`), transcribed: `!invisible && showCape &&
+    /// skin.cape() != null && !has_layer(chestEquipment, WINGS)`. The last
     /// clause — an elytra in the chest slot suppresses the cape — is
     /// approximated as "the chest slot's item path is literally `elytra`"
-    /// rather than the real `EquipmentClientInfo`/`EquipmentAssetManager`
+    /// rather than the real equipment client info/equipment asset manager
     /// lookup vanilla's `hasLayer` does (which resolves a `minecraft:elytra`
     /// asset id to a set of layer types and asks whether `WINGS` is one of
     /// them): every 26.2 elytra item *is* that asset with a `WINGS` layer, so
@@ -2728,7 +2728,7 @@ impl RenderState {
     /// instance buffers — the layer that replaces the cape
     /// [`Self::prepare_cape`] suppresses for an elytra wearer.
     ///
-    /// `WingsLayer.submit` (`26.2`), transcribed: draw when the chest item
+    /// The wings layer's submit (`26.2`), transcribed: draw when the chest item
     /// carries an `Equippable` with a non-empty `assetId`, then ask that asset
     /// for its `WINGS` layers — which for every vanilla item means the elytra
     /// and nothing else, since a chestplate's asset declares `HUMANOID` layers
@@ -2879,8 +2879,8 @@ impl RenderState {
     /// Resolve this frame's **paintings** into per-`(shape, face)` instance
     /// buffers.
     ///
-    /// `PaintingRenderer.submit` (26.2), which is unusually short: rotate by
-    /// `180 - direction.get2DDataValue() * 90` and emit a `width x height` grid
+    /// The painting renderer's submit (26.2), which is unusually short: rotate by
+    /// `180 - direction.get_2d_data_value() * 90` and emit a `width x height` grid
     /// of cells. Both halves are in
     /// [`lodestone_render::painting`]; this function is the batching and the
     /// culling.
@@ -2896,8 +2896,8 @@ impl RenderState {
     ///
     /// # The facing needs no field
     ///
-    /// `HangingEntity.setDirection` writes the direction into the entity's
-    /// ordinary yaw (`setYRot(direction.get2DDataValue() * 90)`), so
+    /// The hanging entity's set direction writes the direction into the entity's
+    /// ordinary yaw (set y rot), so
     /// `draw.yaw` already carries it and nothing had to be decoded out of the
     /// spawn packet's Object Data. The four legal yaws survive the wire's
     /// byte-angle quantisation exactly.
@@ -2952,7 +2952,7 @@ impl RenderState {
                 continue;
             };
             // The entity's wire position is the slab's **centre** (a painting is
-            // placed by `Painting.calculateBoundingBox`, not stood on the
+            // placed by Painting's calculate bounding box, not stood on the
             // ground), so the cull box is centred on it too. Half the diagonal
             // in every axis covers the slab whichever of the four ways it
             // faces, which is cheaper and safer than rotating a tight box.
@@ -3127,8 +3127,8 @@ impl RenderState {
                 out.push(instance);
             }
             for (slot, id) in &draw.equipment {
-                // `Mob.getMainArm()` is `RIGHT` for every mob **except a
-                // left-handed one** (`draw.main_arm_left`, `Mob.isLeftHanded()`):
+                // Mob's get main arm is `RIGHT` for every mob **except a
+                // left-handed one** (`draw.main_arm_left`, Mob's is left handed):
                 // main hand is the right arm and off hand the left, unless that
                 // flag is set, in which case both sides flip — the same mapping
                 // `merge_held_items` applies, and the only two slots that hold an
@@ -3169,8 +3169,8 @@ impl RenderState {
         light: u8,
     ) -> Option<lodestone_render::BlockEntityInstance> {
         let item = draw.item.as_ref()?;
-        // `DisplaySlot::Ground` — `ItemEntityRenderer.extractRenderState` resolves a
-        // drop in `ItemDisplayContext.GROUND`, and the transform below is read from
+        // `DisplaySlot::Ground` — the item entity renderer's extract render state resolves a
+        // drop in the item display context's ground, and the transform below is read from
         // the same slot so the variant and the pose cannot disagree.
         let ctx = ItemStateContext::new(DisplaySlot::Ground);
         let form = model.items.get(item)?.resolve_special(&ctx)?;
@@ -3203,10 +3203,10 @@ impl RenderState {
     }
 
     /// Player-head equipment in the `Head` slot, following 26.2's
-    /// `CustomHeadLayer` rather than the hand item's display transform.
+    /// The custom head layer rather than the hand item's display transform.
     ///
     /// The vanilla layer routes a worn skull through `wornHeadType`, poses it
-    /// from `HeadedModel.translateToHead`, then scales the raw skull model by
+    /// from the headed model's translate to head, then scales the raw skull model by
     /// `1.1875`. A player head's profile selects only the render sheet; it does
     /// not alter the skull model or placement. Other head-slot items are left to
     /// their existing renderers outside this narrowly scoped player-head path.
@@ -3251,8 +3251,8 @@ impl RenderState {
     /// the arm and that shift must not move the arm's visible mesh.
     ///
     /// A rig with no arm (a creeper handed a chest by a plugin) resolves nothing and
-    /// draws nothing, which is vanilla's behaviour too: `ItemInHandLayer` is only
-    /// attached to renderers whose model implements `ArmedModel`.
+    /// draws nothing, which is vanilla's behaviour too: the item in hand layer is only
+    /// attached to renderers whose model implements armed model.
     fn held_special_item(
         &self,
         model: &ModelRenderer,
@@ -3302,8 +3302,8 @@ impl RenderState {
 
     /// A `minecraft:special` item hanging in an item frame.
     ///
-    /// `DisplaySlot::Fixed`, which is `ItemFrameRenderer.extractRenderState`'s
-    /// `ItemDisplayContext.FIXED` — the same context the campfire path uses and the
+    /// `DisplaySlot::Fixed`, which is the item frame renderer's extract render state's
+    /// The item display context's fixed — the same context the campfire path uses and the
     /// single easiest thing to get wrong here, because every *other* world item
     /// surface is `Ground`. Reusing `Ground` poses a framed chest on its edge.
     ///
@@ -3679,7 +3679,7 @@ mod tests {
     /// constant would fail every one of them.
     #[test]
     fn shadow_radius_reports_vanillas_own_per_species_value() {
-        // `EntityRenderer.shadowRadius`'s field default: vanilla draws no
+        // EntityRenderer's shadow radius's field default: vanilla draws no
         // shadow at all for these, where the flat constant drew a
         // player-sized disc.
         for none in ["arrow", "item_frame", "painting", "armor_stand", "shulker", "marker"] {
@@ -3968,8 +3968,8 @@ mod tests {
 
     /// The eye heights are the jar's, not a formula, and the table is searchable.
     ///
-    /// Every value comes from an `EntityType.Builder.eyeHeight` call in 26.2's
-    /// `EntityTypes` — an outside record definition, read as a record — and the
+    /// Every value comes from an Builder's eye height call in 26.2's
+    /// The entity types — an outside record definition, read as a record — and the
     /// spot checks below are the ones that would move if the table were
     /// regenerated with the wrong column or shifted by a row.
     #[test]
@@ -4002,7 +4002,7 @@ mod tests {
         // formula cannot pass by rounding.
         assert!((eye_probe_offset("ghast", 1.0) - 4.0 * 0.85).abs() > 0.7);
 
-        // Not overridden: `EntityDimensions.defaultEyeHeight`, off the generated
+        // Not overridden: EntityDimensions's default eye height, off the generated
         // dimensions table. A creeper is 1.7 tall.
         let creeper = eye_probe_offset("creeper", 1.0);
         assert!(
@@ -4019,7 +4019,7 @@ mod tests {
 
     /// **The probe is the eye cell, and fire forces only the block nibble.**
     ///
-    /// Both halves of `EntityRenderer.getPackedLightCoords` at once, on inputs
+    /// Both halves of EntityRenderer's get packed light coords at once, on inputs
     /// chosen so the right answer and the two wrong ones are three different
     /// bytes. Before this, every pass in this module and in
     /// [`super::super::world_items`] sampled at `draw.feet`.

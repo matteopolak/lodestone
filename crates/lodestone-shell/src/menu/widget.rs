@@ -50,14 +50,14 @@
 //!
 //! - **Add state to [`Widget`], not to a screen.** The point of the type is that
 //!   the third screen does not write the blit a third time.
-//! - **The sprite's second argument is `isHoveredOrFocused()`, not
+//! - **The sprite's second argument is is hovered or focused, not
 //!   `isFocused()`.** This is worth reading twice, because both an earlier
 //!   design note and
 //!   `docs/ui-framework.md` say `isFocused()` and the jar disagrees:
 //!   vanilla's own default-sprite extract routine passes
-//!   `SPRITES.get(this.active, … this.isHoveredOrFocused())`, and
-//!   `isHoveredOrFocused()` is
-//!   `isHovered() || isFocused()`.
+//!   `SPRITES.get(this.active, … this.is_hovered_or_focused())`, and
+//!   is hovered or focused is
+//!   `is_hovered() || isFocused()`.
 //!
 //!   The earlier design carried both facts in one `focused` field, because the shell had a
 //!   single row cursor that the keyboard *and* [`super::nav::MenuNav::hover`]
@@ -103,7 +103,7 @@
 
 /// Vanilla's inactive-message colour as the **signed** ARGB integer the jar
 /// writes: vanilla's own empty style with color -6250336 in
-/// `AbstractWidget.WithInactiveMessage.defaultInactiveMessage`.
+/// The abstract widget's with inactive message.default_inactive_message.
 ///
 /// `-6250336 as u32` is `0xFF_A0_A0_A0` — opaque grey 160. Kept in vanilla's own
 /// spelling so it can be grepped for in the decompiled source, with
@@ -119,7 +119,7 @@ pub const INACTIVE_LABEL: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.
 
 /// An active widget's label colour: plain white.
 ///
-/// `AbstractButton` tints only the *sprite* with vanilla's own ARGB-white helper applied to `this.alpha`
+/// The abstract button tints only the *sprite* with vanilla's own ARGB-white helper applied to `this.alpha`
 ///; the label keeps the component's own default, which
 /// for every menu button is white.
 pub const ACTIVE_LABEL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -135,9 +135,9 @@ pub const DEFAULT_HEIGHT: f32 = 20.0;
 /// Default gap between adjacent menu buttons.
 pub const DEFAULT_SPACING: f32 = 8.0;
 
-/// `AbstractButton.TEXT_MARGIN`: the inset the label's
+/// The abstract button's text margin: the inset the label's
 /// scroll window is measured from, passed as
-/// `extractScrollingStringOverContents(output, message, 2)`.
+/// extract scrolling string over contents.
 pub const TEXT_MARGIN: f32 = 2.0;
 
 /// Unpacks a vanilla signed-ARGB integer into this shell's `[r, g, b, a]` in
@@ -221,7 +221,7 @@ impl WidgetSprites {
     }
 
     /// Vanilla's 3-argument constructor:
-    /// `(enabled, disabled, focused, disabled)` — `AbstractButton`'s form.
+    /// `(enabled, disabled, focused, disabled)` — the abstract button's form.
     #[must_use]
     pub const fn with_disabled(
         enabled: &'static str,
@@ -261,7 +261,7 @@ pub const BUTTON_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
     "widget/button_highlighted",
 );
 
-/// `AbstractSliderButton`'s track,
+/// The abstract slider button's track,
 /// expressed through the **3**-argument collapse with `enabled` and `disabled`
 /// deliberately equal.
 ///
@@ -279,7 +279,7 @@ pub const BUTTON_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
 /// independently, while vanilla's predicate is a conjunction:
 ///
 /// ```text
-/// getSprite() = isActive() && isFocused() && !canChangeValue ? HIGHLIGHTED : SLIDER
+/// get sprite = isActive() && isFocused() && !canChangeValue ? HIGHLIGHTED : SLIDER
 /// ```
 ///
 /// So `!isActive()` must give the plain track *whatever* focus did — and
@@ -305,14 +305,14 @@ pub const SLIDER_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
     "widget/slider_highlighted",
 );
 
-/// Vanilla's `AbstractWidget`: a menu control's
+/// Vanilla's abstract widget: a menu control's
 /// bounds, message and state.
 ///
 /// Field names and defaults follow the jar: `active` and `visible` are `true`,
 /// `focused` is `false`, and both `active` and `visible` are public because they
 /// are public fields there too — every vanilla
 /// disable site is a plain `button.active = …` assignment
-/// (vanilla's own options-sub-screen base, vanilla's own title-screen rendering).
+/// (vanilla's options-sub-screen base, vanilla's title-screen rendering).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Widget {
     /// Left edge, in logical GUI pixels.
@@ -329,7 +329,7 @@ pub struct Widget {
     /// Whether the widget can be interacted with. `false` is the **entire**
     /// disabled API — see the module docs.
     pub active: bool,
-    /// Whether the widget is drawn at all. `AbstractWidget.extractRenderState`
+    /// Whether the widget is drawn at all. The abstract widget's extract render state
     /// wraps everything in `if (this.visible)`.
     pub visible: bool,
     /// Keyboard focus alone.
@@ -338,7 +338,7 @@ pub struct Widget {
     /// joins the two with `||` in [`Self::is_hovered_or_focused`], so a control
     /// highlights for either pointer hover or keyboard focus.
     pub focused: bool,
-    /// `AbstractWidget.isHovered`, set from **geometry alone** every frame
+    /// The abstract widget's is hovered, set from **geometry alone** every frame
     /// and never consulted about `active` — which
     /// is why a greyed-out button under the cursor still looks greyed out rather
     /// than vanishing.
@@ -347,7 +347,7 @@ pub struct Widget {
     /// background of its own (the `Checkbox`/`EditBox`/slider family).
     pub sprites: Option<WidgetSprites>,
     /// A sprite drawn centred **instead of** [`Self::message`] — vanilla's
-    /// `SpriteIconButton.CenteredIcon`.
+    /// The sprite icon button's centered icon.
     pub icon: Option<&'static str>,
 }
 
@@ -374,7 +374,7 @@ impl Default for Widget {
 
 impl Widget {
     /// A widget with **no** background sprite set: the `Checkbox` / `EditBox` /
-    /// `AbstractSliderButton` shape, whose disabled state is the grey label and
+    /// The abstract slider button shape, whose disabled state is the grey label and
     /// blocked input alone.
     #[must_use]
     pub fn new(x: f32, y: f32, width: f32, height: f32, message: impl Into<String>) -> Self {
@@ -397,7 +397,7 @@ impl Widget {
         }
     }
 
-    /// An `AbstractSliderButton`'s track: [`Self::new`] plus
+    /// An abstract slider button's track: [`Self::new`] plus
     /// [`SLIDER_SPRITES`]. Used by every numeric option on the settings tree
     /// (see [`super::options`]).
     ///
@@ -471,8 +471,8 @@ impl Widget {
         mx >= self.x && mx <= self.x + self.width && my >= self.y && my <= self.y + self.height
     }
 
-    /// `AbstractWidget.isMouseOver`:
-    /// `isActive() && areCoordinatesInRectangle(..)`.
+    /// The abstract widget's is mouse over:
+    /// `isActive() && are_coordinates_in_rectangle(..)`.
     ///
     /// This is the **click** half of the disabled path — the half that matters,
     /// because vanilla still *hovers* a disabled widget (`isHovered` is set from
@@ -483,7 +483,7 @@ impl Widget {
     }
 
     /// Whether a focus-navigation event would land on this widget:
-    /// `AbstractWidget.nextFocusPath` returns a leaf only when `isActive()` and
+    /// The abstract widget's next focus path returns a leaf only when `isActive()` and
     /// not already focused, and `null` otherwise.
     ///
     /// So an inactive widget is skipped by Tab and by the arrow keys, not just
@@ -509,8 +509,8 @@ impl Widget {
     /// The background sprite id, or `None` when this widget has no sprite
     /// background.
     ///
-    /// `AbstractButton.extractDefaultSprite`:
-    /// `SPRITES.get(this.active, this.isHoveredOrFocused())`. Note the first
+    /// The abstract button's extract default sprite:
+    /// `SPRITES.get(this.active, this.is_hovered_or_focused())`. Note the first
     /// argument is the raw `active` field, not `isActive()` — see the module
     /// docs — and the second is [`Self::is_hovered_or_focused`], **not**
     /// [`Self::focused`].
@@ -538,7 +538,7 @@ impl Widget {
 
     /// The horizontal window the label is centred in: `(x + 2, x + width - 2)`.
     ///
-    /// `extractScrollingStringOverContents(output, message, TEXT_MARGIN)` →
+    /// Extract scrolling string over contents →
     /// `left = getX() + margin`, `right = getX() + getWidth() - margin`.
     #[must_use]
     pub fn content_span(&self) -> (f32, f32) {
@@ -559,7 +559,7 @@ impl Widget {
 
     /// The top-left of a `side`×`side` icon centred in the widget.
     ///
-    /// `SpriteIconButton.CenteredIcon.extractContents`
+    /// The sprite icon button's centered icon.extract_contents
     ///; `spriteOffset` is zero at every call
     /// site, so this is a plain centre. Floored, so the icon lands on a pixel.
     #[must_use]
@@ -571,7 +571,7 @@ impl Widget {
     }
 }
 
-/// `SelectableEntry.mouseOverRightHalf`: the
+/// The selectable entry's mouse over right half: the
 /// cursor is in the right half of a `size`×`size` icon whose top-left is the
 /// origin of `(rel_x, rel_y)`.
 ///
@@ -626,7 +626,7 @@ pub trait LayoutElement: core::fmt::Debug {
     fn y(&self) -> f32;
     /// `getWidth()`.
     fn width(&self) -> f32;
-    /// `getHeight()`.
+    /// get height.
     fn height(&self) -> f32;
     /// `setX(int)`.
     fn set_x(&mut self, x: f32);
@@ -683,7 +683,7 @@ impl LayoutElement for Widget {
     }
 
     /// A widget *is* a leaf: it visits itself, exactly as
-    /// `AbstractWidget.visitWidgets` does.
+    /// The abstract widget's visit widgets does.
     fn visit_widgets(&self, visitor: &mut dyn FnMut(&Widget)) {
         visitor(self);
     }
@@ -691,38 +691,38 @@ impl LayoutElement for Widget {
 
 // -- the scrollable list ----------------------------------------------------
 
-/// `AbstractScrollArea.SCROLLBAR_WIDTH`, which is
+/// The abstract scroll area's scrollbar width, which is
 /// also the `scrollbarWidth` every `defaultSettings` record carries (`:146`).
 pub const SCROLLBAR_WIDTH: f32 = 6.0;
 
-/// `AbstractScrollArea.SCROLLBAR_MIN_HEIGHT`, the
+/// The abstract scroll area's scrollbar min height, the
 /// floor [`ScrollList::scroller_height`] clamps the thumb to.
 pub const SCROLLBAR_MIN_HEIGHT: f32 = 32.0;
 
-/// The gap `scrollerHeight()` leaves at the bottom of its own clamp:
+/// The gap scroller height leaves at the bottom of its own clamp:
 /// `Mth.clamp(…, 32, this.height - 8)`.
 pub const SCROLLBAR_HEIGHT_INSET: f32 = 8.0;
 
-/// `AbstractSelectionList.Entry.CONTENT_PADDING`
+/// The abstract selection list's entry.CONTENT_PADDING
 /// — also the `+ 2` in `getFirstEntryY()` (`:104-106`) and half the `+ 4` in
 /// `contentHeight()` (`:198-206`). One constant because vanilla derives all three
 /// from the same 2 px inset, and splitting them is how they drift.
 pub const LIST_CONTENT_PADDING: f32 = 2.0;
 
-/// The thumb sprite: `AbstractScrollArea.SCROLLER_SPRITE`.
+/// The thumb sprite: the abstract scroll area's scroller sprite.
 pub const SCROLLER_SPRITE: &str = "widget/scroller";
 
-/// The track sprite: `AbstractScrollArea.SCROLLER_BACKGROUND_SPRITE`.
+/// The track sprite: the abstract scroll area's scroller background sprite.
 pub const SCROLLER_BACKGROUND_SPRITE: &str = "widget/scroller_background";
 
 // -- the tab widget ---------------------------------------------
 //
-// Vanilla's `MenuTabBar.MenuTabButton` — the tab
-// strip `StatsScreen` and `CreateWorldScreen` both use. Built once here rather
+// Vanilla's menu tab bar's menu tab button — the tab
+// strip stats screen and the create world screen both use. Built once here rather
 // than per-screen, per the owner report: "Statistics and Create New World want
 // the same widget."
 
-/// `MenuTabButton.SPRITES`: the four `widget/tab*`
+/// The menu tab button's sprites: the four `widget/tab*`
 /// ids a tab selects between.
 ///
 /// Keyed by `(selected, hoveredOrFocused)`, **not** `(active, …)` like every
@@ -751,16 +751,16 @@ pub fn tab_underline_colour(active: bool) -> [f32; 4] {
     if active { ACTIVE_LABEL } else { INACTIVE_LABEL }
 }
 
-/// `MenuTabButton.renderLabel`'s `top` local:
-/// `getY() + (isSelected() ? 0 : 3)` — an unselected tab's label window
+/// The menu tab button's render label's `top` local:
+/// `getY() + (is_selected() ? 0 : 3)` — an unselected tab's label window
 /// starts 3 px lower because the selected tab alone draws the inset
 /// background/underline that would otherwise collide with a label sitting
 /// flush against the top.
 ///
 /// This is **not** the label's final draw `y` — vanilla never blits at
 /// `top` directly. `renderLabel` passes `top` and `bottom = getY() +
-/// getHeight()` into `acceptScrollingWithDefaultCenter`, which vertically
-/// *centres* the line between them (`ActiveTextCollector.
+/// get_height()` into `acceptScrollingWithDefaultCenter`, which vertically
+/// *centres* the line between them (the active text collector.
 /// defaultScrollingHelper`: `(top + bottom - lineHeight) / 2 + 1`). Use
 /// [`tab_label_top`], which applies that centring; a caller that adds this
 /// straight to `y` reproduces the bug this function's doc used to describe
@@ -770,11 +770,11 @@ pub fn tab_label_dy(selected: bool) -> f32 {
     if selected { 0.0 } else { 3.0 }
 }
 
-/// The tab label's actual draw `y` — vanilla's `renderLabel` (`MenuTabBar.
+/// The tab label's actual draw `y` — vanilla's `renderLabel` (the menu tab bar.
 /// java`) does not blit at [`tab_label_dy`]'s `top` directly; it hands `top`
-/// and `bottom = getY() + getHeight()` to `acceptScrollingWithDefaultCenter`,
+/// and `bottom = getY() + get_height()` to `acceptScrollingWithDefaultCenter`,
 /// which vertically centres the line between them:
-/// `ActiveTextCollector.defaultScrollingHelper`'s `textTop = (top + bottom -
+/// The active text collector's default scrolling helper's `textTop = (top + bottom -
 /// lineHeight) / 2 + 1`, floored before the `+ 1` exactly as [`Widget::
 /// label_top`] already floors for every other widget's label — the same
 /// formula, just with a `top` that is not always `y` because of the
@@ -799,14 +799,14 @@ pub fn tab_label_top(y: f32, height: f32, selected: bool, line_height: f32) -> f
     ((top + bottom - line_height) / 2.0).floor() + 1.0
 }
 
-/// `MenuTabButton.UNDERLINE_HEIGHT`/`_MARGIN_BOTTOM` (vanilla's own
+/// The menu tab button's underline height/`_MARGIN_BOTTOM` (vanilla's own
 /// menu-tab-bar type, own source at `:116-118,152-157`): a 1 px bar, its own height above the tab's bottom edge,
 /// centred under the label and no wider than `tab_width - 4`.
 pub const TAB_UNDERLINE_H: f32 = 1.0;
 pub const TAB_UNDERLINE_MARGIN_BOTTOM: f32 = 2.0;
 pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
 
-/// Vanilla's `AbstractScrollArea` + `AbstractSelectionList` scroll model: a
+/// Vanilla's abstract scroll area + abstract selection list scroll model: a
 /// **pixel** scroll offset, a scrollbar, and a `hovered`/`selected` pair that are
 /// two separate pieces of state.
 ///
@@ -817,10 +817,10 @@ pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
 ///
 /// | field | vanilla |
 /// |---|---|
-/// | [`Self::scroll`] | `AbstractScrollArea.scrollAmount` (`:18`) |
-/// | [`Self::selected`] | `AbstractSelectionList.selected` (`:40`) |
-/// | [`Self::hovered`] | `AbstractSelectionList.hovered` (`:41`) |
-/// | [`Self::dragging`] | `AbstractScrollArea.scrolling` (`:19`) |
+/// | [`Self::scroll`] | the abstract scroll area's scroll amount (`:18`) |
+/// | [`Self::selected`] | the abstract selection list's selected (`:40`) |
+/// | [`Self::hovered`] | the abstract selection list's hovered (`:41`) |
+/// | [`Self::dragging`] | the abstract scroll area's scrolling (`:19`) |
 ///
 /// It holds **no entries**. A screen keeps its own rows in whatever shape suits
 /// it and tells this type only how many there are, so adopting the primitive
@@ -832,7 +832,7 @@ pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
 /// every consumer treats it as pixels: `repositionEntries` subtracts it straight
 /// from a y, and `mouseScrolled` moves it
 /// by `scrollY * scrollRate()` where `scrollRate` is `defaultEntryHeight / 2`
-/// (`:44` via `AbstractScrollArea.defaultSettings`, `:145-147`).
+/// (`:44` via the abstract scroll area's default settings, `:145-147`).
 ///
 /// **Both of this shell's lists previously stored a row *index*** — `MenuNav`'s
 /// `server_scroll: usize` and `accounts::State::scroll: usize` — so one wheel
@@ -873,13 +873,13 @@ pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
 ///   screen, not here.
 /// - **The integer truncations are load-bearing.** `scrollerHeight` casts to
 ///   `int` before clamping and `scrollBarY` does
-///   `(int)scrollAmount * (height - scrollerHeight()) / maxScrollAmount()` in
+///   `(int)scrollAmount * (height - scroller_height()) / maxScrollAmount()` in
 ///   **integer** arithmetic (`:104-108`). The `floor`s here are that arithmetic,
 ///   not defensive rounding — deleting them moves the thumb by up to a pixel and
 ///   no test of ours would say why.
 /// - **Row heights may be uniform or per-entry, and uniform is the degenerate
-///   case of the same arithmetic.** `AbstractSelectionList` allows a per-entry
-///   height (`addEntry(entry, height)`, `:122-129`) and `super::options`'
+///   case of the same arithmetic.** abstract selection list allows a per-entry
+///   height (add entry, `:122-129`) and `super::options`'
 ///   settings list genuinely needs it, so [`Self::new_variable`] takes the
 ///   heights and every offset goes through [`Self::row_offset`] /
 ///   [`Self::row_height`]. `row_h` remains `defaultEntryHeight` in both modes,
@@ -899,11 +899,11 @@ pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
 /// [`super::render`], which reads [`Self::scrollbar_rects`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScrollList {
-    /// Scroll offset in **logical pixels** — `AbstractScrollArea.scrollAmount`
+    /// Scroll offset in **logical pixels** — the abstract scroll area's scroll amount
     /// (`:18`). Always inside `0..=max_scroll()`; every writer goes through
     /// [`Self::set_scroll`].
     scroll: f32,
-    /// `AbstractSelectionList.defaultEntryHeight` (`:37`) — the height of an
+    /// The abstract selection list's default entry height (`:37`) — the height of an
     /// entry added without one, **and** the basis of
     /// [`Self::scroll_rate`] (`:44`) in both modes. When [`Self::prefix`] is
     /// `None` it is also every entry's height.
@@ -919,16 +919,16 @@ pub struct ScrollList {
     prefix: Option<Box<[f32]>>,
     /// The band's top y — `getY()`.
     top: f32,
-    /// The band's height — `getHeight()`.
+    /// The band's height — get height.
     height: f32,
-    /// Number of entries — `getItemCount()` (`:160-162`).
+    /// Number of entries — get item count (`:160-162`).
     len: usize,
-    /// `AbstractSelectionList.selected` (`:40`). What Enter/Select acts on.
+    /// The abstract selection list's selected (`:40`). What Enter/Select acts on.
     selected: Option<usize>,
-    /// `AbstractSelectionList.hovered` (`:41`). Draw-only, mouse-derived, and
+    /// The abstract selection list's hovered (`:41`). Draw-only, mouse-derived, and
     /// **never** written by anything that writes [`Self::selected`].
     hovered: Option<usize>,
-    /// `AbstractScrollArea.scrolling` (`:19`) — a thumb drag is in progress.
+    /// The abstract scroll area's scrolling (`:19`) — a thumb drag is in progress.
     dragging: bool,
 }
 
@@ -936,7 +936,7 @@ impl ScrollList {
     /// A list of `len` entries of `row_h` each, in a band at `top` of `height`.
     ///
     /// Nothing is selected and nothing is hovered, matching a freshly
-    /// constructed `AbstractSelectionList` (both fields are `@Nullable` and start
+    /// constructed abstract selection list (both fields are `@Nullable` and start
     /// null).
     #[must_use]
     pub fn new(row_h: f32, top: f32, height: f32, len: usize) -> Self {
@@ -954,7 +954,7 @@ impl ScrollList {
     }
 
     /// A list whose entries have **individual** heights — vanilla's
-    /// `addEntry(entry, height)`, where
+    /// add entry, where
     /// `repositionEntries` advances its running `y` by each child's own height
     /// (`:143-152`) rather than by a constant.
     ///
@@ -1023,7 +1023,7 @@ impl ScrollList {
         }
     }
 
-    /// Entry `index`'s own height — `child.getHeight()`.
+    /// Entry `index`'s own height — child's get height.
     ///
     /// Falls back to [`Self::row_h`] for an out-of-range index so that callers
     /// hit-testing a stale index get a sane box rather than a zero-height one
@@ -1039,7 +1039,7 @@ impl ScrollList {
 
     // -- geometry ---------------------------------------------------------
 
-    /// `getBottom()`.
+    /// get bottom.
     #[must_use]
     pub fn bottom(&self) -> f32 {
         self.top + self.height
@@ -1051,7 +1051,7 @@ impl ScrollList {
         self.top
     }
 
-    /// `getHeight()`.
+    /// get height.
     #[must_use]
     pub fn height(&self) -> f32 {
         self.height
@@ -1063,7 +1063,7 @@ impl ScrollList {
         self.row_h
     }
 
-    /// `getItemCount()`.
+    /// get item count.
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
@@ -1077,7 +1077,7 @@ impl ScrollList {
 
     /// Re-seat the band and the entry count, then re-clamp — vanilla's
     /// `updateSizeAndPosition`, which
-    /// ends in `refreshScrollAmount()`.
+    /// ends in refresh scroll amount.
     ///
     /// **Call this every frame**, before reading any geometry. The band depends
     /// on the canvas, and a list that keeps a stale `height` reports a stale
@@ -1158,10 +1158,10 @@ impl ScrollList {
     }
 
     /// The top of entry `index`, in the same space the band is measured in:
-    /// `getFirstEntryY() - scrollAmount() + index * height`, which is
+    /// `getFirstEntryY() - scroll_amount() + index * height`, which is
     /// `repositionEntries`' running `y`.
     ///
-    /// Vanilla truncates the offset once, at `(int)this.scrollAmount()`
+    /// Vanilla truncates the offset once, at `(int)this.scroll_amount()`
     /// (`:144`), rather than per entry — so the whole column moves as a unit and
     /// entries stay exactly `row_h` apart. Reproduced with a single `floor`
     /// outside the multiply for that reason.
@@ -1171,7 +1171,7 @@ impl ScrollList {
     }
 
     /// Whether entry `index` is inside the band —
-    /// `child.getY() + child.getHeight() >= getY() && child.getY() <= getBottom()`.
+    /// `child.getY() + child.get_height() >= getY() && child.getY() <= get_bottom()`.
     ///
     /// **This is a *partial*-overlap test, and now that is the whole point.** It
     /// was previously stood in for by "skip any row that is not wholly inside",
@@ -1253,7 +1253,7 @@ impl ScrollList {
 
     // -- the offset -------------------------------------------------------
 
-    /// `scrollAmount()` — **pixels**.
+    /// scroll amount — **pixels**.
     #[must_use]
     pub fn scroll(&self) -> f32 {
         self.scroll
@@ -1272,7 +1272,7 @@ impl ScrollList {
         };
     }
 
-    /// `refreshScrollAmount()` — re-apply the
+    /// refresh scroll amount — re-apply the
     /// clamp after the band or the content changed.
     pub fn refresh_scroll(&mut self) {
         let s = self.scroll;
@@ -1280,7 +1280,7 @@ impl ScrollList {
     }
 
     /// `scrollRate()`, which for a selection list is `defaultEntryHeight / 2`
-    /// (vanilla's own abstract selection-list base → `AbstractScrollArea.defaultSettings`,
+    /// (vanilla's own abstract selection-list base → abstract scroll area's default settings,
     /// `:145-147`).
     ///
     /// **Integer division, and `scrollRate` is an `int` field of the record**
@@ -1292,7 +1292,7 @@ impl ScrollList {
         (self.row_h / 2.0).floor()
     }
 
-    /// `mouseScrolled`: `setScrollAmount(scrollAmount() - scrollY * scrollRate())`.
+    /// `mouseScrolled`: set scroll amount.
     ///
     /// `notches` is winit's `scrollY`, so **positive scrolls up** (toward entry
     /// 0), matching vanilla's sign.
@@ -1334,7 +1334,7 @@ impl ScrollList {
 
     // -- selection and hover, which are different things -------------------
 
-    /// `getSelected()`.
+    /// get selected.
     #[must_use]
     pub fn selected(&self) -> Option<usize> {
         self.selected
@@ -1345,7 +1345,7 @@ impl ScrollList {
     ///
     /// Vanilla scrolls when the entry is clipped at either edge **or** when the
     /// last input was the keyboard (`:58`). The clipped tests are ported;
-    /// `getLastInputType().isKeyboard()` has no equivalent here, so callers that
+    /// get last input type's is keyboard has no equivalent here, so callers that
     /// mean "the keyboard moved this" pass `keyboard = true`. A click passes
     /// `false`, which is what stops a click on a partially-visible row from
     /// yanking the list — vanilla's own behaviour, and easy to lose.
@@ -1361,13 +1361,13 @@ impl ScrollList {
         }
     }
 
-    /// `getHovered()`.
+    /// get hovered.
     #[must_use]
     pub fn hovered(&self) -> Option<usize> {
         self.hovered
     }
 
-    /// `this.hovered = isMouseOver(…) ? getEntryAtPosition(…) : null`.
+    /// `this.hovered = is_mouse_over(…) ? get_entry_at_position(…) : null`.
     ///
     /// **This method must never touch [`Self::selected`], and there is no code
     /// path here by which it could.** That is not a stylistic note — it is the
@@ -1384,7 +1384,7 @@ impl ScrollList {
     /// [`Self::set_hovered`].
     ///
     /// `row_left`/`row_w` come from the caller because row width is a screen's
-    /// choice (`getRowWidth()`, `:389-391`, is overridable).
+    /// choice (get row width, `:389-391`, is overridable).
     #[cfg(test)]
     pub fn hover_at(&mut self, x: f32, y: f32, row_left: f32, row_w: f32) {
         let inside_x = x >= row_left && x < row_left + row_w;
@@ -1416,15 +1416,15 @@ impl ScrollList {
 
     // -- the scrollbar ----------------------------------------------------
 
-    /// `scrollbarWidth()`.
+    /// scrollbar width.
     #[must_use]
     pub fn scrollbar_width(&self) -> f32 {
         SCROLLBAR_WIDTH
     }
 
-    /// `scrollBarX()` — and note **`AbstractSelectionList` overrides it**:
-    /// `getRowRight() + scrollbarWidth() + 2`,
-    /// *not* `AbstractScrollArea`'s `getRight() - scrollbarWidth()` (`:100-102`).
+    /// scroll bar x — and note **abstract selection list overrides it**:
+    /// `getRowRight() + scrollbar_width() + 2`,
+    /// *not* abstract scroll area's `get_right() - scrollbar_width()` (`:100-102`).
     ///
     /// So the bar sits 8 px to the **right** of the row, outside it, rather than
     /// being inset into the list's right edge. Taking `row_right` rather than
@@ -1435,7 +1435,7 @@ impl ScrollList {
         row_right + SCROLLBAR_WIDTH + 2.0
     }
 
-    /// `scrollerHeight() = Mth.clamp((int)((float)(height * height) / contentHeight()), 32, height - 8)`.
+    /// `scroller_height() = Mth.clamp((int)((float)(height * height) / contentHeight()), 32, height - 8)`.
     ///
     /// The `floor` is vanilla's `(int)` cast. Note the upper clamp can be
     /// *below* the lower one on a very short band, and `Mth.clamp` resolves that
@@ -1452,10 +1452,10 @@ impl ScrollList {
             .min(self.height - SCROLLBAR_HEIGHT_INSET)
     }
 
-    /// `scrollBarY()`.
+    /// scroll bar y.
     ///
     /// **Integer arithmetic throughout in vanilla**:
-    /// `(int)scrollAmount * (height - scrollerHeight()) / maxScrollAmount() + getY()`,
+    /// `(int)scrollAmount * (height - scroller_height()) / maxScrollAmount() + getY()`,
     /// so the numerator truncates *before* the divide. The two `floor`s are that,
     /// in that order.
     #[must_use]
@@ -1513,7 +1513,7 @@ impl ScrollList {
         self.dragging = false;
     }
 
-    /// Whether a thumb drag is in progress — `AbstractScrollArea.scrolling`.
+    /// Whether a thumb drag is in progress — the abstract scroll area's scrolling.
     #[must_use]
     pub fn dragging(&self) -> bool {
         self.dragging
@@ -1523,7 +1523,7 @@ impl ScrollList {
     ///
     /// Three cases, all vanilla's: above the band snaps to 0, below it snaps to
     /// `maxScrollAmount()`, and inside it multiplies the mouse delta by
-    /// `max(1, maxScroll / (height - scrollerHeight()))` so dragging the thumb
+    /// `max(1, maxScroll / (height - scroller_height()))` so dragging the thumb
     /// one pixel moves the content one *page-fraction*. A no-op unless
     /// [`Self::begin_drag`] armed it.
     #[cfg(test)]
@@ -1597,7 +1597,7 @@ impl ScrollList {
 /// None beyond [`ScrollList`]; pure data plus one constructor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListSpec {
-    /// `AbstractSelectionList.defaultEntryHeight`, and the basis of
+    /// The abstract selection list's default entry height, and the basis of
     /// [`ScrollList::scroll_rate`] whether or not [`Self::heights`] is set.
     pub row_h: f32,
     /// The band's top y, in logical pixels — a screen's `content_top`.
@@ -1627,9 +1627,9 @@ pub struct ListSpec {
 /// ## What it is, and why it is not [`RowBand`]
 ///
 /// These are two different rectangles and conflating them is the trap this type
-/// exists to prevent. [`RowBand`] is `getRowLeft()`/`getRowRight()` — the column
+/// exists to prevent. [`RowBand`] is get row left/`getRowRight()` — the column
 /// an *entry* is laid into, 310 px on a settings page. The chrome is the list
-/// **widget's own** `getX()`/`getWidth()`, and `AbstractSelectionList`'s
+/// **widget's own** `getX()`/`getWidth()`, and the abstract selection list's
 /// constructor is `super(0, y, width, height, …)`, so for every list whose screen
 /// hands it `this.width` the chrome is the whole canvas while the rows are a
 /// narrow centred column. Drawing the tint at `row_w` would leave the canvas
@@ -1648,7 +1648,7 @@ pub enum ListChrome {
     /// No chrome at all.
     ///
     /// The Resource Packs screen: vanilla runs **two** 200 px-wide
-    /// `TransferableSelectionList`s side by side, each with its own background
+    /// The transferable selection lists side by side, each with its own background
     /// and its own pair of separators, and this crate models the pair as one
     /// band so that a single clip rect and a single scrollbar can serve both.
     /// One canvas-wide tint would therefore paint the gutter *between* the two
@@ -1693,8 +1693,8 @@ pub enum ListChrome {
 /// nothing clamps it.
 ///
 /// **The right inset must reserve `SCROLLBAR_WIDTH + 2 + SCROLLBAR_WIDTH` = 14 px**
-/// beyond wherever the row's own content ends. `AbstractSelectionList` overrides
-/// `scrollBarX()` to `getRowRight() + scrollbarWidth() + 2`, so the bar lives
+/// beyond wherever the row's own content ends. The abstract selection list overrides
+/// scroll bar x to `getRowRight() + scrollbar_width() + 2`, so the bar lives
 /// *outside* the row, not inset into it — see [`ScrollList::scrollbar_x`]. A
 /// centred list gets that gutter for free from the canvas margin either side; a
 /// full-width one has to declare it.
@@ -1703,7 +1703,7 @@ pub enum RowBand {
     /// vanilla's own abstract selection-list base's get-row-left accessor: a fixed-width row centred on the
     /// canvas.
     Centred {
-        /// `getRowWidth()`.
+        /// get row width.
         row_w: f32,
     },
     /// A row that spans the canvas, inset by `left` from its left edge and
@@ -1719,7 +1719,7 @@ pub enum RowBand {
 }
 
 impl RowBand {
-    /// `getRowLeft()`.
+    /// get row left.
     #[must_use]
     pub fn row_left(self, width: f32) -> f32 {
         match self {
@@ -1740,7 +1740,7 @@ impl RowBand {
         }
     }
 
-    /// `getRowWidth()` at this canvas width. Constant for [`Self::Centred`] and a
+    /// get row width at this canvas width. Constant for [`Self::Centred`] and a
     /// function of the canvas for [`Self::Inset`], which is the whole difference.
     #[must_use]
     pub fn row_w(self, width: f32) -> f32 {
@@ -1816,7 +1816,7 @@ impl ListSpec {
         self
     }
 
-    /// `getRowLeft()` — delegated to [`RowBand`], which is the only place that
+    /// get row left — delegated to [`RowBand`], which is the only place that
     /// knows whether this list's rows are centred or canvas-relative.
     #[must_use]
     pub fn row_left(&self, width: f32) -> f32 {
@@ -1829,7 +1829,7 @@ impl ListSpec {
         self.band.row_right(width)
     }
 
-    /// `getRowWidth()` at this canvas width.
+    /// get row width at this canvas width.
     ///
     /// A method rather than the field it replaced: for [`RowBand::Inset`] the row
     /// width **is** a function of the canvas, so a bare `spec.row_w` could only
@@ -1947,7 +1947,7 @@ mod tests {
 
     #[test]
     fn a_spriteless_widget_has_no_disabled_art() {
-        // `Checkbox`, `EditBox` and `AbstractSliderButton` have none in the jar
+        // `Checkbox`, `EditBox` and the abstract slider button have none in the jar
         // (see the module docs). A `None` here is what stops one being invented.
         let mut w = Widget::new(0.0, 0.0, 20.0, 20.0, "Fancy Graphics");
         assert_eq!(w.background_sprite(), None);
@@ -2358,7 +2358,7 @@ mod tests {
 
     #[test]
     fn the_scroll_rate_truncates_like_vanillas_int_division() {
-        // `scrollRate` is an `int` field of the `ScrollbarSettings` record
+        // `scrollRate` is an `int` field of the scrollbar settings record
         // fed `defaultEntryHeight / 2` in
         // **integer** division, so an odd row height loses the half pixel. The
         // settings list's 25 px entry is the live case.
@@ -2400,7 +2400,7 @@ mod tests {
 
     #[test]
     fn shrinking_the_band_reclamps_the_offset() {
-        // `updateSizeAndPosition` ends in `refreshScrollAmount()`
+        // `updateSizeAndPosition` ends in refresh scroll amount
         //. Without it a shrunk window stays
         // scrolled past its own content and the list draws empty.
         let mut list = server_shaped();
@@ -2702,9 +2702,9 @@ mod tests {
 
     #[test]
     fn the_scrollbar_sits_outside_the_row_not_inset_into_it() {
-        // `AbstractSelectionList` **overrides** `scrollBarX()` to
-        // `getRowRight() + scrollbarWidth() + 2` (`:289-291`). Getting this from
-        // `AbstractScrollArea`'s un-overridden `getRight() - scrollbarWidth()`
+        // The abstract selection list **overrides** scroll bar x to
+        // `getRowRight() + scrollbar_width() + 2` (`:289-291`). Getting this from
+        // The abstract scroll area's un-overridden `get_right() - scrollbar_width()`
         // would put the bar *inside* the list.
         let list = server_shaped();
         let row_right = 392.0;
@@ -2718,17 +2718,17 @@ mod tests {
 
     #[test]
     fn thumb_geometry_lands_flush_at_both_ends() {
-        // `scrollerHeight()` = `clamp((int)(h*h / contentHeight), 32, h - 8)`
+        // scroller height = `clamp((int)(h*h / contentHeight), 32, h - 8)`
         //. For h=200, content=364:
         // 200*200/364 = 109.89 -> 109, and clamp(109, 32, 192) = 109.
         let mut list = server_shaped();
         assert_eq!(list.scroller_height(), 109.0);
 
-        // `scrollBarY()` (`:104-108`). At rest the thumb is at the band's top.
+        // scroll bar y (`:104-108`). At rest the thumb is at the band's top.
         assert_eq!(list.scrollbar_y(), list.top());
 
         // Fully scrolled, the thumb's *bottom* must reach the band's bottom
-        // exactly — travel is `height - scrollerHeight()` = 91, so
+        // exactly — travel is `height - scroller_height()` = 91, so
         // 32 + 91 + 109 = 232 = top + height. A geometry that did not land flush
         // would leave a visible gap the player reads as "there is more below".
         list.set_scroll(list.max_scroll());
@@ -2967,7 +2967,7 @@ mod tests {
     /// existing list here is `RowBand::Centred`, and the refactor must not have
     /// moved one pixel of any of them.
     ///
-    /// The expected values are vanilla's own abstract selection-list base's get-row-left accessor's own
+    /// The expected values are vanilla's abstract selection-list base's get-row-left accessor's
     /// arithmetic — `width / 2 - rowWidth / 2` with **two separate integer
     /// divisions** — evaluated by hand at three widths for the multiplayer list's
     /// real 340, not by calling the code under test. The odd width is the one that
@@ -3081,8 +3081,8 @@ mod tests {
         }
     }
 
-    /// **The gutter rule, as a gate.** `AbstractSelectionList` overrides
-    /// `scrollBarX()` to `getRowRight() + scrollbarWidth() + 2`, so the bar lives
+    /// **The gutter rule, as a gate.** abstract selection list overrides
+    /// scroll bar x to `getRowRight() + scrollbar_width() + 2`, so the bar lives
     /// *outside* the row and nothing clamps it to the canvas. An `Inset` right edge
     /// that only reserves the row's own margin therefore pushes the bar off the
     /// screen — silently, since a rect off the canvas simply does not draw.
@@ -3189,7 +3189,7 @@ mod tests {
     #[test]
     fn tab_underline_colour_matches_vanillas_two_argb_constants() {
         // Expected values originate outside this module: `-1` and `-6250336`
-        // are vanilla's own menu-tab-bar type's own literals, unpacked by the shared
+        // are vanilla's menu-tab-bar type's literals, unpacked by the shared
         // `argb_to_rgba` rather than restated as a second pair of floats.
         assert_eq!(tab_underline_colour(true), argb_to_rgba(-1));
         assert_eq!(tab_underline_colour(false), argb_to_rgba(-6_250_336));
@@ -3200,7 +3200,7 @@ mod tests {
 
     #[test]
     fn tab_label_drops_three_pixels_only_while_unselected() {
-        // Vanilla's own menu-tab-bar type: `getY() + (isSelected() ? 0 : 3)`.
+        // Vanilla's own menu-tab-bar type: `getY() + (is_selected() ? 0 : 3)`.
         assert_eq!(tab_label_dy(true), 0.0);
         assert_eq!(tab_label_dy(false), 3.0);
     }
@@ -3209,7 +3209,7 @@ mod tests {
     fn tab_label_top_centres_between_its_own_top_and_bottom_not_flush_against_top() {
         // At `y = 0`, `height = 24` (a real `layout::TAB_BAR_HEIGHT` row) and
         // `line_height = 9` (this crate's own standard font line height,
-        // `render::LINE_H`): `ActiveTextCollector.defaultScrollingHelper`'s
+        // `render::LINE_H`): the active text collector's default scrolling helper's
         // `(top + bottom - lineHeight) / 2 + 1`, worked by hand —
         // selected: `top = 0`, `bottom = 24`, `(0 + 24 - 9) / 2 + 1 = 8`;
         // unselected: `top = 3`, `bottom = 24`, `(3 + 24 - 9) / 2 + 1 = 10`.

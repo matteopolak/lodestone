@@ -139,7 +139,7 @@ impl LevelBasedPermissionSet {
     /// 26.2's own level-based permission-set union reads:
     ///
     /// ```text
-    /// return this.level().isEqualOrHigherThan(otherSet.level()) ? otherSet : this;
+    /// return level's is equal or higher than(otherSet.level()) ? otherSet : this;
     /// ```
     ///
     /// which returns the **lower**-level set when `this` is the higher one.

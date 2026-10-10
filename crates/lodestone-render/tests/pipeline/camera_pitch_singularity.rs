@@ -40,7 +40,7 @@
 //!
 //! # The fix this pins
 //!
-//! Vanilla does not use a look-at. `Camera.setRotation`
+//! Vanilla does not use a look-at. Camera's set rotation
 //! (vanilla's decompiled camera source, 26.2) builds
 //! a YXZ Euler quaternion and **derives** all three basis vectors from it:
 //!

@@ -64,7 +64,7 @@ pub fn copper_fire_flame(
 /// a candle flame. `flame`'s sheet and physics with a single `scale(0.5F)`.
 ///
 /// `scale` shrinks the **collision box as well as** the quad
-/// (`setSize(0.2 * scale, 0.2 * scale)`), which is why it is one call rather
+/// (set size), which is why it is one call rather
 /// than a `quad_size` multiply — and why a small flame does not clip a candle's
 /// wick the way a half-sized quad on a full-sized box would.
 pub fn small_flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
@@ -79,7 +79,7 @@ pub fn small_flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64,
 ///
 /// [`Behaviour::AshSmoke`] is the right behaviour despite the name: what that
 /// variant *does* is "ordinary physics, advance the sheet by age", which is
-/// vanilla's own soul-particle tick step's own `super.tick(); setSpriteFromAge(sprites);`
+/// vanilla's soul-particle tick step's `super.tick(); set_sprite_from_age(sprites);`
 /// verbatim. Unlike `flame` it does **not** override its move step, so a soul mote
 /// collides.
 pub fn soul(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {

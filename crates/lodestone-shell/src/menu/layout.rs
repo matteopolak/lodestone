@@ -23,7 +23,7 @@
 //!
 //! ### The alignment model is padding-aware
 //!
-//! `AbstractLayout.AbstractChildWrapper::setX` is
+//! The abstract layout's abstract child wrapper::setX is
 //! the whole of it:
 //!
 //! ```text
@@ -39,12 +39,12 @@
 //! pixel: a child centred in a cell 5 px taller than itself lands at x = 2 and
 //! y = 3 (`set_y_rounds_where_set_x_truncates`). It is reproduced, not tidied.
 //!
-//! ## Vanilla has two two-phase timings; this follows `PauseScreen`'s
+//! ## Vanilla has two two-phase timings; this follows pause screen's
 //!
 //! | screen | order |
 //! |---|---|
-//! | `PauseScreen.createPauseMenu` (`:180-182`) | build → `arrangeElements()` → `FrameLayout.alignInRectangle` → `visitWidgets` |
-//! | `OptionsSubScreen.init` (`:28-34`) | build → `visitWidgets` → `repositionElements()` → `arrangeElements()` |
+//! | the pause screen's create pause menu (`:180-182`) | build → arrange elements → FrameLayout's align in rectangle → `visitWidgets` |
+//! | the options sub screen's init (`:28-34`) | build → `visitWidgets` → reposition elements → arrange elements |
 //!
 //! The second exists so a **resize repositions existing widgets** instead of
 //! rebuilding them, which matters once a widget holds state (focus, a scroll
@@ -78,7 +78,7 @@
 //!   dimension.
 //! - **A spanning cell splits its size with a [`Divisor`], not by division.**
 //!   `Divisor` is Mojang's Bresenham-style integer splitter
-//!   (vanilla's own divisor helper's own source file): 7 over 3 is `2, 2, 3`, not `2.33` three
+//!   (vanilla's divisor helper's source file): 7 over 3 is `2, 2, 3`, not `2.33` three
 //!   times. A span only *grows* a row or column if its share exceeds what is
 //!   already there (`Math.max`, vanilla's own grid-layout type), which is why the pause
 //!   screen's 212 px full-width cell produces two 106 px columns and its 100 px
@@ -90,7 +90,7 @@
 //!   arithmetic of its own — a bug fixed in `GridLayout` must fix it too.
 //! - **`FrameLayout`'s children default to centred, `GridLayout`'s do not.**
 //!   vanilla's own frame-layout type is `LayoutSettings.defaults().align(0.5F, 0.5F)`;
-//!   vanilla's own grid-layout type and vanilla's own equal-spacing-layout type are bare
+//!   vanilla's grid-layout type and vanilla's equal-spacing-layout type are bare
 //!   `LayoutSettings.defaults()`, i.e. top-left. Getting this backwards centres
 //!   or corners a whole screen, and it looks deliberate either way.
 //! - **[`GridLayout::default_cell_setting`] is the live baseline;
@@ -104,15 +104,15 @@
 //!   something false:
 //!
 //!   The aliasing is reachable through **exactly one** path: `RowHelper`'s short
-//!   `addChild` forms, which pass `defaultCellSetting()` itself
+//!   `addChild` forms, which pass default cell setting itself
 //!  . Every other `addChild` — `GridLayout`'s,
-//!   `LinearLayout`'s, `FrameLayout`'s, `EqualSpacingLayout`'s — passes a
+//!   `LinearLayout`'s, `FrameLayout`'s, the equal spacing layout's — passes a
 //!   `copy()`. Of the ~75 `defaultCellSetting`/`defaultChildLayoutSetting` call
 //!   sites in the client, the only one on a `RowHelper` is
 //!   vanilla's own Realms reset-world screen, and it runs before that helper's first
 //!   add.
 //!
-//!   One screen *does* mutate a live baseline mid-build — `DisconnectedScreen`
+//!   One screen *does* mutate a live baseline mid-build — the disconnected screen
 //!   sets `padding(10)`, adds the title and reason, then sets `padding(2)` for the
 //!   buttons that follow (`:44-47`) — and it is a `LinearLayout`, whose `addChild`
 //!   copies, so the first two children keep padding 10 in vanilla exactly as they
@@ -136,11 +136,11 @@
 //!
 //! ## Not here, on purpose
 //!
-//! - **`EqualSpacingLayout`.** One user in the whole client tree
+//! - **equal spacing layout.** One user in the whole client tree
 //!   (vanilla's own common-layouts helper aside, `screens/` references it once), so porting it
 //!   now would be an island. Its only bearing on this file is that its default
 //!   cell settings are top-left, unlike `FrameLayout`'s.
-//! - **`CommonLayouts`.** Two static helpers over `LinearLayout`; they belong with
+//! - **common layouts.** Two static helpers over `LinearLayout`; they belong with
 //!   whichever screen first needs them.
 //! - **Focus and tab order.** Screen-level dispatch belongs to [`super::focus`].
 //!   A layout only computes geometry and does not decide which child receives an
@@ -186,7 +186,7 @@ pub fn ipx(v: f32) -> i32 {
     v.round() as i32
 }
 
-/// Mojang's `Divisor` (vanilla's own divisor helper's own source file): splits `numerator` into
+/// Mojang's `Divisor` (vanilla's divisor helper's source file): splits `numerator` into
 /// `denominator` integer parts that sum back to it exactly, distributing the
 /// remainder Bresenham-style rather than piling it on one part.
 ///
@@ -264,7 +264,7 @@ impl Iterator for Divisor {
 /// Vanilla's `LayoutSettings`: one cell's padding and
 /// alignment.
 ///
-/// `Default` is vanilla's `LayoutSettingsImpl()` — zero padding, top-left
+/// `Default is vanilla's layout settings impl()` — zero padding, top-left
 /// alignment — so `derive` is correct here, unlike [`Widget`]'s (whose vanilla
 /// defaults are `active = true`, `visible = true`).
 ///
@@ -316,7 +316,7 @@ impl LayoutSettings {
             .padding_bottom(bottom)
     }
 
-    /// `paddingLeft(int)`.
+    /// padding left.
     #[must_use]
     pub fn padding_left(mut self, padding: i32) -> Self {
         self.padding_left = padding;
@@ -330,27 +330,27 @@ impl LayoutSettings {
         self
     }
 
-    /// `paddingRight(int)`.
+    /// padding right.
     #[must_use]
     pub fn padding_right(mut self, padding: i32) -> Self {
         self.padding_right = padding;
         self
     }
 
-    /// `paddingBottom(int)`.
+    /// padding bottom.
     #[must_use]
     pub fn padding_bottom(mut self, padding: i32) -> Self {
         self.padding_bottom = padding;
         self
     }
 
-    /// `paddingHorizontal(int)`.
+    /// padding horizontal.
     #[must_use]
     pub fn padding_horizontal(self, padding: i32) -> Self {
         self.padding_left(padding).padding_right(padding)
     }
 
-    /// `paddingVertical(int)`.
+    /// padding vertical.
     #[must_use]
     pub fn padding_vertical(self, padding: i32) -> Self {
         self.padding_top(padding).padding_bottom(padding)
@@ -364,14 +364,14 @@ impl LayoutSettings {
         self
     }
 
-    /// `alignHorizontally(float)`.
+    /// align horizontally.
     #[must_use]
     pub fn align_horizontally(mut self, x_alignment: f32) -> Self {
         self.x_alignment = x_alignment;
         self
     }
 
-    /// `alignHorizontallyCenter()`.
+    /// align horizontally center.
     #[must_use]
     pub fn align_horizontally_center(self) -> Self {
         self.align_horizontally(0.5)
@@ -397,7 +397,7 @@ pub trait Layout: LayoutElement {
 /// draws.
 ///
 /// This is [`LayoutElement::visit_widgets`] collected, which is the same walk
-/// vanilla's `visitWidgets(this::addRenderableWidget)` performs; a
+/// vanilla's visit widgets performs; a
 /// [`SpacerElement`] contributes nothing, so the indices are the *drawable*
 /// children only.
 #[must_use]
@@ -407,7 +407,7 @@ pub fn widget_rects(root: &dyn LayoutElement) -> Vec<(f32, f32, f32, f32)> {
     out
 }
 
-/// `AbstractLayout.AbstractChildWrapper`: one child
+/// The abstract layout's abstract child wrapper: one child
 /// plus the cell settings it was added with.
 #[derive(Debug)]
 struct ChildWrapper {
@@ -425,7 +425,7 @@ impl ChildWrapper {
         ipx(self.child.width()) + self.settings.padding_left + self.settings.padding_right
     }
 
-    /// `getHeight()`: the child plus its vertical padding.
+    /// get height: the child plus its vertical padding.
     fn height(&self) -> i32 {
         ipx(self.child.height()) + self.settings.padding_top + self.settings.padding_bottom
     }
@@ -449,7 +449,7 @@ impl ChildWrapper {
     }
 }
 
-/// `GridLayout.ChildContainer`.
+/// The grid layout's child container.
 #[derive(Debug)]
 struct GridChild {
     wrapper: ChildWrapper,
@@ -504,14 +504,14 @@ impl GridLayout {
         }
     }
 
-    /// `columnSpacing(int)`.
+    /// column spacing.
     #[must_use]
     pub fn column_spacing(mut self, spacing: i32) -> Self {
         self.column_spacing = spacing;
         self
     }
 
-    /// `rowSpacing(int)`.
+    /// row spacing.
     #[must_use]
     pub fn row_spacing(mut self, spacing: i32) -> Self {
         self.row_spacing = spacing;
@@ -524,7 +524,7 @@ impl GridLayout {
         self.column_spacing(spacing).row_spacing(spacing)
     }
 
-    /// `defaultCellSetting()`: the **live** baseline
+    /// default cell setting: the **live** baseline
     /// every later cell is copied from. Mutating it changes what subsequent
     /// `add_child` calls inherit — and nothing else, unlike vanilla, which also
     /// aliases it into already-added cells (see the module docs).
@@ -532,20 +532,20 @@ impl GridLayout {
         &mut self.default_cell_settings
     }
 
-    /// `newCellSettings()`: a **copy** of the
+    /// new cell settings: a **copy** of the
     /// baseline, to be adjusted for one cell.
     #[must_use]
     pub fn new_cell_settings(&self) -> LayoutSettings {
         self.default_cell_settings
     }
 
-    /// `addChild(child, row, column)` with the baseline cell settings.
+    /// add child with the baseline cell settings.
     pub fn add_child(&mut self, child: Box<dyn LayoutElement>, row: usize, column: usize) {
         let settings = self.new_cell_settings();
         self.add_child_with(child, row, column, 1, 1, settings);
     }
 
-    /// `addChild(child, row, column, cellSettings)`.
+    /// add child.
     pub fn add_child_settings(
         &mut self,
         child: Box<dyn LayoutElement>,
@@ -556,7 +556,7 @@ impl GridLayout {
         self.add_child_with(child, row, column, 1, 1, settings);
     }
 
-    /// `addChild(child, row, column, rows, columns, cellSettings)` — the one all
+    /// add child — the one all
     /// the others funnel into.
     ///
     /// # Panics
@@ -584,7 +584,7 @@ impl GridLayout {
         });
     }
 
-    /// `createRowHelper(int columns)`: fills cells
+    /// create row helper: fills cells
     /// left to right, wrapping to the next row.
     pub fn create_row_helper(&mut self, columns: usize) -> RowHelper<'_> {
         RowHelper {
@@ -612,7 +612,7 @@ impl LayoutElement for GridLayout {
         self.height as f32
     }
 
-    /// `AbstractLayout.setX`: moving a layout moves
+    /// The abstract layout's set x: moving a layout moves
     /// every child by the same delta. This is what places a nested
     /// [`LinearLayout`]'s children after its parent has arranged it.
     fn set_x(&mut self, x: f32) {
@@ -625,7 +625,7 @@ impl LayoutElement for GridLayout {
         self.x = new_x;
     }
 
-    /// `AbstractLayout.setY`.
+    /// The abstract layout's set y.
     fn set_y(&mut self, y: f32) {
         let new_y = ipx(y);
         let delta = (new_y - self.y) as f32;
@@ -636,9 +636,9 @@ impl LayoutElement for GridLayout {
         self.y = new_y;
     }
 
-    /// `GridLayout.arrangeElements`, transliterated.
+    /// GridLayout's arrange elements, transliterated.
     fn arrange_elements(&mut self) {
-        // `super.arrangeElements()` — `Layout.arrangeElements`'s default body
+        // super's arrange elements — Layout's arrange elements's default body
         //: nested layouts size themselves *before* this grid
         // measures them, or every nested container would measure as 0×0. Written
         // as a direct walk of the child list, which is what `visitChildren` is.
@@ -700,7 +700,7 @@ impl LayoutElement for GridLayout {
         self.height = row_y_offsets[max_row] + max_row_heights[max_row];
     }
 
-    /// `Layout.visitWidgets`'s default: forward to children,
+    /// Layout's visit widgets's default: forward to children,
     /// which is what makes a whole tree reachable from one call.
     fn visit_widgets(&self, visitor: &mut dyn FnMut(&Widget)) {
         for child in &self.children {
@@ -740,24 +740,24 @@ pub struct RowHelper<'a> {
 }
 
 impl RowHelper<'_> {
-    /// `addChild(widget)`: one column, baseline cell settings.
+    /// add child: one column, baseline cell settings.
     pub fn add_child(&mut self, child: Box<dyn LayoutElement>) {
         let settings = self.grid.new_cell_settings();
         self.add_child_with(child, 1, settings);
     }
 
-    /// `addChild(widget, int columnWidth)`: spans `column_width` columns,
+    /// add child: spans `column_width` columns,
     /// baseline cell settings.
     pub fn add_spanning(&mut self, child: Box<dyn LayoutElement>, column_width: usize) {
         let settings = self.grid.new_cell_settings();
         self.add_child_with(child, column_width, settings);
     }
 
-    /// `addChild(widget, int columnWidth, LayoutSettings)` (`:209-220`).
+    /// add child (`:209-220`).
     ///
     /// The wrap is the interesting part: when the span would overflow the row,
     /// the *rest of the current row is abandoned* and the index jumps to the next
-    /// row boundary with `Mth.roundToward`, so a later 1-wide child lands on the
+    /// row boundary with Mth's round toward, so a later 1-wide child lands on the
     /// row after the spanning one rather than beside it.
     pub fn add_child_with(
         &mut self,
@@ -770,7 +770,7 @@ impl RowHelper<'_> {
         if column_begin + column_width > self.columns {
             row += 1;
             column_begin = 0;
-            // `Mth.roundToward(index, columns)` == `positiveCeilDiv * multiple`.
+            // Mth's round toward == `positiveCeilDiv * multiple`.
             self.index = self.index.div_ceil(self.columns) * self.columns;
         }
         self.index += column_width;
@@ -778,13 +778,13 @@ impl RowHelper<'_> {
             .add_child_with(child, row, column_begin, 1, column_width, settings);
     }
 
-    /// `newCellSettings()` — a copy of the grid's baseline.
+    /// new cell settings — a copy of the grid's baseline.
     #[must_use]
     pub fn new_cell_settings(&self) -> LayoutSettings {
         self.grid.new_cell_settings()
     }
 
-    /// `defaultCellSetting()` — the grid's live baseline.
+    /// default cell setting — the grid's live baseline.
     pub fn default_cell_setting(&mut self) -> &mut LayoutSettings {
         self.grid.default_cell_setting()
     }
@@ -845,35 +845,35 @@ impl FrameLayout {
         }
     }
 
-    /// `setMinWidth(int)`.
+    /// set min width.
     pub fn set_min_width(&mut self, min_width: f32) {
         self.min_width = ipx(min_width);
     }
 
-    /// `setMinHeight(int)`.
+    /// set min height.
     pub fn set_min_height(&mut self, min_height: f32) {
         self.min_height = ipx(min_height);
     }
 
-    /// `newChildLayoutSettings()` — a copy of it.
+    /// new child layout settings — a copy of it.
     #[must_use]
     pub fn new_child_layout_settings(&self) -> LayoutSettings {
         self.default_child_settings
     }
 
-    /// `addChild(child)`.
+    /// add child.
     pub fn add_child(&mut self, child: Box<dyn LayoutElement>) {
         let settings = self.new_child_layout_settings();
         self.add_child_settings(child, settings);
     }
 
-    /// `addChild(child, childLayoutSettings)`.
+    /// add child.
     pub fn add_child_settings(&mut self, child: Box<dyn LayoutElement>, settings: LayoutSettings) {
         self.children.push(ChildWrapper::new(child, settings));
     }
 }
 
-/// `FrameLayout.alignInDimension`: the one-axis
+/// FrameLayout's align in dimension: the one-axis
 /// half of aligning a whole block inside a rectangle. Returns the new position.
 ///
 /// Note the truncation happens on the *offset*, before `pos` is added, and that
@@ -885,10 +885,10 @@ pub fn align_in_dimension(pos: f32, length: f32, widget_length: f32, align: f32)
     pos + trunc_int(lerp(align, 0.0, length - widget_length)) as f32
 }
 
-/// `FrameLayout.alignInRectangle`: position an
+/// FrameLayout's align in rectangle: position an
 /// element inside `(x, y, width, height)` at the given alignment.
 ///
-/// This is what `PauseScreen.createPauseMenu` calls on the whole grid, with
+/// This is what pause screen's create pause menu calls on the whole grid, with
 /// `(0.5, 0.25)` — centred horizontally, a quarter of the way down.
 pub fn align_in_rectangle(
     element: &mut dyn LayoutElement,
@@ -942,11 +942,11 @@ impl LayoutElement for FrameLayout {
         self.y = new_y;
     }
 
-    /// `FrameLayout.arrangeElements`: size is the
+    /// FrameLayout's arrange elements: size is the
     /// largest padded child (floored at the minimum), and every child is then
     /// aligned in the *whole* box independently.
     fn arrange_elements(&mut self) {
-        // `super.arrangeElements()` — see `GridLayout`'s.
+        // super's arrange elements — see `GridLayout`'s.
         for child in &mut self.children {
             child.child.arrange_elements();
         }
@@ -1049,24 +1049,24 @@ impl LinearLayout {
         self
     }
 
-    /// `newCellSettings()`.
+    /// new cell settings.
     #[must_use]
     pub fn new_cell_settings(&self) -> LayoutSettings {
         self.wrapped.new_cell_settings()
     }
 
-    /// `defaultCellSetting()`.
+    /// default cell setting.
     pub fn default_cell_setting(&mut self) -> &mut LayoutSettings {
         self.wrapped.default_cell_setting()
     }
 
-    /// `addChild(child)`.
+    /// add child.
     pub fn add_child(&mut self, child: Box<dyn LayoutElement>) {
         let settings = self.new_cell_settings();
         self.add_child_settings(child, settings);
     }
 
-    /// `addChild(child, cellSettings)`.
+    /// add child.
     pub fn add_child_settings(&mut self, child: Box<dyn LayoutElement>, settings: LayoutSettings) {
         let index = self.next_child_index;
         self.next_child_index += 1;
@@ -1138,7 +1138,7 @@ pub const CONTENT_MARGIN_TOP: f32 = 30.0;
 /// [`FrameLayout`]s — header pinned at the top, footer pinned at the bottom,
 /// content between them.
 ///
-/// It is the base of `OptionsSubScreen`, so **every** settings sub-screen
+/// It is the base of the options sub screen, so **every** settings sub-screen
 /// inherits it; it is defined before another consumer needs it because its
 /// arithmetic is expensive to rediscover and easy to get subtly wrong. The
 /// unit tests keep that behavior executable and reviewable.
@@ -1199,19 +1199,19 @@ impl HeaderAndFooterLayout {
         }
     }
 
-    /// `getHeaderHeight()`.
+    /// get header height.
     #[must_use]
     pub fn header_height(&self) -> f32 {
         self.header_height as f32
     }
 
-    /// `setHeaderHeight(int)`.
+    /// set header height.
     #[cfg(test)]
     pub fn set_header_height(&mut self, height: f32) {
         self.header_height = ipx(height);
     }
 
-    /// `getFooterHeight()`.
+    /// get footer height.
     #[must_use]
     pub fn footer_height(&self) -> f32 {
         self.footer_height as f32
@@ -1223,23 +1223,23 @@ impl HeaderAndFooterLayout {
         self.footer_height = ipx(height);
     }
 
-    /// `getContentHeight()`: what is left of the screen between the two bands.
+    /// get content height: what is left of the screen between the two bands.
     #[must_use]
     pub fn content_height(&self) -> f32 {
         (self.screen_height - self.header_height - self.footer_height) as f32
     }
 
-    /// `addToHeader(child)`.
+    /// add to header.
     pub fn add_to_header(&mut self, child: Box<dyn LayoutElement>) {
         self.header.add_child(child);
     }
 
-    /// `addToContents(child)`.
+    /// add to contents.
     pub fn add_to_contents(&mut self, child: Box<dyn LayoutElement>) {
         self.contents.add_child(child);
     }
 
-    /// `addToFooter(child)`.
+    /// add to footer.
     pub fn add_to_footer(&mut self, child: Box<dyn LayoutElement>) {
         self.footer.add_child(child);
     }
@@ -1280,7 +1280,7 @@ impl LayoutElement for HeaderAndFooterLayout {
         self.screen_width as f32
     }
 
-    /// `getHeight()` is the screen's height (`:59-62`).
+    /// get height is the screen's height (`:59-62`).
     fn height(&self) -> f32 {
         self.screen_height as f32
     }
@@ -1292,7 +1292,7 @@ impl LayoutElement for HeaderAndFooterLayout {
     /// `setY` is likewise empty (`:40-42`).
     fn set_y(&mut self, _y: f32) {}
 
-    /// `HeaderAndFooterLayout.arrangeElements` (`:98-115`).
+    /// HeaderAndFooterLayout's arrange elements (`:98-115`).
     ///
     /// The order matters twice: the header is *positioned* before it is arranged
     /// (children are placed relative to the frame's own origin), and the footer is
@@ -1423,17 +1423,17 @@ impl LayoutElement for SpacerElement {
 
 // -- the tab widget's row geometry ------------------------------
 //
-// `MenuTabBar.arrangeElements` — not a
-// `LayoutElement`, unlike everything above: a `MenuTabBar` positions its own
+// The menu tab bar's arrange elements — not a
+// `LayoutElement`, unlike everything above: a menu tab bar positions its own
 // children directly rather than through `LinearLayout`/`GridLayout`
 // arithmetic, so this is transcribed as a free function instead of a type.
 
-/// `MenuTabBar.HEIGHT`.
+/// The menu tab bar's height.
 pub const TAB_BAR_HEIGHT: f32 = 24.0;
-/// `MenuTabBar.MAX_WIDTH` (`:18`).
+/// The menu tab bar's max width (`:18`).
 const TAB_BAR_MAX_WIDTH: f32 = 400.0;
 
-/// `Mth.roundToward(int, int)`: round `value` **up** to
+/// Mth's round toward: round `value` **up** to
 /// the nearest multiple of `multiple`, via `positiveCeilDiv`.
 ///
 /// Transcribed for the `f32` geometry this crate uses everywhere else rather
@@ -1449,7 +1449,7 @@ pub fn round_toward(value: f32, multiple: f32) -> f32 {
     (value / multiple).ceil() * multiple
 }
 
-/// `MenuTabBar.arrangeElements(width)`: the tab
+/// The menu tab bar's arrange elements: the tab
 /// row's own left edge and each tab's (equal) width, for `tab_count` tabs
 /// spread across a canvas `width` px wide.
 ///
@@ -1499,7 +1499,7 @@ mod tests {
 
     #[test]
     fn set_x_is_padding_aware_not_a_naive_centre() {
-        // `AbstractLayout.AbstractChildWrapper::setX`
+        // The abstract layout's abstract child wrapper::setX
         // interpolates between `paddingLeft` and
         // `availableSpace - child.width - paddingRight`, so padding *biases* the
         // alignment rather than shrinking a box that is then centred.
@@ -1538,7 +1538,7 @@ mod tests {
 
     #[test]
     fn frame_children_default_to_centred_and_grid_children_to_top_left() {
-        // vanilla's own frame-layout type vs vanilla's own grid-layout type. Getting this backwards
+        // vanilla's frame-layout type vs vanilla's grid-layout type. Getting this backwards
         // moves an entire screen and looks intentional in a screenshot.
         let mut frame = FrameLayout::with_min_size(100.0, 100.0);
         frame.add_child(cell(20.0, 20.0));
@@ -1593,7 +1593,7 @@ mod tests {
 
     #[test]
     fn divisor_matches_mojangs_bresenham_sequence() {
-        // vanilla's own divisor helper's own source file. The remainder goes to the *later*
+        // vanilla's divisor helper's source file. The remainder goes to the *later*
         // parts, and the parts always sum back to the numerator — which is what
         // stops a spanning cell from being a pixel wider or narrower than its
         // columns.
@@ -1669,7 +1669,7 @@ mod tests {
 
     #[test]
     fn row_helper_wraps_and_abandons_the_rest_of_the_row() {
-        // `GridLayout.RowHelper.addChild`. Two
+        // RowHelper's add child. Two
         // columns: a 1-wide child, then a 2-wide one that cannot fit beside it,
         // then another 1-wide. The 2-wide starts a new row, and `roundToward`
         // pushes the *third* child to the row after that rather than beside the
@@ -1695,7 +1695,7 @@ mod tests {
 
     #[test]
     fn nested_layouts_are_arranged_before_the_parent_measures_them() {
-        // `Layout.arrangeElements`'s default body recurses
+        // Layout's arrange elements's default body recurses
         // first. Without it a nested container measures 0×0 and every column it
         // is in collapses — which looks like a missing widget, not a missing
         // recursion.
@@ -1716,7 +1716,7 @@ mod tests {
 
     #[test]
     fn visit_children_yields_the_children_where_visit_widgets_yields_the_leaves() {
-        // `Layout.visitChildren` yields the immediate children — a nested layout
+        // Layout's visit children yields the immediate children — a nested layout
         // counts as *one* — while `visitWidgets` recurses to the leaves
         //. Both readings are load-bearing: the pause
         // screen's icon row is one grid cell and four drawable buttons.
@@ -1734,7 +1734,7 @@ mod tests {
         assert_eq!(children, 2, "the nested row is one child");
         assert_eq!(widget_rects(&outer).len(), 4, "and four leaves");
 
-        // The mutable walk is what `AbstractLayout.setX` uses, so moving every
+        // The mutable walk is what abstract layout's set x uses, so moving every
         // child through it has to move the nested row's leaves too.
         outer.visit_children_mut(&mut |child| {
             let x = child.x();
@@ -1746,9 +1746,9 @@ mod tests {
 
     #[test]
     fn moving_a_layout_moves_its_children_by_the_same_delta() {
-        // `AbstractLayout.setX`/`setY`. This is the
+        // The abstract layout's set x/`setY`. This is the
         // mechanism that positions an already-arranged nested layout, and the one
-        // `FrameLayout.alignInRectangle` uses on a whole screen's tree.
+        // FrameLayout's align in rectangle uses on a whole screen's tree.
         let mut row = LinearLayout::horizontal().spacing(4);
         for _ in 0..2 {
             row.add_child(cell(20.0, 20.0));
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[test]
     fn align_in_rectangle_truncates_the_offset_before_adding_the_origin() {
-        // `FrameLayout.alignInDimension`. This is
+        // FrameLayout's align in dimension. This is
         // the *screen*-level align, distinct from a cell's padding-aware one.
         let mut block = LinearLayout::vertical();
         block.add_child(cell(200.0, 20.0));
@@ -1785,7 +1785,7 @@ mod tests {
 
     #[test]
     fn header_is_pinned_top_footer_bottom_and_content_prefers_a_thirty_pixel_gap() {
-        // `HeaderAndFooterLayout.arrangeElements` (`:98-115`), both branches of
+        // HeaderAndFooterLayout's arrange elements (`:98-115`), both branches of
         // the clamp. Screen 400×200, default 33 px bands.
         let mut layout = HeaderAndFooterLayout::new(400.0, 200.0);
         layout.add_to_header(cell(100.0, 9.0));
@@ -1869,7 +1869,7 @@ mod tests {
 
     #[test]
     fn a_spacer_occupies_space_and_reaches_no_widget_list() {
-        // `SpacerElement.visitWidgets` is empty, so
+        // SpacerElement's visit widgets is empty, so
         // a spacer is measured and never drawn. This is the mechanism, not an
         // accident of having no art.
         let mut column = LinearLayout::vertical();
@@ -1921,7 +1921,7 @@ mod tests {
 
     #[test]
     fn remove_children_empties_a_layout_and_resets_a_linears_index() {
-        // `LinearLayout.removeChildren` also resets `nextChildIndex` (`:50-54`);
+        // LinearLayout's remove children also resets `nextChildIndex` (`:50-54`);
         // without that, refilling a layout would leave the first rows empty.
         let mut column = LinearLayout::vertical().spacing(4);
         column.add_child(cell(200.0, 20.0));
@@ -1969,8 +1969,8 @@ mod tests {
     /// tree measures against. Hand-derived from vanilla's own menu-tab-bar type
     /// rather than round-tripped through [`tab_bar_geometry`] itself:
     /// `tabsWidth = min(400, 854) - 28 = 372`, `tabWidth =
-    /// roundToward(372 / 3, 2) = roundToward(124, 2) = 124`, `startX =
-    /// roundToward((854 - 372) / 2, 2) = roundToward(241, 2) = 242`.
+    /// round toward = round toward = 124`, `startX =
+    /// round toward((854 - 372) / 2, 2) = round toward = 242`.
     #[test]
     fn tab_bar_geometry_matches_vanillas_own_arithmetic_at_854_wide() {
         let (start_x, tab_width) = tab_bar_geometry(854.0, 3);

@@ -282,7 +282,7 @@ pub(crate) fn profile_skin_url(profile: &lodestone_model::ItemProfile) -> Option
 /// the model-layer stack decoded directly from `SET_EQUIPMENT`.
 #[must_use]
 pub(crate) fn stack_skin_url(stack: &lodestone_game::item::ItemStack) -> Option<Arc<str>> {
-    // Match PlayerHeadSpecialRenderer.extractArgument: `PROFILE` is read by
+    // Match player head special renderer's extract argument: `PROFILE` is read by
     // the player-head item renderer, not by every arbitrary stack that happens
     // to carry that data component. The item-model component may replace only
     // the client definition lookup; the underlying player-head item remains
@@ -758,7 +758,7 @@ fn pop_squeeze_rect(x: f32, y: f32, size: f32, pop: f32) -> [f32; 4] {
 /// three, this does not), not a decode-parity claim.
 ///
 /// The durability bar and stack count draw **unsquashed**, at the original
-/// `(x, y, size)` — vanilla's own `graphics.itemDecorations` call sits after
+/// `(x, y, size)` — vanilla's own graphics's item decorations call sits after
 /// the pose is popped, outside the transform, and
 /// [`draw_item_icon_counted`] already draws that tail at squeeze `1.0`; this
 /// duplicates just that tail rather than sharing it, so this function stays
@@ -1312,7 +1312,7 @@ impl ColourStream<'_> {
     /// edge). The GPU interpolates per-vertex colour across each triangle, so
     /// this needs no second pipeline — just two colours instead of one at emit
     /// time. Used for vanilla's translucent dim behind an open container screen
-    /// (`AbstractContainerScreen::extractTransparentBackground`, a
+    /// (the abstract container screen's extract transparent background, a
     /// `fillGradient`, not a flat fill — see `container.rs`'s own doc comment).
     pub(crate) fn gradient_rect(
         &mut self,
@@ -2117,7 +2117,7 @@ pub(crate) fn build_sprite_pipeline(
 }
 
 /// This frame's [`GuiGlintUniform`], at the player's **Glint Speed** and **Glint
-/// Strength** (vanilla's own options type, two `UnitDouble`s defaulting to `0.5` and
+/// Strength** (vanilla's own options type, two unit doubles defaulting to `0.5` and
 /// `0.75`).
 ///
 /// The clock is wall-clock milliseconds, vanilla's own millisecond-clock
@@ -3529,7 +3529,7 @@ mod pop_tests {
     }
 
     /// Predicted value at the instant a stack lands (`pop == 5.0`, vanilla's
-    /// `setPopTime(5)`): `squeeze = 1 + 5/5 = 2.0`, `scale_x = 0.5`,
+    /// set pop time): `squeeze = 1 + 5/5 = 2.0`, `scale_x = 0.5`,
     /// `scale_y = 1.5`. Pivot at `(x+8, y+12) = (18, 32)` (scale `16/16 ==
     /// 1.0`). `new_x = 18 + (10-18)*0.5 = 14`, `new_y = 32 + (20-32)*1.5 =
     /// 14`, `w = 16*0.5 = 8`, `h = 16*1.5 = 24`.
@@ -3616,7 +3616,7 @@ mod pop_tests {
     ///
     /// The subject colour is vanilla's own `lily_pad` **item** tint,
     /// `0x71C35C` — deliberately not the *block* tint `0x208030`, which is a
-    /// different colour for the same plant. Vanilla never consults `BlockColors`
+    /// different colour for the same plant. Vanilla never consults block colors
     /// for an item, so a wiring that reached for the block table would land here
     /// on visibly wrong numbers rather than merely on a different code path.
     #[test]
@@ -3914,7 +3914,7 @@ mod tint_wiring_tests {
                 0x88_99AA,
             ),
             // The dye control: an undyed leather item resolves to
-            // vanilla's own dyed-item leather-colour constant, vanilla's own definition default.
+            // vanilla's dyed-item leather-colour constant, vanilla's definition default.
             (
                 "undyed_leather_default",
                 dye_layer(),

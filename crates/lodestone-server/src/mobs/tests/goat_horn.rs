@@ -14,7 +14,7 @@ fn flat_world() -> ChunkWorld {
 
 /// **Real arithmetic, not merely "sometimes true"**: over a large sample,
 /// the fraction of goats spawned missing a horn must land near
-/// vanilla's own goat spawn-finalization's own `0.1` roll — bounded generously (5%–15%
+/// vanilla's goat spawn-finalization's `0.1` roll — bounded generously (5%–15%
 /// over 2,000 trials) since this crate's `SpawnRng` is not a
 /// bit-identical port of `java.util.Random` (a disclosed approximation
 /// already established elsewhere in this crate, e.g. `raid::bonus_spawns`).

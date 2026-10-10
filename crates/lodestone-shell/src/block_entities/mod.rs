@@ -65,8 +65,8 @@
 //!   which is the common case.
 //!
 //! What the list *is* good for is being the **set of positions worth looking
-//! at** — exactly how vanilla's `BlockEntityRenderDispatcher` iterates
-//! `level.getBlockEntities()` rather than scanning blocks. The appearance then
+//! at** — exactly how vanilla's block entity render dispatcher iterates
+//! level's get block entities rather than scanning blocks. The appearance then
 //! comes from the block state at that position, via
 //! [`lodestone_data::block_states`]: the block name gives the material and the
 //! `facing`/`type` properties give the rotation and half. That keeps the cost
@@ -163,10 +163,10 @@ fn known_state_id(raw: u32) -> StateId {
 /// at 64.0 and at 63.1.
 pub const VIEW_DISTANCE: f32 = 64.0;
 
-/// Vanilla's `ChestLidController` ramp, per tick.
+/// Vanilla's chest lid controller ramp, per tick.
 const LID_SPEED: f32 = 0.1;
 
-/// One chest's lid state — `ChestLidController`'s three fields.
+/// One chest's lid state — the chest lid controller's three fields.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Lid {
     should_be_open: bool,
@@ -416,7 +416,7 @@ impl GatewayCooldowns {
     }
 
     /// Advances every cooldown one client tick, dropping the finished ones —
-    /// `beamAnimationTick`'s `if (isCoolingDown()) teleportCooldown--`.
+    /// `beamAnimationTick`'s `if (is_cooling_down()) teleportCooldown--`.
     pub fn tick(&mut self) {
         self.cooldowns.retain(|_, ticks| {
             *ticks -= 1;
@@ -460,7 +460,7 @@ const SPAWNER_DEFAULT_MIN_SPAWN_DELAY: f32 = 200.0;
 #[derive(Debug, Clone, PartialEq)]
 struct SpawnerData {
     /// `None` when neither `SpawnData` nor the first `SpawnPotentials` entry
-    /// carries an `entity.id` — vanilla's own get-or-create-display-entity's own
+    /// carries an `entity.id` — vanilla's get-or-create-display-entity's
     /// "nothing to draw" case (an empty entity-id string).
     entity_type: Option<String>,
     min_spawn_delay: f32,
@@ -525,7 +525,7 @@ fn spawn_data_entity_id(spawn_data: &lodestone_core::Nbt) -> Option<String> {
 ///   (vanilla's own trial-spawner-state-data update-tag writes only `spawn_data` and
 ///   `next_mob_spawns_at`). A trial spawner nobody has stood near long
 ///   enough to roll a `spawn_data` therefore has no display entity, matching
-///   vanilla's own get-or-create-display-entity's own empty-entity-id-string
+///   vanilla's get-or-create-display-entity's empty-entity-id-string
 ///   miss.
 /// * **`min_spawn_delay`**: `MinSpawnDelay`, mob-spawner-only —
 ///   [`SPAWNER_DEFAULT_MIN_SPAWN_DELAY`] otherwise, which covers the trial
@@ -625,7 +625,7 @@ fn spawner_mob_scale(entity_type: &str) -> f32 {
     }
 }
 
-/// One spawner/trial-spawner's spin state — `BaseSpawner`'s `spin`/`oSpin`
+/// One spawner/trial-spawner's spin state — the base spawner's `spin`/`oSpin`
 /// plus `spawnDelay`, the fields `clientTick` reads and writes every tick.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Spin {
@@ -660,7 +660,7 @@ impl Default for Spin {
 /// `MinSpawnDelay`) rather than the packet stream alone — see
 /// [`Self::tick`]/[`spawner_tick_candidates`].
 ///
-/// # Simplifications from the real `BaseSpawner`
+/// # Simplifications from the real base spawner
 ///
 /// * **Local player only**, for `isNearPlayer` — the same simplification
 ///   [`EnchantingTableBooks::tick`]'s own doc records for its nearest-player
@@ -677,11 +677,11 @@ impl Default for Spin {
 ///   folding them keeps [`Self::tick`] a single `if` rather than three arms.
 /// * **The trial spawner's real spin-rate formula is not ported.**
 ///   Vanilla's own trial-spawner client tick computes its spawn delay from
-///   `max(0, nextMobSpawnsAt - level.getGameTime())` — a difference against
+///   `max(0, nextMobSpawnsAt - level.get_game_time())` — a difference against
 ///   the **server's** absolute world age, which this client does not track
 ///   in sync with the server's clock (the local tick counter
 ///   [`Sim::beacon_source`] uses for its own scroll cycle is a *local*
-///   count, not `level.getGameTime()`, and the two drift apart from the
+///   count, not level's get game time, and the two drift apart from the
 ///   moment of login). Porting the real formula would need that sync built
 ///   first. Trial spawners share the mob spawner's decrementing-counter
 ///   envelope instead (`spawn_delay` counts down from
@@ -753,7 +753,7 @@ impl SpawnerSpins {
 
     /// This tick's raw `(previous, spin)` pair for `pos` — `(0.0, 0.0)` for an
     /// untracked position, matching a spawner nobody has been near yet
-    /// (`BaseSpawner`'s own fields start at `0.0`).
+    /// (the base spawner's own fields start at `0.0`).
     #[must_use]
     fn raw(&self, pos: [i32; 3]) -> (f32, f32) {
         match self.spins.get(&pos) {
@@ -968,7 +968,7 @@ mod spawner_tests {
     }
 
     /// With no `SpawnData`, the first `SpawnPotentials` entry's `data.entity.id`
-    /// is the fallback — vanilla's own get-or-create-next-spawn-data's own order.
+    /// is the fallback — vanilla's get-or-create-next-spawn-data's order.
     #[test]
     fn spawner_data_falls_back_to_the_first_spawn_potential() {
         let potentials = lodestone_core::Nbt::List {
@@ -1019,8 +1019,8 @@ mod spawner_tests {
         assert_eq!(trial_spawner_spin_speed(trial_spawner_state("active")), Some(1000.0));
     }
 
-    /// The four non-spinning states all miss — `hasSpinningMob()`'s own
-    /// `spinningMobSpeed() >= 0.0` gate, ported as a `None`.
+    /// The four non-spinning states all miss — has spinning mob's own
+    /// `spinning_mob_speed() >= 0.0` gate, ported as a `None`.
     #[test]
     fn trial_spawner_spin_speed_is_none_for_every_non_spinning_state() {
         for state in [
@@ -1150,7 +1150,7 @@ mod spawner_tests {
 /// shelf does not open its book.
 const ENCHANTING_TABLE_PLAYER_RADIUS: f64 = 3.0;
 
-/// One enchanting table's book animation — `EnchantingTableBlockEntity`'s ten
+/// One enchanting table's book animation — the enchanting table block entity's ten
 /// public animation fields, none of which are on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct Book {
@@ -1816,7 +1816,7 @@ pub fn bell_spawns(
 /// nothing and draw every box undyed.
 ///
 /// `facing` defaults to [`ShulkerFacing::Up`] when the property is missing, which
-/// is vanilla's own shulker-box render-state extraction's own facing-property
+/// is vanilla's shulker-box render-state extraction's facing-property
 /// default of up
 /// — unlike a chest, where a missing `facing` is treated as a failure, because a
 /// shulker box genuinely has a sensible default and vanilla uses it.
@@ -2030,7 +2030,7 @@ fn campfire_facing_yaw(state_id: u32) -> Option<f32> {
 }
 
 /// Resolve one loaded block-entity position into the source consumed by
-/// `CampfireBlockEntity::particleTick`: its block position and whether hay
+/// The campfire block entity's particle tick: its block position and whether hay
 /// underneath turns the plume into signal smoke.
 ///
 /// The block state is authoritative. A stale campfire block-entity record at a
@@ -2169,8 +2169,8 @@ fn campfire_smoke_sources_from_loaded_world(
 /// matter to the camera.
 ///
 /// This deliberately walks the decoded block-entity list rather than the
-/// random nearby-block sampler used for `Block::animateTick`. In 26.2 the main
-/// plume belongs to `CampfireBlockEntity::particleTick`, so every loaded
+/// random nearby-block sampler used for Block's animate tick. In 26.2 the main
+/// plume belongs to the campfire block entity's particle tick, so every loaded
 /// campfire in the normal block-entity render range gets one probability roll
 /// per client tick, independent of its distance from the player's current
 /// random-scan cube.
@@ -2197,10 +2197,10 @@ pub fn campfire_smoke_sources(
 /// slot, so a lit but empty campfire yields none.
 ///
 /// Unlike every other gather in this module this feeds the *model* pipeline
-/// rather than the entity one: `CampfireRenderer` owns no mesh and no sheet, only
+/// rather than the entity one: the campfire renderer owns no mesh and no sheet, only
 /// four item poses. See `lodestone_render::campfire_item_matrix`.
 ///
-/// No clock and no partial tick — vanilla's `CampfireRenderer` has no animation
+/// No clock and no partial tick — vanilla's campfire renderer has no animation
 /// at all (the flame flicker is the block model's animated texture, and the
 /// `CookingTimes` in the NBT drive nothing on the client). Installed per frame
 /// anyway, for `Sim::skull_source`'s reason.
@@ -2354,7 +2354,7 @@ mod campfire_smoke_tests {
 ///
 /// **This used to return a bool and decline hanging signs outright**, on the
 /// recorded belief that they needed "a different model set again (chains, a
-/// bar)". They do not: 26.2's `HangingSignRenderer` declares no model, and
+/// bar)". They do not: 26.2's hanging sign renderer declares no model, and
 /// the chains and bar are real block-model geometry the terrain mesher
 /// already draws. See [`SignKind`]'s own doc for the measurement.
 #[must_use]
@@ -2558,7 +2558,7 @@ fn banner_colour(state_id: u32) -> Option<(DyeColor, bool)> {
 
 /// How a banner is attached, read off the property its own block actually has.
 ///
-/// A standing banner has `rotation` (`RotationSegment`, `0..16`, `22.5` degrees a
+/// A standing banner has `rotation` (the rotation segment, `0..16`, `22.5` degrees a
 /// step) and a wall banner has `facing` (four horizontals, `90` degrees a step) —
 /// **neither has the other's**, so this is a fork on which block it is rather than
 /// a property lookup that tries both. Reading `rotation` off a wall banner finds
@@ -3019,7 +3019,7 @@ fn is_water_block(state_id: u32) -> bool {
     })
 }
 
-/// `ConduitBlockEntity.VALID_BLOCKS` — the four frame block identities
+/// The conduit block entity's valid blocks — the four frame block identities
 /// [`conduit_frame_scan`]'s 5×5×5 pass counts.
 #[must_use]
 fn is_conduit_frame_block(state_id: u32) -> bool {
@@ -3091,7 +3091,7 @@ pub fn conduit_scan_frame(handle: &SharedHandle, pos: [i32; 3]) -> ConduitFrame 
 /// merely *close* to vanilla's costs nothing visible.
 const CONDUIT_FRAME_RESCAN_INTERVAL_TICKS: u32 = 40;
 
-/// One conduit's client-side animation clock — `ConduitBlockEntity`'s own
+/// One conduit's client-side animation clock — the conduit block entity's own
 /// `tickCount`/`activeRotation` counters, plus the last [`ConduitFrame`] scan.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ConduitClock {
@@ -3302,7 +3302,7 @@ impl PistonMoves {
         }
     }
 
-    /// The interpolated progress at `pos` — `getProgress(a)`, i.e.
+    /// The interpolated progress at `pos` — get progress, i.e.
     /// `lerp(a, progressO, progress)`.
     ///
     /// `None` for an untracked position. That is **not** the same "absent equals
@@ -3424,7 +3424,7 @@ fn moving_piston_nbt(nbt: &lodestone_core::Nbt) -> Option<MovingPistonNbt> {
         return None;
     };
     let direction = direction_step_from_3d(*facing)?;
-    // Vanilla's `getFloatOr("progress", 0.0F)`: a missing progress is the start of
+    // Vanilla's get float or: a missing progress is the start of
     // the travel, which is a real state rather than a decode failure.
     let progress = match field("progress") {
         Some(Nbt::Float(v)) => *v,
@@ -3589,7 +3589,7 @@ pub fn moving_piston_seeds(handle: &SharedHandle) -> Vec<([i32; 3], f32)> {
     out
 }
 
-/// Every moving piston to draw this frame — vanilla's `PistonHeadRenderer`.
+/// Every moving piston to draw this frame — vanilla's piston head renderer.
 ///
 /// Feeds neither the entity pipeline (no `bakeLayer`, so no rig) nor the item path
 /// (not an item), but the **moving-block-model** seam falling blocks use: see
@@ -3597,12 +3597,12 @@ pub fn moving_piston_seeds(handle: &SharedHandle) -> Vec<([i32; 3], f32)> {
 ///
 /// # Where each of the two light samples comes from
 ///
-/// `extractRenderState` computes `pos = getBlockPos().relative(
-/// getMovementDirection().getOpposite())` and samples light there, one cell *back*
+/// `extractRenderState` computes `pos = get block pos.relative(
+/// get movement direction's get opposite)` and samples light there, one cell *back*
 /// along the push. That is not a detail: the block entity's own cell is full of
 /// `moving_piston`, and the cell behind it is the air (or the piston base) the
 /// geometry is actually travelling out of. The base's sample is taken at
-/// `pos.relative(getMovementDirection())`, which for the retracting case arm 2
+/// `pos.relative(get_movement_direction())`, which for the retracting case arm 2
 /// serves collapses back to the block entity's own cell.
 #[must_use]
 pub fn moving_piston_spawns(
@@ -3663,7 +3663,7 @@ pub fn moving_piston_spawns(
         let Some((state_id, base_state_id)) = moving_piston_states(&decoded, progress) else {
             continue;
         };
-        // `getMovementDirection()` is `extending ? direction : -direction`, so its
+        // get movement direction is `extending ? direction : -direction`, so its
         // opposite — the cell vanilla samples light at — is `-direction` while
         // extending and `+direction` while retracting.
         let back = if decoded.extending { -1 } else { 1 };
@@ -4524,7 +4524,7 @@ mod shulker_tests {
 
     /// Every `FACING` value resolves, including the two vertical ones a chest
     /// cannot have — and a state with no `facing` at all takes vanilla's own
-    /// `getValueOrElse(FACING, UP)` default rather than failing.
+    /// get value or else default rather than failing.
     #[test]
     fn every_facing_resolves_and_a_missing_one_defaults_to_up() {
         let mut seen = std::collections::HashSet::new();
@@ -4940,7 +4940,7 @@ mod shulker_tests {
     }
 }
 
-/// Moving-piston gates — `PistonHeadRenderer` and `PistonMovingBlockEntity`.
+/// Moving-piston gates — the piston head renderer and the piston moving block entity.
 ///
 /// Its own module for the same reason `sign_tests` is: this file is shared, and a
 /// per-renderer module keeps the pathspec commit and the failure output honest
@@ -5614,7 +5614,7 @@ pub fn beacon_spawns(handle: &SharedHandle, eye: Vec3, game_time: i64, partial_t
 
 /// Every end portal within [`VIEW_DISTANCE`], resolved into an
 /// [`EndPortalSpawn`] — the end-portal sibling of [`beacon_spawns`]. No
-/// per-position tracker and no NBT read at all: `TheEndPortalBlockEntity.
+/// per-position tracker and no NBT read at all: the the end portal block entity.
 /// shouldRenderFace` never consults world state or NBT for this type (see
 /// `lodestone_render::end_portal`'s module doc), so the only thing worth
 /// gathering is *where* one is.
@@ -5648,7 +5648,7 @@ pub fn end_portal_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<EndPortalSpawn
 /// Vanilla's own should-render-face check, restated over
 /// this crate's own "does this state fully block light" census
 /// (`lodestone_data::light_props::dampening(state) >= 15`) rather than the
-/// real jar's `VoxelShape` face-occlusion cache — the same stand-in
+/// real jar's voxel shape face-occlusion cache — the same stand-in
 /// [`beacon_beam_scan`] already trusts for "does this block stop the beam".
 /// A full opaque cube and a full light-blocking state coincide for every
 /// block that could plausibly neighbor a gateway (obsidian, bedrock, stone,
@@ -6312,7 +6312,7 @@ mod brushable_tests {
 /// name check is a suffix test rather than a fixed list, matched against
 /// `_shelf` (**with** the leading underscore) so it does not also catch
 /// `minecraft:bookshelf`/`minecraft:chiseled_bookshelf`, two unrelated
-/// blocks (`bookshelf` has no `ShelfBlockEntity` at all; `chiseled_bookshelf`
+/// blocks (`bookshelf` has no shelf block entity at all; `chiseled_bookshelf`
 /// is its own block entity with no renderer registration — see this module's
 /// top-of-file doc for the "23 with no renderer" census).
 #[must_use]
@@ -6618,12 +6618,12 @@ fn copper_golem_statue_pose(state_id: u32) -> Option<CopperGolemPose> {
     })
 }
 
-/// The block's oxidation level, from its registry name — `WeatheringCopper
+/// The block's oxidation level, from its registry name — the weathering copper
 /// .getPreviousState`'s own four-level chain, restated as a name-prefix
 /// match the way [`chest_material`] already does for copper chest variants.
 /// `waxed_` is stripped first: waxing halts further weathering but does not
 /// change which of the four textures a statue currently uses
-/// (`CopperGolemOxidationLevels` has no fifth, waxed-specific entry).
+/// (the copper golem oxidation levels has no fifth, waxed-specific entry).
 #[must_use]
 fn copper_golem_statue_oxidation(state_id: u32) -> Option<CopperGolemOxidation> {
     let name = lodestone_data::block_states::block_name(state_id)?;
@@ -6760,9 +6760,9 @@ mod copper_golem_statue_tests {
 
 // --- end gateway teleport beam --------------------------------------------
 
-/// A generic stand-in for `level.getMaxY()` — the real dimension height the
-/// spawning arm's beam grows toward (`beamDistance = isSpawning() ?
-/// level.getMaxY() : 50.0`). This client resolves a dimension's real height
+/// A generic stand-in for level's get max y — the real dimension height the
+/// spawning arm's beam grows toward (`beamDistance = is_spawning() ?
+/// Level's get max y : 50.0`). This client resolves a dimension's real height
 /// through world data already loaded, not through this gather, and threading
 /// it in is not worth the plumbing for an effect visible for ~10 seconds per
 /// gateway lifetime — a deliberate simplification, the same shape
@@ -6823,15 +6823,15 @@ fn end_gateway_beam_candidates<'a>(
 /// Every end gateway's teleport beam to draw this frame — vanilla's own
 /// end-gateway render submission's call into the shared beacon-beam
 /// submission,
-/// shown while `isSpawning()` (real `Age` NBT, read fresh each frame — a
+/// shown while is spawning (real `Age` NBT, read fresh each frame — a
 /// **stateless** per-frame computation, unlike `teleportCooldown` below)
-/// or `isCoolingDown()` (`cooldowns`, [`GatewayCooldowns`] — a real
+/// or is cooling down (`cooldowns`, [`GatewayCooldowns`] — a real
 /// per-position, `BLOCK_EVENT`-driven tracker, ticked once per client tick
 /// in `Sim::step` and captured here at install time like [`bell_spawns`]).
 ///
 /// **Why `age` is not itself tracked locally, unlike `teleportCooldown`**:
 /// `getUpdateTag` (`Age`'s only path to the client) is sent on initial load
-/// and again whenever `spawning != isSpawning()` flips — rare, not every
+/// and again whenever `spawning != is_spawning()` flips — rare, not every
 /// tick — so a purely-tracked local clock would need to be *seeded* from
 /// that NBT with no channel to do so (the render-source closure captures an
 /// owned snapshot each frame; it cannot write back into a tracker). Reading
@@ -6921,7 +6921,7 @@ mod end_gateway_beam_tests {
         assert!(5 < 200, "age 5 must read as spawning");
     }
 
-    /// No `Age` field at all reads as `0`, matching `getLongOr("Age", 0L)`.
+    /// No `Age` field at all reads as `0`, matching get long or.
     #[test]
     fn missing_age_defaults_to_zero() {
         let nbt = lodestone_core::Nbt::Compound(vec![]);

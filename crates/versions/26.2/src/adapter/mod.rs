@@ -189,11 +189,11 @@ pub struct V770Adapter {
 ///
 /// # Why any state is needed here at all
 ///
-/// 26.2's `set_time` is `(gameTime, Map<Holder<WorldClock>, ClockNetworkState>)`,
+/// 26.2's `set_time` is `(game time, map of world-clock holder → clock network state)`,
 /// and the map is **empty in almost every packet**: the once-a-second
-/// `MinecraftServer::forceGameTimeSynchronization` sends `an empty/literal map()`, while
-/// `ServerClockManager::modifyClock` sends a one-entry map only when a clock
-/// changes and `createFullSyncPacket` sends the full map once, at join. So a
+/// server's forced game-time synchronisation sends an empty map, while
+/// the clock manager's modify step sends a one-entry map only when a clock
+/// changes and the full-sync packet sends the full map once, at join. So a
 /// stateless adapter has no day time to report for 19 packets out of 20, and the
 /// previous code filled that hole with the monotonic world age — which pinned
 /// `sky_darken_for_time_of_day` to one value for the whole session. See
@@ -508,14 +508,14 @@ impl V770Adapter {
     /// produces, and updates the send-tracking state accordingly.
     ///
     /// Mirrors vanilla's own client-side position-send tick exactly (see
-    /// `ServerboundMovePlayerPacket` for the wire shapes it selects between):
+    /// the move-player packet for the wire shapes it selects between):
     /// position is "dirty" when the squared distance from the last **sent**
     /// position exceeds `(2e-4)²`, or every 20 ticks regardless of movement
     /// (the periodic forced update); rotation is dirty on *any* nonzero yaw
     /// or pitch delta from the last sent rotation. Both-dirty sends
-    /// `PosRot`; position-only sends `Pos`; rotation-only sends `Rot`;
+    /// position+rotation; position-only sends position; rotation-only sends rotation;
     /// neither, but on-ground or horizontal-collision changed since last
-    /// tick, sends `StatusOnly`; otherwise nothing is sent this tick — a
+    /// tick, sends status-only; otherwise nothing is sent this tick — a
     /// deliberate, vanilla-faithful `None`, not a bug.
     ///
     /// `on_ground` and `horizontal_collision` are simulation outputs

@@ -52,8 +52,8 @@ pub fn banner_body_model() -> EntityModelDef {
 ///
 /// One part, one box — deliberately a single rigid box rather than the
 /// per-vertex cloth-wave geometry an earlier pass through this doc
-/// (mistakenly) assumed vanilla has. `BannerFlagModel.setupAnim` poses only
-/// `flag.xRot`, a single per-part rotation
+/// (mistakenly) assumed vanilla has. The banner flag's animation poses only
+/// the flag's X rotation, a single per-part rotation
 /// (`lodestone_render::block_entity::banner_flag_x_rot`) —
 /// [`BlockEntityMesh::part_transforms`](crate::block_entity)'s override
 /// mechanism (already used by the chest lid and the bell body) is the right
@@ -131,7 +131,7 @@ pub fn banner_wall_body_model() -> EntityModelDef {
 /// sway is *itself* a pose override, and stacking a second, static override on the
 /// same part is how the two silently start fighting over one field.
 ///
-/// `BannerFlagModel.setupAnim` poses `flag.xRot` identically for both kinds — the
+/// The banner flag's animation poses the flag's X rotation identically for both kinds — the
 /// sway is not attachment-dependent.
 #[must_use]
 pub fn banner_wall_flag_model() -> EntityModelDef {

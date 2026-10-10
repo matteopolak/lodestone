@@ -1,4 +1,4 @@
-//! The Advancements screen — vanilla's `AdvancementsScreen`,
+//! The Advancements screen — vanilla's advancements screen,
 //! reached from the pause menu's Advancements button.
 //!
 //! ## Where the progress comes from
@@ -11,7 +11,7 @@
 //!
 //! **The two halves are joined by id, in one direction only.** The store carries
 //! no positions — 26.2's advancement JSON has no `x`/`y` and the server computes
-//! them with `TreeNodePosition` — so the layout is always ours, run over
+//! them with the tree node position — so the layout is always ours, run over
 //! [`ADVANCEMENTS`], and the store is only ever *looked up* per id. Rebuilding
 //! the forest from the store's own `parent` links would give a second, unpositioned
 //! tree that disagrees with the one being drawn.
@@ -32,7 +32,7 @@
 //!
 //! **Clipping is done on the CPU, not via a GPU scissor.**
 //! `render_geometry_scaled` has no scissor (unlike vanilla's own
-//! `enableScissor`/`disableScissor` bracket around `AdvancementTab.
+//! `enableScissor`/`disableScissor` bracket around advancement tab.
 //! drawWidgets`), so [`advancements_geometry`] clamps every piece of tree
 //! content to the `234 x 113` viewport by hand instead: the connector lines
 //! (`clamp_to`, a plain `Rect` intersection) and a widget's frame sprite too
@@ -72,7 +72,7 @@
 //! spill past the edge.
 //!
 //! **Vanilla draws the connector lines behind every widget, and so do we.**
-//! `AdvancementTab.extractContents` calls `root.extractConnectivity` (both
+//! The advancement tab's extract contents calls root's extract connectivity (both
 //! the shadow and the foreground pass) for the whole tree *before*
 //! `root.extractRenderState` (the frame-then-icon draw), so a line is always
 //! the bottom layer. An early version of this code pushed the widget-frame
@@ -150,7 +150,7 @@ const TILE: f32 = 16.0;
 /// `SCROLL_SPEED = 16.0` (`:40`).
 const SCROLL_SPEED: f32 = 16.0;
 
-/// One tab button, `AdvancementTabType.ABOVE` — `28 x 32`, `max 8`
+/// One tab button, the advancement tab type's above — `28 x 32`, `max 8`
 ///. With five roots every tab is `ABOVE`, so
 /// the other three variants are unreachable and deliberately unported; add them
 /// the day a data pack ships a ninth root.
@@ -170,11 +170,11 @@ const TAB_ICON_DY: f32 = 9.0;
 const NODE_PITCH_X: f32 = 28.0;
 /// `this.y = floor(display.getY() * 27.0F)` (`:62`).
 const NODE_PITCH_Y: f32 = 27.0;
-/// `blitSprite(..., xo + x + 3, yo + y, 26, 26)` (`:164`).
+/// blit sprite (`:164`).
 const FRAME_SIZE: f32 = 26.0;
 /// See [`FRAME_SIZE`].
 const FRAME_DX: f32 = 3.0;
-/// `fakeItem(icon, xo + x + 8, yo + y + 5)` (`:165`).
+/// fake item (`:165`).
 const ICON_DX: f32 = 8.0;
 /// See [`ICON_DX`].
 const ICON_DY: f32 = 5.0;
@@ -186,7 +186,7 @@ const HIT_SIZE: f32 = 26.0;
 /// `advancements/title_box`, the description panel behind the hover tooltip
 /// (vanilla's own advancement-widget rendering, blitted at `:233`/`:235`).
 const SPRITE_TITLE_BOX: &str = "advancements/title_box";
-/// `AdvancementWidgetType::boxSprite` — the hover tooltip's *title bar*, which
+/// The advancement widget type's box sprite — the hover tooltip's *title bar*, which
 /// splits into an obtained and an unobtained half at the progress fraction.
 const SPRITE_BOX_OBTAINED: &str = "advancements/box_obtained";
 /// See [`SPRITE_BOX_OBTAINED`].
@@ -234,12 +234,12 @@ pub struct NodeProgress {
     pub done: u32,
     /// How many groups the server declared. `0` until a node arrives.
     pub total: u32,
-    /// `AdvancementProgress::isDone`.
+    /// AdvancementProgress's is done.
     pub obtained: bool,
 }
 
 impl NodeProgress {
-    /// `getPercent()`: completed groups over declared groups, `0.0` with none.
+    /// get percent: completed groups over declared groups, `0.0` with none.
     #[must_use]
     pub fn percent(self) -> f32 {
         if self.total == 0 {
@@ -378,7 +378,7 @@ pub fn advancement_tabs() -> Vec<&'static Advancement> {
 
 /// Persisted Advancements-screen UI state.
 ///
-/// The scroll is **per tab**, matching vanilla: each `AdvancementTab` owns its
+/// The scroll is **per tab**, matching vanilla: each advancement tab owns its
 /// own `scrollX`/`scrollY` and centres itself once, on first draw.
 #[derive(Debug, Clone, Default)]
 pub struct AdvancementsState {
@@ -388,7 +388,7 @@ pub struct AdvancementsState {
     /// yet — [`Self::scroll_for`] centres it on first read, which is vanilla's
     /// `centered` latch.
     scroll: Vec<Option<(f32, f32)>>,
-    /// `AdvancementTab::fade`, in `0.0..=FADE_CEILING`. Shared across tabs
+    /// The advancement tab's fade, in `0.0..=FADE_CEILING`. Shared across tabs
     /// rather than per-tab: only one tab is ever hovered, and vanilla's own
     /// per-tab copy is unobservable because switching tabs also clears the
     /// hover.
@@ -414,7 +414,7 @@ impl AdvancementsState {
         })
     }
 
-    /// `AdvancementTab.scroll` (`:179-187`): pan, clamped so the tree cannot be
+    /// The advancement tab's scroll (`:179-187`): pan, clamped so the tree cannot be
     /// dragged away from the viewport, and only on the axis that overflows it.
     pub fn pan(&mut self, tree: &TreeLayout, dx: f32, dy: f32) {
         let (mut sx, mut sy) = self.scroll_for(tree);
@@ -434,14 +434,14 @@ impl AdvancementsState {
     }
 
     /// Switch tabs, keeping each tab's own scroll — vanilla does the same, since
-    /// the scroll lives on the `AdvancementTab` and not the screen.
+    /// the scroll lives on the advancement tab and not the screen.
     pub fn select_tab(&mut self, index: usize) {
         self.tab = index;
     }
 
     /// Advance the hover fade one frame, and return the alpha to dim with.
     ///
-    /// `AdvancementTab.extractHovers` (`:97-104`). Deliberately per *frame* and
+    /// The advancement tab's extract hovers (`:97-104`). Deliberately per *frame* and
     /// not per tick, matching vanilla — the ramp is framerate-dependent there
     /// too, and at 60 fps it reaches the ceiling in five frames.
     pub fn tick_fade(&mut self, hovering: bool) -> f32 {
@@ -507,7 +507,7 @@ pub struct AdvancementsLayout {
 /// the same triple the draw uses, one expression for both.
 ///
 /// `progress` decides which hidden advancements are visible: vanilla's
-/// `extractRenderState` gate is `!isHidden() || progress.isDone()`
+/// `extractRenderState` gate is `!is_hidden() || progress.is_done()`
 ///, so a hidden node appears the moment it is
 /// obtained and its connector appears with it.
 #[must_use]
@@ -553,7 +553,7 @@ pub fn advancements_layout(
     Some(AdvancementsLayout { window, inside, tabs, widgets, tree, scroll })
 }
 
-/// `!display.isHidden() || progress.isDone()`.
+/// `!display.is_hidden() || progress.is_done()`.
 fn is_visible(advancement: &Advancement, progress: &AdvancementProgress) -> bool {
     !advancement.hidden || progress.obtained(advancement.id)
 }
@@ -666,7 +666,7 @@ fn draw_plan(layout: &AdvancementsLayout, progress: &AdvancementProgress) -> Dra
     }
 
     let mut lines = Vec::new();
-    // Two whole-tree passes, shadow then foreground — `extractConnectivity(...,
+    // Two whole-tree passes, shadow then foreground — `extract connectivity(...,
     // true)` then `(..., false)`. Vanilla runs them as two traversals rather than
     // per node, so no node's foreground line is ever covered by a later node's
     // shadow.
@@ -688,7 +688,7 @@ fn draw_plan(layout: &AdvancementsLayout, progress: &AdvancementProgress) -> Dra
             if shadow {
                 for dy in [-1.0, 0.0, 1.0] {
                     // The middle of the three shadow rows starts one pixel right,
-                    // which is `horizontalLine(splitX + 1, ...)` — vanilla's own
+                    // which is horizontal line — vanilla's own
                     // asymmetry, and the reason this is a loop with a conditional
                     // rather than three identical calls.
                     let x0 = split_x + if dy == 0.0 { 1.0 } else { 0.0 };
@@ -758,7 +758,7 @@ fn clamp_to(r: &mut Rect, clip: Rect) -> bool {
 
 /// Word-wrap `text` to `max_px` against `measure`. Never returns an empty vector.
 ///
-/// A plain greedy wrap, which is what vanilla's `StringSplitter::splitLines`
+/// A plain greedy wrap, which is what vanilla's string splitter's split lines
 /// reduces to for the unstyled, single-`Style` strings this screen hands it.
 fn wrap(measure: &dyn Fn(&str) -> f32, text: &str, max_px: f32) -> Vec<String> {
     if text.is_empty() {
@@ -810,14 +810,14 @@ fn find_optimal_lines(
 }
 
 /// The hover tooltip's wrapped text and its overall box width — vanilla's
-/// `AdvancementWidget` constructor (`:55-79`), which computes all of this once
+/// The advancement widget constructor (`:55-79`), which computes all of this once
 /// per widget. We compute it for the one hovered widget per frame instead, which
 /// is the same work spread differently and needs no per-widget cache.
 #[derive(Debug, Clone, Default)]
 struct HoverText {
     title: Vec<String>,
     description: Vec<String>,
-    /// `getProgressText()`, `None` for a single-group advancement.
+    /// get progress text, `None` for a single-group advancement.
     progress: Option<String>,
     /// The box width: `longestDescLine + TITLE_PADDING_LEFT + TITLE_PADDING_RIGHT`.
     width: f32,
@@ -1063,8 +1063,8 @@ pub fn advancements_geometry(
     // The tiled per-tab background, drawn **before** the window art, or the
     // window's own baked-in inner shadow and border would be erased.
     //
-    // `AdvancementTab.extractContents` (stratum 1, `AdvancementsScreen.
-    // extractInside`) draws the tile grid; `AdvancementsScreen.extractWindow`
+    // The advancement tab's extract contents (stratum 1, the advancements screen.
+    // extractInside`) draws the tile grid; the advancements screen's extract window
     // (stratum 2, drawn *after* via `graphics.nextStratum()`) draws
     // `window.png` on top of it. That ordering is load-bearing, not
     // cosmetic: `window.png` is not an opaque frame with a transparent hole —
@@ -1197,8 +1197,8 @@ pub fn advancements_geometry(
     // A **separate** builder, not `b` — see `ContainerGeometry::mid_bg_verts`'s
     // doc for why this needs its own renderer pass rather than a range split
     // of an existing stream. Vanilla draws a connector line *behind* every
-    // widget (`AdvancementTab.extractContents` runs both
-    // `root.extractConnectivity` passes over the whole tree before
+    // widget (the advancement tab's extract contents runs both
+    // root's extract connectivity passes over the whole tree before
     // `root.extractRenderState`, the frame-then-icon draw); the frame loop
     // below runs after both `bg_slot_floats` and `chrome_floats` above, so a
     // real sprite frame (the `Some` arm, on `mid.bg_verts`) still lands in a
@@ -1365,7 +1365,7 @@ pub fn advancements_geometry(
         mid_glint_verts: mid.glint_verts,
         dim2_verts,
         widget_rect: Some(layout.window),
-        // No inventory avatar — `AdvancementsScreen` is not `InventoryScreen`.
+        // No inventory avatar — the advancements screen is not the inventory screen.
         // See `ContainerGeometry::player_avatar`.
         player_avatar: None,
     }
@@ -1409,7 +1409,7 @@ fn push_sprite(
 /// drew unclamped — so a widget at the boundary either was not drawn at all,
 /// or was drawn whole and spilling past the window's own art. Vanilla
 /// scissors the `234 x 113` viewport around exactly this draw
-/// (`AdvancementWidget.draw`, called from inside `AdvancementTab.
+/// (the advancement widget's draw, called from inside advancement tab.
 /// drawWidgets`'s `enableScissor`/`disableScissor` bracket); this ports that
 /// by shrinking the sprite's own destination rect **and** its sampled UV rect
 /// in lock-step, so the visible sliver still samples the right part of the
@@ -1687,7 +1687,7 @@ fn clip_quads_from(
     }
 }
 
-/// The tab-button sprite for `index` — `AdvancementTabType.extractRenderState`
+/// The tab-button sprite for `index` — the advancement tab type's extract render state
 ///: the `left` sprite at index 0, the `right`
 /// one at `max - 1`, `middle` otherwise, where `max` is the **type**'s capacity
 /// (8 for `ABOVE`) and not the number of tabs shown. With five roots that means
@@ -1705,17 +1705,17 @@ pub fn tab_sprite(index: usize, selected: bool) -> &'static str {
     }
 }
 
-/// `AdvancementTabType.ABOVE`'s `max`.
+/// The advancement tab type's above's `max`.
 const TAB_MAX: usize = 8;
 
-/// `AdvancementToast.DISPLAY_TIME`, milliseconds.
+/// The advancement toast's display time, milliseconds.
 pub const TOAST_DISPLAY_MS: u64 = 5000;
 
 /// Newly-completed advancements, queued for the HUD toast.
 ///
 /// ## The seed is the whole design
 ///
-/// Vanilla's `ClientAdvancements` fires a toast from `onUpdateAdvancementProgress`,
+/// Vanilla's client advancements fires a toast from `onUpdateAdvancementProgress`,
 /// which the server only calls for a *change*. Our side sees a snapshot instead,
 /// and the join packet's `reset` batch carries every advancement already earned —
 /// so a naive "obtained now, not obtained last frame" test would fire sixty toasts

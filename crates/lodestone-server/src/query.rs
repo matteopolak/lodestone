@@ -25,7 +25,7 @@
 //!
 //! ### There is no separate "full stat" packet type
 //!
-//! `QueryThreadGs4.processPacket`'s `switch (buf[2])` has exactly two live arms:
+//! The query thread gs4's process packet's `switch (buf[2])` has exactly two live arms:
 //! `0` (stat) and `9` (handshake); anything else falls through to
 //! `default: return true;` with **no reply sent**. Basic vs. full stat is
 //! decided *inside* the `case 0` arm by the request's total length: `15 == len`
@@ -47,14 +47,14 @@
 //!
 //! ### The challenge token is text in the response, a 4-byte big-endian int in the request
 //!
-//! `RequestChallenge`'s constructor builds the handshake reply as
+//! The request challenge's constructor builds the handshake reply as
 //! `String.format("\t%s%d\u0000", ident, challenge)` — a **tab byte** (`0x09`,
 //! doubling as the type byte), the client's own 4 session-id bytes reinterpreted
 //! as text, the challenge as **decimal digits with no fixed width** (`nextInt`
 //! over `[0, 16_777_216)`, so 1–8 digits, never zero-padded), then a null
 //! terminator. The client is expected to parse those digits back into an
 //! integer and send *that* integer as a plain 4-byte **big-endian** field
-//! (`PktUtils.intFromNetworkByteArray`) in its stat request — [`mint_challenge`]
+//! (the pkt utils's int from network byte array) in its stat request — [`mint_challenge`]
 //! and [`QuerySession::challenge`] follow that split: minted and stored as a
 //! `u32`, formatted as ASCII decimal (no padding) into the handshake reply, and
 //! compared as a parsed big-endian integer against the stat request's token
@@ -100,8 +100,8 @@
 //!   caller supply its own config.
 //! * The wire layout lives in [`handle_request`] and the two private response
 //!   builders. The layouts are pinned by the protocol, so a change there is a
-//!   protocol change, not a refactor — re-derive from `QueryThreadGs4` /
-//!   `NetworkDataOutputStream` in `.cache/mc/26.2/src`, the same source this
+//!   protocol change, not a refactor — re-derive from the query thread gs4 /
+//!   The network data output stream in `.cache/mc/26.2/src`, the same source this
 //!   module's own layout was hand-expanded from, rather than from a
 //!   description; see the module doc's "Corrected against the real protocol"
 //!   section for what reading a summary instead of the writer cost here.
@@ -143,7 +143,7 @@ const TYPE_STAT: u8 = 0x00;
 /// The exact request length (magic + type + session id + challenge token +
 /// 4 padding bytes) that selects the full form. Anything else with
 /// [`TYPE_STAT`] is the basic form, mirroring `15 == len` in
-/// `QueryThreadGs4.processPacket`.
+/// The query thread gs4's process packet.
 const FULL_STAT_REQUEST_LEN: usize = 15;
 /// The literal two bytes vanilla writes after `"splitnum\0"` in a full-stat
 /// reply (`write(128); write(0);`) — not a null-terminated string "value" the
@@ -154,7 +154,7 @@ const SPLITNUM_VALUE: [u8; 2] = [0x80, 0x00];
 /// protocol's audience, not ours to change.
 const GAME_ID: &str = "MINECRAFT";
 /// Upper bound (exclusive) for a minted challenge, `nextInt(1 << 24)` in
-/// `RequestChallenge`'s constructor. Every value fits in 3 bytes, so the
+/// The request challenge's constructor. Every value fits in 3 bytes, so the
 /// 4-byte big-endian field a stat request carries it back in always has a
 /// leading zero byte — this module never relies on that, but it is why a
 /// hand-built fixture can safely use a full `u32` field for it.
@@ -177,7 +177,7 @@ pub const DEFAULT_QUERY_VERSION: &str = "Lodestone";
 pub const DEFAULT_GAME_TYPE: &str = "SMP";
 
 /// The default level name (`map` in both stat forms). Vanilla's default world
-/// folder is `world` (`DedicatedServerProperties.level-name`), and this crate
+/// folder is `world (the dedicated server properties's level-name`), and this crate
 /// has no world-name concept of its own yet.
 pub const DEFAULT_MAP: &str = "world";
 
@@ -316,7 +316,7 @@ pub fn handle_request(
         TYPE_STAT => {
             // A stat request must prove the current challenge, carried as a
             // 4-byte big-endian integer right after the session id
-            // (`PktUtils.intFromNetworkByteArray`).
+            // (the pkt utils's int from network byte array).
             if packet.len() < 11 {
                 return None;
             }
@@ -335,7 +335,7 @@ pub fn handle_request(
 }
 
 /// Mints a fresh challenge value in `[0, 2^24)`, matching
-/// `RandomSource.nextInt(16_777_216)` in vanilla's `RequestChallenge`
+/// `RandomSource.nextInt(16_777_216)` in vanilla's request challenge
 /// constructor. A draw that would repeat the previous value is nudged, so two
 /// handshakes in a row always produce visibly different challenges (vanilla
 /// does not guarantee this; see [`QuerySession::last_value`]'s doc for why it
@@ -364,7 +364,7 @@ fn write_kv(out: &mut Vec<u8>, key: &str, value: &str) {
 /// The handshake reply: `0x09` (the tab byte inside vanilla's
 /// `"\t%s%d\u0000"` format string doubles as the type here), the echoed
 /// session id, the challenge as **unpadded decimal digits**, and a null
-/// terminator. Not zero-padded to any fixed width — `RequestChallenge` builds
+/// terminator. Not zero-padded to any fixed width — the request challenge builds
 /// this with `String.format`'s plain `%d`, so a small challenge value is a
 /// short reply.
 fn build_handshake_response(session_id: &[u8; 4], token: u32) -> Vec<u8> {

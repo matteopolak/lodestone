@@ -130,7 +130,7 @@ pub struct EntityMotion {
     pub position: Vec3d,
     /// Velocity (vanilla's own velocity field). [`move_entity`] moves the entity by this
     /// vector, then rewrites it via the collision restitution — exactly as
-    /// vanilla's `travel()` calls `move(SELF, getDeltaMovement())`.
+    /// vanilla's `travel()` calls `move(SELF, get_delta_movement())`.
     pub velocity: Vec3d,
     /// Whether the entity is supported from below (vanilla's own vertical-collision-below flag). This
     /// is the flag the client transmits; see [`crate::player::PlayerState`].
@@ -182,7 +182,7 @@ pub struct MoveContext {
     /// honey slowdown.
     ///
     /// Vanilla's own player override is
-    /// `!abilities.flying && !isFallFlying() ? super.getBlockSpeedFactor() : 1.0F`,
+    /// `!abilities.flying && !is_fall_flying() ? super.get_block_speed_factor() : 1.0F`,
     /// so a player suppresses it while **either** creative-flying or gliding. The
     /// whole disjunction is modelled rather than just the flight half: a partial
     /// model of one vanilla method is the failure `docs/edge-back-off.md` calls
@@ -275,7 +275,7 @@ pub fn move_entity_among_entities(
 
     let bb = dims.bounding_box(motion.position);
 
-    // `delta = this.maybeBackOffFromEdge(delta, moverType);` — vanilla's own
+    // `delta = this.maybe_back_off_from_edge(delta, moverType);` — vanilla's own
     // edge back-off runs **inside** the move, after the stuck multiplier is
     // consumed and before `collide`. The position is unchanged at this
     // point, so `bb` is vanilla's own bounding box.
@@ -443,7 +443,7 @@ pub struct AirTravelContext {
     /// a mob always passes `false`.
     ///
     /// This is the *sneak* input alone, not the full vanilla conjunct: the
-    /// scaffolding exception (`!getInBlockState().is(Blocks.SCAFFOLDING)`)
+    /// scaffolding exception (`!get_in_block_state().is(Blocks.SCAFFOLDING)`)
     /// is applied inside [`travel_in_air`] against the same
     /// in-block position `is_climbable` already queries, because it needs a
     /// [`CollisionView`] call this context struct has none of — see that
@@ -476,7 +476,7 @@ pub struct AirTravelContext {
     /// steady climb-up.
     ///
     /// Vanilla's own player override is `abilities.flying ? false :
-    /// super.onClimbable()`. `false` for mobs, whose "on climbable" check
+    /// super.on_climbable()`. `false` for mobs, whose "on climbable" check
     /// has no such override, so [`Default`] is inert.
     pub suppress_climbable: bool,
 }

@@ -22,7 +22,7 @@ use fanout::{wire_update_centres, wire_update_fan_out};
 ///    strength (`crate::redstone_wire::calculate_target_strength`); if it
 ///    changed, writes the new power and re-fans-out through
 ///    [`wire_update_fan_out`], which is
-///    `DefaultRedstoneWireEvaluator.updatePowerStrength`'s **complete**
+///    The default redstone wire evaluator's update power strength's **complete**
 ///    update set (vanilla's own default wire evaluator), both layers.
 /// 3. **Redstone torches, repeaters, comparators, and observers**
 ///    — schedule a delayed recheck into `block_ticks` when the neighbour's
@@ -42,14 +42,14 @@ use fanout::{wire_update_centres, wire_update_fan_out};
 ///
 /// `NeighborPropagator::propagate` issues notifications to the origin's six
 /// *neighbours* and never to the origin — faithfully, because it models
-/// `Level.updateNeighborsAt`, which does exactly that. Every existing caller of
+/// Level's update neighbors at, which does exactly that. Every existing caller of
 /// [`propagate_and_react`] is a *change* whose origin has already had its say
 /// (a drained scheduled tick has just run the block's own callback; a random
 /// tick has just mutated it), so the omission is correct there.
 ///
 /// A **placement** is the one case where it is not. Vanilla splits the two
 /// halves across different callbacks, and the placed block's own half lives in
-/// `BlockBehaviour.setPlacedBy`, called from `BlockItem.place` — nowhere near
+/// The block behaviour's set placed by, called from the block item's place — nowhere near
 /// the neighbour pass. Without it, placing a repeater into an already-powered
 /// line does nothing at all: the fan-out notifies the dust either side, neither
 /// dust changes power, no cascade reaches the repeater, and the repeater is
@@ -59,15 +59,15 @@ use fanout::{wire_update_centres, wire_update_fan_out};
 ///
 /// | family | `setPlacedBy` | modelled here |
 /// |---|---|---|
-/// | repeater, comparator (`DiodeBlock:160-165`) | `if (shouldTurnOn) scheduleTick(pos, this, 1)` | yes |
-/// | redstone torch (`RedstoneTorchBlock`) | none — only `onPlace`'s neighbour notify | nothing to do |
-/// | observer (`ObserverBlock`) | none; its `onPlace:115-123` only *cancels* a stale pulse on a block it replaced, which cannot apply to a placement into air | nothing to do |
+/// | repeater, comparator (the diode block:160-165) | `if (shouldTurnOn) scheduleTick(pos, this, 1)` | yes |
+/// | redstone torch (the redstone torch block) | none — only `onPlace`'s neighbour notify | nothing to do |
+/// | observer (the observer block) | none; its `onPlace:115-123` only *cancels* a stale pulse on a block it replaced, which cannot apply to a placement into air | nothing to do |
 ///
-/// **The delay is 1, not `getDelay(state)`, and that is not a slip.** A
+/// **The delay is 1, not get delay, and that is not a slip.** A
 /// repeater dropped into a live line lights one game tick later at *every* one
 /// of its four delay settings; the `2d` delay governs signal *changes* reaching
 /// an already-placed repeater, through `checkTickOnNeighbor`
-/// (`DiodeBlock:88-104`), which is a different callback with a different delay.
+/// (the diode block:88-104), which is a different callback with a different delay.
 /// `redstone_placement_gate` measures both and separates them, because reading
 /// `2d` here is the single most plausible wrong model of this function.
 ///
@@ -169,7 +169,7 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
                     block_ticks.schedule((x, y, z), kind, current_tick + delay, TickPriority::Normal);
                 }
             }
-            // `FireBlock::onPlace` schedules the fire's own first tick, and without
+            // The fire block's on place schedules the fire's own first tick, and without
             // it a fire block is inert forever — it neither spreads nor goes out,
             // because every later tick comes from the previous one's reschedule.
             // This is the same "the placed block owes itself a reaction the
@@ -186,7 +186,7 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
                     }
                 }
             }
-            // `BaseRailBlock.onPlace` -> `updateState` -> `level.neighborChanged(state,
+            // The base rail block's on place -> `updateState` -> `level.neighbor_changed(state,
             // pos, this, ...)` (vanilla's own base-rail on-place chain): a freshly placed
             // powered/activator rail notifies **itself**, the same "placed block
             // owes itself a reaction the neighbour pass cannot deliver" shape as the
@@ -203,7 +203,7 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
                     own.push(RandomTickEvent { pos: (x, y, z), from: state, to: new_state });
                 }
             }
-            // `TripWireHookBlock.setPlacedBy` (`:104-106`) calls `calculateState`
+            // The trip wire hook block's set placed by (`:104-106`) calls `calculateState`
             // directly on the just-placed hook, with no neighbour notification at
             // all — see `crate::redstone_tripwire`'s own module doc for why this
             // family lives in `react_at_placement` rather than
@@ -215,7 +215,7 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
                 };
                 apply_tripwire_result(&columns, &result, &mut own);
             }
-            // `TripWireBlock.onPlace` (`:101-105`) calls `updateSource`, which
+            // The trip wire block's on place (`:101-105`) calls `updateSource`, which
             // scans south/west for a controlling hook and recalculates *that*
             // hook's state with this wire cell as its `wireSource`.
             if state.block() == Block::Tripwire {
@@ -296,7 +296,7 @@ fn apply_tripwire_result(
 }
 
 /// The `redstone_tripwire::TICK_TRIPWIRE_RECHECK` scheduled-tick body —
-/// `TripWireHookBlock.tick` (`:196-199`), which re-runs `calculate_state` with
+/// The trip wire hook block's tick (`:196-199`), which re-runs `calculate_state` with
 /// no `wire_source`. `pub(crate)` for `crate::tick`'s scheduled-tick drain,
 /// the same shape [`settle_gravity_at`] already has for gravity's own
 /// specially-handled arm (a multi-position write plan, not a single
@@ -783,8 +783,8 @@ fn propagate_and_react_over<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Si
 
     // The mutated block itself decides how wide the *outermost* fan-out is.
     // Every mutation family except dust mirrors `setBlockAndUpdate`, which is
-    // a single `updateNeighborsAt(pos)`; a dust power change instead runs
-    // `DefaultRedstoneWireEvaluator.updatePowerStrength`'s seven-centre set —
+    // a single update neighbors at; a dust power change instead runs
+    // The default redstone wire evaluator's update power strength's seven-centre set —
     // and that applies to the origin exactly as it applies to a wire reached
     // mid-cascade, which an earlier version omitted.
     //
@@ -868,8 +868,8 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
 
         // 1. Gravity — first, matching the existing precedent.
         //
-        // **`FallingBlock.updateShape`, which is `scheduleTick(pos, this,
-        // getDelayAfterPlace())` and nothing else.** No `isFree(below)` test here
+        // **FallingBlock's update shape, which is `scheduleTick(pos, this,
+        // getDelayAfterPlace())` and nothing else.** No is free test here
         // and no fall: the eligibility check belongs to `FallingBlock.tick`, which
         // the scheduled tick dispatches to (`crate::tick`'s drain →
         // `settle_gravity_at`).
@@ -882,7 +882,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         // a block ever leaves the world for a fall.
         //
         // No further fan-out (empty return): `updateShape` returns
-        // `super.updateShape(...)` unchanged, so nothing about the world moved and
+        // super's update shape unchanged, so nothing about the world moved and
         // there is nothing to notify.
         if class == crate::redstone_graph::ReactionClass::Gravity {
             block_ticks.schedule(
@@ -1008,11 +1008,11 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                 let sticky = crate::piston::is_sticky_piston(state);
 
                 // Finish a matching pending commit before applying a retraction.
-                // `PistonBaseBlock.triggerEvent`'s retract branch always looks at
+                // The piston base block's trigger event's retract branch always looks at
                 // the piston's *own arm cell* (`pos.relative(direction)`, never a
                 // cell further out a run may have carried a block to) for a still
                 // -pending commit and forces it to finish immediately
-                // (`PistonMovingBlockEntity.finalTick`) before doing anything else.
+                // (the piston moving block entity's final tick) before doing anything else.
                 // A `source` entity there (an extension's not-yet-placed head, or a
                 // retraction's not-yet-restored base) evaporates to air instead of
                 // materialising — see `crate::piston::interrupt`'s own doc comment,
@@ -1050,7 +1050,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                 }
 
                 // Second interrupt — sticky retraction only, and a *different*
-                // cell from the arm above. `PistonBaseBlock.triggerEvent`'s
+                // cell from the arm above. The piston base block's trigger event's
                 // `isSticky` branch also inspects `pos.offset(direction * 2)`
                 // (`piston::relative_n(.., 2)`, the cell this piston's own pull
                 // would grab from) and, if it holds a still-**extending**
@@ -1219,9 +1219,9 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         // reached from `neighborChanged`
         // and `onPlace`:
         //
-        //     boolean shouldBeOn = !level.hasNeighborSignal(pos);
+        //     boolean shouldBeOn = !level's has neighbor signal;
         //     if (shouldBeOn != state.getValue(ENABLED)) {
-        //        level.setBlock(pos, state.setValue(ENABLED, shouldBeOn), 2);
+        //        level.setBlock(pos, state's set value, 2);
         //     }
         //
         // Unlike every other family in this function, a hopper's reaction is
@@ -1271,8 +1271,8 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         }
 
         // 3e. Redstone-openable blocks: doors, trapdoors and fence
-        // gates. `DoorBlock.neighborChanged` / `TrapDoorBlock.neighborChanged` /
-        // `FenceGateBlock.neighborChanged` read whether the block is
+        // gates. The door block's neighbor changed / trap door block's neighbor changed /
+        // The fence gate block's neighbor changed read whether the block is
         // redstone-powered and, when that differs from the stored `powered`,
         // write both `open` and `powered` to the new value — **immediately**,
         // with a flag-2 `setBlock` (no `scheduleTick`, no neighbour fan-out),
@@ -1298,7 +1298,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                     to: new_state,
                 });
                 // A door occupies two cells; both halves must flip together.
-                // Vanilla keeps them in sync through `DoorBlock.updateShape`;
+                // Vanilla keeps them in sync through the door block's update shape;
                 // this crate has no such pass, so the same `signal` is applied
                 // to the other half here. The other half is not re-notified
                 // (empty cascade below), matching flag 2's no-fan-out.
@@ -1347,8 +1347,8 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
 
         // 3g. Powered/activator rails (rail half — detector
         // rail's own producer is still unbuilt, see `crate::redstone_rail`'s
-        // module doc). `PoweredRailBlock.updateState`, reached through
-        // `BaseRailBlock.neighborChanged` (`:80-92`) since neither block
+        // module doc). The powered rail block's update state, reached through
+        // The base rail block's neighbor changed (`:80-92`) since neither block
         // overrides `neighborChanged` itself.
         if class == crate::redstone_graph::ReactionClass::Rail {
             let new_state = {
@@ -1405,12 +1405,12 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
             return Vec::new();
         }
 
-        // 3i. TNT — redstone-signal ignition (vanilla's own `TntBlock::onPlace`/
+        // 3i. TNT — redstone-signal ignition (vanilla's own tnt block's on place/
         // `neighborChanged`). Unlike the dispenser
         // above there is no `TRIGGERED` state machine: vanilla primes and
         // removes the block in the same call, unconditionally, whenever
-        // `hasNeighborSignal(pos)` is true. This dispatcher has no `MobSim` to
-        // spawn a `PrimedTnt` into, so it schedules
+        // has neighbor signal is true. This dispatcher has no `MobSim` to
+        // spawn a primed tnt into, so it schedules
         // `crate::mobs::tnt::TICK_TNT_PRIME` instead — see that constant's
         // own doc for the handoff and its one-tick cost.
         if class == crate::redstone_graph::ReactionClass::Tnt {
@@ -1434,7 +1434,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         }
 
         // 3j. Command blocks — the redstone-edge half of the command-block
-        // remainder (vanilla's own `CommandBlock.neighborChanged` →
+        // remainder (vanilla's own CommandBlock's neighbor changed →
         // `CommandBlock.setPoweredAndUpdate`). `crate::command_block::on_power_changed` was
         // written and unit-tested with no production caller until this arm;
         // see that module's own doc for the other two hops (wire decode,
@@ -1467,10 +1467,10 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                     {
                         data.powered = reaction.new_powered;
                         if reaction.schedule_execution {
-                            // `markConditionMet()` — computed at the edge, not
+                            // mark condition met — computed at the edge, not
                             // deferred to the scheduled tick: `CommandBlock.tick`'s
                             // own `REDSTONE` arm reads `wasConditionMet` as-is with
-                            // no recompute, matching `CommandBlockEntity`'s own
+                            // no recompute, matching command block entity's own
                             // split between `markConditionMet` (called from
                             // `setPoweredAndUpdate`) and `wasConditionMet` (read
                             // later by `tick`).

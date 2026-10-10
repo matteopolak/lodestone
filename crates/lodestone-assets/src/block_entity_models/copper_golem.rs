@@ -21,7 +21,7 @@ fn copper_golem_head_cubes() -> Vec<CubeDef> {
 }
 
 /// vanilla's own copper-golem-model body-layer construction — the statue's `STANDING` pose
-/// (`CopperGolemStatueBlock.Pose.STANDING`), and the plainest of the four:
+/// (the statue's standing pose), and the plainest of the four:
 /// every part is a bare `PartPose.offset` with no rotation, the ordinary
 /// humanoid-ish rig every other block in this corpus that reuses a mob rig
 /// (skull) already assumes.
@@ -80,9 +80,9 @@ pub fn copper_golem_statue_standing_model() -> EntityModelDef {
 }
 
 /// vanilla's own copper-golem-model running-pose body-layer construction — the `RUNNING` pose.
-/// Every limb is a *nested* `PartDefinition`: a bare pivot part (no cube of
+/// Every limb is a *nested* part definition: a bare pivot part (no cube of
 /// its own) holding one `_r1` child that carries the real box at a further
-/// `offsetAndRotation` — a 3D-pose-tool export shape distinct from every
+/// offset and rotation — a 3D-pose-tool export shape distinct from every
 /// other rig in this corpus, transcribed exactly rather than collapsed into
 /// one part, since collapsing would double-apply neither pivot but *would*
 /// silently drop the two-stage translate.

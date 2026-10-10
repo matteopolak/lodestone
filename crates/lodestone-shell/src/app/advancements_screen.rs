@@ -134,7 +134,7 @@ impl WindowApp {
     }
 
     /// Continue a viewport drag — vanilla pans the tree by the pointer delta
-    /// (`AdvancementsScreen.mouseDragged` forwards to `AdvancementTab.scroll`).
+    /// (the advancements screen's mouse dragged forwards to the advancement tab's scroll).
     pub(super) fn drag_advancements(&mut self, w: u32, h: u32) {
         let Some((px, py)) = self.advancements_drag else {
             return;
@@ -208,7 +208,7 @@ impl WindowApp {
 pub(super) struct AdvancementsHoverFrame {
     /// `(node index, title, description)`.
     pub(super) hovered: Option<(usize, String, String)>,
-    /// `AdvancementTab::fade`.
+    /// The advancement tab's fade.
     pub(super) fade: f32,
 }
 

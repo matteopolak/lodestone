@@ -322,8 +322,8 @@ pub fn is_snowy_setting(above_state: &str) -> bool {
     matches!(base_name(above_state), "minecraft:snow" | "minecraft:snow_block" | "minecraft:powder_snow")
 }
 
-/// `defaultBlockState().setValue(SNOWY, isSnowySetting(above))` for a
-/// `SpreadingSnowyBlock` — the write vanilla performs both when grass spreads
+/// default block state's default block state for a
+/// The spreading snowy block — the write vanilla performs both when grass spreads
 /// and when the block above one changes
 /// (its own update-shape hook).
 ///
@@ -359,7 +359,7 @@ pub(crate) fn is_snowy_family_id(state: StateId) -> bool {
 }
 
 /// `true` iff `block_state` is one this crate models a random tick for.
-/// Mirrors `BlockState.isRandomlyTicking()`
+/// Mirrors BlockState's is randomly ticking
 /// (vanilla's own default implementation) — grass/mycelium-family spreading (see
 /// [`GRASS_BLOCK`]'s doc comment for why dirt is deliberately excluded), plus
 /// the three families added: crop growth, sapling growth, and
@@ -495,7 +495,7 @@ pub struct RandomTickEvent {
 }
 
 /// The random-tick driver: owns the two independent generators
-/// `ServerLevel` keeps (the position LCG and the behaviour RNG — see this
+/// The server level keeps (the position LCG and the behaviour RNG — see this
 /// module's doc comment for why they must stay separate), and drives
 /// [`grass_random_tick`] against a real [`crate::chunk::ChunkColumn`].
 #[derive(Debug, Clone)]
@@ -503,8 +503,8 @@ pub struct RandomTickScheduler {
     /// Vanilla's `Level.randValue` — see [`next_random_tick_pos`].
     position_state: i32,
     /// A generator independent of `position_state`, standing in for
-    /// vanilla's `ServerLevel.random` (the `RandomSource` passed into every
-    /// `BlockState.randomTick`). Not vanilla's actual PRNG algorithm — see
+    /// vanilla's server level's random (the `RandomSource` passed into every
+    /// BlockState's random tick). Not vanilla's actual PRNG algorithm — see
     /// this module's doc comment: only the **draw pattern** (how many calls,
     /// in what order) is asserted anywhere in this crate, never the literal
     /// values, so a different (but still deterministic) generator is a
@@ -585,7 +585,7 @@ impl RandomTickScheduler {
     /// `column` is read fresh from `source.column(cx, cz)` by the caller and
     /// passed in as `&mut` so within-call mutations (a grass block spreading
     /// onto a dirt block earlier in the same call) are visible to later
-    /// picks in the same call — matching vanilla's `section.getBlockState`
+    /// picks in the same call — matching vanilla's section's get block state
     /// reading the live, already-mutated section array mid-`tickChunk`.
     /// Every mutation this function makes to `column` is also returned as a
     /// [`RandomTickEvent`] so the caller can persist it through
@@ -628,9 +628,9 @@ impl RandomTickScheduler {
         // per-section decision is one.
         //
         // **Fluids are deliberately out of scope, and this is the boundary.**
-        // Vanilla's gate is `isRandomlyTickingBlocks() || isRandomlyTickingFluids()`
+        // Vanilla's gate is `is_randomly_ticking_blocks() || is_randomly_ticking_fluids()`
         // (its own per-section ticking counters), and lava is the one fluid whose
-        // `isRandomlyTicking()` is true (its own override
+        // is randomly ticking is true (its own override
         // of the base fluid's `false`; water never overrides). This crate models
         // no fluid random ticks — `is_randomly_ticking` names no fluid — so a
         // `tickingFluidCount` today would have zero producers and zero
@@ -680,7 +680,7 @@ impl RandomTickScheduler {
     /// (this module) or crop/sapling/leaves (`crate::growth_tick`). One
     /// dispatch point keeps `tick_chunk`'s own selection loop
     /// ignorant of which families exist, exactly like vanilla's single
-    /// `blockState.randomTick(...)` virtual call fanning out to whichever
+    /// block state's random tick virtual call fanning out to whichever
     /// `Block` subclass is actually at that position.
     #[allow(clippy::too_many_arguments)]
     fn tick_randomly_ticking_block<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
@@ -839,7 +839,7 @@ impl RandomTickScheduler {
     /// Leaf decay — see `crate::growth_tick`'s module doc for
     /// why this draws **zero** RNG values: `is_randomly_ticking` already
     /// proved `leaves_should_decay`, and vanilla's own `randomTick` for
-    /// `LeavesBlock` has no `random.nextInt` call at all, only the
+    /// The leaves block has no `random.nextInt` call at all, only the
     /// deterministic `decaying(state)` check. Removes the block (sets it to
     /// air); item-drop spawning (`dropResources`) is out of scope — see the
     /// module doc's own note.
@@ -893,7 +893,7 @@ fn randomly_ticking_palette_mask(column: &crate::chunk::ChunkColumn) -> Vec<bool
         .collect()
 }
 
-/// `LevelChunkSection::isRandomlyTicking`'s boolean, computed by scanning the
+/// The level chunk section's is randomly ticking's boolean, computed by scanning the
 /// section's palette **indices** against `mask` — see this module's doc comment
 /// for why a scan is the faithful reduction for a chunk representation with no
 /// incremental per-section counter, and
@@ -1037,7 +1037,7 @@ mod tests {
 
     /// Every position pick advances `position_state` exactly once, whether
     /// or not the picked block turns out eligible — mirrors
-    /// `ServerLevel::tickChunk`'s unconditional `for (i = 0; i < tickSpeed; i++)`
+    /// The server level's tick chunk's unconditional `for (i = 0; i < tickSpeed; i++)`
     /// draw. Ticking one section at `tick_speed = 5` with **no** eligible
     /// block anywhere in it must still advance the position LCG exactly 5
     /// times — proven indirectly here by checking the *next* pick after a
@@ -1224,10 +1224,10 @@ mod tests {
     /// **Which above-block kills grass, predicted from the documented rules:**
     /// record and the dampening census rather than from this crate's answer.**
     ///
-    /// `SpreadingSnowyBlock.canStayAlive` is, in order: snow with `LAYERS == 1`
+    /// The spreading snowy block's can stay alive is, in order: snow with `LAYERS == 1`
     /// is `true`; a **full** fluid state is `false`; otherwise
-    /// `getLightDampeningInto(...) < 15`, which for two full-cube states is the
-    /// above block's own `getLightDampening()` — exactly
+    /// `get_light_dampening_into(...) < 15`, which for two full-cube states is the
+    /// above block's own get light dampening — exactly
     /// `lodestone_data::light_props::dampening`'s column.
     ///
     /// # The fixture, stated because this is badly exposed to the *world* species
@@ -1313,11 +1313,11 @@ mod tests {
         }
     }
 
-    /// The three `isFull()` cases, since `has_full_fluid` is what stops grass
+    /// The three is full cases, since `has_full_fluid` is what stops grass
     /// living under an ocean and a `level == 0` test misses two of them.
     ///
-    /// `LiquidBlock.getFluidState` maps `level` to `amount = 8 - level` when
-    /// `level < 8` and to `8` (falling) otherwise, and `isFull()` is
+    /// The liquid block's get fluid state maps `level` to `amount = 8 - level` when
+    /// `level < 8` and to `8` (falling) otherwise, and is full is
     /// `amount == 8`.
     #[test]
     fn a_full_fluid_state_is_source_falling_or_waterlogged() {
@@ -1449,7 +1449,7 @@ mod tests {
 
     /// the two halves of `snowy`. The tag is `#minecraft:snow` — three
     /// blocks, so `snow_block` counts and this is not a `minecraft:snow` check
-    /// — and `SnowyBlock.updateShape` moves the property in both directions
+    /// — and the snowy block's update shape moves the property in both directions
     /// when the block above changes.
     #[test]
     fn snowy_tracks_the_block_above_in_both_directions() {
@@ -1668,12 +1668,12 @@ mod tests {
     // Two of the three gates below used to assert the **teleport**: that an
     // adjacent mutation moved the sand from `y = 5` to `y = 0` inside
     // `tick_chunk`, in one step, with no entity. That was correct and evidenced
-    // when written — the `FallingBlockEntity` did not exist and
+    // when written — the falling block entity did not exist and
     // `settle_gravity_at` really did write the block at its landing position. It
     // is now the *bug the owner reported* ("it just teleports to its final place
     // at the bottom instead of falling down and landing"), so the gates assert
     // the opposite: the sand does not move here at all, and what the notification
-    // produces is a scheduled `TICK_GRAVITY` — `FallingBlock.updateShape`'s
+    // produces is a scheduled `TICK_GRAVITY` — FallingBlock's update shape's
     // `scheduleTick(pos, this, getDelayAfterPlace())` and nothing else.
     //
     // The fall itself is `crate::tick`'s drain plus `crate::mobs`, one layer up,
@@ -1747,8 +1747,8 @@ mod tests {
     /// Negative control, **repointed**: the support test now belongs to
     /// `settle_gravity_at` rather than to the notification.
     ///
-    /// `FallingBlock.updateShape` schedules unconditionally for *any*
-    /// `FallingBlock` — there is no `isFree(below)` test in it — so a supported
+    /// FallingBlock's update shape schedules unconditionally for *any*
+    /// `FallingBlock` — there is no is free test in it — so a supported
     /// sand block does get a scheduled tick, and the discrimination happens in
     /// `FallingBlock.tick`. Asserting "no tick was scheduled" here would
     /// therefore be asserting a bug. This gate instead requires
@@ -1898,7 +1898,7 @@ mod tests {
             column.block_state(6, 8, 5),
         );
         // `snowy=false` explicitly: the spread write sets the property
-        // vanilla's `SpreadingSnowyBlock.randomTick` sets, air being above.
+        // vanilla's spreading snowy block's random tick sets, air being above.
         assert_eq!(column.block_state(6, 5, 5), "minecraft:grass_block[snowy=false]", "at local (6, 5, 5)");
         // Nothing may have been written at the alias cells.
         assert_eq!(column.block_state(6, 8, 5), "minecraft:stone", "at alias cell local (6, 8, 5)");
@@ -2260,7 +2260,7 @@ mod tests {
     /// *different* cell from the arm the first interrupt already covers — is
     /// checked too, and a still-**extending** `moving_piston` entity found
     /// there is finalTicked exactly as the arm's own pending commit is, per
-    /// `PistonBaseBlock.triggerEvent`'s `isSticky` branch.
+    /// The piston base block's trigger event's `isSticky` branch.
     ///
     /// **The discriminating pair.** Scenario A leaves a plain pushable block at
     /// the two-cell-out position with no pending commit — an ordinary sticky
@@ -2377,7 +2377,7 @@ mod tests {
         }
     }
 
-    /// **The tripwire block-removal hook** (`TripWireBlock.affectNeighborsAfterRemoval`),
+    /// **The tripwire block-removal hook** (the trip wire block's affect neighbors after removal),
     /// wired for the first time through [`react_at_removal`].
     ///
     /// Layout: hook@(0,5,0) facing east, real wire cells at x=1 and x=3 (neither

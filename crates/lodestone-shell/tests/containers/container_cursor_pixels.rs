@@ -73,7 +73,7 @@
 //! of everything - including items in my cursor when i move them and item
 //! tooltips."*
 //!
-//! `AbstractRecipeBookScreen.extractRenderState` is the record and it is explicit:
+//! The abstract recipe book screen's extract render state is the record and it is explicit:
 //! container contents, `nextStratum()`, the recipe-book component, `nextStratum()`,
 //! *then* the carried stack and the hovered-slot tooltip. Ours drew the panel as a
 //! trailing pass after the whole container call, so it landed over both.

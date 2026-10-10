@@ -241,7 +241,7 @@ pub struct Relit {
 /// The lowest `y` whose sky-source status a change at `(x, y, z)` can flip.
 ///
 /// Sky light is the one layer a radius bound does not contain: every cell open to
-/// the sky is itself a full-strength source (`ChunkSkyLightSources`), so uncapping a
+/// the sky is itself a full-strength source (the column's sky-light sources), so uncapping a
 /// shaft promotes the whole shaft at once and capping one demotes it. Both cases are
 /// the run of transparent cells directly *below* the change, which is why the scan
 /// starts at `y - 1` and does not care which way the change went.

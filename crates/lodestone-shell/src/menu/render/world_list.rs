@@ -1,4 +1,4 @@
-//! Vanilla's `SelectWorldScreen`: its metrics, its
+//! Vanilla's select world screen: its metrics, its
 //! header/footer layout block, and the world-list row rects.
 //!
 //! Named `world_list` rather than `world_select` on purpose: this module is a
@@ -10,7 +10,7 @@
 
 use super::*;
 
-// -- vanilla's `SelectWorldScreen` metrics ----------------------
+// -- vanilla's select world screen metrics ----------------------
 //
 // Same rule as the block above: every number is transcribed from
 // `.cache/mc/26.2/client-src`, with the file and line named, in logical GUI
@@ -19,19 +19,19 @@ use super::*;
 /// The header band, spelled out as `8 + 9 + 8 + 20 + 4` in the constructor
 /// and left unreduced here for the reason it is
 /// unreduced there: the parts *are* the layout — 8 px of slack above and below,
-/// the 9 px title `StringWidget`, the 20 px search box, and the 4 px
+/// the 9 px title string widget, the 20 px search box, and the 4 px
 /// `LinearLayout` spacing between the two.
 const WORLD_SELECT_HEADER_H: f32 = 8.0 + 9.0 + 8.0 + 20.0 + 4.0;
 /// The footer band. Two 20 px button rows 4 px
 /// apart measure 44, so the band carries 16 px of slack, which the footer
 /// `FrameLayout`'s inherited `align(0.5, 0.5)` splits 8/8.
 const WORLD_SELECT_FOOTER_H: f32 = 60.0;
-/// Vanilla's own vertical linear layout at spacing 4 in the header and `.rowSpacing(4)` in
+/// Vanilla's own vertical linear layout at spacing 4 in the header and `.row_spacing(4)` in
 /// the footer grid — the same 4 either way.
 const WORLD_SELECT_SPACING: i32 = 4;
-/// `new GridLayout().columnSpacing(8)`.
+/// `new GridLayout().column_spacing(8)`.
 const WORLD_SELECT_COLUMN_SPACING: i32 = 8;
-/// `footer.createRowHelper(4)`.
+/// footer's create row helper.
 const WORLD_SELECT_FOOTER_COLUMNS: usize = 4;
 /// The search box's declared size — `new EditBox(font, this.width / 2 - 100, 22,
 /// 200, 20, …)`. **The `x` and `y` in that call
@@ -43,11 +43,11 @@ const WORLD_SELECT_SEARCH_W: f32 = 200.0;
 /// `Button.DEFAULT_WIDTH` instead ([`widget::DEFAULT_WIDTH`]) and each spans two
 /// of the four columns.
 const WORLD_SELECT_SMALL_BTN_W: f32 = 71.0;
-/// A `StringWidget`'s height: `StringWidget(message, font)` delegates to
+/// A string widget's height: the string widget(message, font) delegates to
 /// `this(0, 0, font.width(...), 9, ...)`.
 const STRING_WIDGET_H: f32 = 9.0;
 /// Vanilla's own world-selection list's get-row-width accessor — a
-/// 270 px override of `AbstractSelectionList`'s own 220 (`:389-391`).
+/// 270 px override of the abstract selection list's own 220 (`:389-391`).
 pub(super) const WORLD_LIST_ROW_W: f32 = 270.0;
 /// The list's `itemHeight`: the last argument of
 /// `super(minecraft, width, height, 0, 36)`.
@@ -58,10 +58,10 @@ pub(super) const WORLD_LIST_ROW_W: f32 = 270.0;
 /// and a second copy of `36.0` there is exactly how the draw and the hit-test
 /// drift apart.
 pub const WORLD_LIST_ITEM_H: f32 = 36.0;
-/// `AbstractSelectionList.Entry.CONTENT_PADDING` (`:436`). Every `getContentX`/
+/// The abstract selection list's entry.CONTENT_PADDING (`:436`). Every `getContentX`/
 /// `getContentY` insets the entry rect by 2 and `getContentWidth`/
 /// `getContentHeight` by 4 (`:477-495`), so a 36 px row has a **32** px content
-/// box — which is exactly the world icon's 32×32 (`WorldListEntry.ICON_SIZE`,
+/// box — which is exactly the world icon's 32×32 (the world list entry's icon size,
 /// `:400`).
 const LIST_CONTENT_PADDING: f32 = 2.0;
 /// `getFirstEntryY() = getY() + 2`: the
@@ -85,14 +85,14 @@ const WORLD_LIST_FIRST_ENTRY_Y: f32 = 2.0;
 /// wrong everywhere else.
 const WORLD_SELECT_REF_CANVAS: (f32, f32) = (854.0, 480.0);
 
-/// Vanilla's `SelectWorldScreen.init` as a
+/// Vanilla's select world screen's init as a
 /// real [`layout::HeaderAndFooterLayout`], arranged for a `width`×`height`
 /// canvas.
 ///
 /// Three things about it are worth knowing before changing it:
 ///
 /// - **The title cell is zero-width on purpose.** Vanilla's
-///   `StringWidget(this.title, this.font)` is `font.width(title)` wide, and this
+///   The string widget(this.title, this.font) is `font.width(title)` wide, and this
 ///   shell has no font at arrange time. It does not matter: the cell is
 ///   `alignHorizontallyCenter`ed in the 200 px column, so a `w`-wide title lands
 ///   at `colX + (200 - w) / 2` and its *centre* is `colX + 100` for every `w`
@@ -103,11 +103,11 @@ const WORLD_SELECT_REF_CANVAS: (f32, f32) = (854.0, 480.0);
 ///   part in the measurement, because `HeaderAndFooterLayout`'s content clamp
 ///   reads the content frame's *height* (`min(headerHeight + 30, screenHeight -
 ///   footerHeight - contentHeight)`), and vanilla sizes the list to
-///   `layout.getContentHeight()` exactly (`:68`) — which is what makes the clamp
+///   layout's get content height exactly (`:68`) — which is what makes the clamp
 ///   pick the header height. A spacer's `visit_widgets` is a no-op, so it is
 ///   measured and never drawn, which is also true of vanilla's list here: it is
-///   an `AbstractWidget` but not one this shell has ported.
-/// - **`SharedConstants.DEBUG_WORLD_RECREATE` is a system-property debug flag**
+///   an abstract widget but not one this shell has ported.
+/// - **shared constants's debug world recreate is a system-property debug flag**
 ///  , false in any shipped client, so the sub-header
 ///   holds the search box alone (`:50-53`).
 fn world_select_layout(width: f32, height: f32) -> layout::HeaderAndFooterLayout {
@@ -144,8 +144,8 @@ fn world_select_layout(width: f32, height: f32) -> layout::HeaderAndFooterLayout
     let content_height = root.content_height();
     root.add_to_contents(Box::new(layout::SpacerElement::new(width, content_height)));
 
-    // `GridLayout footer = this.layout.addToFooter(new GridLayout().columnSpacing(8).rowSpacing(4));`
-    // `footer.defaultCellSetting().alignHorizontallyCenter();` (`:82-84`)
+    // `GridLayout footer = this.layout.add_to_footer(new GridLayout().column_spacing(8).row_spacing(4));`
+    // `footer.default_cell_setting().align_horizontally_center();` (`:82-84`)
     let mut footer = layout::GridLayout::new()
         .column_spacing(WORLD_SELECT_COLUMN_SPACING)
         .row_spacing(WORLD_SELECT_SPACING);
@@ -285,11 +285,11 @@ pub fn world_select_slot(button: super::world_select::WorldSelectButton) -> Slot
     world_select_block().footer_slot(index)
 }
 
-/// The title `StringWidget`'s label, positioned from the arranged header's own
+/// The title string widget's label, positioned from the arranged header's own
 /// title cell.
 ///
 /// `Align::Centre` because the cell is zero-width and therefore *is* the text's
-/// centre — see [`world_select_layout`]. `StringWidget.visitLines` draws at
+/// centre — see [`world_select_layout`]. The string widget's visit lines draws at
 /// `y + (height - 9) / 2`, which is `y` for a 9 px widget
 ///, so the cell's `y` is the text's top.
 #[must_use]
@@ -314,8 +314,8 @@ pub fn world_select_title_label() -> MenuLabel {
 /// screen over: one wheel notch is `scrollRate = defaultEntryHeight / 2` = 18 px,
 /// and a row-quantised offset cannot represent that at all. Canvas-independent in
 /// the other axis: `list.getY()` is the content band's top, which
-/// `HeaderAndFooterLayout.arrangeElements` clamps to exactly the header height
-/// whenever the content is sized to `getContentHeight()`.
+/// HeaderAndFooterLayout's arrange elements clamps to exactly the header height
+/// whenever the content is sized to get content height.
 ///
 /// The scroll term used to be absent, and its absence was the whole of that fix —
 /// worlds past the tenth were unreachable.
@@ -345,8 +345,8 @@ pub fn world_list_visible_rows(height: f32) -> usize {
 
 /// Whether world-list row `index` overlaps the content band on a `height`-tall
 /// canvas at `scroll` **pixels** of offset — `extractListItems`' own visibility
-/// test, `child.getY() + child.getHeight() >= getY() && child.getY() <=
-/// getBottom()`.
+/// test, `child.getY() + child.get_height() >= getY() && child.getY() <=
+/// get_bottom()`.
 ///
 /// `row_rect` calls this too (through [`MenuRow::world`]'s carried `scroll`), so a
 /// click can no longer land on a row that is not on screen — and, in the other
@@ -452,8 +452,8 @@ pub fn world_list_window_rows() -> usize {
     (band / WORLD_LIST_ITEM_H).floor().max(1.0) as usize
 }
 
-/// The left edge of every world-list row: `getRowLeft()`, which is
-/// `getX() + this.width / 2 - getRowWidth() / 2` with `getX() == 0`
+/// The left edge of every world-list row: get row left, which is
+/// `getX() + this.width / 2 - get_row_width() / 2` with `getX() == 0`
 ///. The `floor` is Java's integer
 /// division of an odd canvas width, and it is the reason this takes a width
 /// rather than being folded into a slot.
@@ -476,7 +476,7 @@ pub fn world_list_row_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, 
 
 /// A row's *content* rect — the entry rect inset by
 /// [`LIST_CONTENT_PADDING`]/twice it.
-/// This is where a `WorldListEntry` puts its 32×32 icon and, at
+/// This is where a world list entry puts its 32×32 icon and, at
 /// `x + 32 + 3`, its three text lines.
 #[must_use]
 pub fn world_list_row_content_rect(
@@ -497,7 +497,7 @@ pub fn world_list_row_content_rect(
 /// [`WORLD_LIST_ICON`] square.
 ///
 /// Derived from [`world_list_row_content_rect`] rather than from the row, for the
-/// reason that function exists: `WorldListEntry` measures everything it draws from
+/// reason that function exists: the world list entry measures everything it draws from
 /// the content box.
 #[must_use]
 pub fn world_list_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
@@ -507,7 +507,7 @@ pub fn world_list_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f32,
 
 /// Vanilla's own literal-component construction for `levelIdAndDate`,
 /// coloured `-8355712`
-/// (`WorldSelectionList`'s `WorldListEntry`) and the same colour merged onto the
+/// (the world selection list's world list entry) and the same colour merged onto the
 /// info line — `0xFF808080`, i.e. mid grey.
 ///
 /// The **name** line takes no colour at all in vanilla, so it draws in
@@ -516,20 +516,20 @@ pub fn world_list_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f32,
 pub(super) const WORLD_LIST_DIM: [f32; 4] =
     [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
 
-/// `AbstractSelectionList.extractItem`'s selection pass
+/// The abstract selection list's extract item's selection pass
 ///: a 1 px outline with the interior
 /// filled **black**, drawn under the row's content.
 pub(super) const WORLD_LIST_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
-/// `WorldListEntry.ICON_SIZE` — the square thumbnail at the row's content
-/// origin, which `WorldListEntry.extractContent` blits with
-/// `graphics.blit(…, this.icon.textureLocation(), getContentX(), getContentY(),
+/// The world list entry's icon size — the square thumbnail at the row's content
+/// origin, which the world list entry's extract content blits with
+/// `graphics.blit(…, this.icon.texture_location(), get_content_x(), get_content_y(),
 /// …, 32, 32, 32, 32)`.
 pub(super) const WORLD_LIST_ICON: f32 = 32.0;
 
-/// Where a `WorldListEntry`'s three text lines start, relative to the row's
-/// content box: `getTextX() = getContentX() + 32 + 3` (`WorldSelectionList`'s
-/// `WorldListEntry`).
+/// Where a world list entry's three text lines start, relative to the row's
+/// content box: `get_text_x() = get_content_x() + 32 + 3` (the world selection list's
+/// The world list entry).
 ///
 /// The 32 is [`WORLD_LIST_ICON`], written as that constant rather than as a
 /// literal so the thumbnail and the text column cannot disagree about the
@@ -537,16 +537,16 @@ pub(super) const WORLD_LIST_ICON: f32 = 32.0;
 pub const WORLD_LIST_TEXT_DX: f32 = WORLD_LIST_ICON + 3.0;
 
 /// The three text lines' y offsets inside a row's content box —
-/// `WorldListEntry.extractContent`:
+/// The world list entry's extract content:
 /// `contentY + 1`, `contentY + 9 + 3`, `contentY + 9 + 9 + 3`.
 ///
 /// Left unreduced for the reason `WORLD_SELECT_HEADER_H` is: the `9`s are
-/// `StringWidget`'s own height and the `3`s are the gaps, and a reader has to be
+/// The string widget's own height and the `3`s are the gaps, and a reader has to be
 /// able to check them against the Java rather than against `12` and `21`.
 pub const WORLD_LIST_LINE_DY: [f32; 3] = [1.0, 9.0 + 3.0, 9.0 + 9.0 + 3.0];
 
-/// The width one of those three lines is clipped to — `WorldListEntry`'s own
-/// `maxTextWidth` (`:417`), which is `getRowWidth() - getTextX() - 2` less the
+/// The width one of those three lines is clipped to — the world list entry's own
+/// `maxTextWidth` (`:417`), which is `get_row_width() - get_text_x() - 2` less the
 /// content inset.
 #[must_use]
 pub fn world_list_text_width() -> f32 {

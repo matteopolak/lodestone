@@ -57,7 +57,7 @@ pub enum MenuKey {
     /// `options.keyDrop` (`Q` by default). `ctrl` selects drop-**stack** over
     /// drop-one, which is the *only* thing the modifier changes.
     Drop {
-        /// Whether Control was held (`event.hasControlDown()`).
+        /// Whether Control was held (event's has control down).
         ctrl: bool,
     },
 }
@@ -478,7 +478,7 @@ impl MenuInput {
     /// the **same backing container** as the double-clicked slot, may be
     /// picked up, is non-empty, and matches `last_quick_moved`
     /// (`target.mayPickup(player) && target.hasItem() && target.container ==
-    /// slot.container && canItemQuickReplace(target, lastQuickMoved, true)`).
+    /// slot.container && can_item_quick_replace(target, lastQuickMoved, true)`).
     ///
     /// `target.container == slot.container` compares the **backing
     /// container** (`Slot::container`, an index into `Menu`'s container
@@ -486,11 +486,11 @@ impl MenuInput {
     /// in a chest sweep the player's own inventory, or vice versa, since both
     /// live in the same `Menu`.
     ///
-    /// `canItemQuickReplace(target, lastQuickMoved, true)` is called here only
+    /// Can item quick replace is called here only
     /// once `target.hasItem()` is already known true, at which point its
     /// `ignoreSize` argument (`true`) drops the remaining size check
-    /// entirely, so it reduces to `isSameItemSameComponents(lastQuickMoved,
-    /// target.getItem())`.
+    /// entirely, so it reduces to `is same item same components(lastQuickMoved,
+    /// target's get item)`.
     fn gather_shift_matches(&self, menu: &Menu, origin: usize) -> Vec<Click> {
         let Some(last) = self.last_quick_moved.as_ref() else {
             return Vec::new();

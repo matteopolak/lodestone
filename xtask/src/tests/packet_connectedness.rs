@@ -783,3 +783,27 @@ impl ServerProtocol for V999ServerProtocol {
         assert!(report.render().contains("decode-but-stranded 1 [MYSTERY_ACTION]"));
         Ok(())
     }
+
+    /// 26.3 has no adapter of its own; the audit must measure it through the
+    /// shared one, including the arms keyed by packet name rather than id.
+    #[test]
+    fn connectedness_covers_the_dialect_only_26_3_family() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root");
+        let report = connectedness_report(root)?;
+        assert!(
+            report.skipped.iter().all(|(family, _)| family != "26.3"),
+            "26.3 must not be skipped: {:?}",
+            report.skipped
+        );
+        let v263 = report
+            .families
+            .iter()
+            .find(|family| family.family == "26.3")
+            .expect("26.3 is audited");
+        assert_eq!(v263.play_clientbound_total, 144);
+        // Control: the release-only packets are dispatched by name, so a scanner
+        // blind to name arms would leave these three unexamined.
+        assert_eq!(v263.examined_clientbound_arms, 144);
+        assert!(!v263.unclassified.iter().any(|u| u.packet == "SWING_ANIMATION"));
+        Ok(())
+    }

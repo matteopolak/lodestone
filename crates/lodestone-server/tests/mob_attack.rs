@@ -77,7 +77,7 @@ fn attack_runs_the_full_armour_reduction_pipeline_with_the_live_verified_number(
 /// dealing damage, not firing unconditionally.
 ///
 /// A bare `knockback_power <= 0.0` is deliberately **not** this control any
-/// more: vanilla's `LivingEntity.dealDefaultKnockback` applies a flat `0.4`
+/// more: vanilla's living entity's deal default knockback applies a flat `0.4`
 /// knockback to every damaging hit regardless of the attacker's own
 /// `attack_knockback` attribute, so a non-sprinting punch —
 /// `knockback_power == 0.0` in
@@ -114,9 +114,9 @@ fn no_damage_dealt_leaves_velocity_exactly_unchanged() {
 }
 
 /// A landed hit produces the **exact** predicted velocity — hand-derived from
-/// `knockback_impulse`'s own formula (`LivingEntity.knockback`), applied
+/// `knockback_impulse`'s own formula (the living entity's knockback), applied
 /// **twice** and chained (vanilla's own `dealDefaultKnockback` then
-/// `causeExtraKnockback`, two independent `LivingEntity.knockback` calls —
+/// `causeExtraKnockback`, two independent living entity's knockback calls —
 /// see `MobSim::attack`'s own doc comment), not re-derived intuition:
 ///
 /// attacker at (0,0,0), target at (1,0,0), so the target-to-attacker vector

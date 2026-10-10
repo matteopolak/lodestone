@@ -1,4 +1,4 @@
-//! Mob spawner blocks — the decision half of vanilla's `BaseSpawner.serverTick`.
+//! Mob spawner blocks — the decision half of vanilla's base spawner's server tick.
 //!
 //! # What it is
 //!
@@ -13,11 +13,11 @@
 //! # Scope: this is the trigger→entity decision, not the tick cadence itself
 //!
 //! [`SpawnerState::tick`] *does* own the delay countdown and reroll — that part
-//! of `BaseSpawner` is small, pure state and inseparable from "did this fire",
+//! of the base spawner is small, pure state and inseparable from "did this fire",
 //! so splitting it out would just move the same arithmetic behind a second
 //! seam. What it deliberately does **not** own:
 //!
-//! * **Per-species placement rules** (`SpawnPlacements.checkSpawnRules` —
+//! * **Per-species placement rules** (the spawn placements's check spawn rules —
 //!   light level, biome, valid ground per species). `crate::natural_spawn`
 //!   already carries that table for the natural-spawn cycle; wiring a spawner
 //!   through it needs a light query this call site does not have plumbed yet.
@@ -37,7 +37,7 @@
 //!   implemented here.
 //! * **Entity-vs-entity collision.** `level.noCollision` also checks other
 //!   entities occupying the cell; this only checks blocks.
-//! * **Passenger entities.** `EntityType.loadEntityRecursive` can spawn a
+//! * **Passenger entities.** EntityType's load entity recursive can spawn a
 //!   ridden pair (e.g. a skeleton on a spider); only the primary entity spawns
 //!   here.
 //!
@@ -55,7 +55,7 @@
 //! A `SpawnData` whose `entity` compound carries no `id` (vanilla's stripped
 //! constructor removes the key entirely when absent) resolves to
 //! [`SpawnData::NONE`] — [`SpawnerState::tick`] then reroots the delay and
-//! spawns nothing, matching `BaseSpawner.serverTick`'s
+//! spawns nothing, matching base spawner's server tick's
 //! `entityType.isEmpty()` early return.
 //!
 //! # Dependencies
@@ -309,26 +309,26 @@ pub(crate) fn apply_spawner_tick_owner_batches(
 /// Per-tick facts [`SpawnerState::tick`] cannot compute itself, mirroring the
 /// closures [`crate::spawn_egg::use_spawn_egg`] takes.
 pub struct SpawnCtx<'a> {
-    /// `BaseSpawner.isNearPlayer` — whether an alive player is within
+    /// The base spawner's is near player — whether an alive player is within
     /// `required_player_range` blocks of the spawner. Computed by the caller
     /// because only it holds the player list.
     pub near_player: bool,
-    /// The `spawner_blocks_work` game rule (`ServerLevel.isSpawnerBlockEnabled`).
+    /// The `spawner_blocks_work` game rule (the server level's is spawner block enabled).
     pub spawner_blocks_work: bool,
     /// World difficulty, for the Peaceful gate.
     pub difficulty: Difficulty,
     /// The spawner's own block position.
     pub pos: BlockPos,
-    /// `level.noCollision(entityType.getSpawnAABB(...))`, approximated as "the
+    /// `level.noCollision(entityType.get_spawn_aabb(...))`, approximated as "the
     /// block at this candidate's floor cell has an empty collision shape" —
     /// see the module doc's scope note for what this does not check.
     pub is_valid_position: &'a dyn Fn(Vec3) -> bool,
-    /// `level.getEntities(EntityTypeTest.forExactClass(...), aabb,
+    /// `level.get_entities(the entity type test's for exact class, aabb,
     /// NO_SPECTATORS).size()` — how many entities of exactly `entity_type`
     /// already occupy the box centred on `pos` and inflated by `spawn_range`.
     /// The caller answers this from its own live entity list (`MobSim
     /// ::snapshots`), the same "count the exact type, not the category"
-    /// distinction vanilla's `EntityTypeTest.forExactClass` makes.
+    /// distinction vanilla's entity type test's for exact class makes.
     pub nearby_count: &'a dyn Fn(&ResourceKey, i32) -> i32,
 }
 
@@ -359,7 +359,7 @@ pub struct SpawnerState {
 }
 
 impl Default for SpawnerState {
-    /// `BaseSpawner`'s field initializers: `DEFAULT_SPAWN_DELAY` (20),
+    /// The base spawner's field initializers: `DEFAULT_SPAWN_DELAY` (20),
     /// `DEFAULT_MIN_SPAWN_DELAY` (200), `DEFAULT_MAX_SPAWN_DELAY` (800),
     /// `DEFAULT_SPAWN_COUNT` (4), `DEFAULT_MAX_NEARBY_ENTITIES` (6),
     /// `DEFAULT_REQUIRED_PLAYER_RANGE` (16), `DEFAULT_SPAWN_RANGE` (4), an
@@ -399,7 +399,7 @@ impl SpawnerState {
     }
 
     /// Reconstructs a spawner's state from its saved NBT fields —
-    /// [`crate::chunk_nbt`]'s load path. Mirrors `BaseSpawner.load` field for
+    /// [`crate::chunk_nbt`]'s load path. Mirrors the base spawner's load field for
     /// field; a caller building a fresh (not-loaded-from-disk) spawner should
     /// use [`SpawnerState::default`] instead.
     #[must_use]
@@ -465,7 +465,7 @@ impl SpawnerState {
         )
     }
 
-    /// `WeightedList.getRandom` over `spawn_potentials`: a weighted draw, or
+    /// WeightedList's get random over `spawn_potentials`: a weighted draw, or
     /// `None` when the list is empty or every weight is `0` (vanilla's
     /// `totalWeight == 0` → `selector = null` → `getRandom` always empty).
     fn weighted_pick(&self, rng: &mut SpawnRng) -> Option<SpawnData> {
@@ -486,7 +486,7 @@ impl SpawnerState {
         None
     }
 
-    /// `BaseSpawner.delay`: rerolls `spawn_delay` uniformly over
+    /// The base spawner's delay: rerolls `spawn_delay` uniformly over
     /// `[min_spawn_delay, max_spawn_delay)` (or pins to `min_spawn_delay` when
     /// the range is empty or inverted), and rerolls `next_spawn_data` **only**
     /// when the weighted draw succeeds — an empty `spawn_potentials` leaves
@@ -503,7 +503,7 @@ impl SpawnerState {
         }
     }
 
-    /// `BaseSpawner.getOrCreateNextSpawnData`: returns the pinned
+    /// The base spawner's get or create next spawn data: returns the pinned
     /// `next_spawn_data`, or draws one and pins it (falling back to
     /// [`SpawnData::NONE`] when `spawn_potentials` is empty).
     fn next_spawn_data(&mut self, rng: &mut SpawnRng) -> SpawnData {
@@ -515,7 +515,7 @@ impl SpawnerState {
         picked
     }
 
-    /// `BaseSpawner.serverTick`, reduced to the decision this crate can act
+    /// The base spawner's server tick, reduced to the decision this crate can act
     /// on. See the module doc for the full clause table and what is
     /// deliberately not modelled (per-species placement rules, custom spawn
     /// rules, equipment, entity-vs-entity collision, passengers).
@@ -573,7 +573,7 @@ impl SpawnerState {
             if !(ctx.is_valid_position)(candidate) {
                 continue;
             }
-            // `SpawnPlacements.checkSpawnRules`'s own first statement — the one
+            // The spawn placements's check spawn rules's own first statement — the one
             // clause of the per-species predicate every species shares. See
             // the module doc for why the rest of that predicate (light,
             // ground, biome) is not evaluated here.
@@ -886,7 +886,7 @@ mod tests {
 
     /// The candidate position lands within `spawn_range` of the spawner block
     /// on every axis, and the y term is one of exactly `{-1, 0, 1}` —
-    /// `BaseSpawner`'s own arithmetic, checked over many draws so a
+    /// The base spawner's own arithmetic, checked over many draws so a
     /// mis-transcribed bound (e.g. `spawn_range` used as a diameter instead of
     /// a radius) would show up as an out-of-range sample.
     #[test]

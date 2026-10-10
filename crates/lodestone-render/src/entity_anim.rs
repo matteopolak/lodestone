@@ -1574,7 +1574,7 @@ impl Skeleton {
     ///   f2 = -PI / (isAggressive ? 1.5 : 2.25)
     ///   rightArm.xRot = f2;           leftArm.xRot = f2
     ///   rightArm.xRot += f*1.2 - f1*0.4; leftArm.xRot += f*1.2 - f1*0.4
-    ///   bobArms(leftArm, rightArm, ageInTicks)
+    ///   bob arms
     /// ```
     ///
     /// Three details that are easy to get wrong and are load bearing here:
@@ -1611,11 +1611,11 @@ impl Skeleton {
     }
 
     /// Vanilla's humanoid pose setup swim arm-stroke block (`swimAmount > 0.0F`)
-    /// (the `!state.isUsingItem` half — see the call site's own doc for the
+    /// (the `!state.is_using_item` half — see the call site's own doc for the
     /// gate), transcribed exactly from the 26.2 client. Three windows of
     /// `animationPos % 26.0`: the recovery reach (`< 14`), the catch
     /// (`14..22`), and the pull back to the side (`22..26`);
-    /// `quadraticArmUpdate(x) = -65x + x²` shapes the entry curve of the
+    /// `quadratic_arm_update(x) = -65x + x²` shapes the entry curve of the
     /// first window's `z_rot`. Every value is a *lerp from whatever the walk
     /// swing and idle bob already left the arm at* toward that window's
     /// stroke target, not an assignment — so a mid-ramp `swim_amount` blends
@@ -2260,7 +2260,7 @@ mod tests {
     /// `lodestone-shell`'s `EntityDraw`.
     ///
     /// Every expectation is hand-evaluated from `sqrt((deathTime - 1)/20 · 1.6)`
-    /// clamped to 1, times `getFlipDegrees()`'s 90 — and the linear reading is
+    /// clamped to 1, times get flip degrees's 90 — and the linear reading is
     /// evaluated at the same tick so each row *records* that the two differ rather
     /// than asserting it. **`deathTime == 20` is the coincident input**: both
     /// readings give exactly 90 there, because the `sqrt` has already saturated, so
@@ -2893,7 +2893,7 @@ mod tests {
             assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
         };
 
-        // swim_pos == 0.0: quadraticArmUpdate(0) == 0, so z_lean == 0.
+        // swim_pos == 0.0: quadratic arm update == 0, so z_lean == 0.
         check(0.0, (0.0, pi, pi), (0.0, pi, pi), "window 1 (swim_pos=0)");
 
         // swim_pos == 18.0, second window, t == (18-14)/8 == 0.5:
@@ -2948,7 +2948,7 @@ mod tests {
 
         // swim_pos == 0.0: rightLeg.xRot = lerp(1.0, _, 0.3*cos(0)) == 0.3.
         // y_rot/z_rot: vanilla's unconditional 0.005 rad anti-z-fight nudge
-        // (`this.rightLeg.yRot = 0.005F; this.rightLeg.zRot = 0.005F;`),
+        // (`this.right_leg.yRot = 0.005F; this.right_leg.zRot = 0.005F;`),
         // which the swim block's x_rot-only assignment does not touch.
         let posed = skel.pose(&AnimInput {
             swim_amount: 1.0,
@@ -3534,7 +3534,7 @@ mod tests {
 
     /// `skeleton`/`stray`/`wither_skeleton` and `player_slim` shift the arm's
     /// pivot `x` *before* its own rotation, then restore it — vanilla's
-    /// `part.x += offset; part.translateAndRotate(); part.x -= offset;`.
+    /// `part.x += offset; part.translate_and_rotate(); part.x -= offset;`.
     ///
     /// # Why the expected value here is not just this crate's own formula read back
     ///

@@ -117,7 +117,7 @@ pub struct MenuNav {
     /// button under the mouse draws highlighted.
     list_button: Option<usize>,
     /// How far the multiplayer list is scrolled down, **in logical pixels** —
-    /// vanilla's `AbstractScrollArea.scrollAmount`, which is a `double` and is
+    /// vanilla's abstract scroll area's scroll amount, which is a `double` and is
     /// subtracted straight from a row's y.
     ///
     /// **The offset is a `f32` pixel distance, not a `usize` row counter**: one wheel
@@ -135,7 +135,7 @@ pub struct MenuNav {
     /// precondition that makes a pixel offset safe to draw.
     ///
     /// Not persisted and reset to `0.0` whenever the screen is (re)opened from
-    /// the title, matching vanilla building a fresh `JoinMultiplayerScreen` —
+    /// the title, matching vanilla building a fresh join multiplayer screen —
     /// see [`Self::key_main`]'s `MainButton::Multiplayer` arm.
     server_scroll: f32,
     /// The last known mouse position in **logical** pixels, and the canvas it was
@@ -153,7 +153,7 @@ pub struct MenuNav {
     /// than behaving as if the cursor were at `(0, 0)`.
     menu_cursor: Option<(f32, f32, f32, f32)>,
     /// The settings tree's own cursor — which of the nine pages is showing,
-    /// where the cursor is on it, and how far its `OptionsList` is scrolled.
+    /// where the cursor is on it, and how far its options list is scrolled.
     /// See [`super::options::SettingsNav`].
     ///
     /// Held here rather than in [`UiState`] because it is *navigation state*,
@@ -193,7 +193,7 @@ pub struct MenuNav {
     /// Held here for [`Self::stats`]' reason: `Screen::Advancements` is one screen
     /// however far its tree is panned, and `UiState` models legal screen edges
     /// only. Reset on every entry from the pause menu, matching vanilla's
-    /// per-screen `AdvancementTab` lifetime.
+    /// per-screen advancement tab lifetime.
     advancements: crate::menu::advancements::AdvancementsState,
     /// The World Creation screen's own widgets, focus and collected config.
     /// Held here for the same reason [`Self::form`] is: it owns
@@ -801,7 +801,7 @@ mod tests {
     /// `CLAUDE.md`'s `ClientEvent::BiomeVisuals` precedent: an ordering change
     /// has to fail *here*, and no `cargo check` can see one. The wrap on the
     /// fourth press is the interesting entry, because it is vanilla's
-    /// `clearFocus()`-then-retry and not `(i + 1) % n` —
+    /// clear focus-then-retry and not `(i + 1) % n` —
     /// see `super::focus`.
     #[test]
     fn tab_walks_the_form_fields_in_order_and_wraps() {
@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(frame.rows[ADDRESS_FIELD].detail, "Server Address");
         // A hover on row 1 must **not** focus the address field — a player
         // report (2026-08-04) caught pure mouse motion granting real keyboard
-        // focus, which vanilla's `ContainerEventHandler` only ever does from a
+        // focus, which vanilla's container event handler only ever does from a
         // click or Tab. `the_form_field_ids_are_the_row_indices_the_mouse_
         // reports`'s own name is about hover *hit-testing* landing on the
         // right row, which is still true — it is `hover_row`'s reaction to
@@ -987,7 +987,7 @@ mod tests {
     /// that has a row cursor, and on this screen `Enter` means *save* — so
     /// clicking either field submitted the form. That is the same shape one
     /// screen over, and the same dispatch is what makes it visible:
-    /// `ContainerEventHandler.mouseClicked` focuses the child it hit and calls its
+    /// The container event handler's mouse clicked focuses the child it hit and calls its
     /// `onClick`; it never activates the screen.
     #[test]
     fn clicking_a_form_field_focuses_it_instead_of_saving() {
@@ -1335,7 +1335,7 @@ mod tests {
         assert_eq!(nav.friends().tab(), crate::menu::friends::FriendsTab::Settings);
     }
 
-    /// Matches the `OptionInstance` whose vanilla's own persisted-options declarations accessor is `name`.
+    /// Matches the option instance whose vanilla's own persisted-options declarations accessor is `name`.
     fn is_option(name: &str) -> impl Fn(&crate::menu::options::Cell) -> bool + '_ {
         move |c| matches!(c, crate::menu::options::Cell::Option(s) if s.accessor == name)
     }
@@ -1379,7 +1379,7 @@ mod tests {
         // *behaviour* it protected — a scale that cycles, wraps and reaches
         // `options.json` immediately rather than at exit — is unchanged; what
         // moved is the key. Up/Down are a cursor now, and the cycle is Enter on
-        // the row, which is `CycleButton.onPress`.
+        // the row, which is the cycle button's on press.
         let (mut nav, path) = nav("settings-cycle");
         let mut ui = UiState::new();
         ui.open_settings();
@@ -1649,7 +1649,7 @@ mod tests {
     /// was to hand-edit `options.json`. Links 1 and 5 present, 2–4 missing.
     ///
     /// **The expected values come from vanilla's formula, evaluated outside
-    /// `BobFrame`.** `GameRenderer.bobHurt` is
+    /// `BobFrame`.** game renderer's bob hurt is
     /// `-sin((hurt/duration)^4 * PI) * 14 * strength`, so at `hurt == 5` of a
     /// 10-tick window the shaped term is `sin(0.5^4 * PI) = sin(PI/16)` and the
     /// tilt is `-14 * sin(PI/16) * strength`. That is recomputed here from
@@ -1780,7 +1780,7 @@ mod tests {
     /// assertion passes while two categories swap. The values are `(i + 1) / 16`,
     /// dyadic so the `f32` comparison is exact.
     ///
-    /// Drives the **drag** path (`AbstractSliderButton.setValueFromMouse`), which
+    /// Drives the **drag** path (the abstract slider button's set value from mouse), which
     /// is the one that reaches `LiveOption::unit_double_mut`'s index write with a
     /// value of the test's choosing; the click path is exercised separately at the
     /// end, because it goes through a different arm
@@ -1801,7 +1801,7 @@ mod tests {
         open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Sound);
 
         // The eleven target values, and the eleven accessors they belong to. The
-        // accessor order is `config::SOUND_CATEGORY_NAMES`, i.e. `SoundSource`
+        // accessor order is `config::SOUND_CATEGORY_NAMES`, i.e. The sound source
         // declaration order, which is the outside source for the whole mapping.
         let mut expected = [0.0f32; 11];
         for (index, name) in crate::config::SOUND_CATEGORY_NAMES.iter().enumerate() {
@@ -2054,7 +2054,7 @@ mod tests {
         //
         // Back to the root first: `open_settings_page` walks a nav button on the
         // *current* page, and Accessibility's only one goes to Controls. Escape is
-        // `OptionsSubScreen`'s own way back, so this is the route a player takes.
+        // The options sub screen's own way back, so this is the route a player takes.
         nav.key(&mut ui, MenuKey::Escape);
         assert_eq!(
             nav.settings().page(),
@@ -2068,7 +2068,7 @@ mod tests {
             "premise: vanilla's default, and what the sky pass drew unconditionally"
         );
         // FANCY is *last* in the enum, so the first click wraps to OFF. That order
-        // is `CycleButton`'s, not a chosen one.
+        // is the cycle button's, not a chosen one.
         for want in [CloudStatus::Off, CloudStatus::Fast, CloudStatus::Fancy] {
             assert_eq!(nav.click(&mut ui, clouds), MenuAction::None);
             assert_eq!(nav.options().cloud_status, want);
@@ -3339,7 +3339,7 @@ mod tests {
     }
 
     /// A delete that the filesystem refuses is **reported over the world list**,
-    /// not swallowed — vanilla raises `SystemToast.onWorldDeleteFailure` and this
+    /// not swallowed — vanilla raises system toast's on world delete failure and this
     /// shell has no toast layer, so the list's own error line is where it goes.
     ///
     /// Driven by removing the directory behind the confirmation's back, which is
@@ -3757,7 +3757,7 @@ mod tests {
     /// yet published" from "multiplayer, has nothing to publish" apart — both
     /// read `false`, which is exactly the state a fresh `MenuNav` starts in
     /// and a multiplayer session never leaves. `open_to_lan_available` is the
-    /// fix: vanilla's own `hasSingleplayerServer()` conjunct, pushed in by
+    /// fix: vanilla's own has singleplayer server conjunct, pushed in by
     /// `app::session::drive_ui_from_session` from `UiState::kind()`.
     #[test]
     fn open_to_lan_is_absent_on_a_never_flagged_singleplayer_session() {
@@ -4381,7 +4381,7 @@ mod tests {
     ///
     /// **Sign convention:** `notches` is winit's `scrollY` verbatim, so
     /// **positive scrolls up** — the same sign vanilla's
-    /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())` uses
+    /// set scroll amount uses
     ///. This is the *opposite* of the `rows`
     /// parameter it replaced, where positive meant down.
     #[test]
@@ -4626,7 +4626,7 @@ mod tests {
     /// 1 px row outline followed the mouse, so a server could not stay selected
     /// while the cursor travelled down to the Join button.
     ///
-    /// Vanilla reaches `AbstractSelectionList.setSelected` only from `setFocused`
+    /// Vanilla reaches abstract selection list's set selected only from `setFocused`
     /// and the click paths, never from
     /// hover — so this asserts hover is inert on rows *and* that click still
     /// works, because "hover does nothing" is also satisfied by a screen where
@@ -4680,7 +4680,7 @@ mod tests {
     }
 
     /// A click on a row **selects**; only the favicon's right half joins. That is
-    /// `OnlineServerEntry.mouseClicked`'s order,
+    /// The online server entry's mouse clicked's order,
     /// and it is also the `MenuNav::click` hazard documented by the direct-click rule:
     /// translating a click into `Enter` here would connect on any click on any row.
     #[test]
@@ -4859,7 +4859,7 @@ mod tests {
 
         // With the list now empty, the three conditional buttons are inactive and
         // a click on one must do **nothing** — vanilla's inactive
-        // `AbstractWidget.mouseClicked` returns false.
+        // The abstract widget's mouse clicked returns false.
         for b in [
             ServerListButton::Select,
             ServerListButton::Edit,
@@ -5414,11 +5414,11 @@ mod tests {
     /// `stats::frame` set `selected: 0` on a frame whose only row *is* Done, so
     /// it was drawn focused the moment the screen opened. Vanilla focuses
     /// nothing: `Screen.setInitialFocus` runs its whole
-    /// body only `if (this.minecraft.getLastInputType().isKeyboard())`, and this
+    /// body only `if (this.minecraft.get_last_input_type().is_keyboard())`, and this
     /// screen is reached by clicking the pause menu's Statistics button.
-    /// `StatsScreen` does not override `setInitialFocus`, and even if the last
-    /// input *had* been a keyboard, `StatsScreen.init` puts Done in
-    /// `setTabOrderGroup(1)` behind the tab bar, so Done is not the first tab
+    /// The stats screen does not override `setInitialFocus`, and even if the last
+    /// input *had* been a keyboard, the stats screen's init puts Done in
+    /// set tab order group behind the tab bar, so Done is not the first tab
     /// stop either.
     ///
     /// `usize::MAX` rather than an arbitrary out-of-range index: it is
@@ -5473,11 +5473,11 @@ mod tests {
             "Enter with nothing focused must not close the screen"
         );
 
-        // Tab is `Screen.keyPressed`'s TabNavigation, and this screen has one
+        // Tab is `Screen.keyPressed`'s tab navigation, and this screen has one
         // focusable child for it to land on.
         //
         // **A known divergence, stated rather than asserted away.** Vanilla's
-        // `MenuTabBar` is itself focusable and sits in tab-order group 0, ahead
+        // The menu tab bar is itself focusable and sits in tab-order group 0, ahead
         // of the Done button's group 1 — so real vanilla's first Tab lands on
         // the tab bar, not on Done. `StatsNav` models focus as a single flag and
         // the tab rows are not focusable widgets here, so our first Tab reaches
@@ -5499,7 +5499,7 @@ mod tests {
         );
     }
 
-    /// Hover must not focus, and a click must — `ContainerEventHandler.
+    /// Hover must not focus, and a click must — the container event handler.
     /// mouseClicked` focuses the child it hit and then calls its `onClick`,
     /// while hover touches focus on no screen (the server-list report).
     ///
@@ -5541,7 +5541,7 @@ mod tests {
     }
 
     /// Re-entering Statistics must not arrive with Done still focused from last
-    /// time — vanilla builds a fresh `StatsScreen` on every entry, which is the
+    /// time — vanilla builds a fresh stats screen on every entry, which is the
     /// same rule `PauseButton::Statistics` already applies to the scroll offset.
     #[test]
     fn re_entering_statistics_starts_unfocused_again() {

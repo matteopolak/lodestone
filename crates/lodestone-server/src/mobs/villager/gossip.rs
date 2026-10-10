@@ -228,7 +228,7 @@ impl GossipContainer {
     }
 
     /// Villager gossip for one target, summed over every
-    /// tracked [`GossipType`] — this **is** `getReputation(target, t ->
+    /// tracked [`GossipType`] — this **is** `get reputation(target, t ->
     /// true)`, vanilla's own predicate every real caller (`Villager.
     /// getPlayerReputation`) passes. A predicate-narrowed variant is not
     /// ported (see this module's doc); every consumer here wants the full
@@ -278,7 +278,7 @@ impl GossipContainer {
             .collect()
     }
 
-    /// `GossipContainer.transferFrom`: pulls up to `max_count` gossip
+    /// GossipContainer's transfer from: pulls up to `max_count` gossip
     /// entries out of `source`, weighted by `|weightedValue|` (vanilla's
     /// cumulative-range-plus-binary-search draw, reduced here to the
     /// equivalent weighted linear scan — same distribution, no

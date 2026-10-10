@@ -695,7 +695,7 @@ mod tests {
     /// A bare name with no properties at all resolves to the block's
     /// jar-marked default (tier 3) — **not** the lowest id (4011). Cross-
     /// checked against the committed JVM dump's own `D` (`state ==
-    /// defaultBlockState()`) bitstring for this block's id range in
+    /// default_block_state()`) bitstring for this block's id range in
     /// `tests/support/snow_support_jvm.txt`, which marks id 5171 as the one
     /// true bit — an id this test derives independently of `state_id` itself
     /// by walking the dump's `P D` line, not by trusting the function under

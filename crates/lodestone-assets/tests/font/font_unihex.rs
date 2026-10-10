@@ -16,7 +16,7 @@
 //!
 //! # The expected values come from the record, not from the code
 //!
-//! Every advance and bound below is hand-derived from `UnihexProvider` in
+//! Every advance and bound below is hand-derived from the unihex provider in
 //! `.cache/mc/26.2/client-src`, and each case quotes the arithmetic. Two of the
 //! HEX lines are copied verbatim out of vanilla's own `unifont.zip`
 //! (`unifont_all_no_pua-17.0.01.hex`), so the *input* is vanilla's too.
@@ -340,7 +340,7 @@ fn the_override_and_derived_readings_of_a_cjk_glyph_really_do_differ() {
 ///
 /// `A` and `B` are both in the `.hex` payload and both declared by the bitmap
 /// sheet; `B`'s cell is blank. Vanilla still counts that blank cell as the sheet
-/// supplying `B` (`BitmapProvider` maps every non-null `chars` slot), so `B`
+/// supplying `B` (the bitmap provider maps every non-null `chars` slot), so `B`
 /// advances 1, not the 5.0 its unihex entry would give. That is the trap in the
 /// priority rule and the reason this fixture draws one cell and not the other.
 #[test]

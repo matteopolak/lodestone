@@ -41,7 +41,7 @@ fn a_cat_finds_a_nearby_chest_as_its_sit_target() {
 }
 
 /// A bed's *foot* part must feed both seams: the sit goal accepts a bed
-/// foot (vanilla's own valid-target check's own third clause) and the
+/// foot (vanilla's valid-target check's third clause) and the
 /// lie goal accepts any bed part.
 #[test]
 fn a_cat_finds_a_nearby_bed_foot_for_both_seams() {

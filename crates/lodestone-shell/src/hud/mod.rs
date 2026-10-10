@@ -95,7 +95,7 @@ pub(crate) const HUD_MARGIN: f32 = 6.0;
 
 /// The gap between the hotbar's bottom edge and the bottom of the screen.
 ///
-/// **Zero, because vanilla's hotbar is flush.** `Hud.extractItemHotbar` blits it
+/// **Zero, because vanilla's hotbar is flush.** Hud's extract item hotbar blits it
 /// at `(guiWidth/2 - 91, guiHeight - 22, 182, 22)` and the selection at
 /// `(…, guiHeight - 23, 24, 23)`; there is no bottom margin anywhere in that
 /// method. This was [`HUD_MARGIN`] (6), which floated the whole cluster 6 px up.
@@ -201,9 +201,9 @@ pub(crate) const CHAT_PLATE_PAD_PX: f32 = 12.0;
 /// possible wrapped line rather than on top of it. See `docs/chat.md`.
 const CHAT_SCROLLBAR_GAP: f32 = 8.0;
 
-/// `DebugScreenOverlay.MARGIN_LEFT`/`MARGIN_RIGHT`/`MARGIN_TOP`, all `2`.
+/// The debug screen overlay's margin left/`MARGIN_RIGHT`/`MARGIN_TOP`, all `2`.
 ///
-/// `extractLines` spends them as `left = alignLeft ? 2 : guiWidth() - 2 - width`
+/// `extractLines` spends them as `left = alignLeft ? 2 : gui_width() - 2 - width`
 /// and `top = 2 + height * i`, so the same `2` is the left inset, the right
 /// inset and the top inset.
 ///
@@ -213,7 +213,7 @@ const CHAT_SCROLLBAR_GAP: f32 = 8.0;
 pub const DEBUG_MARGIN: f32 = 2.0;
 
 /// The F3 overlay's line pitch — vanilla's literal `int height = 9` in
-/// `DebugScreenOverlay.extractLines`.
+/// The debug screen overlay's extract lines.
 ///
 /// It is both the pitch (`top = 2 + height * i`) and the plate's own height
 /// (`fill(…, top - 1, …, top + height - 1, …)` spans exactly `height` rows), so
@@ -228,7 +228,7 @@ pub const DEBUG_LINE_H: f32 = 9.0;
 
 /// The plate behind each F3 overlay line — vanilla's
 /// `fill(left - 1, top - 1, left + width + 1, top + height - 1, -1873784752)`,
-/// i.e. `0x90505050` (`DebugScreenOverlay.extractLines`) — mid grey at 56%
+/// i.e. `0x90505050` (the debug screen overlay's extract lines) — mid grey at 56%
 /// alpha. Without it the overlay is unreadable over bright terrain, which is
 /// what the shell shipped before it had one.
 pub(crate) const DEBUG_LINE_BG: [f32; 4] = [
@@ -244,7 +244,7 @@ pub(crate) const DEBUG_LINE_INK: [f32; 4] =
     [0xE0 as f32 / 255.0, 0xE0 as f32 / 255.0, 0xE0 as f32 / 255.0, 1.0];
 
 /// The Tab player-list overlay's line pitch — vanilla's literal `9`
-/// (`PlayerTabOverlay.extractRenderState`, which advances `yo` by `9` per row and
+/// (the player tab overlay's extract render state, which advances `yo` by `9` per row and
 /// fills each slot `8` tall inside it).
 ///
 /// **Vanilla's own metrics, not an ad-hoc HUD-wide pitch.** The tab overlay is a
@@ -257,7 +257,7 @@ pub(crate) const TAB_LINE_H: f32 = 9.0;
 /// The tab overlay's text scale — vanilla metrics, so `1.0`. See [`TAB_LINE_H`].
 pub(crate) const TAB_TEXT_SCALE: f32 = 1.0;
 
-/// The scoreboard sidebar's line pitch — `Hud.displayScoreboardSidebar`'s
+/// The scoreboard sidebar's line pitch — Hud's display scoreboard sidebar's
 /// literal `9` (`int height = entriesCount * 9;`, and each row's `y` advances
 /// by that same `9` walking backwards from `bottom`).
 ///
@@ -271,7 +271,7 @@ pub(crate) const SIDEBAR_LINE_H: f32 = 9.0;
 pub(crate) const SIDEBAR_TEXT_SCALE: f32 = 1.0;
 
 /// The sidebar's edge inset — vanilla's own display-scoreboard-sidebar's literal `3` in
-/// `int left = guiWidth() - width - 3;` and `int right = guiWidth() - 3 + 2;`.
+/// `int left = gui_width() - width - 3;` and `int right = gui_width() - 3 + 2;`.
 const SIDEBAR_EDGE_MARGIN: f32 = 3.0;
 
 /// Vanilla's own get-background-color accessor at `0.3F`'s body-plate alpha, with
@@ -283,21 +283,21 @@ const SIDEBAR_BODY_BG_ALPHA: f32 = 0.3;
 /// [`SIDEBAR_BODY_BG_ALPHA`].
 const SIDEBAR_HEADER_BG_ALPHA: f32 = 0.4;
 
-/// `ChatFormatting.RED` (`0xFF5555`) — `StyledFormat.SIDEBAR_DEFAULT`'s colour,
+/// The chat formatting's red (`0xFF5555`) — the styled format's sidebar default's colour,
 /// the score column's default when a server sends no per-entry
 /// [`lodestone_game::scoreboard::NumberFormat::Styled`] override.
 const SIDEBAR_SCORE_DEFAULT: [f32; 3] = [1.0, 0x55 as f32 / 255.0, 0x55 as f32 / 255.0];
 
-/// `BossHealthOverlay.BAR_WIDTH`/`BAR_HEIGHT` — every boss bar is this fixed
+/// The boss health overlay's bar width/`BAR_HEIGHT` — every boss bar is this fixed
 /// native size, never a fraction of the canvas width.
 const BOSS_BAR_WIDTH: f32 = 182.0;
 const BOSS_BAR_HEIGHT: f32 = 5.0;
 
-/// `BossHealthOverlay.extractRenderState`'s `int yOffset = 12;` — the first
+/// The boss health overlay's extract render state's `int yOffset = 12;` — the first
 /// bar's top.
 const BOSS_BAR_TOP: f32 = 12.0;
 
-/// `BossHealthOverlay.extractRenderState`'s per-bar stride: `yOffset += 10 +
+/// The boss health overlay's extract render state's per-bar stride: `yOffset += 10 +
 /// 9;` — 10 for the bar's own row pitch, 9 for the title above it.
 const BOSS_BAR_STEP: f32 = 19.0;
 

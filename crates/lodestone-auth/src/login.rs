@@ -309,8 +309,7 @@ pub enum SelectedAccount {
     ///
     /// **This is not a reason to abort the join.** An offline-mode server never
     /// asks for authentication (vanilla only sends the encryption request
-    /// inside `ServerLoginPacketListenerImpl.handleHello`'s
-    /// `usesAuthentication() && !isMemoryConnection()` arm), so refusing to
+    /// inside the hello handler's authenticated, not-in-memory-connection arm), so refusing to
     /// dial would break joins that would have worked. The caller should join
     /// with its offline identity and keep this text to explain the failure
     /// *if* the server turns out to demand online mode.

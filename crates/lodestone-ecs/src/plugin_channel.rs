@@ -140,7 +140,7 @@ pub trait PluginChannel: Message + Sized {
     ///
     /// Return `None` for a payload that does not have the shape this channel
     /// expects. That is not an error and never disconnects: vanilla's own
-    /// fallback for an unparseable payload is `DiscardedPayload`, read-and-drop,
+    /// fallback for an unparseable payload is a discarded-payload read-and-drop,
     /// and a third-party channel may legitimately carry several message shapes.
     /// A rejected payload is counted in
     /// [`PluginChannelState::rejected`] so "nothing arrived" and "it arrived and

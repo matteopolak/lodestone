@@ -176,7 +176,7 @@ pub(super) fn glint_now_ms() -> f64 {
 /// and `0.75`), so an untouched install is byte-identical to the old behaviour
 /// and no gate written against the defaults can tell the difference.
 ///
-/// Clamped to `[0, 1]` because both options are `UnitDouble`s and this reaches a
+/// Clamped to `[0, 1]` because both options are the unit doubles and this reaches a
 /// GPU uniform: a hand-edited negative strength would make `dst += src * src`
 /// darken the item instead of shimmering it.
 ///

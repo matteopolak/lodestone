@@ -736,7 +736,7 @@ fn an_unpowered_lever_propagates_nothing() {
 }
 
 /// A pressed button drives the same run — the family that shares
-/// `LeverBlock`'s signal shape but reaches it from a scheduled release rather
+/// The lever block's signal shape but reaches it from a scheduled release rather
 /// than a toggle, so its `powered=false` state is the one a player sees most of
 /// the time.
 #[test]

@@ -487,7 +487,7 @@ pub(crate) fn mesh_item_quads_with_light(
 //
 // ```text
 // scale(scale, scale, scale)
-// mulPose(camera.orientation)
+// mul pose
 // submit(...)                              // resolved in the ground display context
 // ```
 //
@@ -912,7 +912,7 @@ pub fn item_frame_content_lift(invisible: bool) -> f32 {
 /// ```
 ///
 /// `rotation` is vanilla's item-frame rotation accessor, `0..8`; `invisible` is
-/// `state.isInvisible`, which swaps the lift (see [`item_frame_content_lift`]).
+/// state's is invisible, which swaps the lift (see [`item_frame_content_lift`]).
 ///
 /// # The sign trap
 ///

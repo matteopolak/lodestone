@@ -192,7 +192,7 @@ pub fn experience_orb_tint(age_ticks: f32) -> [u8; 3] {
 /// An orb's packed light, from the sample at its own position.
 ///
 /// Vanilla's experience-orb light-level accessor is
-/// `clamp(super.getBlockLightLevel(..) + 7, 0, 15)` — a **+7 boost to the block
+/// `clamp(super.get_block_light_level(..) + 7, 0, 15)` — a **+7 boost to the block
 /// nibble only**, which is what keeps an orb readable on a cave floor. The sky
 /// nibble is passed through untouched; boosting both would make an orb in a lit
 /// room brighter than the room.

@@ -922,7 +922,7 @@ impl ToolRule {
     }
 }
 
-/// The block set a [`ToolRule`] matches against (26.2 `HolderSet<Block>`).
+/// The block set a [`ToolRule`] matches against (26.2's block holder set).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolBlocks {
     /// A block tag, for example `minecraft:mineable/pickaxe`. Written on the

@@ -12,12 +12,12 @@
 //! ## Ground truth, not a guess
 //!
 //! Every key name and every default value here is transcribed from
-//! vanilla's own dedicated-server-properties record in this repo's own pinned 26.2 decompile, not from an older
+//! vanilla's dedicated-server-properties record in this repo's pinned 26.2 decompile, not from an older
 //! Minecraft version's documentation. Two things that transcription caught
 //! that an assumption would not have:
 //!
 //! * **There is no `pvp` key in 26.2.** Older server.properties files carry
-//!   one; `DedicatedServerProperties`'s field list does not, and neither does
+//!   one; the dedicated server properties's field list does not, and neither does
 //!   the real file this repo's own oracle already runs against
 //!   (`.cache/mc/26.2/server.properties` has no `pvp`/`allow-nether`/
 //!   `spawn-monsters`/`spawn-npcs`/`spawn-animals` line either). This module
@@ -260,7 +260,7 @@ pub fn default_raw() -> RawProperties {
 /// `(key, default)` pairs, in vanilla's own dedicated-server-properties
 /// record's declaration order (which is also the real file's alphabetical order).
 /// `management-server-secret` here is `""` rather than vanilla's randomly
-/// generated `SecurityConfig.generateSecretKey()` — this crate implements no
+/// generated security config's generate secret key — this crate implements no
 /// management server to protect with it, so a fixed empty default is honest
 /// about that rather than manufacturing a secret nothing checks.
 const DEFAULTS: &[(&str, &str)] = &[
@@ -350,7 +350,7 @@ pub struct ServerProperties {
     pub level_name: String,
     /// `level-seed`, unparsed. Feed it to
     /// `lodestone_worldgen::hash::java_string_hash` the same way
-    /// `WorldOptions.parseSeed`'s catch arm does; empty means "random".
+    /// The world options's parse seed's catch arm does; empty means "random".
     pub level_seed: String,
     /// `level-type`. `minecraft:normal`/`minecraft:large_biomes`/
     /// `minecraft:amplified` are real; anything else (including
@@ -374,7 +374,7 @@ pub struct ServerProperties {
     /// `server-port`.
     pub server_port: u16,
     /// `server-ip`. Empty means "every interface", matching vanilla's own
-    /// `ServerConnectionListener` binding `InetAddress` only when this is
+    /// The server connection listener binding `InetAddress` only when this is
     /// non-empty.
     pub server_ip: String,
     /// `white-list`.
@@ -506,9 +506,9 @@ impl ServerProperties {
     }
 }
 
-/// `GameType::byName`/`GameType::byId`: name first (case-insensitive), then a
+/// GameType's by name/`GameType::byId`: name first (case-insensitive), then a
 /// numeric id (0–3), defaulting to survival for anything else — matching
-/// `DedicatedServerProperties`'s `dispatchNumberOrString`.
+/// The dedicated server properties's `dispatchNumberOrString`.
 fn parse_gamemode(raw: Option<&str>) -> GameMode {
     match raw.map(str::trim) {
         Some(v) if v.eq_ignore_ascii_case("survival") => GameMode::Survival,
@@ -532,7 +532,7 @@ fn gamemode_name(mode: GameMode) -> &'static str {
     }
 }
 
-/// `Difficulty::byName`/`Difficulty::byId`, same shape as [`parse_gamemode`].
+/// Difficulty's by name/`Difficulty::byId`, same shape as [`parse_gamemode`].
 fn parse_difficulty(raw: Option<&str>) -> Difficulty {
     match raw.map(str::trim) {
         Some(v) if v.eq_ignore_ascii_case("peaceful") => Difficulty::Peaceful,
@@ -556,7 +556,7 @@ fn difficulty_name(difficulty: Difficulty) -> &'static str {
     }
 }
 
-/// `WorldOptions.parseSeed`: trim, empty is "no seed" (caller picks random),
+/// The world options's parse seed: trim, empty is "no seed" (caller picks random),
 /// else parse as `i64`, else Java's `String::hashCode` widened to `i64` —
 /// [`lodestone_worldgen::hash::java_string_hash`] is the same function
 /// `lodestone-shell`'s own seed field uses for the identical formula

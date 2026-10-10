@@ -319,9 +319,9 @@ const FANCY_CLOUD_WGSL: &str = include_str!("shaders/sky_cloud_fancy.wgsl");
 // Pipelines
 // ---------------------------------------------------------------------------
 
-/// Vanilla's `BlendFunction.OVERLAY` (26.2's decompiled blend-function
-/// declaration),
-/// which `RenderPipelines.CELESTIAL` and `.STARS` both use
+/// Vanilla's overlay blend function (26.2's
+/// blend-function declaration),
+/// which the celestial and stars pipelines both use
 /// (vanilla's render-pipeline registration table): colour is `src.rgb * src.a + dst.rgb` — additive,
 /// weighted by the fragment's own alpha, with the destination **not**
 /// attenuated (`dst_factor: One`, not `OneMinusSrcAlpha` as ordinary alpha
@@ -354,7 +354,7 @@ const CELESTIAL_BLEND: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
-/// Vanilla's `BlendFunction.TRANSLUCENT`, which `CLOUDS_SNIPPET` uses for both
+/// Vanilla's translucent blend function, which the clouds snippet uses for both
 /// cloud pipelines (its render-pipeline registration table): ordinary
 /// `SrcAlpha`/`OneMinusSrcAlpha` compositing.
 ///
@@ -425,9 +425,9 @@ fn build_pipeline(
     })
 }
 
-/// Vanilla's `BlendFunction.TRANSLUCENT`
-/// (26.2's decompiled blend-function declaration),
-/// which `RenderPipelines.SUNRISE_SUNSET` uses: ordinary
+/// Vanilla's translucent blend function
+/// (26.2's blend-function declaration),
+/// which the sunrise/sunset pipeline uses: ordinary
 /// `SrcAlpha`/`OneMinusSrcAlpha` colour blending, with `One`/`OneMinusSrcAlpha`
 /// on alpha.
 ///
@@ -555,8 +555,8 @@ impl CelestialPipeline {
     }
 }
 
-/// The star-field pipeline: [`CELESTIAL_BLEND`] (vanilla's `RenderPipelines.STARS`
-/// is the same `BlendFunction.OVERLAY` as `.CELESTIAL`), position + baked
+/// The star-field pipeline: [`CELESTIAL_BLEND`] (vanilla's stars pipeline
+/// is the same overlay blend as the celestial one), position + baked
 /// brightness colour. Shares [`SkyDiscPipeline`]'s shader and vertex layout,
 /// but needs its own blend state (additive over the disc, not opaque).
 #[derive(Debug)]
@@ -1049,8 +1049,8 @@ impl SkyFrame {
     /// **Two independent gates**, which is the whole reason this is a method
     /// rather than a field read: the player's own Clouds option
     /// ([`cloud_status`](Self::cloud_status)) *and* the dimension's cloud-colour
-    /// alpha, which vanilla checks as `ARGB.alpha(cloudColor) > 0` in
-    /// `LevelRenderer` before it even adds the cloud pass. The Nether declares no
+    /// alpha, which vanilla checks as the cloud colour's alpha above 0
+    /// in the level renderer before it even adds the cloud pass. The Nether declares no
     /// `minecraft:visual/cloud_color`, and the attribute's registered default is
     /// `0` — fully transparent — so a Nether cloud deck is suppressed by the
     /// *dimension*, with the graphics option still on FANCY. Folding both here
@@ -1170,8 +1170,8 @@ impl SkyFrame {
     /// Everything the finite overhead disc does not cover keeps this colour, so
     /// it is what the player sees below the horizon wherever terrain does not
     /// reach. See [`SkyRenderer::render`]'s `clear` parameter for the full
-    /// account and for vanilla's equivalent (`LevelRenderer`'s `"clear"` pass at
-    /// `fogColor`).
+    /// account and for vanilla's equivalent (the level renderer's "clear" pass at
+    /// the fog colour).
     ///
     /// It reads [`resolve_colors`](Self::resolve_colors) rather than
     /// `day_fog_color` for two reasons, and both have bitten this file before:
@@ -1693,7 +1693,7 @@ impl SkyRenderer {
                 ops: wgpu::Operations {
                     // See `render`'s doc: this is the below-horizon void, not a
                     // scratch value. Vanilla's equivalent is
-                    // `LevelRenderer`'s `"clear"` pass at the fog colour.
+                    // the level renderer's "clear" pass at the fog colour.
                     load: wgpu::LoadOp::Clear(clear),
                     store: wgpu::StoreOp::Store,
                 },

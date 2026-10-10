@@ -180,10 +180,10 @@ pub fn tick_sprint_window(mut input: ResMut<RawInput>) {
 ///
 /// Vanilla's own client-side send-position step is *evaluated* every client
 /// tick but *sends* on only a fraction of them: it tracks the position/
-/// rotation last actually transmitted and emits `Pos`/`Rot`/`PosRot`/
-/// `StatusOnly` only when that state is dirty by more than `(2e-4)²`
+/// rotation last actually transmitted and emits a position-only, rotation-only,
+/// both, or status-only update only when that state is dirty by more than `(2e-4)²`
 /// (position) or at all (rotation), or forces one `Pos` every 20 ticks
-/// regardless (`positionReminder`); an idle player with no on-ground/
+/// regardless; an idle player with no on-ground/
 /// collision transition sends *nothing at all* on the other ~19 ticks out of
 /// 20. `crates/versions/26.2/src/adapter/mod.rs`'s `select_move_packet` is a
 /// verified, tested port of that exact algorithm
@@ -191,7 +191,7 @@ pub fn tick_sprint_window(mut input: ResMut<RawInput>) {
 /// `ClientAction::Move` here every tick does **not** put one packet on the
 /// wire every tick for v26-2 — it is what keeps that downstream dirty-tracker
 /// correctly clocked, since its own `positionReminder`-style counter only
-/// advances when it is invoked, exactly mirroring `sendPosition()` being
+/// advances when it is invoked, exactly mirroring send position being
 /// called every real tick in vanilla. Removing this per-tick push (rather
 /// than throttling *inside* the adapter, where the real "last sent" state
 /// already lives) would starve that counter and silently break the 20-tick

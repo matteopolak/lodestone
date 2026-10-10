@@ -49,7 +49,7 @@ struct World {
     jump_factor: HashMap<(i32, i32, i32), f32>,
     speed_factor: HashMap<(i32, i32, i32), f32>,
     fluids: HashMap<(i32, i32, i32), FluidCell>,
-    /// `BubbleColumnBlock` cells → the `DRAG_DOWN` property.
+    /// Bubble-column cells → the `DRAG_DOWN` property.
     bubble: HashMap<(i32, i32, i32), bool>,
 }
 
@@ -280,7 +280,7 @@ fn walk_speed_ii_matches_golden() {
 ///
 /// The airborne branch of vanilla's own friction-influenced speed step
 /// returns its own flying-speed accessor, whose **non**-flying arm is
-/// sprint-dependent (`isSprinting() ? 0.025999999F : 0.02F`). Both this crate and
+/// sprint-dependent (`is_sprinting() ? 0.025999999F : 0.02F`). Both this crate and
 /// `gen_golden.py` returned a flat `0.02F`, so every airborne tick of a sprint-jump
 /// accelerated 30% short — and the two ports agreed with each other while both
 /// disagreed with the jar, which is the whole reason "a self-authored oracle
@@ -917,7 +917,7 @@ fn water_current_push_matches_golden() {
 #[test]
 fn soul_sand_walk_matches_golden() {
     // Full collision cube carrying block speed factor 0.4. The player rests at
-    // y=1.0 so blockPosition() is air (1.0) and getBlockSpeedFactor falls through
+    // y=1.0 so block position is air (1.0) and getBlockSpeedFactor falls through
     // to the block below — the here==1.0 fallback branch no other scenario hits.
     let mut world = World::flat_floor(8);
     for x in -8..=8 {
@@ -944,7 +944,7 @@ fn soul_sand_walk_matches_golden() {
 
 #[test]
 fn jump_boost_matches_golden() {
-    // Jump Boost II (amplifier 1): getJumpBoostPower() = 0.1F*(1+1) = 0.2F added
+    // Jump Boost II (amplifier 1): get jump boost power = 0.1F*(1+1) = 0.2F added
     // to the jump velocity as a separate float term, not a MOVEMENT_SPEED modifier.
     let world = World::flat_floor(4);
     let state = grounded(0.5, 1.0, 0.5).with_effects(StatusEffects {

@@ -126,7 +126,7 @@ fn a_settings_row_is_cut_at_the_bands_bottom_rather_than_painted_over_the_footer
 /// Every expected value originates **outside this crate**: the four colours are the
 /// pixel values of `textures/gui/{header,footer}_separator.png` and
 /// `menu_list_background.png` decoded out of the 26.2 `client.jar`, and the two
-/// y offsets are vanilla's own list-separator extraction's own y-minus-2 and its
+/// y offsets are vanilla's list-separator extraction's y-minus-2 and its
 /// own bottom accessor. The
 /// rects come from `ListSpec::chrome_rect`, the same call the draw makes.
 ///
@@ -246,7 +246,7 @@ fn the_settings_band_carries_vanillas_separators_and_its_tint() {
 /// and what their text is came out of vanilla's own persisted-options declarations'
 /// `cachedConstantTooltip` sites
 /// resolved through `en_us.json`, and the box geometry is
-/// vanilla's own tooltip-render utility's own padding and mouse offset. The cursor is set through
+/// vanilla's tooltip-render utility's padding and mouse offset. The cursor is set through
 /// `MenuNav::set_menu_cursor`, the same call `app`'s mouse-move path makes.
 #[test]
 fn hovering_a_settings_row_shows_its_option_tooltip_and_only_then() {

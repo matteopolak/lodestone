@@ -83,7 +83,7 @@ pub(super) fn brewing_slot_for(item: &str) -> Option<BrewingSlot> {
 pub(super) const BREWING_STACK_CAP: u32 = 64;
 
 /// The window-0 menu slot of the hotbar's first (native) slot — vanilla's
-/// `InventoryMenu`: hotbar menu slots `36..=44` address native hotbar `0..=8`
+/// The inventory menu: hotbar menu slots `36..=44` address native hotbar `0..=8`
 /// (see `crate::inventory::PlayerInventory`'s own doc table). The window-0
 /// `container_set_slot` [`apply_use_item_on`] sends after a brewing insert
 /// addresses the selected hotbar slot by this menu index, not its native one.

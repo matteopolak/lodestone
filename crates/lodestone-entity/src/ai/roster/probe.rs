@@ -119,7 +119,7 @@ impl MobController for SpeedProbe {
         true
     }
     // `TrailParentGoal` returns early unless the mob is a baby with a parent in
-    // range (`TrailParentGoal.canUse`, `getAge() >= 0` → no goal).
+    // range (`TrailParentGoal.canUse`, `get_age() >= 0` → no goal).
     fn is_baby(&self) -> bool {
         true
     }

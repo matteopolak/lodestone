@@ -65,7 +65,7 @@ const H: u32 = 240;
 /// the discriminating fixture rather than an all-plain one.
 const SIGN: [i32; 3] = [3, -59, 3];
 
-/// Vanilla's `SignBlockEntity.MAX_TEXT_LINE_WIDTH`, used only to size a
+/// Vanilla's sign block entity's max text line width, used only to size a
 /// generous expected rect.
 const MAX_TEXT_LINE_WIDTH: f32 = 90.0;
 
@@ -185,8 +185,8 @@ fn expected_text_rect(spawn: &SignSpawn, view_proj: glam::Mat4) -> Rect {
 }
 
 /// Looking at the **front** face of a `rotation=0` standing sign, which is a
-/// fact worth deriving rather than guessing: `RotationSegment` 0 is angle 0,
-/// so `StandingSignRenderer.textTransformation` applies no Y rotation and
+/// fact worth deriving rather than guessing: the rotation segment 0 is angle 0,
+/// so standing sign renderer's text transformation applies no Y rotation and
 /// `TEXT_OFFSET`'s `+z` puts the *front* text plane on the `+Z` (south) side
 /// of the block. `Camera`'s yaw 0 faces `+Z`, so a camera north of the sign
 /// looking south sees its **back**.
@@ -452,7 +452,7 @@ fn a_live_servers_sign_text_reaches_pixels() {
 /// board in the depth buffer underneath its text**.
 ///
 /// The separation is small: `template_sign_rot_0`'s board spans `z ∈ [7.33333, 8.66667]/16` and
-/// `StandingSignRenderer.TEXT_OFFSET` puts the text plane at
+/// The standing sign renderer's text offset puts the text plane at
 /// `0.5 + 0.046666667`, i.e. **0.005 blocks** — 5 mm — in front of the front
 /// face. So this arm renders the live sign over the live world's own meshed
 /// terrain and requires the text to survive.

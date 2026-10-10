@@ -1,4 +1,4 @@
-//! Vanilla's `EditBox` (vanilla's own edit-box widget's own source file) — a single-line
+//! Vanilla's `EditBox` (vanilla's edit-box widget's source file) — a single-line
 //! text field with a caret, a selection, horizontal scrolling and a length cap.
 //!
 //! ## What it is
@@ -32,7 +32,7 @@
 //! contexts this shell's own screens do not reproduce, so wiring the field
 //! would be wiring a feature nothing here wants — deleted rather than
 //! half-implemented. If a future screen genuinely needs it, the port is
-//! `EditBox.extractWidgetRenderState`'s ordering (text → hint → suggestion,
+//! EditBox's extract widget render state's ordering (text → hint → suggestion,
 //! drawn at `cursorX - 1`, gated on `!insert`) — see the chat input's own
 //! (correctly wired) suggestion draw for the shape to copy.
 //!
@@ -40,11 +40,11 @@
 //!
 //! - **There is no `setFilter`.** Input restriction is a fixed built-in:
 //!   `insertText` runs vanilla's own string-util filter-text helper and `charTyped` gates on
-//!   `CharacterEvent.isAllowedChatCharacter`, both of which are
-//!   `StringUtil.isAllowedChatCharacter` — `ch != 167 && ch >= 32 && ch != 127`
+//!   The character event's is allowed chat character, both of which are
+//!   The string util's is allowed chat character — `ch != 167 && ch >= 32 && ch != 127`
 //!  . A per-field predicate does not exist and cannot
 //!   be added without editing the class. `addFormatter` **is** real but is
-//!   display-only (vanilla's own edit-box widget, a `FormattedCharSequence`), so it
+//!   display-only (vanilla's own edit-box widget, a formatted char sequence), so it
 //!   cannot reject a character either. [`is_allowed_chat_character`] is the whole
 //!   of the rule.
 //!
@@ -56,21 +56,21 @@
 //!   vanilla's own edit-box widget uses the **two**-argument constructor
 //!   ([`super::widget::WidgetSprites::focusable`]), which collapses `disabled`
 //!   onto `enabled`. "No `WidgetSprites` for `Checkbox`/`EditBox`/slider" is true
-//!   of `Checkbox` and `AbstractSliderButton` and false of this one.
+//!   of `Checkbox` and the abstract slider button and false of this one.
 //!
-//! - **Both `get` arguments differ from `AbstractButton`'s.**
+//! - **Both `get` arguments differ from the abstract button's.**
 //!   vanilla's own edit-box widget is `SPRITES.get(this.isActive(), this.isFocused())`
 //!   where vanilla's own abstract-button base is
-//!   `SPRITES.get(this.active, this.isHoveredOrFocused())`. So: `isActive()`
+//!   `SPRITES.get(this.active, this.is_hovered_or_focused())`. So: `isActive()`
 //!   (i.e. `visible && active`) not the raw field, and **`isFocused()` alone** —
 //!   hovering a text field does *not* draw its highlighted sprite. Button hover
 //!   handling therefore cannot be copied here; [`EditBox::background_sprite`]
 //!   deliberately differs from [`super::widget::Widget::background_sprite`].
 //!
 //! - **The grey text colour is keyed on `isEditable`, not on `active`.**
-//!   vanilla's own edit-box widget is `this.isEditable ? this.textColor :
+//!   vanilla's own edit-box widget is `this.isEditable ? this.text_color :
 //!   this.textColorUneditable`, and `isEditable` is a *separate* flag from
-//!   `AbstractWidget.active`. A field can be active (clickable, focusable) and
+//!   The abstract widget's active. A field can be active (clickable, focusable) and
 //!   uneditable, which is how vanilla shows read-only text you can still select
 //!   and copy. [`EditBox::text_colour`] keys on the right one.
 //!
@@ -80,7 +80,7 @@
 //! `maxLength` — is a Java `String` index, i.e. a **UTF-16 code unit**. Ours are
 //! `char` (Unicode scalar value) indices. Three consequences, all deliberate:
 //!
-//! 1. `Util.offsetByCodepoints` exists in vanilla only to step *over* a
+//! 1. Util's offset by codepoints exists in vanilla only to step *over* a
 //!    surrogate pair, so [`EditBox::move_cursor`] is a plain `±1` here.
 //! 2. `insertText`'s `Character.isHighSurrogate(text.charAt(len - 1))` guard
 //!   , which backs the truncation point off by one to
@@ -156,7 +156,7 @@
 //! ## How to change it
 //!
 //! - **`textX`/`textY` are methods here, not cached fields.** Vanilla caches
-//!   them and calls `updateTextPosition()` from `setX`, `setY`, `setValue`,
+//!   them and calls update text position from `setX`, `setY`, `setValue`,
 //!   `setBordered`, `setCentered` and `onValueChange` —
 //!   six places, and a seventh that forgets is a field drawing at a stale
 //!   offset. Computing them on demand deletes that bug class outright.
@@ -169,7 +169,7 @@
 //! - **Clipboard shortcuts are real, ported line-for-line from
 //!   vanilla's own edit-box widget's key-pressed handler's `default:` group.** `isCopy`/`isCut`/`isPaste` all
 //!   return `true` in vanilla *and* touch
-//!   `Minecraft.keyboardHandler.setClipboard`/`getClipboard`; [`clipboard_seam`]
+//!   keyboard handler's set clipboard/`getClipboard`; [`clipboard_seam`]
 //!   is that boundary here — the real OS clipboard in production, an in-memory
 //!   `thread_local` under every `#[cfg(test)]` build so no test run ever reads
 //!   or writes the developer's actual clipboard. This used to be a deliberate
@@ -265,12 +265,12 @@ pub const DEFAULT_TEXT_COLOR_ARGB: i32 = -2_039_584;
 /// `isEditable`, **not** on `active` — see the module docs.
 pub const TEXT_COLOR_UNEDITABLE_ARGB: i32 = -9_408_400;
 
-/// `EditBox.maxLength`'s initialiser.
+/// EditBox's max length's initialiser.
 pub const DEFAULT_MAX_LENGTH: usize = 32;
 
 /// A practically-unbounded [`EditBox::max_length`] for a field whose real
 /// vanilla cap is proportional (see [`EditBox::max_pixel_width`]) rather than
-/// a character count — vanilla's own `TextFieldHelper` (the sign editor's
+/// a character count — vanilla's own text field helper (the sign editor's
 /// field type, distinct from vanilla's own edit-box widget) has no `maxLength` at all, only
 /// its pixel-width `stringValidator`. `usize::MAX` itself is not safe here:
 /// [`EditBox::insert_text`]'s budget arithmetic casts `max_length` to
@@ -294,7 +294,7 @@ pub const BORDER_INSET: f32 = 4.0;
 /// highlight rect and `9 + 1` in the insert cursor's.
 pub const LINE_HEIGHT: f32 = 9.0;
 
-/// `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`.
+/// The text cursor utils's cursor blink interval ms.
 pub const CURSOR_BLINK_INTERVAL_MS: u64 = 300;
 
 /// One character's width, in the units this shell's menu text is actually drawn
@@ -314,7 +314,7 @@ pub const CURSOR_BLINK_INTERVAL_MS: u64 = 300;
 /// point.
 pub const MENU_TEXT_ADVANCE: f32 = 6.0;
 
-/// `StringUtil.isAllowedChatCharacter`: the *only*
+/// The string util's is allowed chat character: the *only*
 /// input filter `EditBox` has.
 ///
 /// `ch != 167 && ch >= 32 && ch != 127` — so the section sign (the legacy
@@ -376,24 +376,24 @@ pub struct EditBoxDraw {
     pub show_cursor: bool,
 }
 
-/// `EditBox` (vanilla's own edit-box widget's own source file).
+/// `EditBox` (vanilla's edit-box widget's source file).
 ///
 /// Wraps a [`Widget`] rather than duplicating its bounds and state, so the
 /// [`LayoutElement`] seam's containers and the focus dispatcher share one
 /// definition of the `active`/`visible`/`focused` flags.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditBox {
-    /// The `AbstractWidget` half: bounds, `active`, `visible`, `focused`, and
+    /// The abstract widget half: bounds, `active`, `visible`, `focused`, and
     /// the narration message (`EditBox` never draws it — `createNarrationMessage`
     /// is its only reader, vanilla's own edit-box widget).
     pub widget: Widget,
     /// `EditBox.value`.
     value: String,
-    /// `EditBox.maxLength`, in `char`s — see the module docs.
+    /// EditBox's max length, in `char`s — see the module docs.
     max_length: usize,
     /// `EditBox.bordered`. `false` drops the sprite *and* the 4 px text inset.
     pub bordered: bool,
-    /// `EditBox.canLoseFocus`. When `false`, `setFocused(false)` is ignored
+    /// `EditBox.canLoseFocus`. When `false`, set focused is ignored
     /// entirely — how the chat prompt keeps the
     /// keyboard.
     pub can_lose_focus: bool,
@@ -405,7 +405,7 @@ pub struct EditBox {
     pub centered: bool,
     /// `EditBox.cursorPos`.
     cursor_pos: usize,
-    /// `EditBox.highlightPos` — the *other* end of the selection. Equal to
+    /// EditBox's highlight pos — the *other* end of the selection. Equal to
     /// [`Self::cursor_pos`] when nothing is selected.
     highlight_pos: usize,
     /// `EditBox.displayPos`: the first visible character, i.e. the horizontal
@@ -419,7 +419,7 @@ pub struct EditBox {
     /// An additional, proportional cap on top of [`Self::max_length`]'s
     /// character count — real jar-sourced glyph widths in font pixels
     /// (`VanillaFont::width(s, 1.0)`), checked against the *whole* resulting
-    /// value the way vanilla's `TextFieldHelper.insertText` checks its own
+    /// value the way vanilla's text field helper's insert text checks its own
     /// `stringValidator`: an insertion that would push the value over this
     /// width is rejected outright, not truncated to fit (unlike
     /// [`Self::max_length`]'s own truncate-to-fit behaviour — the two fields
@@ -428,8 +428,8 @@ pub struct EditBox {
     /// means no proportional cap — every existing field keeps
     /// [`Self::max_length`]'s plain character-count behaviour unchanged.
     /// `menu::sign_edit` is the one caller that sets this, matching
-    /// `AbstractSignEditScreen.init`'s `font.width(s) <=
-    /// sign.getMaxTextLineWidth()`. A missing jar-sourced font (headless/test
+    /// The abstract sign edit screen's init's `font.width(s) <=
+    /// sign.get_max_text_line_width()`. A missing jar-sourced font (headless/test
     /// runs) fails **open** — no width check is possible, so nothing is
     /// rejected on that basis — the same fail-open contract every other
     /// jar-optional path in this crate has.
@@ -485,13 +485,13 @@ impl EditBox {
         self.value.is_empty()
     }
 
-    /// `getCursorPosition()`.
+    /// get cursor position.
     #[must_use]
     pub fn cursor_position(&self) -> usize {
         self.cursor_pos
     }
 
-    /// `EditBox.highlightPos`.
+    /// EditBox's highlight pos.
     #[must_use]
     pub fn highlight_position(&self) -> usize {
         self.highlight_pos
@@ -504,7 +504,7 @@ impl EditBox {
         self.display_pos
     }
 
-    /// `EditBox.maxLength`.
+    /// EditBox's max length.
     #[must_use]
     pub fn max_length(&self) -> usize {
         self.max_length
@@ -530,14 +530,14 @@ impl EditBox {
     /// Sets [`Self::max_pixel_width`] as a builder step, for a field declared
     /// inline. Does not retroactively reject the field's current value —
     /// same "only gates future insertions" contract vanilla's own
-    /// `TextFieldHelper` has (it has no `setValue`-time check either).
+    /// The text field helper has (it has no `setValue`-time check either).
     #[must_use]
     pub fn with_max_pixel_width(mut self, max_pixel_width: f32) -> Self {
         self.max_pixel_width = Some(max_pixel_width);
         self
     }
 
-    /// `setValue(String)`: truncate to `maxLength`, then
+    /// set value: truncate to `maxLength`, then
     /// cursor **and** highlight to the end.
     pub fn set_value(&mut self, value: impl AsRef<str>) {
         let value = value.as_ref();
@@ -551,7 +551,7 @@ impl EditBox {
         self.on_value_change();
     }
 
-    /// `getHighlighted()` — the selected substring, which is empty when
+    /// get highlighted — the selected substring, which is empty when
     /// `cursorPos == highlightPos`.
     #[must_use]
     pub fn highlighted(&self) -> String {
@@ -608,7 +608,7 @@ impl EditBox {
         (width / self.advance).floor().max(0.0) as usize
     }
 
-    /// `getInnerWidth()`: the width text may occupy,
+    /// get inner width: the width text may occupy,
     /// which for a bordered box is 8 px less — 4 on each side.
     #[must_use]
     pub fn inner_width(&self) -> f32 {
@@ -619,7 +619,7 @@ impl EditBox {
         }
     }
 
-    /// `updateTextPosition()`'s `textX`, as a method —
+    /// update text position's `textX`, as a method —
     /// see the module docs on why it is not cached.
     #[must_use]
     pub fn text_x(&self) -> f32 {
@@ -645,7 +645,7 @@ impl EditBox {
         }
     }
 
-    /// `updateTextPosition()`'s `textY`. `(this.height - 8) / 2` is Java integer
+    /// update text position's `textY`. `(this.height - 8) / 2` is Java integer
     /// division, so it truncates — reproduced with `floor`.
     #[must_use]
     pub fn text_y(&self) -> f32 {
@@ -656,8 +656,8 @@ impl EditBox {
         }
     }
 
-    /// The visible slice: `font.plainSubstrByWidth(value.substring(displayPos),
-    /// getInnerWidth())`.
+    /// The visible slice: `font.plain_substr_by_width(value.substring(displayPos),
+    /// get inner width)`.
     #[must_use]
     pub fn displayed(&self) -> &str {
         let from = self.byte_of(self.display_pos);
@@ -669,21 +669,21 @@ impl EditBox {
         }
     }
 
-    /// `setCursorPosition(int)`: clamp, then scroll so
+    /// set cursor position: clamp, then scroll so
     /// the new position is visible.
     pub fn set_cursor_position(&mut self, pos: usize) {
         self.cursor_pos = pos.min(self.len());
         self.scroll_to(self.cursor_pos);
     }
 
-    /// `setHighlightPos(int)`. Also scrolls — which is
+    /// set highlight pos. Also scrolls — which is
     /// why dragging a selection off the right edge follows it.
     pub fn set_highlight_pos(&mut self, pos: usize) {
         self.highlight_pos = pos.min(self.len());
         self.scroll_to(self.highlight_pos);
     }
 
-    /// `moveCursorTo(int, boolean)`. `extend_selection`
+    /// move cursor to. `extend_selection`
     /// is Shift: it leaves `highlightPos` where it was.
     pub fn move_cursor_to(&mut self, pos: usize, extend_selection: bool) {
         self.set_cursor_position(pos);
@@ -692,8 +692,8 @@ impl EditBox {
         }
     }
 
-    /// `moveCursor(int, boolean)`. `dir` is `EditBox.FORWARDS`/`BACKWARDS`,
-    /// i.e. `±1`; vanilla's `Util.offsetByCodepoints` is a plain step here (see
+    /// move cursor. `dir` is `EditBox.FORWARDS`/`BACKWARDS`,
+    /// i.e. `±1`; vanilla's Util's offset by codepoints is a plain step here (see
     /// the module docs).
     pub fn move_cursor(&mut self, dir: i32, extend_selection: bool) {
         let target = self.offset_cursor(dir);
@@ -708,17 +708,17 @@ impl EditBox {
         }
     }
 
-    /// `moveCursorToStart(boolean)`.
+    /// move cursor to start.
     pub fn move_cursor_to_start(&mut self, extend_selection: bool) {
         self.move_cursor_to(0, extend_selection);
     }
 
-    /// `moveCursorToEnd(boolean)`.
+    /// move cursor to end.
     pub fn move_cursor_to_end(&mut self, extend_selection: bool) {
         self.move_cursor_to(self.len(), extend_selection);
     }
 
-    /// `insertText(String)`: replace the selection with
+    /// insert text: replace the selection with
     /// `input`, filtered and truncated to what `maxLength` still allows.
     ///
     /// Read vanilla's budget again — it is written oddly and it is right:
@@ -738,7 +738,7 @@ impl EditBox {
             text = text.chars().take(budget).collect();
         }
         let (sb, eb) = (self.byte_of(start), self.byte_of(end));
-        // `TextFieldHelper.insertText`'s `stringValidator.test(newPageText)`:
+        // The text field helper's insert text's `stringValidator.test(newPageText)`:
         // built and checked against the *whole* prospective value, and
         // rejected outright (not truncated) if it fails — see
         // `max_pixel_width`'s own doc for why this is a second, different
@@ -759,7 +759,7 @@ impl EditBox {
         self.on_value_change();
     }
 
-    /// `deleteText(dir, wholeWord)` — the switch `keyPressed` calls for
+    /// delete text — the switch `keyPressed` calls for
     /// Backspace and Delete.
     pub fn delete_text(&mut self, dir: i32, whole_word: bool) {
         if whole_word {
@@ -769,7 +769,7 @@ impl EditBox {
         }
     }
 
-    /// `deleteWords(int)`. A live selection wins: it is
+    /// delete words. A live selection wins: it is
     /// deleted instead of a word, which is why Ctrl+Backspace over a selection
     /// does not eat the word before it as well.
     pub fn delete_words(&mut self, dir: i32) {
@@ -784,13 +784,13 @@ impl EditBox {
         }
     }
 
-    /// `deleteChars(int)`.
+    /// delete chars.
     pub fn delete_chars(&mut self, dir: i32) {
         let pos = self.offset_cursor(dir);
         self.delete_chars_to_pos(pos);
     }
 
-    /// `deleteCharsToPos(int)`.
+    /// delete chars to pos.
     pub fn delete_chars_to_pos(&mut self, pos: usize) {
         if self.value.is_empty() {
             return;
@@ -808,20 +808,20 @@ impl EditBox {
         self.value.replace_range(sb..eb, "");
         self.set_cursor_position(start);
         self.on_value_change();
-        // Vanilla calls `moveCursorTo(start, false)` *after* `setCursorPosition`
+        // Vanilla calls move cursor to *after* `setCursorPosition`
         // and `onValueChange` (`:193-195`). The extra call is what collapses the
         // selection; the redundant re-set is reproduced rather than tidied so a
         // diff against the jar is clean.
         self.move_cursor_to(start, false);
     }
 
-    /// `getWordPosition(dir)` from the current cursor.
+    /// get word position from the current cursor.
     #[must_use]
     pub fn word_position(&self, dir: i32) -> usize {
         self.word_position_from(dir, self.cursor_pos, true)
     }
 
-    /// `getWordPosition(dir, from, stripSpaces)`,
+    /// get word position,
     /// transcribed over `char` indices.
     #[must_use]
     pub fn word_position_from(&self, dir: i32, from: usize, strip_spaces: bool) -> usize {
@@ -854,7 +854,7 @@ impl EditBox {
         result
     }
 
-    /// `scrollTo(int)`: nudge `displayPos` until `pos`
+    /// scroll to: nudge `displayPos` until `pos`
     /// is inside the visible window.
     ///
     /// The order is deliberate and slightly strange: `lastPos` is computed from
@@ -868,7 +868,7 @@ impl EditBox {
         let visible = self.fits(inner).min(len.saturating_sub(self.display_pos));
         let last_pos = visible + self.display_pos;
         if pos == self.display_pos {
-            // `displayPos -= plainSubstrByWidth(value, innerWidth, true).length()`:
+            // `displayPos -= plain_substr_by_width(value, innerWidth, true).length()`:
             // a whole window's worth, backwards, capped by the value's length.
             self.display_pos = self.display_pos.saturating_sub(self.fits(inner).min(len));
         }
@@ -884,7 +884,7 @@ impl EditBox {
     /// `onValueChange` minus the responder callback: vanilla's `Consumer<String>`
     /// exists so a screen can react to typing, and every consumer in this shell
     /// reads the value back from the widget instead. The other half —
-    /// `updateTextPosition()` — is not needed because `textX`/`textY` are
+    /// update text position — is not needed because `textX`/`textY` are
     /// computed on demand.
     fn on_value_change(&mut self) {
         self.display_pos = self.display_pos.min(self.len());
@@ -892,7 +892,7 @@ impl EditBox {
         self.highlight_pos = self.highlight_pos.min(self.len());
     }
 
-    /// `canConsumeInput()`:
+    /// can consume input:
     /// `isActive() && isFocused() && isEditable()`.
     #[must_use]
     pub fn can_consume_input(&self) -> bool {
@@ -902,9 +902,9 @@ impl EditBox {
     /// `SPRITES.get(isActive(), isFocused())`, or `None`
     /// when `bordered` is false — an unbordered box draws no background at all.
     ///
-    /// **Both arguments differ from `AbstractButton`'s.** See the module docs:
+    /// **Both arguments differ from the abstract button's.** See the module docs:
     /// `isActive()` rather than the raw `active` field, and `isFocused()` rather
-    /// than `isHoveredOrFocused()`.
+    /// than is hovered or focused.
     #[must_use]
     pub fn background_sprite(&self) -> Option<&'static str> {
         self.bordered
@@ -1084,13 +1084,13 @@ impl EditBox {
                     self.set_highlight_pos(0);
                     true
                 } else if event.is_copy() {
-                    // `keyboardHandler.setClipboard(this.getHighlighted())` —
+                    // `keyboardHandler.set_clipboard(this.get_highlighted())` —
                     // unconditional, even on a non-editable (read-only,
                     // still-selectable) field.
                     clipboard_seam::set(&self.highlighted());
                     true
                 } else if event.is_paste() {
-                    // `insertText(getClipboard())`, gated on `isEditable()` —
+                    // insert text, gated on `isEditable()` —
                     // the read happens either way in vanilla, but there is
                     // nothing to do with it on a read-only field.
                     if self.is_editable {
@@ -1099,7 +1099,7 @@ impl EditBox {
                     }
                     true
                 } else if event.is_cut() {
-                    // `setClipboard(getHighlighted())` first, then delete the
+                    // set clipboard first, then delete the
                     // selection — same order as vanilla, so a cut on a
                     // read-only field still copies (it just cannot delete).
                     clipboard_seam::set(&self.highlighted());
@@ -1133,14 +1133,14 @@ impl EditBox {
     /// character, extending the selection if Shift is held.
     ///
     /// `findClickedPositionInText` (`:371-375`) clamps the click's offset to
-    /// `getInnerWidth()` first, so a click past the right edge lands at the end
+    /// get inner width first, so a click past the right edge lands at the end
     /// of the *visible* text rather than the end of the value.
     pub fn click_at(&mut self, mouse_x: f32, extend_selection: bool) {
         let pos = self.clicked_position(mouse_x);
         self.move_cursor_to(pos, extend_selection);
     }
 
-    /// `findClickedPositionInText(event)`.
+    /// find clicked position in text.
     #[must_use]
     pub fn clicked_position(&self, mouse_x: f32) -> usize {
         let offset = (mouse_x.floor() - self.text_x()).min(self.inner_width());
@@ -1181,7 +1181,7 @@ impl super::focus::FocusTarget for EditBox {
 
     /// vanilla's own abstract-widget base's mouse-clicked handler -> `onClick` (vanilla's own abstract-widget base,
     /// vanilla's own edit-box widget): the caret moves to the click *and* the click is
-    /// reported as consumed, which is what makes `ContainerEventHandler` focus
+    /// reported as consumed, which is what makes container event handler focus
     /// the box.
     fn mouse_clicked(&mut self, x: f32, y: f32) -> bool {
         if !self.widget.is_mouse_over(x, y) {
@@ -1288,7 +1288,7 @@ mod tests {
 
     #[test]
     fn the_sprite_is_the_two_argument_collapse_and_keys_on_focus_alone() {
-        // vanilla's own edit-box widget + `:407`. Both differences from `AbstractButton`
+        // vanilla's own edit-box widget + `:407`. Both differences from the abstract button
         // are asserted, because both are easy to "fix" into the button's rule.
         assert_eq!(SPRITES.enabled, "widget/text_field");
         assert_eq!(
@@ -1307,7 +1307,7 @@ mod tests {
             Some("widget/text_field_highlighted")
         );
         // Hover must NOT highlight it: `EditBox` passes `isFocused()` where
-        // `AbstractButton` passes `isHoveredOrFocused()`.
+        // The abstract button passes is hovered or focused.
         b.widget.focused = false;
         b.widget.hovered = true;
         assert_eq!(
@@ -1398,7 +1398,7 @@ mod tests {
     #[test]
     fn an_unfocused_or_inactive_box_consumes_nothing() {
         // `keyPressed` is gated on `isActive() && isFocused()`
-        // and `charTyped` on `canConsumeInput()`, which adds
+        // and `charTyped` on can consume input, which adds
         // `isEditable()`. Three different gates, and they are not the same.
         let mut b = field();
         b.widget.focused = false;
@@ -1473,7 +1473,7 @@ mod tests {
     }
 
     /// Copy writes the *selection*, not the whole value, to
-    /// [`clipboard_seam`]'s test-mode fake — `getHighlighted()` in the jar,
+    /// [`clipboard_seam`]'s test-mode fake — get highlighted in the jar,
     /// not `getValue()`.
     #[test]
     fn copy_writes_only_the_selection_to_the_clipboard() {
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     /// Cut writes the selection to the clipboard *and* deletes it — same
-    /// order as vanilla's `setClipboard` then `insertText("")`.
+    /// order as vanilla's `setClipboard` then insert text.
     #[test]
     fn cut_writes_the_selection_and_deletes_it() {
         clipboard_seam::set("");
@@ -1735,7 +1735,7 @@ mod tests {
         b.click_at(4.0 + 15.0, false);
         assert_eq!(b.cursor_position(), 2);
         // Past the right edge clamps to the end of the *visible* text, not past
-        // it (`findClickedPositionInText`'s `Math.min(.., getInnerWidth())`).
+        // it (`findClickedPositionInText`'s `Math.min(.., get_inner_width())`).
         b.click_at(10_000.0, false);
         assert_eq!(b.cursor_position(), 6);
         // Left of the text clamps to 0.

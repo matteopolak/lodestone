@@ -277,7 +277,7 @@ pub(crate) fn is_interactable_state(state: lodestone_data::block_states::StateId
         .any(|fragment| state.name().contains(fragment))
 }
 
-/// Blocks whose `facing` is `getHorizontalDirection().getOpposite()` — vanilla's
+/// Blocks whose `facing` is get horizontal direction's get opposite — vanilla's
 /// own horizontal-directional block family, i.e. "faces the player".
 ///
 /// A hand-written list, and the reason it is a list rather than a derivation:
@@ -291,7 +291,7 @@ pub(crate) fn is_interactable_state(state: lodestone_data::block_states::StateId
 /// not a stair) simply does not predict.
 ///
 /// Sourced by grepping `getStateForPlacement` for
-/// `getHorizontalDirection().getOpposite()` across the decompiled 26.2
+/// get horizontal direction's get opposite across the decompiled 26.2
 /// client's own block classes, then restricted to the
 /// single-cell blocks whose remaining properties [`state_for_placement`] can also
 /// resolve. Namespace-stripped paths.
@@ -345,8 +345,8 @@ const FACING_HORIZONTAL_OPPOSITE: &[&str] = &[
     "black_glazed_terracotta",
 ];
 
-/// Blocks whose 6-way `facing` is `getNearestLookingDirection().getOpposite()` —
-/// vanilla's `DirectionalBlock` family.
+/// Blocks whose 6-way `facing` is get nearest looking direction's get opposite —
+/// vanilla's directional block family.
 ///
 /// Same reasoning as [`FACING_HORIZONTAL_OPPOSITE`], and likewise a list rather
 /// than "every block with a 6-value `facing`": 41 blocks have one in 26.2, and
@@ -382,11 +382,11 @@ const FACING_ALL: &[&str] = &[
 /// A further 16 unambiguous names are **deliberately left out** because vanilla
 /// computes them at placement time from geometry or neighbours, so their
 /// registered default is the wrong answer for a *placed* block: `attachment`
-/// (`BellBlock`), `face` (`FaceAttachedHorizontalDirectionalBlock`),
-/// `orientation` (`CrafterBlock`, `JigsawBlock`), `hinge` (`DoorBlock`), `part`
-/// (`BedBlock`), `vertical_direction`/`thickness` (`PointedDripstoneBlock`),
-/// `hanging` (`LanternBlock`), `distance`/`persistent`/`leaves`
-/// (`LeavesBlock` — note `persistent` is set **true** for a player-placed leaf,
+/// (the bell block), `face` (the face attached horizontal directional block),
+/// `orientation` (the crafter block, the jigsaw block), `hinge` (the door block), `part`
+/// (the bed block), `vertical_direction`/`thickness` (the pointed dripstone block),
+/// `hanging` (the lantern block), `distance`/`persistent`/`leaves`
+/// (the leaves block — note `persistent` is set **true** for a player-placed leaf,
 /// so its `false` default would be actively wrong), `instrument`
 /// (`NoteBlock`, read from the block below), `side_chain`, `tip`, `tilt`, `drag`.
 /// Omitting a name makes every block carrying it decline, which is the safe
@@ -503,7 +503,7 @@ impl BlockStates {
 
 /// Collect [`BlockStates`] for `block` (a full identifier, e.g.
 /// `minecraft:chest`), or `None` if no such block exists — which is how a
-/// non-block item (a sword, bread) is recognised: vanilla's `BlockItem` shares
+/// non-block item (a sword, bread) is recognised: vanilla's block item shares
 /// its block's registry name, so "is this item placeable?" is "is there a block
 /// with this name?".
 pub(crate) fn block_states_of(block: &str) -> Option<BlockStates> {
@@ -571,12 +571,12 @@ pub(crate) fn orientation_for_placement(block: &str, states: &BlockStates) -> Op
     {
         return Some(OrientationKind::DoublePlant);
     }
-    // A pillar's axis is the clicked face's axis (`RotatedPillarBlock`). A
+    // A pillar's axis is the clicked face's axis (the rotated pillar block). A
     // 2-value `axis` is `nether_portal`, which is not placed by an item.
     if let Some(axis) = states.domain("axis") {
         return (axis.len() == 3).then_some(OrientationKind::Pillar);
     }
-    // `SlabBlock`'s `type` is `top`/`bottom`/`double`; a chest's is
+    // The slab block's `type` is `top`/`bottom`/`double`; a chest's is
     // `single`/`left`/`right`, which is not geometry and is handled as a
     // non-geometric default instead.
     if states.domain("type").is_some_and(|d| d.contains(&"double")) {
@@ -697,17 +697,17 @@ fn state_for_placement_with_overrides(
                 ) => extra_half.unwrap_or("lower"),
             "hinge" if orientation == OrientationKind::Door => "left",
             "part" if orientation == OrientationKind::Bed => extra_part.unwrap_or("foot"),
-            // `StairBlock.getStateForPlacement` computes `shape` from the
+            // The stair block's get state for placement computes `shape` from the
             // neighbouring stairs; `straight` is the no-neighbour answer and is
             // what every one of the 64 stair blocks defaults to. The server
             // corrects a corner with its own block update.
             "shape" if orientation == OrientationKind::Stairs => "straight",
             // Vanilla reads this from the fluid at the placement position
-            // (`SimpleWaterloggedBlock`'s `copyWaterloggedFrom`). We only predict
+            // (the simple waterlogged block's `copyWaterloggedFrom`). We only predict
             // into air (see `is_air_state`), so `false` is the answer rather than
             // a default.
             "waterlogged" => "false",
-            // `ChestBlock.getStateForPlacement` scans for an adjacent chest to
+            // The chest block's get state for placement scans for an adjacent chest to
             // make a double; `single` is the no-neighbour answer, and the server
             // re-sends the state when a neighbour makes it a double. Keyed on the
             // value rather than the property name because `type` is also a slab's
@@ -765,7 +765,7 @@ pub fn predicted_placement_state(block: &str, placed: &PlacedState) -> Option<u3
     state_for_placement(block, &states, orientation, placed)
 }
 
-/// [`BlockFace`] to the `facing` property value (`Direction.getSerializedName`).
+/// [`BlockFace`] to the `facing` property value (Direction's get serialized name).
 pub(crate) fn face_property(face: BlockFace) -> &'static str {
     match face {
         BlockFace::Down => "down",

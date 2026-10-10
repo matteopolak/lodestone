@@ -3,9 +3,9 @@
 //!
 //! ## What it is
 //!
-//! Vanilla's `SelectWorldScreen` (`client/gui/screens/worldselection/`): a
+//! Vanilla's select world screen (`client/gui/screens/worldselection/`): a
 //! [`HeaderAndFooterLayout`](super::layout::HeaderAndFooterLayout) with a title
-//! and a search [`EditBox`] in the header, an `ObjectSelectionList` of worlds in
+//! and a search [`EditBox`] in the header, an object selection list of worlds in
 //! the content band, and six footer buttons — Play Selected World, Create New
 //! World, Edit, Delete, Re-Create, Back.
 //!
@@ -41,23 +41,23 @@
 //! This section used to say "the list has exactly one world, and no storage
 //! behind it", and describe a hardcoded [`BUNDLED_WORLD`] row. That was issue
 //! That fix's reading (1) and it is **gone**: [`crate::saves`] is this client's
-//! `LevelStorageSource`, and the rows are whatever is in `saves/`. Read
+//! The level storage source, and the rows are whatever is in `saves/`. Read
 //! `saves.rs`'s module doc for the product decision and for the wart that forced
 //! it (with one implicit world, Create New World could not create a second one).
 //!
 //! What that changes here:
 //!
 //! - the content band holds **N** rows, one per [`crate::saves::WorldSummary`],
-//!   drawn with `WorldListEntry`'s geometry (a 32 px icon column and three text
-//!   lines — vanilla's own world-selection list rendering) rather than `NoWorldsEntry`'s
+//!   drawn with the world list entry's geometry (a 32 px icon column and three text
+//!   lines — vanilla's own world-selection list rendering) rather than the no worlds entry's
 //!   single centred string. The icon square itself stays empty: this client
 //!   writes no `icon.png`, so there is nothing to blit into it, and the column
 //!   is reserved anyway because the three text lines' x is measured from it
-//!   (`getTextX() = getContentX() + 32 + 3`, `:568-570`);
+//!   (`get_text_x() = get_content_x() + 32 + 3`, `:568-570`);
 //! - a row is a **focusable, clickable widget**, so [`Self::selected`] is a real
 //!   selection rather than a constant, and Play/Edit/Delete/Re-Create ask it —
 //!   which is what [`WorldSelectNav::update_button_status`] is now for;
-//! - the search box filters, by `WorldSelectionList.filterAccepts` (`:233-235`):
+//! - the search box filters, by the world selection list's filter accepts (`:233-235`):
 //!   a case-insensitive substring of the **display name or the folder name**.
 //!
 //! ## Deliberate deviations
@@ -65,7 +65,7 @@
 //! - An empty save list opens world creation directly. Cancel returns to the
 //!   title screen; a filter with no matches leaves the world list visible.
 //! - **The first row is selected on open.** Vanilla starts with
-//!   `updateButtonStatus(null)` and needs a click. `AbstractSelectionList`'s
+//!   `updateButtonStatus(null)` and needs a click. The abstract selection list's
 //!   keyboard selection is not ported (see the next point), so requiring a click
 //!   would leave a keyboard-only player unable to play at all; selecting the
 //!   most-recently-played world — which is row 0, because
@@ -88,10 +88,10 @@
 //!
 //! The title screen's Singleplayer button — [`super::nav::MainButton::Singleplayer`]
 //! calls [`UiState::open_world_select`](super::UiState::open_world_select), which
-//! is vanilla's own wiring (its own title-screen rendering opens `SelectWorldScreen`; nothing
+//! is vanilla's own wiring (its own title-screen rendering opens select world screen; nothing
 //! launches a world straight off the title). That arm also **re-enumerates**:
 //! `MenuNav` rebuilds this screen from disk on entry, the way vanilla constructs
-//! a fresh `SelectWorldScreen`, so a world created a moment ago is on the list.
+//! a fresh select world screen, so a world created a moment ago is on the list.
 //!
 //! Play Selected World is what launches: it returns
 //! [`WorldSelectOutcome::Play`] carrying the selected world's **folder name**,
@@ -107,7 +107,7 @@ use super::nav::MenuKey;
 use super::widget::Widget;
 use crate::saves::WorldSummary;
 
-/// `selectWorld.title` (`en_us.json`): the header's `StringWidget`.
+/// `selectWorld.title` (`en_us.json`): the header's string widget.
 pub const WORLD_SELECT_TITLE: &str = "Select World";
 
 /// `gui.selectWorld.search` (`en_us.json`), the search box's hint
@@ -179,25 +179,25 @@ pub const FIRST_BUTTON_ROW: usize = 1;
 ///   numbering;
 /// - the *tab* order is registration order, not id order (see
 ///   [`super::focus`]), so [`WorldSelectNav::new`] can still register
-///   header → contents → footer exactly as `layout.visitWidgets` walks them
+///   header → contents → footer exactly as layout's visit widgets walks them
 ///  . `tab_visits_the_list_between_the_search_field_and_the_footer`
 ///   is the gate on that, and it is the one that would fail if these two facts
 ///   were ever collapsed into one.
 pub const FIRST_WORLD_ROW: usize = FIRST_BUTTON_ROW + WORLD_SELECT_BUTTONS.len();
 
 /// The screen's six footer buttons, in vanilla's own `RowHelper` order —
-/// `SelectWorldScreen.createFooterButtons`.
+/// The select world screen's create footer buttons.
 ///
 /// The order is load-bearing twice: it is the grid's cell order (so it decides
 /// where each button *is*, via `render::world_select_slot`) and it is the tab
-/// order, because `layout.visitWidgets` walks header → contents → footer and
+/// order, because layout's visit widgets walks header → contents → footer and
 /// vanilla registers them in that sequence (`:76`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldSelectButton {
-    /// `LevelSummary.PLAY_WORLD` = `selectWorld.select`.
+    /// The level summary's play world = `selectWorld.select`.
     /// Two columns wide. **Enabled**: vanilla's
     /// `updateButtonStatus` turns this on for a selection whose
-    /// `primaryActionActive()` holds (`:163`) — which since that fix is a real
+    /// primary action active holds (`:163`) — which since that fix is a real
     /// [`crate::saves::WorldSummary`] rather than the one hardcoded
     /// [`BUNDLED_WORLD`] this doc used to name. Pressing it starts the integrated
     /// server — see [`WorldSelectOutcome::Play`] and the module docs' "what
@@ -210,22 +210,22 @@ pub enum WorldSelectButton {
     /// does not do yet. This was **the one deviation from vanilla** on this
     /// screen before that fix; that history is why the module docs still say so.
     Create,
-    /// `selectWorld.edit`, 71 px. Disabled: vanilla's `summary.canEdit()`
-    /// (`:170`), and there is no selection — nor an `EditWorldScreen` to open.
+    /// `selectWorld.edit`, 71 px. Disabled: vanilla's summary's can edit
+    /// (`:170`), and there is no selection — nor an edit world screen to open.
     Edit,
     /// `selectWorld.delete`, 71 px. **Live** since that fix:
-    /// `summary.canDelete()` (`:172`), and vanilla's own
+    /// summary's can delete (`:172`), and vanilla's own
     /// level-summary can-delete accessor is unconditionally `true`
     /// — so this is off only in the no-selection
     /// branch, where there is nothing to delete. Its press opens
     /// [`super::Screen::Confirm`]; it does not delete anything itself.
     Delete,
-    /// `selectWorld.recreate`, 71 px. Disabled: `summary.canRecreate()`
-    /// (`:171`), and re-creation routes through `CreateWorldScreen` too.
+    /// `selectWorld.recreate`, 71 px. Disabled: summary's can recreate
+    /// (`:171`), and re-creation routes through the create world screen too.
     ReCreate,
     /// `gui.back`, 71 px. **The one active button**: vanilla's press is
-    /// `setScreen(this.lastScreen)` (`:106`), i.e. back to the title screen,
-    /// which is also what `onClose()` does (`:154-157`) and therefore what
+    /// set screen (`:106`), i.e. back to the title screen,
+    /// which is also what on close does (`:154-157`) and therefore what
     /// Escape does.
     Back,
 }
@@ -262,9 +262,9 @@ impl WorldSelectButton {
     /// landed, so `Play`'s real answer is now
     /// [`WorldSelectNav::update_button_status`]'s, computed from
     /// [`crate::saves::WorldSummary::can_play`] exactly as vanilla's
-    /// `updateButtonStatus` computes it from `LevelSummary`. What is left here is
+    /// `updateButtonStatus` computes it from the level summary. What is left here is
     /// the *ceiling*: `Edit` and `Re-Create` return `false` unconditionally
-    /// because there is no `EditWorldScreen` and no re-create flow to open.
+    /// because there is no edit world screen and no re-create flow to open.
     ///
     /// **`Delete` used to be in that list and is not any more**. The
     /// reason it was there is worth keeping, because it is the reason the fix
@@ -334,8 +334,8 @@ const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 /// `FocusSet`'s methods take `&mut dyn FocusChildren`, so the set and its
 /// children cannot live in the same struct.
 ///
-/// The title `StringWidget` is **not** here. Vanilla registers it (`:76` visits
-/// every leaf) but `StringWidget`'s constructor sets `active = false`
+/// The title string widget is **not** here. Vanilla registers it (`:76` visits
+/// every leaf) but the string widget's constructor sets `active = false`
 ///, so it can never take focus and never receives an
 /// event; the only additional capability its registration would provide is
 /// narration, and nothing in this shell narrates. It is drawn as a
@@ -343,15 +343,15 @@ const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorldSelectWidgets {
     /// The header's search field. Filters the list by
-    /// `WorldSelectionList.filterAccepts`.
+    /// The world selection list's filter accepts.
     pub search: EditBox,
     /// The footer buttons, in [`WORLD_SELECT_BUTTONS`]' order.
     pub buttons: [Widget; WORLD_SELECT_BUTTONS.len()],
     /// One widget per **visible** world row, in the order the rows draw.
     ///
     /// A `Widget` rather than a bare rect because that is what makes a row a
-    /// focus target at all — `AbstractSelectionList`'s entries are
-    /// `GuiEventListener`s in vanilla too. Its `message` is never drawn (the row
+    /// focus target at all — the abstract selection list's entries are
+    /// The gui event listeners in vanilla too. Its `message` is never drawn (the row
     /// draws three of its own text lines); it carries the display name so a
     /// narration/tooltip layer would have somewhere to read it.
     pub worlds: Vec<Widget>,
@@ -439,7 +439,7 @@ pub struct WorldSelectNav {
     /// merging them would make *moving the mouse across the screen* steal
     /// keyboard focus out of the search field, so typing would land nowhere.
     /// Vanilla keeps them separate for the same reason and joins them only where
-    /// the sprite is picked — `isHoveredOrFocused()`, which lives in
+    /// the sprite is picked — is hovered or focused, which lives in
     /// [`Widget::is_hovered_or_focused`](super::widget::Widget::is_hovered_or_focused).
     hovered: Option<usize>,
     /// Every world on disk, already sorted by
@@ -457,7 +457,7 @@ pub struct WorldSelectNav {
     /// player sees are the filtered ones, and a click on visible row 2 must
     /// select the third *visible* world.
     shown: Vec<usize>,
-    /// Which visible row is the list's selection — `getSelectedOpt()`.
+    /// Which visible row is the list's selection — get selected opt.
     ///
     /// An index into [`Self::shown`]. `None` is vanilla's
     /// `updateButtonStatus(null)` state, which this screen really can be in now
@@ -529,7 +529,7 @@ impl WorldSelectNav {
     /// [`crate::saves::list_worlds_in`] already sorted.
     ///
     /// This is the constructor `MenuNav` uses on entry to the screen, matching
-    /// vanilla constructing a brand-new `SelectWorldScreen` every time
+    /// vanilla constructing a brand-new select world screen every time
     /// `TitleScreen`'s Singleplayer button is pressed — so the list is re-read
     /// rather than cached, and a world created a moment ago appears.
     #[must_use]
@@ -559,7 +559,7 @@ impl WorldSelectNav {
             .selected
             .and_then(|row| self.shown.get(row).copied());
 
-        // `WorldSelectionList.filterAccepts` (`:233-235`): a case-insensitive
+        // The world selection list's filter accepts (`:233-235`): a case-insensitive
         // substring of the display name **or** the folder name. Both, not just
         // the name — a player who renamed a world can still find it by folder.
         self.shown = self
@@ -601,7 +601,7 @@ impl WorldSelectNav {
                     h,
                     world.map_or_else(String::new, |world| world.display_name.clone()),
                 );
-                // `LevelSummary.primaryActionActive` — a corrupt world is listed
+                // The level summary's primary action active — a corrupt world is listed
                 // but not openable, so its row must not be a tab stop either.
                 widget.active = world.is_some_and(WorldSummary::can_play);
                 widget
@@ -619,8 +619,8 @@ impl WorldSelectNav {
 
         let focused = self.focus.focused();
         let mut focus = FocusSet::new();
-        // `layout.visitWidgets(this::addRenderableWidget)` (`:76`), in the
-        // header → contents → footer order `HeaderAndFooterLayout.visitChildren`
+        // layout's visit widgets (`:76`), in the
+        // header → contents → footer order HeaderAndFooterLayout's visit children
         // walks (`:84-89`) — which is also the tab order, since nothing here
         // overrides `getTabOrderGroup`. The *ids* are not in that order (see
         // [`FIRST_WORLD_ROW`]); the registration is, and registration is what Tab
@@ -643,7 +643,7 @@ impl WorldSelectNav {
             //
             // **`set_focused`, not `set_initial_focus`, and the difference is a
             // real bug rather than a style choice.** `set_initial_focus` offers the
-            // widget an `InitialFocus` event and honours `takes_focus()`, which is
+            // widget an initial focus event and honours `takes_focus()`, which is
             // `is_active() && !is_focused()` — and the widget the fresh `FocusSet`
             // has forgotten still carries `focused = true` from the old one. So the
             // offer is *declined*, nothing is set, and the set and the widget
@@ -704,9 +704,9 @@ impl WorldSelectNav {
     /// summary (`:159-184`), now with a
     /// real summary to ask.
     ///
-    /// Vanilla's non-null branch reads four `LevelSummary` predicates —
-    /// `primaryActionActive()`, `canEdit()`, `canRecreate()`, `canDelete()`
-    /// — plus a `requiresFileFixing()` tooltip. All
+    /// Vanilla's non-null branch reads four level summary predicates —
+    /// primary action active, can edit, can recreate, can delete
+    /// — plus a requires file fixing tooltip. All
     /// four are asked here, against
     /// [`crate::saves::WorldSummary`]'s own ports of them, and then `&&`-ed with
     /// [`WorldSelectButton::enabled`]'s client-level ceiling: a world may be
@@ -784,7 +784,7 @@ impl WorldSelectNav {
 
     /// The mouse moved onto row `row`. Records hover only — **never** focus, see
     /// [`Self::hovered`]. A disabled row is still hovered, matching vanilla:
-    /// `AbstractWidget.extractRenderState` sets `isHovered` from geometry alone
+    /// The abstract widget's extract render state sets `isHovered` from geometry alone
     /// and the disabled sprite wins anyway.
     pub fn hover(&mut self, row: usize) {
         if row == SEARCH_FIELD
@@ -834,21 +834,21 @@ impl WorldSelectNav {
             KeyOutcome::Close => WorldSelectOutcome::Close,
             KeyOutcome::Consumed | KeyOutcome::FocusMoved => {
                 // Focus landing on a list row *is* a selection change —
-                // `AbstractSelectionList.nextFocusPath` calls `setSelected` on the
+                // The abstract selection list's next focus path calls `setSelected` on the
                 // entry it moves to, which is why arrowing through the list keeps
                 // Play pointed at the row that is highlighted rather than at
                 // whatever was clicked last.
                 self.sync_selection_to_focus();
                 WorldSelectOutcome::Handled
             }
-            // `AbstractButton.keyPressed` presses a focused, *active* button on
+            // The abstract button's key pressed presses a focused, *active* button on
             // Enter or Space and returns `true`.
             // Our `Widget` is data with no press callback, so the screen applies
             // that here instead; the observable behaviour is the same, and an
             // inactive button never gets here because it cannot hold focus.
             //
             // Enter on a focused **list row** is `joinWorld` — vanilla reaches it
-            // through `AbstractSelectionList.keyPressed`'s Enter arm on the
+            // through the abstract selection list's key pressed's Enter arm on the
             // selected entry, which is the keyboard twin of the double-click.
             KeyOutcome::Declined if key == MenuKey::Enter => match self.focused_row() {
                 Some(row) if self.world_row(row).is_some() => self.play_selected(),
@@ -856,7 +856,7 @@ impl WorldSelectNav {
             },
             KeyOutcome::Declined => WorldSelectOutcome::Handled,
         };
-        // `this.searchBox.setResponder(list::updateFilter)`
+        // search box's set responder
         //. Gated on the value actually changing so a
         // Backspace on an empty box does not rebuild the whole list — and, more
         // importantly, so a keystroke that only moved focus does not reset the
@@ -907,20 +907,20 @@ impl WorldSelectNav {
     /// cursor at all: a click on the field focuses it and a click on a button
     /// presses it, and neither is the other.
     ///
-    /// Mirrors `ContainerEventHandler.mouseClicked` (`:44-52`) by row instead of
+    /// Mirrors the container event handler's mouse clicked (`:44-52`) by row instead of
     /// by coordinate: the child answers whether it consumed the click
-    /// (`AbstractWidget.mouseClicked` returns `false` when inactive,
+    /// (the abstract widget's mouse clicked returns `false` when inactive,
     /// vanilla's own abstract-widget base) and only then does it take focus, gated on
-    /// `shouldTakeFocusAfterInteraction()` — `true` for a plain `Button`.
+    /// should take focus after interaction — `true` for a plain `Button`.
     pub fn click_row(&mut self, row: usize) -> WorldSelectOutcome {
         if row == SEARCH_FIELD {
             self.focus.set_focused(&mut self.widgets, Some(SEARCH_FIELD));
             return WorldSelectOutcome::Handled;
         }
         // A click on a list row **selects** it and does not launch —
-        // `WorldSelectionList.WorldListEntry.mouseClicked` (`:571-583`) only
+        // The world selection list's world list entry.mouseClicked (`:571-583`) only
         // joins on a `doubleClick` or on a click inside the 32×32 icon, and a
-        // single click elsewhere falls through to `AbstractSelectionList`'s own
+        // single click elsewhere falls through to the abstract selection list's own
         // `setSelected`. Launching on a single click would make Play Selected
         // World unreachable: you could never point at a world without opening it.
         //
@@ -934,11 +934,11 @@ impl WorldSelectNav {
             // used to return early for an inactive row, so clicking the one world
             // whose `level.dat` will not decode left the selection where it was —
             // and Delete acts on the *selection*, so vanilla's
-            // "`canDelete()` is unconditionally `true`, including for a corrupt
+            // "can delete is unconditionally `true`, including for a corrupt
             // world" could not be reached from the UI at all.
             //
-            // Vanilla has no such coupling: `AbstractSelectionList.setSelected`
-            // runs for any entry, and `primaryActionActive()` gates only
+            // Vanilla has no such coupling: the abstract selection list's set selected
+            // runs for any entry, and primary action active gates only
             // `joinWorld`. So a click selects any row, and the row's own `active`
             // flag — which stays `can_play()` — still decides two separate
             // things: whether it can take **focus** (so a corrupt row is never a
@@ -988,9 +988,9 @@ impl WorldSelectNav {
             WorldSelectButton::Play => self.play_selected(),
             // Opens `Screen::CreateWorld`.
             WorldSelectButton::Create => WorldSelectOutcome::CreateWorld,
-            // Vanilla's `list.getSelectedOpt().ifPresent(WorldListEntry::deleteWorld)`
+            // Vanilla's get selected opt's get selected opt
             //, whose `deleteWorld` opens a
-            // `ConfirmScreen` and deletes nothing.
+            // The confirm screen and deletes nothing.
             // That fix.
             WorldSelectButton::Delete => self.delete_selected(),
             // Edit and Re-Create have no screen to open, so both are inactive and
@@ -1016,7 +1016,7 @@ impl WorldSelectNav {
     /// implicit until then — a corrupt world could not be *selected*, so this
     /// could never see one — and making the corrupt row selectable so it could be
     /// deleted removed that implicit protection. The gate is vanilla's own:
-    /// `WorldListEntry.joinWorld` opens with `if (this.summary.primaryActionActive())`
+    /// The world list entry's join world opens with `if (this.summary.primary_action_active())`
     ///, i.e. the check lives in the *action* and
     /// not only in the button's `active` flag.
     /// `a_corrupt_worlds_row_is_selectable_and_deletable_but_never_playable` is
@@ -1073,8 +1073,8 @@ impl WorldSelectNav {
     }
 
     /// One mouse-wheel notch at a `canvas_height`-tall canvas —
-    /// `AbstractScrollArea::mouseScrolled`,
-    /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())`.
+    /// The abstract scroll area's mouse scrolled,
+    /// set scroll amount.
     ///
     /// **Delegates to [`super::widget::ScrollList`] rather than reimplementing the
     /// arithmetic**, which is what makes one notch 18 px rather than a whole 36 px
@@ -1094,7 +1094,7 @@ impl WorldSelectNav {
     }
 
     /// Bring the **focused** row into the band —
-    /// `AbstractSelectionList.scrollToEntry` (`:251-261`), reached in vanilla
+    /// The abstract selection list's scroll to entry (`:251-261`), reached in vanilla
     /// through `setSelected`'s keyboard branch (`:53-62`).
     ///
     /// This is the fix for the one thing that fix called genuinely wrong rather than
@@ -1373,7 +1373,7 @@ mod tests {
     }
 
     /// A corrupt world is listed, is not selectable and cannot be played —
-    /// vanilla's `CorruptedLevelSummary` reaching this screen's own predicates.
+    /// vanilla's corrupted level summary reaching this screen's own predicates.
     #[test]
     fn a_corrupt_worlds_row_is_selectable_and_deletable_but_never_playable() {
         let mut nav = populated();
@@ -1384,7 +1384,7 @@ mod tests {
         // **This used to assert the selection did not move**, and that was the
         // bug that fix surfaced: Delete acts on the selection, so a corrupt
         // world that could not be selected could not be removed — the one world
-        // vanilla most insists you can remove (`canDelete()` is unconditionally
+        // vanilla most insists you can remove (can delete is unconditionally
         // `true`). Selection and activation are two facts now; see `click_row`.
         assert_eq!(nav.selected_row(), Some(2), "a click selects any row");
         assert_eq!(
@@ -1538,7 +1538,7 @@ mod tests {
         assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
 
         // Focus landing on a list row **is** a selection change —
-        // `AbstractSelectionList.nextFocusPath` calls `setSelected`.
+        // The abstract selection list's next focus path calls `setSelected`.
         let mut nav = populated();
         nav.handle_key(MenuKey::Tab);
         nav.handle_key(MenuKey::Tab);

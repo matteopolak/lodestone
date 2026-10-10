@@ -1728,7 +1728,7 @@ mod tests {
     ///
     /// The exact value is the whole point. Sky light is not a vertical rule with a
     /// per-step cost — every cell whose column is unobstructed all the way up is
-    /// *itself* a 15 source (`ChunkSkyLightSources`), so the newly exposed cell is
+    /// *itself* a 15 source (the column's sky-light sources), so the newly exposed cell is
     /// `15`, not `14`. Those are the two hypotheses and they differ here by exactly
     /// one level, which is why this asserts the number instead of `> 0`: a
     /// propagate-downward-with-attenuation engine passes any "it got brighter"

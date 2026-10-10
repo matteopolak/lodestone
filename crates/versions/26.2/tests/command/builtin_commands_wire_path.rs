@@ -195,8 +195,8 @@ async fn gamemode_changes_the_mode_on_the_wire_and_confirms_it_in_chat() {
     assert_eq!(observed.chat, ["Set own game mode to Creative Mode"]);
 }
 
-/// 26.2 accepts the four full mode names and **nothing else** — `vanilla's own game type's own by name`
-/// is an exact match against `getSerializedName`.
+/// 26.2 accepts the four full mode names and **nothing else** — the game-type name lookup
+/// is an exact match against the serialised name.
 ///
 /// This is the gate on the faithfulness bug the deleted `parse_gamemode_command`
 /// had: it accepted `c` and `1`, which is *more* permissive than vanilla. Its own
@@ -220,7 +220,7 @@ async fn gamemode_rejects_the_abbreviations_the_hand_rolled_parser_accepted() {
 /// `container_set_slot` frame reaches the client.
 ///
 /// The slot is predicted exactly. A fresh player's inventory is empty, so
-/// `vanilla's own inventory's own get free slot` places the first stack in native slot `0`, which
+/// the inventory's free-slot search places the first stack in native slot `0`, which
 /// `window_zero_menu_slot` maps to **menu slot 36** — the first hotbar cell.
 /// Both the count and the item id are predicted too, so a `/give` that arrived
 /// with the wrong count or as the wrong item fails.

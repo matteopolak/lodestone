@@ -33,7 +33,7 @@
 //! `Some(true)` is the magma-block drain and `Some(false)` the soul-sand lift.
 //! Inverting them turns every elevator into a drowning trap and vice versa, and
 //! nothing about the resulting motion looks malformed — it just goes the wrong way.
-//! `vanilla's own bubble column block's own get column state` is the authority: `ENABLES_BUBBLE_COLUMN_PUSH_UP`
+//! The bubble column block's column-state rule is the authority: `ENABLES_BUBBLE_COLUMN_PUSH_UP`
 //! (soul sand) sets `DRAG_DOWN` to `false`, `ENABLES_BUBBLE_COLUMN_DRAG_DOWN`
 //! (magma block) sets it to `true`.
 
@@ -92,8 +92,8 @@ fn seam_reports_drag_for_both_bubble_column_states() {
 }
 
 /// `drag=true` is the block's **default** state, per `blocks.json`'s `"default":
-/// true` marker and `BubbleColumnBlock`'s constructor
-/// (`registerDefaultState(… setValue(DRAG_DOWN, true))`, `vanilla's own bubble column block's own java`).
+/// true` marker and the block's constructor
+/// (which registers a default state with drag set to true).
 ///
 /// This is the id-independent way to pin the direction: the lower of the two state
 /// ids is the default one, and it must be the drain.

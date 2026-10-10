@@ -50,7 +50,7 @@ impl AssetProfile {
     /// `textures/blocks/` and item textures under `textures/items/` (both
     /// plural), block *models* are already singular (`models/block/`),
     /// blockstates use only the `variants` schema (no `multipart`), and there is
-    /// no `atlases/*.json` index. `pack_format` 1 is a `SharedConstants` code
+    /// no `atlases/*.json` index. `pack_format` 1 is a shared-constants code
     /// constant — the 1.8.9 jar ships no `pack.mcmeta`/`version.json`.
     pub const LEGACY_1_8: AssetProfile = AssetProfile {
         pack_format: 1,

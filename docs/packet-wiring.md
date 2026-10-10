@@ -14,6 +14,8 @@ How a decoded packet reaches a real consumer instead of an island on both the se
 
 This gate and `cargo xtask connectedness` are complements. `connectedness` asks whether a decoded clientbound packet reaches anything and is blind to a missing constructor; `serverbound_wiring.rs` asks whether every variant is ever constructed and is blind to a missing consumer (a variant landing in `dispatch_play_packet`'s no-op group). Neither sees a canonicalisation defect (see [multi-protocol seam](multi-protocol-seam.md)).
 
+`connectedness` takes each family's packet-id denominators from its own `packet_ids.rs`. A family with no adapter of its own (`26.3`) is scanned through its base family's adapter and `ServerProtocol` (`SHARED_LOGIC_BASES` in `xtask/src/connectedness.rs`), including release arms keyed by packet name (`Some("minecraft:...")`) and renamed serverbound packets (`SERVERBOUND_RENAMES`). A new dialect-only family needs an entry in both tables.
+
 To find a packet that decodes but reaches nothing, check in order: (1) the decode arm constructs the event or action (a `let _ = ...` in a decoder consumes bytes and drops the value); (2) a router claims it, or `dispatch_play_packet` matches it into a real consumer; (3) for packets with a discriminant (`PLAYER_ACTION`, `PLAYER_COMMAND`, `INTERACT`, `CUSTOM_CLICK_ACTION`), check each ordinal, since one can still fall to `Ignored`.
 
 ### Teleport acknowledgement gate

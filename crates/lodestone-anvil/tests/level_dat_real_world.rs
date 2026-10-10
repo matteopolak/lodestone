@@ -13,7 +13,7 @@
 //! Cross-checked against all five 26.2 oracle worlds this checkout
 //! currently has on disk (`creative`, `terrain`, `survival`, `online262`,
 //! `oracle`) — all five agree, which is expected: they all came from the
-//! same `.cache/mc/26.2` server jar's `SharedConstants` data version, not a
+//! same `.cache/mc/26.2` server jar's game data version, not a
 //! coincidence.
 //!
 //! `#[ignore]`d for the same reason as `region_real_world.rs`: these are

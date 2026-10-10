@@ -56,7 +56,7 @@ use super::vanilla_font::VanillaFont;
 /// The scale the overlay draws its text at.
 ///
 /// `1.0`, because `HudGeometry::build_with_gui` already lays out in the
-/// `gui_scale`-divided logical canvas and `DebugScreenOverlay` draws with no
+/// `gui_scale`-divided logical canvas and the debug screen overlay draws with no
 /// pose scale of its own. Named here so the measure a caller passes to
 /// [`layout_columns`] and the scale the draw hands `Builder::text` cannot
 /// drift apart.
@@ -76,7 +76,7 @@ pub enum Anchor {
     /// where a wide block (the frame profile) belongs.
     Left,
     /// Right-aligned at `canvas_w - margin - width`, vanilla's
-    /// `guiWidth() - 2 - font.width(line)`.
+    /// `gui_width() - 2 - font.width(line)`.
     Right,
 }
 
@@ -206,7 +206,7 @@ fn choose_cut(rest: &str, indent: &str, max_width: f32, measure: &dyn Fn(&str) -
 ///
 /// The returned order is every left row, then every right row. Callers draw the
 /// plates for all of them before any of the text, which is vanilla's own
-/// two-pass order (`DebugScreenOverlay.extractLines`) and is what stops a later
+/// two-pass order (the debug screen overlay's extract lines) and is what stops a later
 /// line's plate covering an earlier line's glyphs.
 ///
 /// **The guarantee**: for every row, `x >= margin` and

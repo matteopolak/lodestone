@@ -617,7 +617,7 @@ use super::*;
         );
 
         // A stage >= 10 clears the overlay, matching vanilla
-        // (`LevelRenderer.setBlockBreakProgress`) — proven through the same
+        // (the renderer's block-break-progress setter) — proven through the same
         // real schedule run, not by calling `BlockDestructionOverlays::apply`.
         fold(
             &mut app,
@@ -934,8 +934,8 @@ use super::*;
         );
     }
 
-    /// A respawn lands us on foot. Vanilla builds a brand-new `ServerPlayer`
-    /// (`PlayerList.respawn`) which is never a passenger, and no
+    /// A respawn lands us on foot. Vanilla builds a brand-new server player
+    /// which is never a passenger, and no
     /// `SET_PASSENGERS` follows — so without the explicit clear the seat pin
     /// would hold a respawned player at a vehicle nothing can free them from.
     #[test]

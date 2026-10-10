@@ -325,16 +325,16 @@ impl<T: Transport> Connection<T> {
             // driver fails open on an adapter decode error but never on a
             // transport one. That is a whole session lost to one junk frame.
             //
-            // Vanilla tolerates it, and worth knowing *how*, because there is no
-            // explicit guard to point at: `Varint21FrameDecoder` rejects only a
-            // zero *length*, `CompressionDecoder` turns `uncompressedLength == 0`
-            // into `in.readBytes(in.readableBytes())` — an empty buffer — and
-            // `PacketDecoder` has no empty check. It never needs one, because
+            // The game tolerates it, and worth knowing *how*, because there is no
+            // explicit guard to point at: the frame decoder rejects only a
+            // zero *length*, the compression decoder turns an uncompressed length of 0
+            // into a read of the remaining bytes — an empty buffer — and
+            // the packet decoder has no empty check. It never needs one, because
             // netty's `ByteToMessageDecoder` only calls `decode` while the buffer
-            // `isReadable()`, so an empty one is silently dropped before
-            // `PacketDecoder` ever sees it. The tolerance is a property of the
+            // is readable, so an empty one is silently dropped before
+            // the packet decoder ever sees it. The tolerance is a property of the
             // pipeline, not of the packet code — which is exactly why reading the
-            // packet classes alone suggests vanilla would die here too.
+            // packet classes alone suggests the game would die here too.
             //
             // Measured against a live Velocity proxy (protocol 776, compression
             // threshold 256): it emits exactly this frame, and it is what ended

@@ -78,7 +78,7 @@ pub const MOJANG_PUBLIC_KEY_BITS: usize = 4_096;
 /// key) and asserts on with its own precondition check on every decode.
 pub const SIGNATURE_BYTES: usize = 256;
 
-/// Maximum entries in a last-seen window (`LastSeenMessages.LAST_SEEN_MESSAGES_MAX_LENGTH`).
+/// Maximum entries in a last-seen window.
 pub const LAST_SEEN_MAX_LEN: usize = 20;
 
 // --- Response shape -------------------------------------------------------
@@ -91,11 +91,9 @@ pub const LAST_SEEN_MAX_LEN: usize = 20;
 struct KeyPairResponse {
     #[serde(rename = "keyPair")]
     key_pair: KeyPairData,
-    /// Vanilla reads **this** field (`publicKeySignatureV2`), not the sibling
-    /// `publicKeySignature` the response also carries — see
-    /// `AccountProfileKeyPairManager.parsePublicKey`, which builds
-    /// `ProfilePublicKey.Data` from `response.publicKeySignature()`, itself
-    /// the Java getter for the `@SerializedName("publicKeySignatureV2")` field.
+    /// The game reads **this** field (`publicKeySignatureV2`), not the sibling
+    /// `publicKeySignature` the response also carries: its key-parsing step
+    /// builds the signed public-key data from the V2 field.
     #[serde(rename = "publicKeySignatureV2")]
     public_key_signature_v2: String,
     #[serde(rename = "expiresAt")]
@@ -149,11 +147,11 @@ pub struct ProfilePublicKeyData {
     pub key_signature: Vec<u8>,
 }
 
-/// Builds the byte sequence Mojang signs for `ProfilePublicKey.Data`:
+/// Builds the byte sequence Mojang signs for the profile public-key data:
 /// profile UUID most-significant bits, least-significant bits, expiry epoch
 /// milliseconds (all signed big-endian `i64`), then the original SPKI DER.
 ///
-/// This is `ProfilePublicKey.Data#signedPayload` from vanilla 26.2; neither a
+/// This is the game's signed payload for that key in 26.2; neither a
 /// VarInt nor a length prefix appears in the signed sequence.
 #[must_use]
 pub fn profile_public_key_signature_payload(data: &ProfilePublicKeyData) -> Vec<u8> {
@@ -164,7 +162,7 @@ pub fn profile_public_key_signature_payload(data: &ProfilePublicKeyData) -> Vec<
     payload
 }
 
-/// Vanilla's `ProfilePublicKey.Data#hasExpired`: expiry is strict (`isBefore`)
+/// Whether the key has expired: expiry is strict (a before-comparison)
 /// so equality is still usable and one millisecond earlier is expired.
 #[must_use]
 pub fn profile_public_key_has_expired(expires_at_millis: i64, now_millis: i64) -> bool {
@@ -333,8 +331,8 @@ impl MojangPublicKeyCache {
 
 /// A Mojang-issued chat-signing RSA key pair, ready to sign outgoing chat.
 ///
-/// Corresponds to vanilla's `ProfileKeyPair` (private key + `ProfilePublicKey`
-/// + `refreshedAfter`), flattened: the public key is kept as the raw DER bytes
+/// Corresponds to the game's profile key pair (private key + public key
+/// + refresh-after instant), flattened: the public key is kept as the raw DER bytes
 /// Mojang sent (see [`Self::public_key_der`]'s doc for why that is exactly
 /// what the wire needs, with no re-encoding step to get subtly wrong).
 #[derive(Clone)]
@@ -477,7 +475,7 @@ fn parse_key_pair_response(resp: KeyPairResponse) -> Result<ChatKeyPair> {
         "-----END RSA PRIVATE KEY-----",
     )?;
     // Despite the PKCS#1-style header text, the bytes inside are PKCS#8
-    // (`Crypt.byteToPrivateKey` parses them with `PKCS8EncodedKeySpec`) — a
+    // (Crypt's byte to private key parses them with `PKCS8EncodedKeySpec`) — a
     // Mojang quirk, not a mistake here; a real PKCS#1 `RSAPrivateKey` DER
     // would fail this parse.
     let private_key = RsaPrivateKey::from_pkcs8_der(&private_der).map_err(|e| {
@@ -489,7 +487,7 @@ fn parse_key_pair_response(resp: KeyPairResponse) -> Result<ChatKeyPair> {
         "-----BEGIN RSA PUBLIC KEY-----",
         "-----END RSA PUBLIC KEY-----",
     )?;
-    // Sanity-parse as X.509 SubjectPublicKeyInfo (`Crypt.byteToPublicKey` uses
+    // Sanity-parse as X.509 SubjectPublicKeyInfo (Crypt's byte to public key uses
     // `X509EncodedKeySpec`) so a malformed key fails here rather than as a
     // mysterious rejection three steps later. The parsed value is discarded —
     // see `ChatKeyPair::public_key_der`'s doc for why the raw bytes, not this
@@ -1138,7 +1136,7 @@ mod tests {
             expires_at_millis: 1000,
             refreshed_after_millis: 1000,
         };
-        // `ProfileKeyPair.dueRefresh` is `refreshedAfter.isBefore(now)`, and
+        // The game's refresh-due check is a strict before-comparison against the refresh-after instant, and
         // Java's `Instant.isBefore` is strict (`<`, not `<=`): at the exact
         // boundary `refreshedAfter == now`, neither instant is *before* the
         // other, so refresh is not yet due. This was the wrong expectation

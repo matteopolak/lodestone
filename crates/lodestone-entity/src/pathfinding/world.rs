@@ -192,7 +192,7 @@ impl HiveView {
 /// (`&dyn T: Send` needs `T: Sync`). Real world adapters are plain terrain
 /// stores, so this is free.
 pub trait PathWorld: Send + Sync {
-    /// The world's minimum block Y (`level.getMinY()`), the floor of downward
+    /// The world's minimum block Y (level's get min y), the floor of downward
     /// searches.
     fn min_y(&self) -> i32;
 
@@ -483,7 +483,7 @@ pub struct MobShape {
     pub can_pass_doors: bool,
     /// Whether the mob can open wooden doors.
     pub can_open_doors: bool,
-    /// Per-type malus overrides (`Mob.getPathfindingMalus`); absent types use
+    /// Per-type malus overrides (Mob's get pathfinding malus); absent types use
     /// the [`PathType::malus`] default.
     pub malus_overrides: HashMap<PathType, f32>,
     /// The water locomotion of an [`NavMode::Amphibious`] body.
@@ -546,7 +546,7 @@ impl MobShape {
         shape
     }
 
-    /// The mob's malus for a path type (`Mob.getPathfindingMalus`).
+    /// The mob's malus for a path type (Mob's get pathfinding malus).
     #[must_use]
     pub fn malus(&self, kind: PathType) -> f32 {
         self.malus_overrides

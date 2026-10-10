@@ -63,10 +63,10 @@ pub const ANGER_DECAY_PER_TICK: i32 = 1;
 /// (`this.increaseAngerAt(entity, 35, true)`).
 pub const ANGER_INCREASE: i32 = 35;
 
-/// `AngerLevel.AGITATED.getMinimumAnger()`.
+/// AGITATED's get minimum anger.
 pub const AGITATED_THRESHOLD: i32 = 40;
 
-/// `AngerLevel.ANGRY.getMinimumAnger()`.
+/// ANGRY's get minimum anger.
 pub const ANGRY_THRESHOLD: i32 = 80;
 
 /// A warden's own melee reach, squared. **Not a transcribed vanilla
@@ -114,7 +114,7 @@ pub const DIGGING_COOLDOWN_TICKS: i32 = 1200;
 /// fire.
 pub const SONIC_BOOM_COOLDOWN_TICKS: i32 = 40;
 
-/// `SonicBoom.checkExtraStartConditions`'s `closerThan(target, 15.0, 20.0)`
+/// SonicBoom's check extra start conditions's `closerThan(target, 15.0, 20.0)`
 /// horizontal leg — `Entity.closerThan`'s `xz` argument, squared for the
 /// same reason [`MELEE_RANGE_SQR`] is.
 pub const SONIC_BOOM_RANGE_XZ_SQR: f64 = 225.0;
@@ -122,7 +122,7 @@ pub const SONIC_BOOM_RANGE_XZ_SQR: f64 = 225.0;
 pub const SONIC_BOOM_RANGE_Y_SQR: f64 = 400.0;
 
 /// `SonicBoom.tick`'s hit: `10.0F` true damage through
-/// `level.damageSources().sonicBoom(body)` — `minecraft:sonic_boom`,
+/// damage sources's sonic boom — `minecraft:sonic_boom`,
 /// `bypasses_armor bypasses_enchantments bypasses_shield` in the real
 /// datapack table (`lodestone_data::damage_types`), so armour and
 /// enchantments do nothing against it but Resistance still can, exactly as
@@ -151,7 +151,7 @@ pub enum AngerLevel {
 }
 
 impl AngerLevel {
-    /// `AngerLevel.byAnger` — the highest bucket whose own minimum the score
+    /// AngerLevel's by anger — the highest bucket whose own minimum the score
     /// clears, falling back to [`AngerLevel::Calm`].
     #[must_use]
     pub fn from_anger(anger: i32) -> Self {
@@ -164,7 +164,7 @@ impl AngerLevel {
         }
     }
 
-    /// `AngerLevel.isAngry()`.
+    /// AngerLevel's is angry.
     #[must_use]
     pub fn is_angry(self) -> bool {
         self == AngerLevel::Angry
@@ -368,7 +368,7 @@ mod warden_anger_tests {
             .id()
     }
 
-    /// `AngerLevel::from_anger` matches `AngerLevel.byAnger`'s own three
+    /// `AngerLevel::from_anger` matches AngerLevel's by anger's own three
     /// buckets exactly at their boundaries.
     #[test]
     fn anger_level_buckets_match_the_named_thresholds() {
@@ -642,7 +642,7 @@ mod warden_anger_tests {
     }
 
     /// The reciprocal control: an emerging warden is invulnerable to a real
-    /// incoming hit — `Warden.isInvulnerableTo`'s own `isDiggingOrEmerging`
+    /// incoming hit — Warden's is invulnerable to's own `isDiggingOrEmerging`
     /// gate, not merely "does not act".
     #[test]
     fn an_emerging_warden_takes_no_damage_from_a_real_hit() {

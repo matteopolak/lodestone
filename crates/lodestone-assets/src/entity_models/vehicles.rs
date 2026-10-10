@@ -83,7 +83,7 @@ pub(super) fn boat_hull() -> PartDef {
 }
 
 /// Vanilla's own boat-model boat-model construction: hull + both paddles, no chest. Sheet 128×64.
-/// (vanilla's own create-water-patch step's own invisible clip quad is [`boat_water_patch_model`],
+/// (vanilla's create-water-patch step's invisible clip quad is [`boat_water_patch_model`],
 /// a separate corpus entry rather than a child of this part tree — see its
 /// own doc for why.)
 pub fn boat_model() -> EntityModelDef {

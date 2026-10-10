@@ -9,7 +9,7 @@
 //
 // The one addition is `dim`. Vanilla composites a flat dark overlay texture
 // over the panorama on every out-of-world screen except the title screen itself
-// (vanilla's own background-extraction routine, and the title screen's own empty
+// (vanilla's background-extraction routine, and the title screen's empty
 // override). That texture was
 // decoded out of client.jar and is flat black at alpha 64/255 in every pixel, so
 // compositing it is exactly a multiply by `1 - 64/255` — one uniform here instead

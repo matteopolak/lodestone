@@ -1053,7 +1053,7 @@ impl Sim {
     /// Push a client-authored system line into the chat feed.
     ///
     /// The one writer that is not the wire. Vanilla has the same seam —
-    /// `ChatComponent.addMessage` is called by local commands and by
+    /// The chat component's add message is called by local commands and by
     /// `MultiplayerOptionsScreen`'s publish result — and this exists for exactly
     /// that second caller: the LAN port has to be readable while the
     /// host reads it out, which a toast is not.
@@ -1172,7 +1172,7 @@ impl Sim {
     }
 
     /// The tab overlay's whole frame — rows in vanilla display order, capped at
-    /// `PlayerTabOverlay`'s 80, plus the server's header and footer. Empty until
+    /// The player tab overlay's 80, plus the server's header and footer. Empty until
     /// the server sends player-list data.
     ///
     /// One method rather than the `player_rows` + `tab_banner` pair it replaces:
@@ -1202,7 +1202,7 @@ impl Sim {
     pub fn tab_list_view(&self) -> crate::tablist::TabListView {
         let list = self.tab_list();
         // The same `SessionScoreboard` read `Sim::sidebar` already does —
-        // `PlayerTabOverlay.getNameForDisplay` runs a name with no explicit
+        // The player tab overlay's get name for display runs a name with no explicit
         // display name through the player's team, so a tab list built without
         // this reads every team-coloured player in plain white.
         let board = self.read(|w| {
@@ -1344,7 +1344,7 @@ impl Sim {
 
     /// The ticks a fresh attack must wait before it is back at full strength —
     /// vanilla's own current-item-attack-strength-delay calculation: `(1.0 /
-    /// getAttributeValue(Attributes.ATTACK_SPEED)) * 20.0`.
+    /// get attribute value) * 20.0`.
     ///
     /// Reads `minecraft:attack_speed` off the local player's own
     /// [`Attributes`] snapshot — the same server-fed, per-item-aware value
@@ -1356,7 +1356,7 @@ impl Sim {
     /// weapon's `-2.4` (sword) / `-3.0` (axe) modifier arrives the same way
     /// any other equipment-driven attribute change does, as a server
     /// `update_attributes` packet the instant the held item changes
-    /// (`AttributeMap`'s dirty-tracking on `LivingEntity.setItemSlot`), and
+    /// (`AttributeMap`'s dirty-tracking on the living entity's set item slot), and
     /// [`Attributes`] already folds it. Before the first such packet (a fresh
     /// demo-world player, or a live session before login's fold lands)
     /// `attribute_value` reads the registry default (`4.0`, unarmed), giving a
@@ -1379,11 +1379,11 @@ impl Sim {
     /// Armour points to draw, `None` before the local player has a server-fed
     /// attribute snapshot.
     ///
-    /// Vanilla's `LivingEntity.getArmorValue` is
-    /// `Mth.floor(getAttributeValue(Attributes.ARMOR))`, so this is the folded
+    /// Vanilla's living entity's get armor value is
+    /// `Mth.floor(get_attribute_value(Attributes.ARMOR))`, so this is the folded
     /// `minecraft:armor` attribute and **not** a per-item table — equipment
     /// contributes through the modifiers the server pushes on
-    /// `LivingEntity.setItemSlot`, exactly as [`Self::attack_strength_delay`]
+    /// The living entity's set item slot, exactly as [`Self::attack_strength_delay`]
     /// above documents for `attack_speed`. `Some(0)` is a real state (a live
     /// player wearing nothing) and draws no row, matching vanilla's
     /// `if (armor > 0)`; `None` is "no snapshot yet" and also draws nothing, so
@@ -1422,8 +1422,8 @@ impl Sim {
     }
 
     /// The attack-cooldown fraction the crosshair indicator fills to,
-    /// `0.0..=1.0` — vanilla's `getAttackStrengthScale(0.0F)`
-    ///, the exact call `Hud.extractCrosshair` makes
+    /// `0.0..=1.0` — vanilla's get attack strength scale
+    ///, the exact call Hud's extract crosshair makes
     /// for the crosshair-style indicator. The `a` (partial
     /// tick) argument is fixed at `0.0` here, same as that call site; nothing
     /// in this shell threads a render-time partial tick into `Sim`'s other
@@ -1433,11 +1433,11 @@ impl Sim {
         self.attack_strength_scale_at(0.0)
     }
 
-    /// `getAttackStrengthScale(a)` with the partial
+    /// get attack strength scale with the partial
     /// tick argument exposed, because vanilla itself calls this with two
     /// different values for two different purposes: `0.0F` for the crosshair
     /// indicator ([`Self::attack_strength_scale`], vanilla's own hud rendering) and `0.5F`
-    /// for vanilla's own attack path's own `fullStrengthAttack` gate
+    /// for vanilla's attack path's `fullStrengthAttack` gate
     ///, which [`Self::maybe_spawn_crit_particles`]
     /// needs. One private helper rather than two public accessors that would
     /// otherwise duplicate the ticker read and delay computation.
@@ -1588,7 +1588,7 @@ impl Sim {
     }
 
     /// The book and selected page of the currently open lectern, if the
-    /// server supplied a signed book in its sole menu slot. `LecternMenu`
+    /// server supplied a signed book in its sole menu slot. The lectern menu
     /// exposes that book without the ordinary 36 appended inventory slots;
     /// `lodestone_game::menus::Menus` preserves the slot before this reader
     /// projects it into the normal book-view state.
@@ -1646,7 +1646,7 @@ impl Sim {
     ///
     /// This used to only send `ContainerClose`, and the screen therefore never went
     /// away — you could open a crafting table and not get out of it. A vanilla
-    /// server does **not** echo a close back; `ClientboundContainerClosePacket` is
+    /// server does **not** echo a close back; container-close packet is
     /// sent only when the *server* forces a close. So waiting for the wire to clear
     /// [`Self::open_menu`] waits forever, and every consumer that keys off it —
     /// `active_container_menu`, the key-dispatch gate, the container draw — stayed
@@ -1800,8 +1800,8 @@ impl Sim {
     ///
     /// The main hand is checked first, matching vanilla's own hand
     /// resolution (`Player.interactionResultAndUpdate` tries
-    /// `InteractionHand.MAIN_HAND` before `OFF_HAND`). `slot` is already in
-    /// `ServerboundEditBookPacket`'s own addressing — the hotbar's *inventory*
+    /// The interaction hand's main hand before `OFF_HAND`). `slot` is already in
+    /// Edit-book packet's own addressing — the hotbar's *inventory*
     /// index (`0..=8`) for the main hand, or
     /// [`lodestone_game::menu::OFFHAND_NATIVE`] (`40`) for the off hand — see
     /// `crate::menu::book_edit`'s module doc.
@@ -1855,7 +1855,7 @@ impl Sim {
     /// differences from it, both because a signed book is immutable:
     ///
     /// * **No slot.** Nothing this screen does reaches the wire, so there is
-    ///   no `ServerboundEditBookPacket` addressing to compute.
+    ///   no edit-book packet addressing to compute.
     /// * **The `written_book_content` component is required, not
     ///   defaulted.** A book with no component is a freshly crafted draft
     ///   that `writable_book_in_hand` handles; a `minecraft:written_book`
@@ -2155,7 +2155,7 @@ impl Sim {
     }
 
     /// Report the recipe-book panel's open/filter state for one book type —
-    /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`.
+    /// vanilla's recipe-book-change-settings packet.
     ///
     /// The first producer of [`ClientAction::SetRecipeBookSettings`] anywhere
     /// outside `crates/protocol/`: all four families encoded it and nothing
@@ -2176,10 +2176,10 @@ impl Sim {
         }
     }
 
-    /// Report a recipe as seen — vanilla's `ServerboundRecipeBookSeenRecipePacket`,
-    /// sent from `LocalPlayer::removeRecipeHighlight`
-    /// (`RecipeBookComponent::recipeShown`, itself called from
-    /// `RecipeButton::init` for every highlighted recipe a page just placed a
+    /// Report a recipe as seen — vanilla's recipe-book-seen-recipe packet,
+    /// sent from LocalPlayer's remove recipe highlight
+    /// (the recipe book component's recipe shown, itself called from
+    /// The recipe button's init for every highlighted recipe a page just placed a
     /// button for). Clears the recipe's "new" tab-highlight and squeeze
     /// animation server-side.
     ///
@@ -2193,7 +2193,7 @@ impl Sim {
         }
     }
 
-    /// Select a merchant trade row — vanilla's `ServerboundSelectTradePacket`
+    /// Select a merchant trade row — vanilla's select-trade packet
     /// (vanilla's own merchant-screen button-click handling), sent
     /// when the player clicks a trade-list row (UI half).
     ///
@@ -2202,7 +2202,7 @@ impl Sim {
     /// `ClientAction::SetFlying` was caught in. Best-effort like
     /// [`Self::send_recipe_book_settings`] — a closed session drops it. Note
     /// this does **not** locally move items into the payment slots the way
-    /// vanilla's `MerchantMenu.tryMoveItems` does — that needs the offer list
+    /// vanilla's merchant menu's try move items does — that needs the offer list
     /// cross-referenced against the player's own inventory contents, which is
     /// prediction work for a later unit, not this send.
     pub fn send_select_trade(&self, index: i32) {
@@ -2212,7 +2212,7 @@ impl Sim {
     }
 
     /// Confirm a beacon's primary/secondary power selection — vanilla's
-    /// `ServerboundSetBeaconPacket` (its own beacon-confirm-button press
+    /// Set-beacon packet (its own beacon-confirm-button press
     /// handling), sent when the player presses the beacon
     /// screen's confirm button (`SetBeaconEffects` remainder).
     ///
@@ -2227,7 +2227,7 @@ impl Sim {
     /// this file takes: the server is the authority and corrects a wrong
     /// send via its own `container_set_data` broadcast.
     /// Press one of the enchanting table's three enchant-offer buttons —
-    /// vanilla's `ServerboundContainerButtonClickPacket`
+    /// vanilla's container-button-click packet
     /// (its own enchantment-screen click handling, routed through its own
     /// client-side inventory-button-click dispatch), sent when the
     /// player clicks an offer row the client-side gate already accepted
@@ -2289,7 +2289,7 @@ impl Sim {
     }
 
     /// Apply the world-creation Game Rules editor's overrides — vanilla's
-    /// `ServerboundSetGameRulePacket` (More tab). Sent once, by
+    /// Set-game-rule packet (More tab). Sent once, by
     /// `app/session.rs`'s `drive_ui_from_session`, the moment a freshly
     /// created singleplayer session reaches `SessionPhase::Connected` — there
     /// is no server to hold this state on any earlier, since the integrated
@@ -2366,7 +2366,7 @@ impl Sim {
     }
 
     /// Set a container slot's contents by creative fiat — vanilla's
-    /// `ServerboundSetCreativeModeSlotPacket`, sent by the creative-inventory
+    /// Set-creative-mode-slot packet, sent by the creative-inventory
     /// screen.
     ///
     /// The **producer** half of a round trip whose encoder already existed:
@@ -2389,7 +2389,7 @@ impl Sim {
     }
 
     /// Write one window-0 menu slot **locally and on the wire** — vanilla's
-    /// `MultiPlayerGameMode.handleCreativeModeItemAdd`, which is what the creative
+    /// The multi player game mode's handle creative mode item add, which is what the creative
     /// inventory screen uses in place of a `container_click` for every mutation it
     /// makes.
     ///
@@ -2444,7 +2444,7 @@ impl Sim {
     /// Replace the shared cursor stack, locally only.
     ///
     /// There is no serverbound verb for the cursor, and there does not need to be:
-    /// vanilla's `ItemPickerMenu.setCarried` delegates to `player.inventoryMenu`, so a
+    /// vanilla's item picker menu's set carried delegates to `player.inventoryMenu`, so a
     /// creative cursor is purely client state until it is put into a slot — and *that*
     /// is what [`Self::apply_creative_slot`] reports. Routed through
     /// [`ClientEvent::CursorItemChanged`] for the same reason: one fold, not a second
@@ -2556,7 +2556,7 @@ impl Sim {
     /// fraction)` for the F3 overlay, or `None` when none have arrived.
     ///
     /// "Explored" is the fraction of the 128×128 grid whose colour byte is
-    /// non-zero — `0` is vanilla's transparent/unexplored `MapColor.NONE`, so a
+    /// non-zero — `0` is vanilla's transparent/unexplored map color's none, so a
     /// freshly crafted map reads `0%` and one carried across a continent
     /// approaches `100%`. That makes this a real observation of the fold rather
     /// than a count of packets: a wire that arrived but blitted its patch
@@ -2643,8 +2643,8 @@ impl Sim {
     ///
     /// # Deliberately no permission gate
     ///
-    /// Vanilla guards on `player.canUseGameMasterBlocks()`
-    /// (`CommandBlock.useWithoutItem`), which is op level 2 **and** creative.
+    /// Vanilla guards on player's can use game master blocks
+    /// (CommandBlock's use without item), which is op level 2 **and** creative.
     /// This client tracks neither: there is no op level anywhere in the
     /// workspace, and the server is the authority regardless — it rejects a
     /// `SetCommandBlock` from an unauthorised player, exactly as it rejects

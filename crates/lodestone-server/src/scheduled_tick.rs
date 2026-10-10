@@ -405,7 +405,7 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
     /// Schedules `kind` at `pos` to run at `trigger_tick`, at `priority`.
     ///
     /// Returns `false` (a no-op) if a tick for the same `(pos, kind)` is
-    /// already pending — mirrors `LevelChunkTicks::schedule`'s
+    /// already pending — mirrors the level chunk ticks's schedule's
     /// `ticksPerPosition.add(tick)` dedup keyed on `(pos, type)` only, per
     /// this module's own doc comment. The *new* call's `trigger_tick`/
     /// `priority` are discarded in that case, exactly like vanilla: the

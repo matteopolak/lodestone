@@ -13,9 +13,9 @@
 //!
 //! # The trap this seam is documented against
 //!
-//! `BlockHardness::requires_correct_tool` is `vanilla's own block state's own requires correct tool for drops`
+//! `BlockHardness::requires_correct_tool` is the block state's requires-correct-tool-for-drops flag
 //! — a property of the *block*. `lodestone-game`'s `BreakInputs.correct_tool` is
-//! `vanilla's own player's own has correct tool for drops` — a property of the *player's held item vs.
+//! the player's has-correct-tool-for-drops check — a property of the *player's held item vs.
 //! the block*. Bare-handed they are near-opposites
 //! (`correct_tool == !requires_correct_tool`), so assigning this field straight
 //! across makes stone break in 45 ticks instead of 151. See the doc comment on

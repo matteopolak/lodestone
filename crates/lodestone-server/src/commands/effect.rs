@@ -47,7 +47,7 @@ pub enum Effect {
     SetGameMode(GameMode),
     /// Put these stacks in the player's inventory, spilling nothing.
     ///
-    /// A `Vec` rather than one stack because `GiveCommand` splits a count across
+    /// A `Vec` rather than one stack because give command splits a count across
     /// whole stacks at the item's own max stack size, and the split is the
     /// command's business, not the applier's.
     GiveItems(Vec<ItemStack>),

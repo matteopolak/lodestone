@@ -268,7 +268,7 @@ impl Menus {
     }
 
     /// Opens a **local** menu — one a plugin supplied, with no server container
-    /// behind it. `Bukkit.createInventory` + `Player.openInventory`.
+    /// behind it. Bukkit's create inventory + `Player.openInventory`.
     ///
     /// # Why this cannot go through `apply`
     ///
@@ -516,8 +516,8 @@ impl Menus {
     /// [`hand_inventory_to_opened`](Self::hand_inventory_to_opened).
     ///
     /// **This is what makes the hotbar right after the screen closes.** A vanilla
-    /// server sends nothing on close (`ServerPlayer.doCloseContainer` only calls
-    /// `transferState`), so anything the player rearranged inside the container
+    /// server sends nothing on close (its close handler only transfers state),
+    /// so anything the player rearranged inside the container
     /// would be lost on close if the storage went out with the menu.
     fn reclaim_inventory(&mut self) {
         if let Some(open) = self.opened.as_mut() {
@@ -530,7 +530,7 @@ impl Menus {
     /// `self.player` onto whichever menu currently owns the player inventory.
     ///
     /// Window 0's player-section slots address the one inventory — vanilla's
-    /// `ClientPacketListener.handleContainerSetSlot` routes container id `0` to
+    /// the client's container-set-slot handler routes container id `0` to
     /// `player.inventoryMenu`, whose slots reference the shared `Inventory`, so
     /// a window-0 update lands in the same storage an open chest is showing.
     /// Here, while a container is open, `self.player`'s player container is a
@@ -599,7 +599,7 @@ impl Menus {
                     (None, None)
                 }
             };
-            // `LecternMenu` exposes only its single displayed-book slot. It
+            // The lectern menu exposes only its single displayed-book slot. It
             // does not append the normal 36 player-inventory slots to its
             // content packet, despite borrowing the player's inventory for
             // interaction. Keep that one slot in the model so the shell can
@@ -687,7 +687,7 @@ impl Menus {
     /// # Why this is not a container click, and why it writes both copies
     ///
     /// Drop is **not** a `ClickType::THROW`. It travels as a bare
-    /// `ServerboundPlayerActionPacket` with no window id, no slot and no state
+    /// player-action packet with no window id, no slot and no state
     /// id, so there is nothing for [`ClientMenu::reconcile`] to correct against
     /// and no `state_id` to bump — going through [`Self::click`] would fabricate
     /// a container-click round trip the server never sees.
@@ -742,7 +742,7 @@ impl Menus {
 ///
 /// The **size** always comes from the server's own content length; `menu_type`
 /// only selects the slot *kinds*. A crafting table advertises
-/// `minecraft:crafting`, whose `CraftingMenu` is `1 + 3*3 = 10` container slots;
+/// `minecraft:crafting`, whose crafting menu is `1 + 3*3 = 10` container slots;
 /// if the server disagrees about the size we fall back to a generic container
 /// rather than build a menu whose slot count contradicts the packet.
 ///
@@ -805,14 +805,14 @@ impl Menus {
 /// correct a wrong guess" order already established above.
 ///
 /// The beacon (also part of that same family) is no longer in that list:
-/// [`Menu::beacon`] builds the real `BeaconMenu` shape, and its
+/// [`Menu::beacon`] builds the real beacon-menu shape, and its
 /// primary/secondary power buttons and confirm/cancel controls — not menu
 /// slots, driven off `container_data` and screen-local selection state — are
 /// `lodestone-shell`'s `container::beacon` module's job (the
 /// `SetBeaconEffects` remainder).
 ///
 /// The villager's trade list is no longer in that list: [`Menu::merchant`]
-/// builds the real `MerchantMenu` shape, and the trade
+/// builds the real merchant-menu shape, and the trade
 /// *offers* themselves — the seven-row scrollable list, not menu slots at all
 /// — arrive separately as [`crate::trades::TradeOffers`] and are drawn by
 /// `lodestone_shell::container::merchant`.
@@ -849,12 +849,12 @@ fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
         // it (see `SpecialLayout::Hopper`'s doc comment).
         (Some("hopper"), 5) => Menu::hopper(),
         // The merchant/trading screen. `container_size == 3`
-        // matches `MerchantMenu`'s two payment slots plus its take-only
+        // matches the merchant menu's two payment slots plus its take-only
         // result — see `Menu::merchant`'s doc comment for what is and is not
         // modelled.
         (Some("merchant"), 3) => Menu::merchant(),
         // The beacon screen (the `SetBeaconEffects` remainder).
-        // `container_size == 1` matches `BeaconMenu`'s one payment slot
+        // `container_size == 1` matches the beacon menu's one payment slot
         // (vanilla's own beacon slot-count constant).
         (Some("beacon"), 1) => Menu::beacon(),
         (Some("lectern"), 1) => Menu::lectern(),
@@ -1192,7 +1192,7 @@ mod tests {
     }
 
     /// Control for the test above: a size the server never actually sends
-    /// for a merchant (real `MerchantMenu`s are always 3 container slots)
+    /// for a merchant (real merchant menus are always 3 container slots)
     /// must **not** get the merchant shape — `build_menu` falls back to a
     /// plain generic container, the same size-guard the anvil/grindstone/
     /// smithing control above exercises.

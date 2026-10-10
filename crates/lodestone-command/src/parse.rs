@@ -308,7 +308,7 @@ impl CommandTree {
         // `CommandDispatcher::parseNodes` only bothers skipping the separator
         // and continuing (into a redirect target, or into the child's own
         // children) when there is *strictly more* input left to justify it —
-        // `reader.canRead(child.getRedirect() == null ? 2 : 1)`, collapsed
+        // `reader.can_read(child.get_redirect() == null ? 2 : 1)`, collapsed
         // here to a single `can_read()` check (a documented simplification:
         // real Brigadier additionally declines to recurse into a *non*-redirect
         // child's own children when only the bare separator remains with

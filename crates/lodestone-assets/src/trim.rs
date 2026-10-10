@@ -15,8 +15,8 @@
 //! Vanilla's own sprite-id composition is:
 //!
 //! ```text
-//! suffix = material.assets().assetId(equipmentAsset).suffix()   // wearer-aware
-//! path   = pattern.assetId().path()
+//! suffix = material.assets's asset id(equipmentAsset).suffix()   // wearer-aware
+//! path   = pattern's asset id.path()
 //! sprite = layerAssetPrefix + "/" + path + "_" + suffix
 //! ```
 //!

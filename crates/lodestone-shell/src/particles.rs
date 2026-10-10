@@ -64,7 +64,7 @@ use lodestone_render::{BlockModels, Camera};
 ///
 /// Two unrelated uses, and only one of them is a real vanilla value.
 /// `infested`, `raid_omen` and `trial_omen` are registered against
-/// vanilla's own spell-particle provider, which takes a bare `SimpleParticleType` and never
+/// vanilla's own spell-particle provider, which takes a bare simple particle type and never
 /// calls `setColor` at all — white *is* their colour, and their sprites carry
 /// the tint. `effect`, `entity_effect` and `instant_effect` reach it only on
 /// the fallback arms, where a connection's protocol family gave this client no
@@ -133,9 +133,9 @@ pub struct ParticleInstance {
     ///
     /// The fragment shader never reads this — [`ParticleRenderer::prepare`]
     /// does, to partition the upload into the two draws vanilla splits
-    /// particles across (`SubmitNodeCollection::submitQuadParticleGroup`
+    /// particles across (the submit node collection's submit quad particle group
     /// submits the same group twice, once into the `solid` phase and once into
-    /// `afterTerrain`, and `QuadParticleFeatureRenderer` keeps only the layers
+    /// `afterTerrain`, and the quad particle feature renderer keeps only the layers
     /// whose `translucent()` matches). It rides in the instance rather than
     /// being passed alongside it because `RenderState::prepare_particles`'s
     /// signature is fixed by callers outside this module, and because deriving
@@ -385,7 +385,7 @@ mod tests {
             // `size`; `huge_explosion_matches_the_exact_vanilla_formulas` in
             // `lodestone-particle` already pins the formula itself.
             // `explosion_emitter` is deliberately not in this shared loop: it
-            // is a `NoRenderParticle` that produces zero quads on its own
+            // is a no render particle that produces zero quads on its own
             // (see `explosion_emitter_reaches_pixels_only_after_a_tick`
             // below), so it would fail this loop's `drawn == 1` assertion for
             // a reason that has nothing to do with dispatch being broken.
@@ -411,8 +411,8 @@ mod tests {
             ("enchant", [0.4, 0.7, -0.3]),
             ("nautilus", [0.4, 0.7, -0.3]),
             // The ambient/biome family: vanilla's own suspended particle,
-            // `SuspendedTownParticle`, the rest of `BaseAshSmokeParticle`, and
-            // `ExplodeParticle`.
+            // The suspended town particle, the rest of the base ash smoke particle, and
+            // The explode particle.
             ("spore_blossom_air", [0.0, 0.0, 0.0]),
             ("underwater", [0.0, 0.0, 0.0]),
             ("crimson_spore", [0.0, 0.0, 0.0]),
@@ -471,8 +471,8 @@ mod tests {
             ("bubble_pop", [0.0, 0.0, 0.0]),
             ("fishing", [0.0, 0.0, 0.0]),
             ("dust_plume", [0.0, 0.0, 0.0]),
-            // `FallingLeavesParticle`'s two payload-free variants. The tinted
-            // third needs a `ColorParticleOption` and so cannot ride this
+            // The falling leaves particle's two payload-free variants. The tinted
+            // third needs a color particle option and so cannot ride this
             // loop's blanket `ParticleOptions::None`; it is covered by
             // `no_sheet_is_atlas_resident_and_unreachable_from_the_dispatch`,
             // which supplies payloads, and by
@@ -548,14 +548,14 @@ mod tests {
                     to_color: [0.0, 0.0, 1.0],
                     scale: 1.0,
                 },
-                // `ColorParticleOption`, decoded ARGB. Deliberately not grey
+                // The color particle option, decoded ARGB. Deliberately not grey
                 // and not fully opaque: an arm that transposed a colour
                 // component or dropped the alpha would still pass against
                 // `[1.0; 4]`.
                 "tinted_leaves" | "flash" => {
                     ParticleOptions::Color { color: [0.25, 0.5, 0.75, 0.6] }
                 }
-                // The `BlockParticleOption` family. `falling_dust` is the only
+                // The block particle option family. `falling_dust` is the only
                 // one of the five that reaches a `Sheet` at all, so it is the
                 // only one this gate's orphan set can see — but all five are
                 // listed, because the table's job is "give every payload-
@@ -639,7 +639,7 @@ mod tests {
                 SpriteSource::Item(expected),
                 "{kind:?} must carry {item:?}'s validated item identity"
             );
-            // The four-argument `BreakingItemParticle` constructor, not the
+            // The four-argument breaking item particle constructor, not the
             // seven-argument one: `gravity = 1.0` and the quad size halved,
             // with the jitter left undamped.
             assert!(
@@ -658,7 +658,7 @@ mod tests {
         );
     }
 
-    /// The three `FallingLeavesParticle` variants must land on their **own**
+    /// The three falling leaves particle variants must land on their **own**
     /// provider constants, not on a sibling's.
     ///
     /// One class, three registry types, five constants apart — and the wrong
@@ -674,7 +674,7 @@ mod tests {
     /// scales all consume random draws and so cannot be predicted exactly here.
     #[test]
     fn the_leaf_variants_differ_in_every_constant_that_separates_them() {
-        /// `FallingLeavesParticle.ACCELERATION_SCALE`.
+        /// The falling leaves particle's acceleration scale.
         const ACCELERATION_SCALE: f32 = 0.0025;
         /// The `1.2F` the constructor multiplies `fallAcceleration` by.
         const GRAVITY_FACTOR: f32 = 1.2;
@@ -689,7 +689,7 @@ mod tests {
         let cases: &[(&str, f32, f32, ParticleOptions)] = &[
             ("cherry_leaves", cherry_gravity, pale_oak_gravity, ParticleOptions::None),
             ("pale_oak_leaves", pale_oak_gravity, cherry_gravity, ParticleOptions::None),
-            // `TintedLeavesProvider` takes the **pale oak** constants exactly,
+            // The tinted leaves provider takes the **pale oak** constants exactly,
             // and differs from it only in sheet and colour. Asserting it
             // against cherry's is the mistake this arm exists to catch.
             (
@@ -757,7 +757,7 @@ mod tests {
         );
     }
 
-    /// `rain` must be a `WaterDropParticle` at **its own** gravity, and the two
+    /// `rain` must be a water drop particle at **its own** gravity, and the two
     /// water-column types must pull in opposite directions.
     ///
     /// Three magnitude claims that a reachability gate cannot make, each
@@ -769,8 +769,8 @@ mod tests {
     /// | `bubble_column_up` | `-0.125` | any positive value, i.e. a sinking bubble |
     /// | `current_down` | `0.002` | `-0.125`, its sibling's |
     ///
-    /// The `rain`/`splash` pair is the sharp one: `SplashParticle extends
-    /// WaterDropParticle` and overrides exactly this field, so the natural way
+    /// The `rain`/`splash` pair is the sharp one: the splash particle extends
+    /// The water drop particle and overrides exactly this field, so the natural way
     /// to write `rain` is to copy `splash` — which silently keeps `0.04` and
     /// leaves raindrops hanging in the air.
     #[test]
@@ -1106,7 +1106,7 @@ mod tests {
             );
         }
 
-        // `ColorParticleOption`: one ARGB word, alpha in the top byte.
+        // The color particle option: one ARGB word, alpha in the top byte.
         let particle = spawn_from_wire(28, &0x4411_2233u32.to_be_bytes());
         assert_eq!(
             particle.colour, want_rgb,
@@ -1119,7 +1119,7 @@ mod tests {
             particle.alpha
         );
 
-        // `SculkChargeParticleOptions`: one f32 roll. Deliberately not a round
+        // The sculk charge particle options: one f32 roll. Deliberately not a round
         // multiple of anything, so it cannot coincide with the zero default.
         let particle = spawn_from_wire(45, &1.234_5f32.to_be_bytes());
         assert_eq!(particle.roll, 1.234_5, "sculk_charge's roll must reach the particle");
@@ -1187,7 +1187,7 @@ mod tests {
     /// but every shifted number is still a uniform float mapped into the same
     /// band, so no assertion here can see it. The transcription is right and
     /// this gate is not the thing that proves it; only the source is. **The
-    /// power** is the `PowerParticleOption` payload.
+    /// power** is the power particle option payload.
     #[test]
     fn dragon_breath_draws_its_own_sheet_and_its_own_purple_band() {
         let mut p = resolvable();
@@ -1227,7 +1227,7 @@ mod tests {
         );
     }
 
-    /// `PowerParticleOption` reaching vanilla's own particle set-power, on the same
+    /// The power particle option reaching vanilla's own particle set-power, on the same
     /// deterministic input the `effect` gate uses and for the same reason: at
     /// `power = 0.0` the correct formula lands on exactly `(0, 0.1, 0)` and the
     /// plausible wrong one (`yd *= power`) on `(0, 0, 0)`.
@@ -1306,8 +1306,8 @@ mod tests {
     }
 
     /// `explosion_emitter` is the one dispatch-reachable kind in
-    /// this module that is invisible on its own — `HugeExplosionSeedParticle`
-    /// is a `NoRenderParticle`, so `frame.drawn` must stay `0` immediately
+    /// this module that is invisible on its own — the huge explosion seed particle
+    /// is a no render particle, so `frame.drawn` must stay `0` immediately
     /// after dispatch even though the seed *is* live in the engine. Only
     /// after a real tick (`Particles::tick`, the same call `sim.rs`'s frame
     /// loop makes) does it seed its six `explosion` follow-ups, which must
@@ -1586,7 +1586,7 @@ mod tests {
         }
     }
 
-    // -- The `BlockParticleOption` family ----------------------------------
+    // -- The block particle option family ----------------------------------
     //
     // Five registry types, one wire payload, five different providers. Every
     // gate below exists because the shared payload is the *only* thing they
@@ -1604,7 +1604,7 @@ mod tests {
             .expect("stone is in the block-state registry")
     }
 
-    /// Spawns one particle of `kind` with a stone `BlockParticleOption` payload
+    /// Spawns one particle of `kind` with a stone block particle option payload
     /// and returns it. `vel` is delivered exactly, via the `count == 0` branch.
     fn spawn_block_particle(p: &mut Particles, kind: &str, vel: [f32; 3]) -> Particle {
         let before = p.engine.particles().len();
@@ -1682,7 +1682,7 @@ mod tests {
             "a block fragment takes a random quarter of the sprite"
         );
 
-        // `setParticleSpeed(0.0, 0.0, 0.0)` — exactly zero, on all three axes.
+        // set particle speed — exactly zero, on all three axes.
         // The construction still runs through `Particle(level, x, y, z, xa, ya,
         // za)`, which can never produce a zero `yd` (it adds a flat `+ 0.1`), so
         // a crumble arm that forgot the override would fail this on `yd` alone.
@@ -1807,10 +1807,10 @@ mod tests {
             // 0.1F))`, untouched by its own terrain-particle provider. A copy of
             // `block_crumble`'s `nextInt(10) + 1` would top out at 10.
             Case { kind: "block", interval: [4, 40], floor: Some(11) },
-            // Vanilla's own crumbling provider: `setLifetime(random.nextInt(10) + 1)`.
+            // Vanilla's own crumbling provider: set lifetime.
             // Dropping the `+ 1` gives [0, 9]; both ends are asserted.
             Case { kind: "block_crumble", interval: [1, 10], floor: None },
-            // Vanilla's own dust-pillar provider: `setLifetime(random.nextInt(20) + 20)`.
+            // Vanilla's own dust-pillar provider: set lifetime.
             Case { kind: "dust_pillar", interval: [20, 39], floor: None },
             // Vanilla's own block-marker particle: a flat `this.lifetime = 80`.
             Case { kind: "block_marker", interval: [80, 80], floor: None },
@@ -1862,7 +1862,7 @@ mod tests {
         }
     }
 
-    /// vanilla's own dust-pillar provider's vertical velocity is the packet's own `ya`
+    /// vanilla's dust-pillar provider's vertical velocity is the packet's `ya`
     /// **plus** a gaussian, not a gaussian alone.
     ///
     /// That additive base is the whole reason a mace smash throws a column
@@ -2517,7 +2517,7 @@ mod tests {
                     to_color: [0.0, 0.0, 1.0],
                     scale: 1.0,
                 },
-                // The `BlockParticleOption` family is deliberately left
+                // The block particle option family is deliberately left
                 // payload-free here, unlike in
                 // `no_sheet_is_atlas_resident_and_unreachable_from_the_dispatch`:
                 // four of the five wear a `SpriteSource::BlockState`, and this
@@ -2557,7 +2557,7 @@ mod tests {
              against the stitched atlas"
         );
         // Exactly one live particle legitimately draws nothing:
-        // `explosion_emitter` is a `NoRenderParticle` (`Behaviour::
+        // `explosion_emitter` is a no render particle (`Behaviour::
         // HugeExplosionSeed`), excluded from `extract` by construction. Naming
         // it rather than relaxing the equality keeps a *second* undrawn type
         // from hiding behind a `>=`.

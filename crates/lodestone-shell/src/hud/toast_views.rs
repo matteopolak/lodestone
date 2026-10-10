@@ -14,7 +14,7 @@ pub const RECIPE_TOAST_SLIDE_MS: u64 = 600;
 ///
 /// # Geometry, read from the record rather than a call site
 ///
-/// Every number below comes from vanilla's own toast base/vanilla's own recipe-toast rendering in
+/// Every number below comes from vanilla's toast base/vanilla's recipe-toast rendering in
 /// `.cache/mc/26.2/client-src`, checked against the **definitions**:
 ///
 /// - vanilla's own toast base's width accessor is 160, its height accessor is 32 (vanilla's own toast base; the
@@ -26,7 +26,7 @@ pub const RECIPE_TOAST_SLIDE_MS: u64 = 600;
 /// - `yPos(firstSlotIndex) == firstSlotIndex * height()`,
 ///   so the *first* toast is flush with the top of the screen at `y == 0`, not
 ///   inset by a margin. We only ever draw one, so `firstSlotIndex == 0`.
-/// - Contents (`RecipeToast.extractRenderState`, vanilla's own recipe-toast rendering), all
+/// - Contents (the recipe toast's extract render state, vanilla's own recipe-toast rendering), all
 ///   toast-local: background sprite over the full `160×32`; title at `(30, 7)`
 ///   colour `-11534256` (`0xFF500050`); description at `(30, 18)` colour
 ///   `-16777216` (opaque black); the crafting-station icon at `(3, 3)` under a
@@ -35,11 +35,11 @@ pub const RECIPE_TOAST_SLIDE_MS: u64 = 600;
 #[derive(Debug, Clone)]
 pub struct RecipeToastView {
     /// The crafting station's icon — the small scaled corner item
-    /// (`RecipeToast.Entry::categoryItem`, vanilla's own recipe-toast rendering).
+    /// (the recipe toast's entry::category_item, vanilla's own recipe-toast rendering).
     pub station: ItemIcon,
-    /// The newly unlocked recipe's result icon (`Entry::unlockedItem`).
+    /// The newly unlocked recipe's result icon (Entry's unlocked item).
     pub unlocked: ItemIcon,
-    /// `ToastManager.ToastInstance::visiblePortion` (vanilla's own toast-manager type,
+    /// The toast manager's toast instance::visiblePortion (vanilla's own toast-manager type,
     /// used at `:266`): `1.0` fully on screen, `0.0` entirely off the right
     /// edge. Callers with no animation state should pass `1.0`.
     pub visible_portion: f32,
@@ -50,7 +50,7 @@ pub const ADVANCEMENT_TOAST_SPRITE: &str = "toast/advancement";
 
 /// One advancement-completion toast.
 ///
-/// `AdvancementToast.extractRenderState`, the
+/// The advancement toast's extract render state, the
 /// single-title-line branch: the type's own heading at `(30, 7)` in yellow — or
 /// `0xFFFF88FF` for a challenge — the advancement's title at `(30, 18)` in white,
 /// and its icon at `(8, 8)` unscaled, all over the same `160×32` background

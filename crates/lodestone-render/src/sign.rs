@@ -416,7 +416,7 @@ pub fn sign_dark_color_rgb(side: &SignSide) -> u32 {
 /// with its own gate folded in.
 ///
 /// `distance_squared` is from the camera to the sign block's **centre**
-/// (vanilla's own "box centre" accessor), matching vanilla's own
+/// (vanilla's "box centre" accessor), matching vanilla's
 /// outline-visible check. The scoping-spyglass half
 /// of that check has no equivalent here and is not modelled; it only ever
 /// *adds* an outline at long range.

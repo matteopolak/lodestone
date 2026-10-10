@@ -421,7 +421,7 @@ pub fn full_footprint_y_range(boxes: &[lodestone_model::BlockAabb]) -> Option<(f
 /// # How the coverage test works
 ///
 /// Only boxes touching the boundary plane contribute — vanilla slices the
-/// occlusion shape at that layer (`VoxelShape.getFaceShape`) before comparing.
+/// occlusion shape at that layer (its face-shape slice) before comparing.
 /// Their projections onto the two free axes are axis-aligned rectangles, so the
 /// union covers `[0,1]²` iff it covers every strip between consecutive
 /// `a`-breakpoints. Each strip is then a 1-D interval cover, answered greedily.

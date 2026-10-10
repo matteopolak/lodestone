@@ -17,7 +17,7 @@
 //! Neither touches where the number comes from. The number came from
 //! `ClientEvent::TimeChanged::time_of_day`, and that field was carrying the
 //! monotonic **world age** rather than the day clock: 26.2's `set_time` mostly
-//! ships an empty clock map (`MinecraftServer::forceGameTimeSynchronization`,
+//! ships an empty clock map (the minecraft server's force game time synchronization,
 //! about once a second), and the v26-2 adapter used to fall back to `game_time`
 //! for those. So `sky_darken` was a **session constant** — permanently whatever
 //! hour `age % 24000` happened to name. On a long-lived world that lands in
@@ -147,7 +147,7 @@ fn the_clients_day_clock_follows_the_servers() {
     // extrapolates the held anchor, so a running clock adds one tick per tick of
     // `settle`. 26.2 renamed the gamerule to snake_case *and* renamed the concept:
     // it is `advance_time`, not `doDaylightCycle`, and it reaches the client as a
-    // clock `rate` of `0.0` (`ClockInstance::packNetworkState`), never as a flag.
+    // clock `rate` of `0.0` (the clock instance's pack network state), never as a flag.
     let froze = rcon.cmd("gamerule advance_time false");
     assert!(
         !froze.contains("Incorrect") && !froze.contains("Unknown"),

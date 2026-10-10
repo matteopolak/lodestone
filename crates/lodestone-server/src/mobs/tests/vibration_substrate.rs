@@ -220,7 +220,7 @@ fn only_the_zombie_family_ever_calls_for_reinforcements() {
 }
 
 /// **Control:** the identical zombie/roll setup below Hard difficulty
-/// must queue nothing — `level.getDifficulty() == Difficulty.HARD` is a
+/// must queue nothing — `level.get_difficulty() == Difficulty.HARD` is a
 /// hard gate in vanilla, not folded into the continuous chance roll, so
 /// a saturated `special_multiplier` (`1.0`, Normal/Easy's ceiling) must
 /// not substitute for it.

@@ -35,7 +35,7 @@ pub struct PingRequest {
 /// Serverbound `teleport_to_entity` packet.
 ///
 /// Sent while spectating to teleport to an entity by uuid, e.g. clicking a
-/// player in the tab list (`ServerboundTeleportToEntityPacket`). Wire
+/// player in the tab list (the teleport-to-entity packet). Wire
 /// layout: a single raw 16-byte UUID, not a VarInt entity id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct TeleportToEntity {

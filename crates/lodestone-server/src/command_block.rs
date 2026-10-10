@@ -25,7 +25,7 @@
 //!    and `crate::server`'s handler applies it: swaps the block's own type to
 //!    match the requested mode (preserving `FACING`), writes `conditional`,
 //!    updates the entity's command/track-output/"Always Active" fields, and —
-//!    matching `CommandBlockEntity.setAutomatic`'s own inline scheduling —
+//!    matching command block entity's set automatic's own inline scheduling —
 //!    schedules an immediate run via [`on_automatic_changed`] when turning
 //!    "Always Active" on while unpowered. `SET_COMMAND_MINECART` is still
 //!    decode-only; no command-block-minecart entity exists to write into.
@@ -50,7 +50,7 @@
 //!    lever flip, a button press, a piece of dust changing power, or a
 //!    scheduled-tick diode flip that reaches a command block's position all
 //!    now compute `hasNeighborSignal` and call [`on_power_changed`] exactly as
-//!    `CommandBlock.neighborChanged` does. The one disclosed narrowing: a
+//!    CommandBlock's neighbor changed does. The one disclosed narrowing: a
 //!    *conditional* command block's predecessor read is column-local only, so
 //!    a chain that crosses a chunk boundary at the exact instant of the edge
 //!    degrades to "no predecessor found" rather than reading across columns —
@@ -65,7 +65,7 @@
 //!
 //! # Two field names collide with a Rust keyword's neighbour, on purpose
 //!
-//! `CommandBlockData::auto` is vanilla's `CommandBlockEntity.auto` (the
+//! `CommandBlockData::auto` is vanilla's command block entity's auto (the
 //! **"Always Active"** toggle on a repeating command block — run every tick
 //! with no redstone at all) and is a completely different thing from
 //! [`CommandBlockMode::Auto`] (the *block type* — `repeating_command_block` —
@@ -144,7 +144,7 @@ pub use lodestone_model::CommandBlockMode;
 /// vanilla does. Field-for-field against vanilla's own base command block, not a
 /// paraphrase: `lastExecution`/`updateLastExecution` exist because
 /// vanilla's own command-execution routine refuses to run twice in the same game tick
-/// (`level.getGameTime() == this.lastExecution`), which matters the moment a
+/// (`level.get_game_time() == this.lastExecution`), which matters the moment a
 /// chain or a redstone pulse could otherwise re-trigger a block already run
 /// this tick.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,17 +153,17 @@ pub struct CommandBlockData {
     pub success_count: i32,
     pub track_output: bool,
     pub last_output: Option<String>,
-    /// `CommandBlockEntity.powered` — the redstone state as of the last
+    /// The command block entity's powered — the redstone state as of the last
     /// [`on_power_changed`] call.
     pub powered: bool,
-    /// `CommandBlockEntity.auto` — the "Always Active" toggle. See this
+    /// The command block entity's auto — the "Always Active" toggle. See this
     /// module's doc for why this is *not* [`CommandBlockMode::Auto`].
     pub auto: bool,
-    /// `CommandBlockEntity.conditionMet` — the result of the most recent
+    /// The command block entity's condition met — the result of the most recent
     /// [`mark_condition_met`] call.
     pub condition_met: bool,
     pub update_last_execution: bool,
-    /// `BaseCommandBlock.lastExecution` — the game tick this block last ran,
+    /// The base command block's last execution — the game tick this block last ran,
     /// `None` for "never" (vanilla's `-1`).
     pub last_execution: Option<i64>,
 }
@@ -190,7 +190,7 @@ impl CommandBlockData {
         Self::default()
     }
 
-    /// `BaseCommandBlock.setCommand` — replacing the command always zeroes
+    /// The base command block's set command — replacing the command always zeroes
     /// the success count, matching the analog-output-signal reset a player
     /// sees immediately after editing one.
     pub fn set_command(&mut self, command: impl Into<String>) {
@@ -198,11 +198,11 @@ impl CommandBlockData {
         self.success_count = 0;
     }
 
-    /// `BaseCommandBlock.performCommand`'s own same-tick dedup —
-    /// `level.getGameTime() == this.lastExecution`. Call *before* actually
+    /// The base command block's perform command's own same-tick dedup —
+    /// `level.get_game_time() == this.lastExecution`. Call *before* actually
     /// running the command; a caller that skips this on a `true` answer
     /// reproduces the one case `performCommand` itself refuses (and reports
-    /// as "did not run" to `executeChain`'s own `if (!performCommand())
+    /// as "did not run" to `executeChain`'s own `if (!perform_command())
     /// break`).
     #[must_use]
     pub fn already_ran_this_tick(&self, game_time: i64) -> bool {
@@ -218,9 +218,9 @@ impl CommandBlockData {
     }
 }
 
-/// `CommandBlockEntity.markConditionMet` — an unconditional block is always
+/// The command block entity's mark condition met — an unconditional block is always
 /// "met"; a conditional one inherits its predecessor's last success
-/// (`commandBlockEntity.getCommandBlock().getSuccessCount() > 0` on the block
+/// (`commandBlockEntity.get_command_block().get_success_count() > 0` on the block
 /// directly behind, opposite this block's own facing). `predecessor_succeeded`
 /// is `None` when there is no command block immediately behind at all
 /// (vanilla's own `!(block instanceof CommandBlock)` branch, which forces
@@ -239,7 +239,7 @@ pub fn mark_condition_met(conditional: bool, predecessor_succeeded: Option<bool>
 pub struct PowerReaction {
     pub new_powered: bool,
     /// Whether this edge should mark the condition met and schedule a 1-tick
-    /// execution — vanilla's `markConditionMet()` + `scheduleTick(pos, this, 1)`.
+    /// execution — vanilla's mark condition met + `scheduleTick(pos, this, 1)`.
     pub schedule_execution: bool,
 }
 
@@ -258,7 +258,7 @@ pub fn on_power_changed(
     Some(PowerReaction { new_powered: is_powered, schedule_execution })
 }
 
-/// `CommandBlockEntity.setAutomatic` — toggling "Always Active" on, while
+/// The command block entity's set automatic — toggling "Always Active" on, while
 /// unpowered and not already active, schedules an immediate run exactly like
 /// a rising redstone edge would (unless this is a chain/`Sequence` block,
 /// which never self-schedules).
@@ -278,8 +278,8 @@ pub struct TickDecision {
     /// Whether the command should actually run this tick.
     pub run: bool,
     /// Whether a conditional block with an unmet condition should have its
-    /// success count zeroed (vanilla's `else if (isConditional())
-    /// setSuccessCount(0)` — happens even when nothing runs).
+    /// success count zeroed (vanilla's `else if (is_conditional())
+    /// set_success_count(0)` — happens even when nothing runs).
     pub zero_success_if_conditional: bool,
     /// `Auto` mode's own self-rescheduling — always `false` for the other two
     /// modes, which never reschedule from inside `tick` itself.
@@ -298,7 +298,7 @@ pub struct TickDecision {
 /// repeating command block's gate is always one reschedule behind its own
 /// predecessor's latest success, exactly as `CommandBlock.tick`'s own
 /// ordering produces (`boolean wasConditionMet = commandBlock
-/// .wasConditionMet(); if (mode == AUTO) { commandBlock.markConditionMet();
+/// .was condition met; if (mode == AUTO) { command block's mark condition met;
 /// … }`).
 #[must_use]
 pub fn tick(
@@ -334,7 +334,7 @@ pub fn tick(
     }
 }
 
-/// One hop of `CommandBlock.executeChain`'s walk: the next position to check,
+/// One hop of CommandBlock's execute chain's walk: the next position to check,
 /// stepping in `direction` from `from`.
 #[must_use]
 pub fn next_chain_position(from: BlockPos, direction: Direction) -> BlockPos {
@@ -343,7 +343,7 @@ pub fn next_chain_position(from: BlockPos, direction: Direction) -> BlockPos {
 
 /// Whether `executeChain`'s walk should continue *stepping into* the block at
 /// this position at all — `!state.is(CHAIN_COMMAND_BLOCK) ||
-/// commandBlock.getMode() != SEQUENCE` breaks the loop outright (a
+/// command block's get mode != SEQUENCE` breaks the loop outright (a
 /// non-chain block, or a chain block somehow not reporting `Sequence` mode,
 /// ends the whole chain, not just this link).
 #[must_use]
@@ -357,7 +357,7 @@ pub fn chain_link_present_id(state: StateId) -> bool {
 }
 
 /// Whether a present chain link should actually run this pass —
-/// `commandBlock.isPowered() || commandBlock.isAutomatic()`. A chain link
+/// `commandBlock.isPowered() || commandBlock.is_automatic()`. A chain link
 /// that is neither stays in the chain (the walk does not `break`) but simply
 /// does not fire, matching vanilla's own `if (isPowered || isAutomatic) { … }`
 /// with no `else break`.
@@ -367,8 +367,8 @@ pub fn chain_link_should_run(powered: bool, always_active: bool) -> bool {
 }
 
 /// The wire ordinal `SET_COMMAND_BLOCK`'s `mode` field carries
-/// (`CommandBlockEntity.Mode`'s declaration order — `SEQUENCE=0, AUTO=1,
-/// REDSTONE=2`, matched by `ServerGamePacketListenerImpl
+/// (the command block entity's mode's declaration order — `SEQUENCE=0, AUTO=1,
+/// REDSTONE=2, matched by the server game packet listener impl
 /// .handleSetCommandBlock`'s own `switch`) to the block base name the
 /// packet's handler swaps in, preserving `FACING`. Falls back to
 /// [`COMMAND_BLOCK`] for any other ordinal, matching that `switch`'s own
@@ -397,7 +397,7 @@ pub fn state_with(base: Block, facing: Direction, conditional: bool) -> StateId 
 }
 
 /// One [`TICK_COMMAND_BLOCK`] entry at delay `1` —
-/// `CommandBlockEntity::scheduleTick`'s own `level.scheduleTick(pos, block,
+/// The command block entity's schedule tick's own `level.scheduleTick(pos, block,
 /// 1)`, called from `setAutomatic`/`onModeSwitch`. Built through a real queue
 /// rather than a struct literal because `ScheduledTick::sub_tick_order` is
 /// private — the same idiom `crate::fluid::ticks_after_edit`/
@@ -427,7 +427,7 @@ pub fn yaw_for_facing(facing: Direction) -> f32 {
 }
 
 /// The synthetic [`crate::commands::CommandSource`] identity every command
-/// block runs as — `CommandBlockEntity`'s own source has no real player
+/// block runs as — the command block entity's own source has no real player
 /// behind it (vanilla's `CommandSource.NULL`/a closeable console source), and
 /// [`crate::commands::Effect::SetBlock`]/`Fill` still need *some* uuid to
 /// self-target (see `crate::commands::block_commands`' own doc comment on
@@ -503,7 +503,7 @@ mod tests {
         assert!(redstone.new_powered);
         assert!(redstone.schedule_execution, "an ordinary impulse block must schedule on its own rising edge");
 
-        // `CommandBlock.setPoweredAndUpdate` only excludes `isAutomatic()`
+        // `CommandBlock.setPoweredAndUpdate` only excludes is automatic
         // (the "Always Active" toggle) and `Mode.SEQUENCE` — **not**
         // `Mode.AUTO` itself. A repeating block that is not "Always Active"
         // schedules off its own redstone edge exactly like an impulse block;
@@ -675,7 +675,7 @@ mod tests {
         column.set_block_id(5, 5, 5, state(COMMAND_BLOCK, Direction::North, false));
         // A constant signal source directly beside the command block —
         // `redstone::best_neighbor_signal`'s own six-direction scan reaches it
-        // exactly as `Level.hasNeighborSignal` would.
+        // exactly as Level's has neighbor signal would.
         column.set_block_id(5, 5, 6, Block::RedstoneBlock.default_state());
 
         let block_entities = BlockEntityHandle::new();

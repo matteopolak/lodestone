@@ -2170,7 +2170,7 @@ where
                 sleep_vote.get_up(player_entity_id);
             }
         }
-        // `ServerboundPingRequestPacket` shares one wire struct across Status
+        // Ping-request packet shares one wire struct across Status
         // and Play (see the decode arm's own comment), so `PingRequest` reaches
         // here too, unlike its `Handshake`/`LoginStart`/etc. siblings below.
         // Vanilla's own ping-request handler is exactly "echo the
@@ -2218,7 +2218,7 @@ where
         // `Mob` override (a spawn egg) is modelled; see
         // `crate::item_use::spawn_egg_for_entity_type`'s doc comment for the
         // entities this refuses. `include_data` also gates a game-master
-        // avatar-profile debug command in vanilla (`FetchProfileCommand`),
+        // avatar-profile debug command in vanilla (the fetch profile command),
         // which this crate has no command channel for, so it is unread here
         // too.
         ServerBound::PickItemFromEntity { entity_id, include_data: _ } => {

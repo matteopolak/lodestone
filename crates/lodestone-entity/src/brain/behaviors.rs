@@ -934,7 +934,7 @@ impl Behavior for RamTarget {
             return;
         };
         // Vanilla's own `lostOrReachedTarget` compares
-        // `walkTarget.get().getTarget().currentPosition()` — the *WalkTarget's
+        // get target's current position — the *WalkTarget's
         // own* fixed position, built from this exact `ramTargetPos` in
         // `start()` — against `ramTarget.get()`, the same value read back from
         // memory. Both sides trace to the identical constant, so the literal

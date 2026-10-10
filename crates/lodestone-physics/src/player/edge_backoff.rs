@@ -57,15 +57,11 @@ pub enum EdgeBackOff {
 /// modelling it claims a position past where the server's own replay puts
 /// it, and gets corrected.
 ///
-/// # The gate, transcribed
+/// # The gate
 ///
-/// ```text
-/// !this.abilities.flying
-///   && !(delta.y > 0.0)
-///   && (moverType == MoverType.SELF || moverType == MoverType.PLAYER)
-///   && this.isStayingOnGroundSurface()
-///   && this.isAboveGround(maxDownStep)
-/// ```
+/// All five must hold: the player is not flying, the vertical delta is not
+/// upward, the mover type is self or player, the player is staying on a ground
+/// surface, and ground lies within the max down step.
 ///
 /// Two of the five are satisfied by construction here and so are not parameters:
 ///
@@ -209,7 +205,7 @@ pub(crate) fn maybe_back_off_from_edge(
 ///
 /// ```text
 /// this.onGround() || this.fallDistance < maxDownStep
-///                    && !this.canFallAtLeast(0.0, 0.0, maxDownStep - this.fallDistance)
+///                    && !this's can fall at least
 /// ```
 ///
 /// Note the **shrinking** probe depth in the airborne branch: the further you have

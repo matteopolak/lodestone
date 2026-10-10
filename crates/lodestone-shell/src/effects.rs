@@ -7,9 +7,9 @@
 //!
 //! | | HUD overlay | inventory column |
 //! |---|---|---|
-//! | vanilla | vanilla's own HUD effects-extract routine | vanilla's own inventory-effects widget |
-//! | shown when | no screen, or a screen whose `showsActiveEffects()` is false | the player's own inventory only |
-//! | filters `show_icon` | **yes** | **no** — `getActiveEffects()` is used whole |
+//! | vanilla | vanilla's HUD effects-extract routine | vanilla's inventory-effects widget |
+//! | shown when | no screen, or a screen whose shows active effects is false | the player's own inventory only |
+//! | filters `show_icon` | **yes** | **no** — get active effects is used whole |
 //! | text | none at all | translated name plus vanilla's own effect-duration formatter |
 //! | drawn by | `hud.rs`'s geometry builder, from [`hud_icons`] | `container::geometry`'s `draw_effect_column` |
 //!
@@ -176,7 +176,7 @@ pub fn hud_icon_alpha(e: &StatusEffect) -> f32 {
 /// Vanilla's own is-beneficial check — the effect's category equals the
 /// beneficial category.
 ///
-/// Transcribed from vanilla's own mob-effects registration class's own per-effect category argument (see
+/// Transcribed from vanilla's mob-effects registration class's per-effect category argument (see
 /// `docs/inventory-potion-effects.md`), which is the only place it is stated: it is a
 /// constructor argument, so it appears in no generated registry dump. Note
 /// **`NEUTRAL` is not beneficial** — `glowing`, `bad_omen`, `trial_omen` and
@@ -274,7 +274,7 @@ pub(crate) fn tint_for(path: &str) -> [f32; 3] {
 /// vanilla's own effects-widget icon size — the effect icon's side length, and the
 /// size the `mob_effect/<id>` sprite is blitted at.
 pub const INV_ICON_SIZE: f32 = 18.0;
-/// vanilla's own effects-widget spacing — the icon's inset from the widget's own
+/// vanilla's effects-widget spacing — the icon's inset from the widget's
 /// top-left corner, and the trailing padding in the background's width.
 pub const INV_SPACING: f32 = 7.0;
 /// vanilla's own effects-widget text x-offset — where the name/duration column starts,
@@ -340,7 +340,7 @@ pub struct InventoryEffectRow {
 /// vanilla's own tick-rate-manager accessor reports for an ordinary world and what
 /// vanilla's own tick-duration formatter divides by. A server running
 /// `/tick rate` would report something else; this client has no
-/// `TickRateManager`, so the constant is the honest value rather than a
+/// The tick rate manager, so the constant is the honest value rather than a
 /// placeholder.
 const TICKRATE: f32 = 20.0;
 
@@ -427,8 +427,8 @@ fn effect_color(path: &str) -> Option<u32> {
 fn natural_order(a: &StatusEffect, b: &StatusEffect) -> std::cmp::Ordering {
     /// vanilla's own effect-instance comparator's `updateCutOff`.
     const UPDATE_CUT_OFF: i32 = 32147;
-    // `isInfiniteDuration()` is `duration == -1`, so an infinite effect's raw
-    // `getDuration()` is `-1` and therefore *is* `<= 32147` — the first branch
+    // is infinite duration is `duration == -1`, so an infinite effect's raw
+    // get duration is `-1` and therefore *is* `<= 32147` — the first branch
     // is what an infinite effect always takes unless both are ambient.
     let short = a.duration_ticks <= UPDATE_CUT_OFF || b.duration_ticks <= UPDATE_CUT_OFF;
     let colour = || effect_color(a.id.path()).cmp(&effect_color(b.id.path()));
@@ -452,7 +452,7 @@ fn natural_order(a: &StatusEffect, b: &StatusEffect) -> std::cmp::Ordering {
 /// translated surface in this crate takes — not a design choice about naming.
 ///
 /// Unlike the HUD's own top-right overlay, vanilla's own inventory-effects widget does **not**
-/// filter on `showIcon`: `getActiveEffects()` is used whole, so a
+/// filter on `showIcon`: get active effects is used whole, so a
 /// `show_icon = false` effect still occupies a row here.
 #[must_use]
 pub fn inventory_rows(
@@ -478,7 +478,7 @@ pub fn inventory_rows(
 /// x0`. Real 26.2 source, read directly — **not** the older
 /// `EffectRenderingInventoryScreen` shape some descriptions of this feature
 /// still name: this version never repositions the container panel itself
-/// (`InventoryScreen`'s own `leftPos` comes from the ordinary centred/
+/// (the inventory screen's own `leftPos` comes from the ordinary centred/
 /// recipe-book-shifted layout, untouched by whether any effect is active) —
 /// it only decides whether there is *already* enough free canvas beside the
 /// panel to draw into. A panel-shifting "make room" step does not exist in
@@ -590,7 +590,7 @@ mod tests {
         assert_eq!(inventory_rows(&fx, &|_| None).len(), 2);
     }
 
-    /// `MobEffectCategory` decides the row, and **`NEUTRAL` is not
+    /// The mob effect category decides the row, and **`NEUTRAL` is not
     /// beneficial** — `isBeneficial()` is `category == BENEFICIAL`, not
     /// `!= HARMFUL`. Reading it the other way puts four effects in the wrong
     /// row and looks entirely plausible on screen.
@@ -653,7 +653,7 @@ mod tests {
     }
 
     /// `lodestone_data::potion` carries a **potion-scoped** subset of the same
-    /// `MobEffectCategory` fact (`harmful` on each tooltip entry). Two tables
+    /// The mob effect category fact (`harmful` on each tooltip entry). Two tables
     /// stating one thing is a drift hazard, so they are checked against each
     /// other rather than left to agree by luck — and the expectation for each
     /// is the *other* table, both transcribed from vanilla's own mob-effects registration class.
@@ -950,7 +950,7 @@ mod tests {
         );
     }
 
-    /// vanilla's own inventory-effects widget uses `getActiveEffects()` whole — unlike the HUD's
+    /// vanilla's own inventory-effects widget uses get active effects whole — unlike the HUD's
     /// own overlay, it does **not** filter on `showIcon`. Stated as an
     /// assertion because the two surfaces sit in this same module and share a
     /// state source, so the difference is easy to unify by accident.

@@ -9,7 +9,7 @@
 //! output from the authoritative grid and recipe corpus.
 //!
 //! The 3×3 [`CraftingState::table`] backs the crafting-table menu. `PLACE_RECIPE` is
-//! implemented: [`recipe_book_entries`] supplies opaque `RecipeDisplayId`
+//! implemented: [`recipe_book_entries`] supplies opaque recipe display id
 //! values, and the join path sends the complete recipe book that those values
 //! index.
 //!
@@ -96,9 +96,9 @@ pub fn recipe_book() -> &'static RecipeBook {
 }
 
 /// The recipe at `index` in the bundled corpus's id-sorted order — the id space a
-/// `PLACE_RECIPE` packet's `RecipeDisplayId` refers to.
+/// `PLACE_RECIPE` packet's recipe display id refers to.
 ///
-/// **`RecipeDisplayId` is an opaque index the *server* assigns**, not a name:
+/// **recipe display id is an opaque index the *server* assigns**, not a name:
 /// the server hands the client its whole book and the client echoes back a
 /// position in that list. [`recipe_book_entries`] encodes that packet, walking
 /// this same id-sorted order, so the two index
@@ -129,7 +129,7 @@ pub enum SlotDisplay {
     Empty,
     /// `item` — one item by id, no count and no components.
     Item(lodestone_model::Identifier),
-    /// `item_stack` — an `ItemStackTemplate`: item id and count. Components are
+    /// `item_stack` — an item stack template: item id and count. Components are
     /// not carried because the bundled corpus's results have none; a recipe that
     /// grew one would need this widened, not worked around at the encoder.
     Stack {
@@ -188,11 +188,11 @@ pub enum RecipeDisplay {
     },
 }
 
-/// One `ClientboundRecipeBookAddPacket.Entry` — a `RecipeDisplayEntry` plus its
+/// One recipe-book-add packet.Entry — a recipe display entry plus its
 /// notification/highlight flag byte.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecipeBookEntry {
-    /// `RecipeDisplayId.index` — the position this entry occupies, which is what
+    /// The recipe display id's index — the position this entry occupies, which is what
     /// a later `PLACE_RECIPE` echoes back. **The same index
     /// [`recipe_at_index`] resolves**, by construction: both walk
     /// [`recipe_book`]'s id-sorted order.
@@ -344,7 +344,7 @@ fn book_category(recipe: &lodestone_game::recipe::Recipe) -> &'static str {
 }
 
 /// Flattens one ingredient to the item ids that satisfy it, resolving tags —
-/// what `Ingredient.CONTENTS_STREAM_CODEC` puts on the wire (a `HolderSet<Item>`,
+/// what `Ingredient.CONTENTS_STREAM_CODEC puts on the wire (a holder set<Item>`,
 /// which for our purposes is always the explicit list form).
 fn resolve_ingredient_items(
     ingredient: &lodestone_game::recipe::Ingredient,
@@ -371,7 +371,7 @@ fn resolve_ingredient_items(
 /// Whether `grid` currently holds **exactly** `placement`'s shape — every named
 /// cell occupied by a matching item and every unnamed cell empty.
 ///
-/// Vanilla's `RecipeBookMenu.recipeMatches`, and the whole of what decides between
+/// Vanilla's recipe book menu's recipe matches, and the whole of what decides between
 /// "top this up" and "clear it and start over" in [`place_recipe`]. It has to be
 /// an exact shape test in both directions: a grid holding a *superset* (the right
 /// items plus junk in a cell this recipe does not use) is a different craft, and

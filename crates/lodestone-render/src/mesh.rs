@@ -177,7 +177,7 @@ fn level_to_byte(level: f32) -> u8 {
 ///
 /// For each corner we average four samples — the two edge-adjacent neighbours,
 /// the diagonal corner, and the centre block in front of the face — as
-/// continuous floats, matching `BlockModelLighter`:
+/// continuous floats, matching vanilla's block-model lighter:
 ///
 /// * **AO** averages a per-cell shade (`1.0` open, [`AO_OCCLUDED`] occluding).
 /// * **Sky/block light** average the four neighbours' levels, but a dark

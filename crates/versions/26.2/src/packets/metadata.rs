@@ -43,7 +43,7 @@
 //!
 //! It is decoded here by delegating to the adapter's existing clientbound
 //! item-stack codec ([`crate::adapter::read_item_stack_with`]), which models
-//! 26.2's `DataComponentPatch` and already degrades correctly on a component it
+//! 26.2's data-component patch and already degrades correctly on a component it
 //! does not model. That degradation is *load-bearing* and interacts with this
 //! module's stream shape:
 //!
@@ -115,17 +115,17 @@ const IDX_AIR_SUPPLY: u8 = 1;
 const IDX_CUSTOM_NAME: u8 = 2;
 const IDX_CUSTOM_NAME_VISIBLE: u8 = 3;
 const IDX_POSE: u8 = 6;
-/// the living-entity class's own living-entity-flags accessor, the first
-/// `defineId` in `LivingEntity` and therefore index 8 — the byte carrying
+/// the living entity's flags accessor, the first
+/// `define_id` in the living-entity class and therefore index 8 — the byte carrying
 /// using-item / off-hand / spin-attack.
 ///
 /// **This index is ambiguous and needs the entity's concrete type.** It is also
 /// where the abstract-arrow class's own flags accessor lands (`Projectile`
 /// declares no synched data of its own, so the arrow's first field is index 8
-/// too), and both are vanilla's own metadata-serializer registry's own byte accessor. So the serializer cannot
+/// too), and both use the byte serializer. So the serializer cannot
 /// disambiguate them the way it does for an item stack, and an arrow's crit bit
 /// (`0x01`) is bit-identical to the using-item bit. Only surfaced when the caller
-/// says the entity is a `LivingEntity`; see `read_entity_metadata`'s `living`
+/// says the entity is a living entity; see `read_entity_metadata`'s `living`
 /// parameter. Index 8 is *also* the item stack on a dropped item and on thrown
 /// projectiles, but that one does self-identify by serializer and is handled
 /// before the index match.
@@ -145,7 +145,7 @@ const IDX_LIVING_FLAGS: u8 = 8;
 /// at index 8: the experience-orb class's own value accessor, the primed-tnt class's own fuse accessor,
 /// the fishing-hook class's own hooked-entity accessor, the vehicle-entity class's own id-hurt accessor and
 /// the display class's own transformation-interpolation-start-delta-ticks accessor. All five are
-/// vanilla's own metadata-serializer registry's own int accessor, so — exactly as for the byte pair — the serializer
+/// use the int serializer, so — exactly as for the byte pair — the serializer
 /// tells you nothing and only the concrete entity type does. Hence the
 /// [`MetadataClass::ExperienceOrb`] guard: ungated, a primed TNT's fuse countdown
 /// would arrive as an orb value and pick an orb sprite for it.
@@ -168,7 +168,7 @@ const IDX_HEALTH: u8 = 9;
 /// # This index is ambiguous too, and `living` is **not** a strong enough guard
 ///
 /// The jar dump (`tests/support/entity_data_index_jvm.txt`) reports three
-/// claimants on index 15, all vanilla's own metadata-serializer registry's own byte accessor:
+/// claimants on index 15, all using the byte serializer:
 ///
 /// | owner | field | `0x04` |
 /// |---|---|---|
@@ -177,7 +177,7 @@ const IDX_HEALTH: u8 = 9;
 /// | the display class | its own billboard-render-constraints accessor | an enum ordinal |
 ///
 /// Index 8's collision was between a living entity and a non-living one, so
-/// `is_living` resolved it. **`ArmorStand` is a `LivingEntity`**, so the same
+/// `is_living` resolved it. **The armor stand is a living entity**, so the same
 /// guard would let a decorative armour stand with arms shown report itself as an
 /// aggressive mob — and, holding a bow, draw it. This byte is therefore gated on
 /// `entity_census::is_mob`, a strictly narrower census column, resolved from the
@@ -195,7 +195,7 @@ const IDX_PLAYER_MODEL_CUSTOMIZATION: u8 = 16;
 // only meaningful once the entity's concrete type is known (see `MetadataClass`).
 //
 // **Both of these were off by one until the jar was asked.** They were counted
-// by hand as "Sheep's first field, so 17" and "AbstractHorse's flags at 17, so
+// by hand as "the sheep's first field, so 17" and "the horse base's flags at 17, so
 // the variant int is 18", and the count missed the ageable-mob class's own age-locked accessor — a
 // second accessor on the ageable-mob class, at index 17, right after its own
 // baby accessor at 16.
@@ -354,8 +354,8 @@ const IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 /// **Index 10, three `INT` claimants** in the committed jar dump
 /// (`crates/versions/26.2/tests/support/entity_data_index_jvm.txt`):
 /// the display class's own pos-rot-interpolation-duration accessor, the item-frame class's own rotation accessor
-/// and — under `FLOAT`, so not actually a collision — `VehicleEntity
-/// .DATA_ID_DAMAGE`. No census column separates a frame from a display entity
+/// and — under `FLOAT`, so not actually a collision — the vehicle entity's
+/// damage accessor. No census column separates a frame from a display entity
 /// (neither is living, neither is a mob), so this is gated on
 /// [`MetadataClass::ItemFrame`].
 ///
@@ -375,7 +375,7 @@ const IDX_ITEM_FRAME_ROTATION: u8 = 10;
 /// (`crates/versions/26.2/tests/support/entity_data_index_jvm.txt`):
 /// the experience-orb class's own value accessor, the primed-tnt class's own fuse accessor,
 /// the fishing-hook class's own hooked-entity accessor, the display class's interpolation start delta and
-/// this. None of the five is a `LivingEntity`, so neither the `living` nor the
+/// this. None of the five is a living entity, so neither the `living` nor the
 /// `mob` census column separates them and only [`MetadataClass::Vehicle`] can.
 const IDX_VEHICLE_HURT_TIME: u8 = 8;
 /// the vehicle-entity class's own id-hurtdir accessor, index 9 — `+1`/`-1`, negated on every hit
@@ -414,7 +414,7 @@ const IDX_FIREWORK_ATTACHED: u8 = 9;
 ///
 /// Index 10's `BOOLEAN` has three claimants in the jar dump:
 /// the abstract-arrow class's own in-ground accessor, the interaction class's own response accessor and this. None of
-/// the three is a `LivingEntity`, so neither the `living` nor the `mob` census
+/// the three is a living entity, so neither the `living` nor the `mob` census
 /// separates them — this is the case `MetadataClass::FireworkRocket` exists
 /// for. Ungated, an arrow stuck in the ground would report itself as fired from
 /// a crossbow.
@@ -473,7 +473,7 @@ const IDX_DISPLAY_BRIGHTNESS: u8 = 16;
 const IDX_DISPLAY_VARIANT_PAYLOAD: u8 = 23;
 /// The per-variant *second* payload every display subtype but the block-display class
 /// carries at index 24: `the item-display class's own item-display accessor (`BYTE`,
-/// vanilla's own item-display-context ordinal) or the text-display class's own line-width accessor
+/// the item-display context ordinal) or the text-display class's own line-width accessor
 /// (`INT`, the wrap width in pixels). Self-identifying by value shape (no
 /// other claimant at index 24 in the jar dump is a bare `BYTE` or `INT`), but
 /// guarded by class anyway for the same consistency reason as
@@ -885,7 +885,7 @@ fn is_display_class(class: Option<MetadataClass>) -> bool {
 pub struct TrackedEntity {
     /// The ambiguous-variant class, if this type has one.
     pub class: Option<MetadataClass>,
-    /// Whether this type is a vanilla `LivingEntity`.
+    /// Whether this type is a vanilla living entity.
     pub living: bool,
     /// Whether this type is a vanilla `Mob` — strictly narrower than
     /// [`living`](Self::living), and the guard on index 15. A `Player`, an
@@ -908,7 +908,7 @@ impl TrackedEntity {
     }
 }
 
-// --- 26.2 serializer type ids (EntityDataSerializers registration order) -----
+// --- 26.2 serializer type ids (entity-data serializer registration order) -----
 const SER_BYTE: i32 = 0;
 const SER_INT: i32 = 1;
 const SER_LONG: i32 = 2;
@@ -917,7 +917,7 @@ const SER_STRING: i32 = 4;
 const SER_COMPONENT: i32 = 5;
 const SER_OPTIONAL_COMPONENT: i32 = 6;
 const SER_ITEM_STACK: i32 = 7;
-/// vanilla's own metadata-serializer registry's own painting-variant accessor. One claimant in the whole 26.2
+/// the painting-variant serializer. One claimant in the whole 26.2
 /// dump — the painting class's own painting-variant accessor — which is why the value it
 /// produces needs no index or class guard.
 const SER_PAINTING_VARIANT: i32 = 34;
@@ -1206,7 +1206,7 @@ fn decode_value(
             Value::Consumed
         }
         SER_VILLAGER_DATA => {
-            // holderRegistry(type) + holderRegistry(profession) + VarInt level.
+            // holder registry + holder registry + VarInt level.
             // Each holder is a registry id written as `id + 1` (0 = inline direct,
             // which vanilla never sends for villagers).
             let type_id = reader.var_i32()?.checked_sub(1).unwrap_or(-1);
@@ -1315,7 +1315,7 @@ fn decode_value(
         }
         // A dropped item's entire identity. Delegated to the adapter's single
         // clientbound item-stack codec — never re-implemented here — so both
-        // paths share one reading of the `DataComponentPatch` wire. An
+        // paths share one reading of the data-component patch wire. An
         // unmodeled component yields a partial stack with `complete == false`
         // rather than an error; the caller ends the list there.
         SER_ITEM_STACK => {
@@ -1550,7 +1550,7 @@ pub(crate) fn read_entity_metadata_with(
             // the item-frame class's own rotation accessor. Guarded on class: index 10's `INT` is
             // also a display's interpolation duration — see
             // [`IDX_ITEM_FRAME_ROTATION`]. Masked to `0..8` here rather than at
-            // the consumer, matching vanilla's own item-frame rotation setter's own `% 8`; a
+            // the consumer, matching the item frame's `% 8` rotation setter; a
             // negative or out-of-range int is a datapack, not a rotation.
             (IDX_ITEM_FRAME_ROTATION, Value::Int(v)) if class == Some(MetadataClass::ItemFrame) => {
                 md.item_frame_rotation = Some((v.rem_euclid(8)) as u8);
@@ -2507,12 +2507,12 @@ mod tests {
 
     /// Index 8, `BYTE`, on a **living** entity decodes to `living_flags` — the
     /// using-item bitfield behind a bow draw. Index verified against
-    /// the living-entity class's own living-entity-flags accessor being `LivingEntity`'s first
+    /// the living entity's flags accessor being the living-entity class's first
     /// `defineId`, not assumed from a summary.
     #[test]
     fn decodes_living_flags_at_index_8_for_a_living_entity() {
-        // Using an item, off hand: `setLivingEntityFlag(1, true)` +
-        // `setLivingEntityFlag(2, hand == OFF_HAND)`.
+        // Using an item, off hand: set living entity flag +
+        // set living entity flag.
         let mut bytes = Vec::new();
         bytes.push(IDX_LIVING_FLAGS);
         bytes.extend(varint(SER_BYTE));
@@ -2543,7 +2543,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.push(IDX_LIVING_FLAGS);
         bytes.extend(varint(SER_BYTE));
-        bytes.push(0x01); // AbstractArrow's crit bit
+        bytes.push(0x01); // the abstract arrow's crit bit
         // A second field *after* it, so this also proves the byte was consumed
         // rather than skipped: a misalignment here would make the health decode
         // garbage or error.
@@ -2615,7 +2615,7 @@ mod tests {
     }
 
     /// `is_tracked` has no `mob` disjunct, and this is why that is not a hole:
-    /// `Mob extends LivingEntity`, so a mob is always caught by the `living` one.
+    /// A mob extends the living entity, so a mob is always caught by the `living` one.
     /// Stated as a test because "the missing disjunct is unreachable" is exactly
     /// the kind of claim that rots into a real gap.
     #[test]
@@ -2639,7 +2639,7 @@ mod tests {
     }
 
     /// Index 15, `BYTE`, on a **`Mob`** decodes to `mob_flags` — the byte whose
-    /// `0x04` is `isAggressive()` and therefore whether a skeleton draws its bow.
+    /// `0x04` is is aggressive and therefore whether a skeleton draws its bow.
     /// The index comes from the jar dump, not a hand count; see
     /// `every_metadata_index_constant_matches_the_jar_dump`.
     #[test]
@@ -4057,12 +4057,12 @@ mod tests {
     /// collisions this decoder's guards exist for, or the test above is checking
     /// a table that could have been written from the same wrong count.
     ///
-    /// Index **8** is `LivingEntity`'s flags byte *and* `AbstractArrow`'s, both
+    /// Index **8** is the living entity's flags byte *and* the abstract arrow's, both
     /// `BYTE`, with `0x01` meaning "using item" on one and "critical" on the
     /// other — the `living` guard. Index **15** is `Mob`'s flags byte
     /// *and* `ArmorStand`'s client flags, both `BYTE`, with `0x04` meaning
-    /// "aggressive" on one and "show arms" on the other — and since `ArmorStand`
-    /// *is* a `LivingEntity`, that one needs a narrower guard than index 8's.
+    /// "aggressive" on one and "show arms" on the other — and since the armor stand
+    /// *is* a living entity, that one needs a narrower guard than index 8's.
     /// A firework's angle bit is surfaced only for a firework, and its
     /// attached flag only for the empty/present distinction.
     ///

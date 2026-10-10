@@ -105,7 +105,7 @@ impl OfferState {
     /// The real get-modified-cost-count rule, applied to the primary cost:
     /// `basePrice + max(0, floor(basePrice * demand * priceMultiplier)) +
     /// specialPriceDiff`, clamped to `1..=` the cost item's own max stack
-    /// size (vanilla's `cost.itemStack().getMaxStackSize()`; `64` when this
+    /// size (vanilla's item stack's get max stack size; `64` when this
     /// crate has no prototype for the item at all, matching every ordinary
     /// trade-currency item's real cap).
     #[must_use]
@@ -326,9 +326,9 @@ impl VillagerTrades {
         self.offers.get_mut(index)?.take(offered_a, offered_b)
     }
 
-    /// Runs one `WorkAtPoi`-equivalent restock check
-    /// (`body.shouldRestock(level)` / `body.restock()`, vanilla's own two
-    /// call sites, both inside the Brain `WorkAtPoi` behavior — not built in
+    /// Runs one work at poi-equivalent restock check
+    /// (body's should restock / `body.restock()`, vanilla's own two
+    /// call sites, both inside the Brain work at poi behavior — not built in
     /// this crate; see this module's own doc for why). Returns whether a
     /// restock actually happened.
     pub fn maybe_restock(&mut self, game_time: i64, current_day: i64) -> bool {

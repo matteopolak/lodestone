@@ -21,8 +21,8 @@
 //! - `HEADER_LENGTH` = 21 (`<clinit>`: `MAGIC_LENGTH + 1 + 4 + 4 + 4`, i.e.
 //!   magic + token + compressed-length + original-length + checksum).
 //! - `COMPRESSION_METHOD_RAW` = `0x10`, `COMPRESSION_METHOD_LZ4` = `0x20`
-//!   (both `ConstantValue` attributes on the class's static fields).
-//! - `DEFAULT_SEED` = `0x9747B28C` (`ConstantValue` attribute, read as the
+//!   (both compile-time constants on the class's static fields).
+//! - `DEFAULT_SEED` = `0x9747B28C` (a compile-time constant, read as the
 //!   signed `i32` `-1756908916`, which is `0x9747B28C` in two's complement —
 //!   the XXHash32 seed `newStreamingHash32(DEFAULT_SEED)` uses).
 //!

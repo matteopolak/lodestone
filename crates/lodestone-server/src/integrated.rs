@@ -6604,7 +6604,7 @@ mod tests {
     }
 
     /// The discovery datagram body is the *whole* LAN-discovery protocol —
-    /// vanilla's `LanServerDetection` parses this literal string and nothing
+    /// vanilla's lan server detection parses this literal string and nothing
     /// else, so an off-by-one in the markers is a world that never appears in
     /// the multiplayer list with no error anywhere.
     #[test]

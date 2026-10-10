@@ -11,9 +11,9 @@
 //!   observing its own echo, which would pass even if the broadcast reached
 //!   nobody else.
 //! * **The serverbound frame is hand-built from the 26.2 wire layout**
-//!   (`ServerboundChatPacket`'s own constructor: `readUtf(256)`,
-//!   `readInstant()`, `readLong()` salt, `readNullable(MessageSignature::read)`,
-//!   then `vanilla's own last seen messages's own update`'s VarInt offset + fixed 20-bit set +
+//!   (chat packet's own constructor: read utf,
+//!   `readInstant()`, `readLong()` salt, read nullable,
+//!   then the last-seen-messages update's VarInt offset + fixed 20-bit set +
 //!   checksum byte). It is **not** produced by our own `ChatMessage` encoder,
 //!   so this is an external anchor rather than `decode(encode(x)) == x`.
 //! * **B's reply is decoded by the pre-existing client-side decoder**
@@ -32,8 +32,8 @@
 //! # The sender receives their own message
 //!
 //! Checked against the jar rather than assumed:
-//! `vanilla's own player list's own broadcast chat message` (`vanilla's own player list's own java`) loops
-//! `for (ServerPlayer player : this.players)` with no sender exclusion, and a
+//! the player list's chat broadcast loops
+//! over every connected player with no sender exclusion, and a
 //! vanilla client does not echo its own chat locally — it waits for the
 //! server. So A must see A's own message too, and this test asserts it.
 
@@ -113,16 +113,16 @@ fn hello_bytes(name: &str, uuid: Uuid) -> Vec<u8> {
 }
 
 /// Hand-written serverbound `chat`, straight from 26.2's
-/// `ServerboundChatPacket` constructor — **the external anchor**.
+/// Chat packet constructor — **the external anchor**.
 ///
 /// ```text
-/// readUtf(256)                          message
+/// read utf                          message
 /// readInstant()                         i64 epoch millis
 /// readLong()                            i64 salt
-/// readNullable(MessageSignature::read)  bool present, then 256 bytes if so
-/// vanilla's own last seen messages's own update(input):
-///   readVarInt()                        offset
-///   readFixedBitSet(20)                 3 bytes, no length prefix
+/// read nullable  bool present, then 256 bytes if so
+/// last-seen-messages update(input):
+///   read var int                        offset
+///   read fixed bit set                 3 bytes, no length prefix
 ///   readByte()                          checksum (0 = ignore)
 /// ```
 ///

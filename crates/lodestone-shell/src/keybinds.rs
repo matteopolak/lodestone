@@ -30,7 +30,7 @@
 //! - Persisted binding names: vanilla's own input-constants `addKey` table
 //!   (`key.keyboard.w`, `key.mouse.left`, `key.keyboard.left.shift`, …).
 //! - The save-line shape: vanilla's own persisted-options declarations write each mapping as
-//!   `key_<name>` → `saveString()`.
+//!   `key_<name>` → save string.
 //!
 //! ## Deliberate divergences from vanilla, and why
 //!
@@ -98,7 +98,7 @@
 //!      `Click::offhand_swap` and `do_swap`'s `button == 40` arm were already in
 //!      place and tested; this binding is what finally reached them.
 //!    * **gameplay half**. With no screen open, vanilla sends a bare
-//!      `ServerboundPlayerActionPacket` / `SWAP_ITEM_WITH_OFFHAND`
+//!      Player-action packet / `SWAP_ITEM_WITH_OFFHAND`
 //!      — **no slot, no hit test, no container**.
 //!      Reached through `KeyOutcome::SwapOffhand`, guarded on
 //!      the player not being a spectator and sent with no local prediction, because
@@ -244,13 +244,13 @@ pub enum InputAction {
     /// producer for the *keyboard* form of the same screen — see
     /// [`crate::app::KeyOutcome::ContainerPickItem`]. With no screen open,
     /// vanilla's own pick-block-or-entity handling
-    /// switches on the current `HitResult`: `ClientAction::
+    /// switches on the current hit result: `ClientAction::
     /// PickItemFromEntity` when the crosshair is over an entity,
     /// `ClientAction::PickItemFromBlock` when it is over a block, nothing on
     /// a miss — both already encoded and round-trip tested
     /// (`crates/protocol/v770/tests/serverbound_interaction_tier2.rs`) with
     /// zero producers before this. `include_data` on either action is
-    /// `hasControlDown()`, read the same place [`Self::Drop`]'s `ctrl` is.
+    /// has control down, read the same place [`Self::Drop`]'s `ctrl` is.
     /// See [`crate::app::KeyOutcome::PickItem`].
     PickItem,
     // -- inventory --------------------------------------------------------
@@ -334,8 +334,8 @@ pub enum InputAction {
     TogglePerspective,
     /// Open the pause screen, or close an open container.
     ///
-    /// **Not a vanilla `KeyMapping`** — vanilla handles Escape in `Screen` /
-    /// `KeyboardHandler` and it cannot be rebound. Routed through the table
+    /// **Not a vanilla key mapping** — vanilla handles Escape in `Screen` /
+    /// The keyboard handler and it cannot be rebound. Routed through the table
     /// here so a Controls menu can show it.
     ///
     /// **Hazard:** this is the only gameplay route to the pause screen (and so
@@ -345,7 +345,7 @@ pub enum InputAction {
     /// enforces that yet because there is no menu to enforce it in.
     Pause,
     // -- debug ------------------------------------------------------------
-    /// The F3 overlay. A genuine vanilla `KeyMapping` in 26.2 — see the module
+    /// The F3 overlay. A genuine vanilla key mapping in 26.2 — see the module
     /// docs, which is not what older versions did.
     DebugOverlay,
     /// F3+B — `key.debug.showHitboxes`, GLFW 66.
@@ -423,7 +423,7 @@ impl InputAction {
     ];
 
     /// The stable identifier used in `options.json` and as the translation key,
-    /// matching vanilla's `KeyMapping::getName` where a counterpart exists.
+    /// matching vanilla's key mapping's get name where a counterpart exists.
     ///
     /// Lodestone-only actions are namespaced `key.lodestone.*` so they can never
     /// collide with a vanilla name we later want.
@@ -568,7 +568,7 @@ impl InputAction {
             InputAction::Screenshot => Binding::Key(Key::F2),
             // vanilla's own persisted-options declarations — 294.
             InputAction::TogglePerspective => Binding::Key(Key::F5),
-            // No vanilla counterpart (Escape is not a `KeyMapping`); GLFW 256.
+            // No vanilla counterpart (Escape is not a key mapping); GLFW 256.
             InputAction::Pause => Binding::Key(Key::Escape),
             // vanilla's own persisted-options declarations — 292.
             InputAction::DebugOverlay => Binding::Key(Key::F3),
@@ -1125,7 +1125,7 @@ pub enum Binding {
 }
 
 impl Binding {
-    /// The persisted name, in vanilla's `InputConstants` spelling where one
+    /// The persisted name, in vanilla's input constants spelling where one
     /// exists (`key.keyboard.w`, `key.mouse.left`, `key.keyboard.left.shift`).
     ///
     /// Keys and buttons vanilla has no name for get a `…winit.*` name so they
@@ -1490,7 +1490,7 @@ impl Keybinds {
     }
 
     /// Whether `action` still holds vanilla's default — vanilla's
-    /// `KeyMapping::isDefault`, used to decide whether to show a reset affordance.
+    /// The key mapping's is default, used to decide whether to show a reset affordance.
     #[must_use]
     pub fn is_default(&self, action: InputAction) -> bool {
         self.binding(action) == action.default_binding()
@@ -1525,7 +1525,7 @@ impl Keybinds {
     }
 
     /// The *other* actions sharing `action`'s binding — vanilla's duplicate
-    /// highlight in the Controls screen (`KeyMapping::same`).
+    /// highlight in the Controls screen (the key mapping's same).
     ///
     /// Exposed as a query so a menu never has to reach into [`Keybinds`]'s
     /// internals to compute it. Empty for an unbound action.

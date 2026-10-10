@@ -201,7 +201,7 @@ pub(super) fn hunger_wobble(tick: i64, food: i32, saturation: f32, pip: usize) -
 /// client-side (a slot's item identity changed, or its count rose) since
 /// nothing forwards the server's own `Inventory.add` call site here, and
 /// returns each slot's current pop amount on vanilla's own `5.0 → 0.0` scale
-/// (vanilla's own hud rendering, `getPopTime() - partialTick`), stepped once per tick
+/// (vanilla's own hud rendering, `get_pop_time() - partialTick`), stepped once per tick
 /// rather than partial-tick-interpolated.
 #[derive(Debug, Clone)]
 pub(super) struct HotbarPop {
@@ -302,14 +302,14 @@ const XP_FLASH_TICKS: i64 = 10;
 /// # What this is, and what vanilla actually does
 ///
 /// **26.2 has no XP-bar flash.** Read the record, not the folklore:
-/// `ExperienceBar.extractBackground` blits the background and the progress
-/// sprite and nothing else, and `ContextualBar.extractExperienceLevel` draws the
+/// The experience bar's extract background blits the background and the progress
+/// sprite and nothing else, and the contextual bar's extract experience level draws the
 /// level number as four black offset copies plus one `0x80FF20` copy
 /// unconditionally. The only things 26.2 does on an experience change are
-/// non-visual or non-bar: `LocalPlayer.setExperienceValues` stamps
-/// `experienceDisplayStartTick`, which `Hud.willPrioritizeExperienceInfo` uses
+/// non-visual or non-bar: LocalPlayer's set experience values stamps
+/// `experienceDisplayStartTick`, which Hud's will prioritize experience info uses
 /// to keep the XP bar *chosen* over the other contextual bars for 100 ticks;
-/// and `Player.giveExperienceLevels` plays the level-up sound every fifth level.
+/// and Player's give experience levels plays the level-up sound every fifth level.
 ///
 /// So this is **not** a parity port and must not be described as one. It is the
 /// effect the issue asks for, built to sit alongside the other animations in
@@ -625,7 +625,7 @@ mod tests {
         with_item[2] = Some(slot("minecraft:diamond", 1));
 
         // Predicted value at the trigger tick: pop == 5.0 exactly (vanilla's
-        // `setPopTime(5)`). Wrong hypothesis under test: a pop that starts at
+        // set pop time). Wrong hypothesis under test: a pop that starts at
         // 1.0 (an "is it popping" bool rather than the real magnitude) would
         // also pass a bare `> 0.0` check, which is why this asserts the exact
         // value rather than just its sign.

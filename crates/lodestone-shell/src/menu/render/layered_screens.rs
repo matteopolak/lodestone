@@ -351,7 +351,7 @@ fn the_loading_screen_asks_for_the_panorama_and_the_in_world_screens_do_not() {
 /// are the decoded pixels of `textures/gui/{header,footer}_separator.png` and
 /// `menu_list_background.png` from the 26.2 `client.jar` (whose `inworld_*` variants
 /// are byte-identical, which is why one constant is faithful to both arms), and the
-/// two y offsets are vanilla's own abstract-selection-list separator extraction's own
+/// two y offsets are vanilla's abstract-selection-list separator extraction's
 /// top-minus-2 and bottom accessors. The rects come from `ListSpec::chrome_rect`, the call the draw
 /// makes.
 ///

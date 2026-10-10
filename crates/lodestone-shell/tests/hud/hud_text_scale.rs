@@ -356,9 +356,9 @@ fn the_title_block_sits_where_vanillas_pose_translate_puts_it() {
 // `HUD_TEXT_SCALE * opts.scale`, i.e. `2.0` at the vanilla-legal default
 // `chatScale == 1.0` — the same double-apply the title/subtitle/action bar
 // above already had fixed. Vanilla's own chat pose scale
-// (`ChatComponent.getScale`, vanilla's decompiled chat-component source, 26.2) is `chatScale` **alone**:
+// (the chat component's get scale, vanilla's decompiled chat-component source, 26.2) is `chatScale` **alone**:
 // `extractRenderState`'s `pose.scale(scale, scale)` where `scale =
-// (float)this.getScale()`. `chat_pose_scale` is now `opts.scale.max(0.0)`,
+// (float)this.get_scale()`. `chat_pose_scale` is now `opts.scale.max(0.0)`,
 // and `HUD_TEXT_SCALE`/`hud_line_h` — no longer having any caller — are
 // deleted outright.
 //
@@ -369,9 +369,9 @@ fn the_title_block_sits_where_vanillas_pose_translate_puts_it() {
 //
 // | clause | vanilla | ours |
 // |---|---|---|
-// | line pitch | `messageHeight == 9`, scaled by `chatScale` (`ChatComponent.extractRenderState`'s `entryHeight` inside `pose.scale`) | `chat_line_h` |
+// | line pitch | `messageHeight == 9`, scaled by `chatScale` (the chat component's extract render state's `entryHeight` inside `pose.scale`) | `chat_line_h` |
 // | panel width | `getWidth(pct) = floor(pct * 280 + 40)`, **not** scaled by `chatScale` (computed outside the pose transform, in real screen pixels) | `chat_width_px` |
-// | panel height | `getHeight(pct) = floor(pct * 160 + 20)`, likewise unscaled | `chat_height_px` |
+// | panel height | `get_height(pct) = floor(pct * 160 + 20)`, likewise unscaled | `chat_height_px` |
 //
 // The width/height clauses were already correct before this fix (they never
 // read `chat_pose_scale` at all), which is exactly why the panel's *edges*
@@ -406,7 +406,7 @@ mod chat_scale {
     }
 
     /// **Clause 1: line pitch.** Predicts vanilla's `messageHeight == 9` at
-    /// the default `chatScale == 1.0` from `ChatComponent`'s own literal, not
+    /// the default `chatScale == 1.0` from the chat component's own literal, not
     /// from this crate's `chat_line_h` formula (which would make the
     /// assertion circular), and states the double-applied wrong hypothesis
     /// explicitly so the tolerance cannot straddle both.
@@ -418,7 +418,7 @@ mod chat_scale {
         f.chat = &chat;
         let measured = ink_height("chat row", &f);
 
-        let vanilla = 9.0_f32; // `ChatComponent`'s literal `messageHeight`.
+        let vanilla = 9.0_f32; // The chat component's literal `messageHeight`.
         let doubled = 18.0_f32; // the deleted `HUD_TEXT_SCALE` baseline's prediction.
         assert!(
             (measured - vanilla).abs() < 2.0,

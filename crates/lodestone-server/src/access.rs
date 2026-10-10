@@ -26,7 +26,7 @@
 //! handle a connection and an admin console both hold, with the same
 //! `with`-funnels-every-access shape [`crate::BlockEntityHandle`] established.
 //!
-//! [`AccessLists::may_join`] is vanilla `PlayerList.canPlayerLogin`, **in vanilla's
+//! [`AccessLists::may_join`] is vanilla PlayerList's can player login, **in vanilla's
 //! order** — player ban, then whitelist, then IP ban, then the player limit. The
 //! order is observable: a banned *and* non-whitelisted player is told they are
 //! banned, and a test that asserted the whitelist message would be asserting the
@@ -217,7 +217,7 @@ where
 /// Why a join was refused, as the translation key a vanilla client renders plus
 /// the optional reason line vanilla appends.
 ///
-/// The keys are vanilla's own (`PlayerList.canPlayerLogin`), so a real client shows
+/// The keys are vanilla's own (PlayerList's can player login), so a real client shows
 /// its localised text rather than raw English.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JoinRefusal {
@@ -567,7 +567,7 @@ impl AccessLists {
         write_array(&dir.join(BANNED_IPS_FILE), &ip_bans)
     }
 
-    /// Vanilla `PlayerList.canPlayerLogin`, in vanilla's own order: player ban,
+    /// Vanilla PlayerList's can player login, in vanilla's own order: player ban,
     /// whitelist, IP ban, then the player limit.
     ///
     /// `now_secs` is Unix seconds, so a timed ban's expiry is testable without
@@ -959,7 +959,7 @@ mod tests {
 
     /// **Vanilla's refusal order is observable and this is it**: a player who is
     /// both banned and not whitelisted is told they are banned, not that they are
-    /// unlisted (`PlayerList.canPlayerLogin` checks the ban first). A test written
+    /// unlisted (PlayerList's can player login checks the ban first). A test written
     /// against the wrong precedence would look right and assert nothing.
     #[test]
     fn refusal_order_is_vanillas() {

@@ -180,7 +180,7 @@ fn subject() -> SectionKey {
 /// box they occupy.
 ///
 /// `mesh_fluids` insets side faces by `0.001` off the block boundary
-/// (`FluidRenderer`'s z-fight offset, see `docs/fluid-rendering.md`), so the plane
+/// (the fluid renderer's z-fight offset, see `docs/fluid-rendering.md`), so the plane
 /// test is a tolerance and not an equality. A count on its own cannot tell a
 /// uniformly-wrong seam from a localised one — `CLAUDE.md`'s "measure by
 /// location, never by frame average".
@@ -337,7 +337,7 @@ fn a_water_seam_converges_on_the_neighbour_present_answer() {
          exactly the from-the-start answer, not merely change — healed {healed} \
          ({healed_box}) vs fresh {fresh} ({fresh_box})"
     );
-    // Two per emitted side face: `bake_fluid` adds `FluidRenderer.addFace`'s
+    // Two per emitted side face: `bake_fluid` adds fluid renderer's add face's
     // reversed-winding back face to every non-overlay side quad
     // (`docs/fluid-rendering.md`, "Closed — back faces"). Half the 16×16 seam
     // survives, so 128 faces → 256 quads.
@@ -351,7 +351,7 @@ fn a_water_seam_converges_on_the_neighbour_present_answer() {
     // and the survivors are `z < 8`. The top edge is `15.86`, not `16.00`, because
     // a fluid side face's height is the surface's corner heights — `8/9` for a
     // source with air above, averaged down further at the seam by the air-side
-    // neighbour, then pulled `0.001` off the boundary by `FluidRenderer`'s
+    // neighbour, then pulled `0.001` off the boundary by the fluid renderer's
     // z-fight inset. Asserting the box and not just the count is what makes "256
     // quads survived" mean "the right 256"; the first version of the sibling unit
     // test had the halves the wrong way round and only the printed box said so.

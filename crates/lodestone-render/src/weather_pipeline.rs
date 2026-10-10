@@ -23,8 +23,8 @@
 //!
 //! # The depth comparison is flipped from vanilla, deliberately
 //!
-//! Vanilla's `WEATHER_NO_DEPTH_WRITE` is
-//! `DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, false)`
+//! Vanilla's weather no-depth-write state is
+//! depth compare GREATER_THAN_OR_EQUAL with depth writes off
 //! (vanilla's render-pipeline registration table). This renderer is reversed-Z like vanilla, so the
 //! port is [`lodestone_render::DEPTH_COMPARE_NEARER_OR_EQUAL`] with no sign
 //! flip. A strict "nearer wins" would also *look* right (rain is never coplanar
@@ -239,7 +239,7 @@ impl WeatherRenderer {
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleStrip,
-                // Vanilla's `WEATHER_SNIPPET` is `.withCull(false)`
+                // Vanilla's `WEATHER_SNIPPET` is `.with_cull(false)`
                 // (its render-pipeline registration table), and it has to be: the ribbon's
                 // winding flips as the camera crosses the column, so culling
                 // would blink half the rain out on every pass.
@@ -261,7 +261,7 @@ impl WeatherRenderer {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
-                    // `BlendFunction.TRANSLUCENT` (vanilla's render-pipeline registration table).
+                    // Translucent blending (vanilla's render-pipeline registration table).
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

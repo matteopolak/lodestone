@@ -814,7 +814,7 @@ mod tests {
     // --- banner ---------------------------------------------------------
 
     /// `pole` and `bar` are siblings under root, both at `PartPose::ZERO` —
-    /// `BannerModel.createBodyLayer` never nests one under the other, and
+    /// the banner model's body layer never nests one under the other, and
     /// both boxes carry their own pivot-relative origin instead.
     #[test]
     fn banner_body_has_pole_and_bar_as_zero_pose_siblings() {
@@ -833,7 +833,7 @@ mod tests {
     }
 
     /// The flag is one part, offset by `(0, -44, 0)` texels —
-    /// vanilla's own banner-flag-model standing flag-layer construction's own
+    /// vanilla's banner-flag-model standing flag-layer construction's
     /// offset pose. This is
     /// the pivot [`crate::entity::PartPose`]'s own `x_rot` overrides to swing
     /// the sway; a wrong offset here would put the sway pivot at the wrong
@@ -1010,9 +1010,9 @@ mod tests {
         assert!(!quads.is_empty(), "the base baked no quads");
     }
 
-    /// The four conduit sheets, by their own vanilla `LayerDefinition.create`
-    /// calls (`ConduitRenderer.createEyeLayer/createWindLayer/createShellLayer/
-    /// createCageLayer`) — a magnitude check, not a sign check: a builder that
+    /// The four conduit sheets, by their own vanilla layer-definition
+    /// calls (the eye, wind, shell and
+    /// cage layers) — a magnitude check, not a sign check: a builder that
     /// halved or doubled a dimension would still pass
     /// `every_entry_builds_and_resolves_by_name`'s coarse `{16,32,64}` gate.
     #[test]

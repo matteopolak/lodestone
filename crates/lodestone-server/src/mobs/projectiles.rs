@@ -219,7 +219,7 @@ fn block_entry(from: Vec3, delta: Vec3, cell: BlockPos) -> Option<(f64, HitAxis,
     Some((enter, enter_axis, frac))
 }
 
-/// Squared distance from a point to an axis-aligned box — `AABB.distanceToSqr`
+/// Squared distance from a point to an axis-aligned box — AABB's distance to sqr
 /// specialised to the potion-splash case, where one side of the comparison is
 /// always a point (see [`PotionImpact::location`]'s own doc for why a point is
 /// an acceptable stand-in for the projectile's own small bounding box). `0.0`

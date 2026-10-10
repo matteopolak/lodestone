@@ -27,7 +27,7 @@ pub fn enchanted_hit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f6
 ///
 /// Two provider-level differences from [`crit`], both easy to lose: the
 /// vertical aux is passed **`ya + 1.0`**, so the indicator is launched upward
-/// regardless of what the packet asked for, and `setLifetime(20)` *replaces*
+/// regardless of what the packet asked for, and set lifetime *replaces*
 /// the constructor's randomised lifetime rather than scaling it. Its sheet is
 /// [`Sheet::Damage`], not [`Sheet::CriticalHit`] — `damage_indicator.json`
 /// names its own texture.

@@ -147,7 +147,7 @@ pub const DEFAULT_BIOME_BLEND_RADIUS: i32 = lodestone_render::biome_tint::BLEND_
 /// the handle with.
 ///
 /// `0` is a real, reachable value rather than a degenerate one: vanilla's
-/// `Screen.extractBlurredBackground` only asks for the pass at
+/// Screen's extract blurred background only asks for the pass at
 /// `blurRadius >= 1.0F`, so zero means "no blur", which is why the label is
 /// `genericValueOrOffLabel` and reads **OFF**.
 pub const MIN_MENU_BACKGROUND_BLURRINESS: u32 = 0;
@@ -198,7 +198,7 @@ pub const MAX_FOV: u32 = 110;
 /// `camera_rig::FOV_Y_DEGREES` used to pin the camera to unconditionally.
 pub const DEFAULT_FOV: u32 = 70;
 
-/// Vanilla's `CloudStatus.getSerializedName` — the string
+/// Vanilla's CloudStatus's get serialized name — the string
 /// `options.json` stores [`Options::cloud_status`] as.
 ///
 /// A name rather than the enum's ordinal, because the file is hand-editable and a
@@ -218,7 +218,7 @@ pub fn cloud_status_name(status: lodestone_render::CloudStatus) -> &'static str 
 /// same rule every other key in that function follows.
 ///
 /// Vanilla additionally accepts its **legacy** boolean spellings here
-/// (`"true"` → FANCY, `"false"` → OFF, `CloudStatus.byName`), and so does this: a
+/// (`"true"` → FANCY, `"false"` → OFF, CloudStatus's by name), and so does this: a
 /// player copying a value out of an old `options.txt` should not silently get
 /// FANCY where they asked for off.
 #[must_use]
@@ -240,10 +240,10 @@ pub fn cloud_status_from_name(name: &str) -> Option<lodestone_render::CloudStatu
 /// before the row went live.
 ///
 /// **This is a probabilistic filter, not three fixed budgets.**
-/// `ClientLevel.calculateParticleLevel` folds the option down per spawn:
+/// The client level's calculate particle level folds the option down per spawn:
 /// `DECREASED` becomes `MINIMAL` one time in three, and `MINIMAL` is lifted
 /// back to `DECREASED` one time in ten *for an always-show particle*.
-/// `ClientLevel.doAddParticle` then drops the spawn whenever the folded level
+/// The client level's do add particle then drops the spawn whenever the folded level
 /// is `MINIMAL`. So `DECREASED` keeps roughly two thirds of eligible spawns and
 /// `MINIMAL` keeps roughly none. See
 /// `crate::particles::Particles::particle_level_permits`, which is where that
@@ -283,7 +283,7 @@ pub fn particle_level_from_name(name: &str) -> Option<ParticleLevel> {
     }
 }
 
-/// Vanilla's `AttackIndicatorStatus`, the
+/// Vanilla's attack indicator status, the
 /// `options.attackIndicator` cycle.
 ///
 /// Three states in **declaration order**, which is also its own cycle-button's visiting
@@ -292,7 +292,7 @@ pub fn particle_level_from_name(name: &str) -> Option<ParticleLevel> {
 /// this client drew unconditionally before the row went live.
 ///
 /// The two live states draw the **same** attack-strength value in two different
-/// places, never both: `Hud.extractCrosshair` gates its 16x4 bar under the
+/// places, never both: Hud's extract crosshair gates its 16x4 bar under the
 /// crosshair on `CROSSHAIR`, and the hotbar section gates its 18x18 gauge beside
 /// the hotbar on `HOTBAR`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -307,7 +307,7 @@ pub enum AttackIndicator {
     Hotbar,
 }
 
-/// Vanilla's `AttackIndicatorStatus` serialized name — the string
+/// Vanilla's attack indicator status serialized name — the string
 /// `options.json` stores [`Options::attack_indicator`] as. A name rather than
 /// vanilla's own integer id, [`cloud_status_name`]'s reasoning: the file stays
 /// hand-editable and a future variant insertion cannot silently renumber it.
@@ -337,7 +337,7 @@ pub fn attack_indicator_from_name(name: &str) -> Option<AttackIndicator> {
 ///
 /// `Minimized` reduces the frame rate only while the OS reports the window
 /// iconified; `Afk` additionally runs vanilla's own idle clock
-/// (`FramerateLimitTracker`'s `SHORT_AFK`/`LONG_AFK`, 30 fps after a minute of
+/// (the framerate limit tracker's `SHORT_AFK`/`LONG_AFK`, 30 fps after a minute of
 /// no input and 10 after ten). This client's window already throttles an
 /// unfocused/occluded window unconditionally (`app::pacing::FramePacer`'s
 /// table, which predates this option), so what this field actually gates is
@@ -351,7 +351,7 @@ pub enum InactivityFpsLimit {
     Afk,
 }
 
-/// Vanilla's `InactivityFpsLimit.getSerializedName` — the string `options.json`
+/// Vanilla's InactivityFpsLimit's get serialized name — the string `options.json`
 /// stores [`Options::inactivity_fps_limit`] as. Same reasoning as
 /// [`cloud_status_name`]: a name, not an ordinal, so the file stays
 /// hand-editable and immune to a future variant insertion.
@@ -396,7 +396,7 @@ pub const DEFAULT_FRAMERATE_LIMIT: u32 = 120;
 /// Vanilla's `GraphicsPreset` — the "Quality &
 /// Performance" preset slider: `Fast`, `Fancy`, `Fabulous`, `Custom`, in that
 /// declaration order (the order [`crate::menu::options::LiveOption::
-/// GraphicsPreset`]'s slider visits, matching `SliderableEnum.toSliderValue`'s
+/// GraphicsPreset`]'s slider visits, matching sliderable enum's to slider value's
 /// `values.indexOf`).
 ///
 /// `GraphicsPreset::apply` writes **seventeen**
@@ -440,7 +440,7 @@ impl GraphicsPreset {
     ];
 }
 
-/// `GraphicsPreset.getSerializedName` — the string `options.json` stores
+/// GraphicsPreset's get serialized name — the string `options.json` stores
 /// [`Options::graphics_preset`] as. A name, not an ordinal, for
 /// [`cloud_status_name`]'s reason.
 #[must_use]
@@ -680,10 +680,10 @@ pub struct Options {
     /// moves one notch's worth per gesture instead of a proportional amount.
     ///
     /// Applied at the input boundary in `app/lifecycle.rs`, because that is where
-    /// vanilla applies it: `MouseHandler.onScroll` computes
+    /// vanilla applies it: the mouse handler's on scroll computes
     /// `(discreteScroll ? signum(yoffset) : yoffset) * scrollSensitivity` **once**
     /// and hands the result to both
-    /// `screen().mouseScrolled(..)` and the hotbar's `ScrollWheelHandler`. It is
+    /// screen's mouse scrolled and the hotbar's scroll wheel handler. It is
     /// therefore not a list-specific or hotbar-specific transform — it is what a
     /// wheel notch *is* once the options are honoured, which is why it wraps the
     /// raw delta rather than living inside either consumer.
@@ -691,7 +691,7 @@ pub struct Options {
     /// Vanilla's `options.mouseWheelSensitivity`: a
     /// multiplier on the raw scroll delta before it reaches slot selection
     ///. Default `1.0` — vanilla's own default is
-    /// `logMouse(0) == 10^(0/100) == 1.0`, i.e. no
+    /// `log_mouse(0) == 10^(0/100) == 1.0`, i.e. no
     /// scaling, which is why `1.0` (not `0.0`) is what an absent/corrupt key
     /// degrades to.
     pub mouse_wheel_sensitivity: f32,
@@ -778,16 +778,16 @@ pub struct Options {
     ///
     /// F3+H reads like a debug chord alongside F3+B and F3+G, and it is bound the
     /// same way — but the two siblings flip transient render state while this one
-    /// flips a *persisted* option. `ItemStack.getTooltipLines` takes a
-    /// `TooltipFlag`, and `Minecraft` supplies
-    /// `options.advancedItemTooltips ? TooltipFlag.Default.ADVANCED :
-    /// TooltipFlag.Default.NORMAL`, so the chord is a *writer* of this field and
+    /// flips a *persisted* option. ItemStack's get tooltip lines takes a
+    /// The tooltip flag, and `Minecraft` supplies
+    /// `options.advancedItemTooltips ? tooltip flag's default.ADVANCED :
+    /// The tooltip flag's default.NORMAL`, so the chord is a *writer* of this field and
     /// the tooltip builder is its only reader. Storing it in an `AtomicBool` on
     /// `WindowApp` (which is what the hitbox and chunk-border chords do) would
     /// lose it on every restart, which vanilla does not.
     ///
     /// Deliberately **no settings row**: vanilla has none either — there is no
-    /// `advancedItemTooltips` entry on any `OptionsSubScreen`, so adding a
+    /// `advancedItemTooltips` entry on any options sub screen, so adding a
     /// `LiveOption` for it would be this client inventing a control. The chord is
     /// the whole UI.
     ///
@@ -923,7 +923,7 @@ pub struct Options {
     /// why this is a per-vertex render-pass bypass rather than a second
     /// occlusion bake. Changing this forces a remesh of every loaded column
     /// (`Sim::set_cutout_leaves`), matching vanilla's own
-    /// `operateOnLevelExtractor(LevelExtractor::allChanged)`.
+    /// operate on level extractor.
     pub cutout_leaves: bool,
     /// Vanilla's **Mipmap Levels** option (`options.mipmapLevels`,
     /// vanilla's own persisted-options declarations): a clamped range `0..=4`, default
@@ -984,7 +984,7 @@ pub struct Options {
     ///
     /// Reaches `hud::HudFrame::attack_indicator`, which the crosshair and hotbar
     /// draw sites in `hud::HudGeometry::build_inner` each gate on — vanilla's own
-    /// two `if` in `Hud.extractCrosshair` and the hotbar section. Before this
+    /// two `if` in Hud's extract crosshair and the hotbar section. Before this
     /// field the crosshair bar drew unconditionally, i.e. the client behaved as
     /// though the option were pinned to `Crosshair`, which the draw site's own
     /// comment said in as many words.
@@ -994,7 +994,7 @@ pub struct Options {
     ///
     /// Pushed into the sim by `Sim::set_particle_level` once per presented
     /// frame and read at the one place vanilla reads it —
-    /// `ClientLevel.doAddParticle`'s equivalent in `sim::net_apply`, which
+    /// The client level's do add particle's equivalent in `sim::net_apply`, which
     /// already transcribed that function's *other* half (the 32-block cutoff
     /// and its `overrideLimiter` bypass) and was missing only the level test.
     pub particles: ParticleLevel,
@@ -1012,7 +1012,7 @@ pub struct Options {
     ///
     /// Changing this forces a remesh of every loaded column
     /// (`Sim::set_blend_radius`), matching vanilla's own
-    /// `operateOnLevelExtractor(LevelExtractor::allChanged)` — the blend is
+    /// operate on level extractor — the blend is
     /// baked per vertex, so there is no uniform to update in place.
     pub biome_blend_radius: i32,
     /// Whether Friends change notifications may be shown while actively in a world.
@@ -3668,7 +3668,7 @@ mod tests {
         assert_eq!(cloud_status_name(CloudStatus::Fast), "fast");
         assert_eq!(cloud_status_name(CloudStatus::Fancy), "fancy");
 
-        // Vanilla's legacy boolean spellings, from `CloudStatus.byName`. `"false"`
+        // Vanilla's legacy boolean spellings, from CloudStatus's by name. `"false"`
         // is the discriminating one: under a naive "anything unknown is the
         // default" read it would become FANCY, the opposite of what it says.
         assert_eq!(cloud_status_from_name("false"), Some(CloudStatus::Off));

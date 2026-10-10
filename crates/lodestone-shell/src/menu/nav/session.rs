@@ -2,7 +2,7 @@ use super::{MenuNav, *};
 
 impl MenuNav {
     /// Whether the pause menu should offer its own Open to LAN row at all —
-    /// vanilla's `hasSingleplayerServer()` branch,
+    /// vanilla's has singleplayer server branch,
     /// **not** [`Self::is_lan_published`] alone: a multiplayer session has
     /// nothing local to publish and must take the same collapsed,
     /// full-width-Options shape a *published* singleplayer world does, even

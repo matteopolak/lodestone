@@ -1,8 +1,8 @@
 //! Bit-exact parity of the worldgen RNG primitives against a real JVM.
 //!
 //! `scripts/worldgen-oracle/RngOracle.java` calls the **actual 26.2 game
-//! classes** (`LegacyRandomSource`, `XoroshiroRandomSource`, `RandomSupport`,
-//! `WorldgenRandom`, positional factories) and dumps their outputs; the curated
+//! classes** (the legacy and xoroshiro random sources, the seed-mixing support code,
+//! the world-generation random, positional factories) and dumps their outputs; the curated
 //! dump is checked in as `support/rng_jvm.txt`. This test reproduces every probe
 //! with the Rust implementation and diffs element-wise, naming the exact key
 //! that diverges — never a hash (plan §12.6: a hash nobody can recompute is

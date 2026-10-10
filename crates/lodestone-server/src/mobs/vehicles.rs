@@ -161,13 +161,13 @@ impl<'w> MobSim<'w> {
     /// marks a vehicle invulnerable.
     pub(super) fn attack_vehicle(&mut self, target_id: i32, raw_damage: f32) -> Option<super::AttackOutcome> {
         let vehicle = self.vehicles.get_mut(&target_id)?;
-        // `setHurtDir(-getHurtDir())` first, then `setHurtTime(10)`. The negation
+        // set hurt dir first, then set hurt time. The negation
         // is what makes a second punch tip the hull the *other* way; dropping it
         // leaves every hit rocking the same direction, which reads as a stutter
         // rather than as a swing.
         vehicle.hurt_dir = -vehicle.hurt_dir;
         vehicle.hurt_time = VEHICLE_HURT_TICKS;
-        // `setDamage(getDamage() + damage * 10.0F)`. The x10 is vanilla's, and it
+        // set damage. The x10 is vanilla's, and it
         // is why a one-heart punch produces a visible rock at all: the renderer
         // divides by ten again.
         vehicle.damage = (vehicle.damage + raw_damage * 10.0).min(VEHICLE_DESTROY_DAMAGE);
@@ -247,12 +247,12 @@ impl<'w> MobSim<'w> {
     /// to send `SET_PASSENGERS`. Refuses — vanilla's `PASS` — when:
     ///
     /// * `id` is not a vehicle;
-    /// * `using_secondary_action` is set (`player.isSecondaryUseActive()`, i.e.
+    /// * `using_secondary_action` is set (player's is secondary use active, i.e.
     ///   sneak-clicking a boat does *not* board it);
     /// * the boat is out of control (`outOfControlTicks >= 60`, a fully submerged
     ///   hull);
     /// * someone else is already aboard. Vanilla's real limit is
-    ///   `getMaxPassengers()` — **2** for a boat and **1** for a chest boat — and
+    ///   get max passengers — **2** for a boat and **1** for a chest boat — and
     ///   this crate seats one for every type. A narrower gap than it looks: the
     ///   second seat needs a passenger *list* on the wire and a second seat
     ///   attachment, and seating two players in the same spot would be worse than
@@ -309,7 +309,7 @@ impl<'w> MobSim<'w> {
         self.mount_vehicle(id, player_entity_id, using_secondary_action)
     }
 
-    /// `Entity.stopRiding` for whatever `player_entity_id` is aboard, returning the
+    /// Entity's stop riding for whatever `player_entity_id` is aboard, returning the
     /// vehicle it left.
     ///
     /// Called on disconnect as well as on an explicit dismount: a vehicle whose
@@ -362,7 +362,7 @@ impl<'w> MobSim<'w> {
     /// Returns `true` if it was applied. It is refused when the player rides
     /// nothing, which is the guard that stops a connection moving a boat it is not
     /// in — vanilla's own `handleMoveVehicle` starts with
-    /// `Entity rootVehicle = player.getRootVehicle(); if (rootVehicle == player) return;`.
+    /// `Entity rootVehicle = player.get_root_vehicle(); if (rootVehicle == player) return;`.
     ///
     /// The velocity is **derived from the reported displacement**, not taken from
     /// the packet (there is no velocity field on the wire). That matters for the
@@ -688,7 +688,7 @@ fn tick_one_vehicle(
         vehicle.boat.out_of_control_ticks = 0.0;
     }
     // `player_aboard = false`: the per-tick halving of `landFriction` is
-    // gated on `getControllingPassenger() instanceof Player`, and there is
+    // gated on `get_controlling_passenger() instanceof Player`, and there is
     // nobody aboard here by construction. Passing `true` would let a beached
     // empty boat slide off on its own.
     float_boat(&mut vehicle.motion, &mut vehicle.boat, dims, &view, false);
@@ -720,7 +720,7 @@ fn ticked_vehicle(
 /// of `waterLevel`, and with a coarse `is_water` every boat would compute a
 /// surface `1/9` of a block off and sink slowly through deep water.
 ///
-/// `friction` is the other one: `getGroundFriction` averages `Block.getFriction`
+/// `friction` is the other one: `getGroundFriction` averages Block's get friction
 /// over the cells the hull touches, and it is what decides `ON_LAND` from
 /// `IN_AIR`. Returning the trait's `0.6` default unconditionally would be right
 /// for most blocks and would also classify **air** as land, which freezes a boat
@@ -756,7 +756,7 @@ impl CollisionView for VehicleCollision<'_> {
     }
 
     fn friction(&self, x: i32, y: i32, z: i32) -> f32 {
-        // `Block.getFriction` is `0.6` for everything but ice (`0.98`), packed and
+        // Block's get friction is `0.6` for everything but ice (`0.98`), packed and
         // blue ice (`0.98`/`0.989`) and slime (`0.8`). Air has no friction *and no
         // collision*, and `getGroundFriction` only consults cells whose shape
         // actually touches the hull — so answering `0.6` for a shapeless cell is
@@ -810,7 +810,7 @@ fn boat_dismount_position(
 ) -> Vec3 {
     const BOAT_HEIGHT: f64 = 0.5625;
 
-    // `Entity.getCollisionHorizontalEscapeVector`: every trigonometric and max
+    // Entity's get collision horizontal escape vector: every trigonometric and max
     // operation is `float` in vanilla before widening into the returned Vec3.
     let collider_width = f64::from(1.375f32 * std::f32::consts::SQRT_2);
     let colliding_width = f64::from(0.6f32);
@@ -853,7 +853,7 @@ fn boat_dismount_position(
             ));
         }
 
-        // `Player.getDismountPoses`: standing, crouching, then swimming.
+        // Player's get dismount poses: standing, crouching, then swimming.
         for dims in [
             EntityDimensions::PLAYER,
             EntityDimensions::new(0.6, 1.5, 0.6),
@@ -870,7 +870,7 @@ fn boat_dismount_position(
         }
     }
 
-    // `Entity.getDismountLocationForPassenger`: the vehicle centre at maxY.
+    // Entity's get dismount location for passenger: the vehicle centre at maxY.
     Vec3::new(
         boat_position.x,
         boat_position.y + BOAT_HEIGHT,
@@ -1108,7 +1108,7 @@ mod vehicle_tests {
     /// **Mounting, and the two refusals that make it mean something.**
     ///
     /// Sneak-clicking is the one with a visible symptom: without
-    /// `player.isSecondaryUseActive()`, shift-right-clicking a boat with a block in
+    /// player's is secondary use active, shift-right-clicking a boat with a block in
     /// hand boards it instead of placing, and there is no way to interact past a
     /// boat at all.
     #[test]
@@ -1178,7 +1178,7 @@ mod vehicle_tests {
     /// **The handover, which is the whole point of the vehicle registry.**
     ///
     /// While a player is aboard, the server must not move the boat: the client owns
-    /// it (`Player.isClientAuthoritative()`), and a server that also simulated it
+    /// it (Player's is client authoritative), and a server that also simulated it
     /// would fight the player. Once the boat is empty the server's float pass takes
     /// over again.
     ///
@@ -1295,8 +1295,8 @@ mod vehicle_tests {
         )
         .map(|complaint| wrong.push(complaint));
 
-        // `setHurtDir(-getHurtDir())`, `setHurtTime(10)`,
-        // `setDamage(getDamage() + damage * 10)`.
+        // set hurt dir, set hurt time,
+        // set damage.
         match hurt_of(&sim, boat) {
             Some((10, -1, d)) if (d - 25.0).abs() < f32::EPSILON => {}
             other => wrong.push(format!("after one hit the triple was {other:?}, expected (10, -1, 25.0)")),
@@ -1334,7 +1334,7 @@ mod vehicle_tests {
     ///
     /// The second arm is the security half and the one a "does the position update"
     /// gate cannot see: `apply_vehicle_move` resolves the vehicle from the *player*,
-    /// which is vanilla's `getRootVehicle()` rule, so a connection cannot drag a
+    /// which is vanilla's get root vehicle rule, so a connection cannot drag a
     /// boat it is not sitting in.
     ///
     /// The reported transform uses pairwise-distinct coordinates so a transposition

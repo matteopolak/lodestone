@@ -22,7 +22,7 @@
 //!
 //! 1. **Which faces to draw.** Vanilla's end-portal block-entity should-render-face
 //!    function
-//!    tests only the axis — `direction.getAxis() == Y` — with **no** neighbor
+//!    tests only the axis — `direction.get_axis() == Y` — with **no** neighbor
 //!    check at all, so an end portal always submits exactly its top and
 //!    bottom faces regardless of what is adjacent (there is no
 //!    [`end_portal_vertices`] parameter for this reason; it is not a choice
@@ -44,7 +44,7 @@
 //! Vertex data is **position only** — no UV, no colour, no normal. That is
 //! not a simplification; it is what vanilla's base end-portal renderer's own
 //! per-face vertex table
-//! actually submits (`buffer.addVertex(pose, faceVertex)`, nothing else).
+//! actually submits (buffer's add vertex, nothing else).
 //! The illusion comes entirely from the fragment shader
 //! (`gpu/end_portal.wgsl`), which derives its own texture coordinate from
 //! each fragment's *own* clip-space position
@@ -57,8 +57,8 @@
 //! ## What is deliberately not ported
 //!
 //! * **The gateway beam** (vanilla's end-gateway renderer's submit function's
-//!   beacon-renderer beam-submit call, shown while `isSpawning()`/
-//!   `isCoolingDown()`). It needs a per-position client-simulated
+//!   beacon-renderer beam-submit call, shown while is spawning/
+//!   is cooling down). It needs a per-position client-simulated
 //!   `teleportCooldown` tracker fed by the gateway's own `BLOCK_EVENT`
 //!   (`b0 == 1`, the same collision [`crate::block_entity::BellShakeDirection`]'s
 //!   doc already names — told apart by the block at the position, not the
@@ -71,7 +71,7 @@
 //!   general 9-parameter form is what vanilla's end-gateway renderer calls, not the
 //!   beacon's own accumulated-sections wrapper.
 //! * **Face culling for the end portal itself.** Vanilla genuinely draws no
-//!   side faces (`getAxis() == Y` only) — this is not a gap, it is the real
+//!   side faces (`get_axis() == Y` only) — this is not a gap, it is the real
 //!   rule; a portal frame's own real geometry occupies the sides.
 //! * **Fog.** Vanilla's own `rendertype_end_portal.fsh` applies `apply_fog`;
 //!   this pass does not, the same simplification `gpu/sign_text.rs` and
@@ -219,7 +219,7 @@ pub fn end_portal_vertices(pos: [i32; 3]) -> Vec<EndPortalVertex> {
     out
 }
 
-/// Vanilla's end-gateway renderer's submit function's `submitCube(state.facesToShow, ...)` —
+/// Vanilla's end-gateway renderer's submit function's submit cube —
 /// the full unit cube (`y ∈ [0, 1]`, no squash), restricted to whichever
 /// faces the caller resolved as unoccluded. See the module doc for why that
 /// resolution lives in `lodestone_shell::block_entities::end_gateway_spawns`

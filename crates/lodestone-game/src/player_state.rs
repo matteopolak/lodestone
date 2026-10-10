@@ -470,7 +470,7 @@ impl HeldItemHighlight {
     /// stack's identity — `None` for an empty slot, `Some((item, hover_name))`
     /// otherwise. `hover_name` should already carry any custom-name override
     /// (i.e. it is the string identity changes are compared against, matching
-    /// vanilla's `ItemStack::getHoverName()` equality check).
+    /// vanilla's ItemStack's get hover name equality check).
     pub fn tick(&mut self, selected: Option<(&Identifier, &str)>) {
         match selected {
             None => {

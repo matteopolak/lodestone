@@ -1,19 +1,19 @@
 //! The signed-book reading screen: vanilla's own book-view screen —
 //! the read-only sibling of [`super::book_edit`]'s
-//! `BookEditScreen`.
+//! The book edit screen.
 //!
 //! ## What it is
 //!
 //! Right-clicking a `minecraft:written_book` opens this. A hand-held book is
-//! client-local — `WrittenBookItem.use` calls `player.openItemGui(...)` —
+//! client-local — the written book item's use calls player's open item gui —
 //! while the lectern form of this screen sends server container actions for
 //! page turns and close. That is the same fork shape [`super::book_edit`]
 //! already has in `WindowApp::try_use`, one branch further along.
 //!
 //! ## Why the wrapping and the page geometry are borrowed, not re-derived
 //!
-//! `BookViewScreen` and `BookEditScreen` share vanilla's own numbers —
-//! `TEXT_WIDTH = 114`, `TEXT_HEIGHT = 128` against `BookEditScreen`'s
+//! The book view screen and the book edit screen share vanilla's own numbers —
+//! `TEXT_WIDTH = 114`, `TEXT_HEIGHT = 128` against the book edit screen's
 //! `126`, both `/ 9` lines — so this module reaches for
 //! [`super::book_edit::PAGE_WRAP_CHARS`] and
 //! [`super::book_edit::PAGE_LINE_LIMIT`] rather than restating them. The
@@ -24,7 +24,7 @@
 //!
 //! ## What is deliberately not here, named rather than hidden
 //!
-//! - **No title/author/generation header.** `BookViewScreen` draws exactly
+//! - **No title/author/generation header.** book view screen draws exactly
 //!   three things — the wrapped page text, the `book.pageIndicator` line and
 //!   a Done button. The title, the `book.byAuthor` line and the
 //!   `book.generation.<n>` line are `WrittenBookContent.addToTooltip`'s and
@@ -36,7 +36,7 @@
 //!   draws as plain labels over the standard dimmed backdrop, not over the
 //!   parchment sprite, because the menu overlay stream has no atlas.
 //!   Consequently the page text is drawn in the menu's ordinary light
-//!   colour rather than `BookViewScreen`'s `PAGE_TEXT_STYLE` black, which is
+//!   colour rather than the book view screen's `PAGE_TEXT_STYLE` black, which is
 //!   only legible against that sprite.
 //! ## Page text is interactive, and where that lives
 //!
@@ -100,7 +100,7 @@ pub mod page_row {
     pub const PREVIOUS: usize = 0;
     /// `forwardButton` — `>`.
     pub const NEXT: usize = 1;
-    /// `CommonComponents.GUI_DONE`.
+    /// The common components's gui done.
     pub const DONE: usize = 2;
     /// Lectern-only take-book action.
     pub const TAKE_BOOK: usize = 3;
@@ -128,7 +128,7 @@ pub struct BookViewOpen {
 
 impl BookViewOpen {
     /// An empty page list becomes one empty page, matching
-    /// `BookViewScreen`'s own `Math.max(this.getNumPages(), 1)` in the page
+    /// The book view screen's own `Math.max(this.get_num_pages(), 1)` in the page
     /// indicator: a book with no pages still shows "Page 1 of 1" rather than
     /// "Page 1 of 0".
     #[must_use]
@@ -153,7 +153,7 @@ impl BookViewOpen {
     }
 }
 
-/// The reading screen's live state — vanilla's `BookViewScreen`'s
+/// The reading screen's live state — vanilla's book view screen's
 /// `currentPage` plus the wrapped text of the page it names.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BookViewState {
@@ -166,7 +166,7 @@ pub struct BookViewState {
     /// Every authored page, in order. Never empty — see
     /// [`BookViewOpen::from_pages`].
     pages: Vec<ResolvedText>,
-    /// `BookViewScreen.currentPage`, always a valid index into
+    /// The book view screen's current page, always a valid index into
     /// [`Self::pages`].
     current_page: usize,
     /// The current page, wrapped. Read-only: nothing on this screen calls
@@ -242,7 +242,7 @@ impl BookViewState {
         }
     }
 
-    /// Builds the lectern form of the reader. `LecternMenu` stores the page as
+    /// Builds the lectern form of the reader. The lectern menu stores the page as
     /// a zero-based container-data value, so clamp malformed/out-of-range
     /// values to the book's actual page range before drawing it.
     #[must_use]
@@ -270,7 +270,7 @@ impl BookViewState {
     }
 
     /// The packet payload for the current page after a successful page turn.
-    /// Vanilla's `LecternScreen.sendPageToServer` sends this new zero-based
+    /// Vanilla's lectern screen's send page to server sends this new zero-based
     /// index as the protocol's lectern page-jump button id (`100 + index`).
     #[must_use]
     pub fn lectern_page_action(&self) -> Option<(i32, i32)> {
@@ -301,7 +301,7 @@ impl BookViewState {
         self.current_page + 1 < self.pages.len()
     }
 
-    /// `pageBack()`.
+    /// page back.
     pub fn page_back(&mut self) {
         if self.can_page_back() {
             self.current_page -= 1;
@@ -832,7 +832,7 @@ mod tests {
     }
 
     /// A book with no pages at all still reads as "Page 1 of 1", not "of 0" —
-    /// `BookViewScreen`'s own `Math.max(getNumPages(), 1)`.
+    /// The book view screen's own `Math.max(get_num_pages(), 1)`.
     #[test]
     fn a_pageless_book_still_reads_as_one_page() {
         let open = BookViewOpen::from_pages("T".to_owned(), "A".to_owned(), 0, &[], &|_| None);
@@ -890,7 +890,7 @@ mod tests {
     }
 
     /// Done closes the screen and sends nothing — the whole of this screen's
-    /// exit behaviour (`BookViewScreen` has no wire traffic at all), and the
+    /// exit behaviour (the book view screen has no wire traffic at all), and the
     /// discriminator against a copy of the editor's Done, which returns a
     /// `MenuAction::EditBook`.
     #[test]

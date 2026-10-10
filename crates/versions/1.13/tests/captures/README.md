@@ -53,7 +53,7 @@ and login `set_compression`/`success` are ids 3 and 2 in all three.
 ```
 
 The name went in through vanilla's own `/summon`, the id came back off
-vanilla's own wire, and the two were correlated by the summoned entity's own
+the server's wire, and the two were correlated by the summoned entity's own
 UUID — read back over RCON from the entity itself, not inferred from timing.
 Which packet carried the id is recorded because at 404 the two index
 **different** id spaces; see [`docs/protocol-1-13-era.md`](../../../../docs/protocol-1-13-era.md).

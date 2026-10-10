@@ -289,7 +289,7 @@ impl Sim {
     ///
     /// Vanilla does not have this seam at all: a passenger's screen position
     /// is composed directly from the vehicle's **already-interpolated**
-    /// render transform (`EntityRenderDispatcher` renders a passenger as a
+    /// render transform (the entity render dispatcher renders a passenger as a
     /// child of the vehicle it just placed), never from a second,
     /// independently-clocked position track. [`Self::riding_seat_this_frame`]
     /// reproduces that: it reads the vehicle's per-frame sampled feet/yaw from
@@ -483,7 +483,7 @@ impl Sim {
     /// layer, exactly as [`Self::set_view_bobbing`] does for View Bobbing.
     ///
     /// The two are the halves of one vanilla split and must be pushed together:
-    /// `GameRenderer.renderLevel` applies `bobHurt` *outside* the `bobView` check,
+    /// The game renderer's render level applies `bobHurt` *outside* the `bobView` check,
     /// so turning View Bobbing off must not take the damage tilt with it.
     ///
     /// Clamped here as well as on load, because this is the value a matrix is
@@ -530,7 +530,7 @@ impl Sim {
     /// to the camera fold separately from the fold itself.
     ///
     /// The option zeroes **only the walk terms**, never the hurt half of the
-    /// frame: vanilla's `bobHurt` is unconditional — `GameRenderer.renderLevel`
+    /// frame: vanilla's `bobHurt` is unconditional — the game renderer's render level
     /// applies it outside the `optionsRenderState.bobView` check
     /// — so the damage tilt must survive View
     /// Bobbing being off. A player who has not been hit recently is unaffected
@@ -563,12 +563,12 @@ impl Sim {
             .frame(self.clock().interp_alpha, player.yaw, player.pitch)
     }
 
-    /// The local player was hurt: start the damage tilt (`Player.animateHurt`,
-    /// which records `hurtDir = yaw` after `LivingEntity.animateHurt` resets the
+    /// The local player was hurt: start the damage tilt (Player's animate hurt,
+    /// which records `hurtDir = yaw` after the living entity's animate hurt resets the
     /// ten-tick countdown). The wire `yaw` is
-    /// `ClientboundHurtAnimationPacket.yaw`, already decoded onto
+    /// Hurt-animation packet.yaw, already decoded onto
     /// `ClientEvent::EntityHurtAnimation`; the server computes it as
-    /// `atan2(damage) - playerYaw` (`ServerPlayer.indicateDamage`), so a hit from
+    /// `atan2(damage) - playerYaw` (the server player's indicate damage), so a hit from
     /// straight ahead is `0` — the pure-roll case.
     ///
     /// The camera-side half of the `bobHurt` wiring: `ViewBob` owns the
@@ -612,7 +612,7 @@ impl Sim {
         // The bob lands **here and not in `Self::camera`**, which is deliberate
         // and is the difference between a wobbling camera and a wobbling *game*:
         // `Self::camera` is also the block-targeting ray origin and the audio
-        // listener, and vanilla bobs neither. `GameRenderer.renderLevel` folds the
+        // listener, and vanilla bobs neither. The game renderer's render level folds the
         // bob into the *projection matrix* (`:539`), so `Camera`'s own position
         // and rotation — what `getPickRay` and the listener read — never see it.
         //
@@ -649,7 +649,7 @@ impl Sim {
         // `third_person_camera`.
         if self.camera_type.is_first_person() {
             // Vanilla's FOV zoom is gated on `firstPerson &&
-            // isScoping()` (its own field-of-view-modifier calculation) —
+            // is_scoping()` (its own field-of-view-modifier calculation) —
             // a third-person camera
             // never zooms, so this composition only runs on the early
             // first-person return, not the two third-person branches below.
@@ -706,7 +706,7 @@ impl Sim {
     /// elsewhere in this codebase rather than guessed at:
     /// * **Head yaw never diverges from body yaw** (`head_yaw_deg` is always
     ///   `0`): vanilla's independent head-turn-then-body-catches-up
-    ///   (`LivingEntity.tickHeadTurn`) is not modelled for the local player
+    ///   (the living entity's tick head turn) is not modelled for the local player
     ///   anywhere in this engine.
     /// * **`slim`/skin data**: the rig comes from
     ///   [`crate::skin_fetch::current_model`] — the same signed-in-profile
@@ -737,7 +737,7 @@ impl Sim {
     /// `app/redraw.rs`; see `docs/inventory-player-preview.md`.
     ///
     /// **`attack_anim` here is a phase, not a fraction.** `1.0` is the rest pose
-    /// again, because `HumanoidModel.setupAttackAnimation` drives it through sines
+    /// again, because humanoid model's setup attack animation drives it through sines
     /// and `sin(π) == 0` — so a consumer that substitutes `1.0` for "fully
     /// swung" measures no movement at all and reads as unwired.
     #[must_use]
@@ -973,7 +973,7 @@ impl Sim {
             limb_swing: walk.limb_swing,
             limb_swing_amount: walk.limb_swing_amount,
             // The self-avatar's *body* half of the swing:
-            // `HumanoidModel.setupAttackAnimation`, via
+            // The humanoid model's setup attack animation, via
             // `lodestone_render::entity_anim::Skeleton::pose`. The same scalar
             // the first-person arm pass polls through
             // `Sim::hand_swing_progress`, but a completely different pose

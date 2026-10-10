@@ -495,7 +495,7 @@ impl AtlasBuilder {
     /// Mips are generated **per sprite** with vanilla's algorithm ([`mipmap`]:
     /// linear-light mean, cutout `solidify`, alpha-coverage preservation) and
     /// composited into aligned atlas mip levels, exactly as vanilla's
-    /// `SpriteContents`/atlas do — never by box-filtering the stitched atlas,
+    /// sprite-contents and atlas code do — never by box-filtering the stitched atlas,
     /// which would bleed across sprite boundaries. The effective level count is
     /// capped by the smallest sprite (a sprite dimension must be divisible by
     /// `2^level`), and sprite cells are aligned so `(x >> L, y >> L)` lands each
@@ -729,7 +729,7 @@ impl AtlasBuilder {
         // level-0 blit because level 0 is `chain[0]` — the *prepared* base
         // (solidified, or dark-filled for a `dark_cutout` sprite) — and not the
         // raw decoded PNG. Vanilla gets that for free by mutating the sprite's
-        // own `NativeImage` in place; this CPU path has to keep the prepared
+        // own native image in place; this CPU path has to keep the prepared
         // copy and use it for both the base level and the downsample.
         //
         // `None` when no mips were requested, which leaves those atlases (GUI,
@@ -772,10 +772,10 @@ impl AtlasBuilder {
         let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
         for (p, &(i, x, y)) in placements.iter().enumerate() {
             // Vanilla's own mipmap-generator "generate mip levels" step mutates
-            // `currentMips[0]` **in place** (its own texture-util "solidify" /
-            // "fill empty areas with dark color" steps) and then sets `result[0] =
-            // currentMips[0]`, and `currentMips[0]` *is* the `NativeImage`
-            // its own sprite-contents "upload first frame" step later uploads at level 0. So
+            // the first mip level **in place** (its own "solidify" /
+            // "fill empty areas with dark color" steps) and then uses that
+            // same level as the result's level 0, which *is* the image
+            // its own "upload first frame" step later uploads at level 0. So
             // vanilla's level 0 carries the prepared base, not the raw PNG, and
             // the chain's own level 1 was downsampled from that same prepared
             // image. Blitting the raw image here instead made level 0 the one

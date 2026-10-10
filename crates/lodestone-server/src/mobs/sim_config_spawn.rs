@@ -157,7 +157,7 @@ impl<'w> MobSim<'w> {
     /// [`spawn_species`](Self::spawn_species) call feeds to
     /// [`lodestone_entity::spawn_equipment::populate_default_equipment_slots`]'s
     /// armour-upgrade roll: `special_multiplier` (`DifficultyInstance
-    /// ::getSpecialMultiplier`, `0.0`..`1.0`) and whether the world's base
+    /// ::get special multiplier`, `0.0`..`1.0`) and whether the world's base
     /// difficulty is Hard.
     ///
     /// `crate::tick::run_tick_loop` is the real production caller — it
@@ -830,7 +830,7 @@ impl<'w> MobSim<'w> {
         pumpkin_pos: (i32, i32, i32),
     ) -> Option<GolemConstruction> {
         if let Some(found) = golem::find_golem_pattern(block_at, golem::SNOW_GOLEM_PATTERN, pumpkin_pos) {
-            // `getBlock(0, 2, 0)` — the bottom snow block's cell.
+            // get block — the bottom snow block's cell.
             let feet = found.translate(0, 2, 0);
             let consumed = found.consumed(golem::SNOW_GOLEM_PATTERN);
             let id = self
@@ -846,7 +846,7 @@ impl<'w> MobSim<'w> {
             });
         }
         if let Some(found) = golem::find_golem_pattern(block_at, golem::IRON_GOLEM_PATTERN, pumpkin_pos) {
-            // `getBlock(1, 2, 0)` — the bottom-centre iron block's cell.
+            // get block — the bottom-centre iron block's cell.
             let feet = found.translate(1, 2, 0);
             let consumed = found.consumed(golem::IRON_GOLEM_PATTERN);
             let id = self

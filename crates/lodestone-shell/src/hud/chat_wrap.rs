@@ -42,8 +42,8 @@ pub(super) fn strip_legacy(s: &str) -> String {
 /// precisely so its wrap *decisions* can be tested against a hand-specified
 /// width table with no `Builder`, atlas, or jar involved.
 ///
-/// Mirrors vanilla's own reflow in shape (`GuiMessage.splitLines`, invoked
-/// from `ChatComponent.addMessageToDisplayQueue`, vanilla's own chat-component rendering):
+/// Mirrors vanilla's own reflow in shape (the gui message's split lines, invoked
+/// from the chat component's add message to display queue, vanilla's own chat-component rendering):
 /// break on a space when the next word would overflow, and hard-break a
 /// single word that alone exceeds the width so nothing can escape the box. A
 /// `§` colour/format code seen before a break is carried onto the
@@ -341,7 +341,7 @@ pub(super) fn split_span_paragraphs(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
 /// `max_width_px`, measured by calling `measure` on each candidate row's
 /// spans. The [`TextSpan`] sibling of [`wrap_legacy_paragraph`]: same greedy
 /// break-on-space / hard-break-an-overlong-word algorithm (mirroring
-/// vanilla's `GuiMessage.splitLines`), generalised from "carry the single
+/// vanilla's gui message's split lines), generalised from "carry the single
 /// most recent `§` code onto the continuation line" to "every character
 /// keeps its own already-resolved style" — a styled chat line can carry more
 /// than one colour change per wrapped row (a sender name in one colour
@@ -645,7 +645,7 @@ pub fn chat_interaction_at(
 }
 
 /// [`chat_interaction_at`] with the open chat screen's entry-based scroll
-/// offset. `scrolled` is `ChatComponent.chatScrollbarPos`: entries at the live
+/// offset. `scrolled` is the chat component's chat scrollbar pos: entries at the live
 /// bottom that are outside the rendered window must not be hit-testable.
 #[must_use]
 pub fn chat_interaction_at_scrolled(

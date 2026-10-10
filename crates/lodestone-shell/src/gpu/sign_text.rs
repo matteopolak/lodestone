@@ -26,7 +26,7 @@
 //! override**: vanilla's own sign-renderer submit routine passes the side's
 //! resolved colour (full dye when glowing, vanilla's own ARGB-scale-RGB helper applied to `(dye, 0.4)`
 //! otherwise) as the font's own default-colour argument, and
-//! vanilla's own text-colour resolver only substitutes it when a glyph's own style
+//! vanilla's text-colour resolver only substitutes it when a glyph's style
 //! carries no colour at all — a run that *does* specify one always wins,
 //! at any brightness. [`default_run_color`] resolves that default (via
 //! [`sign_side_color`], the existing glow/dark-scale logic, unchanged), and
@@ -87,10 +87,10 @@
 //!
 //! # Glowing text's outline, as a precomposited dilated mask
 //!
-//! `Font.prepare8xTextOutline` draws the whole string **eight** more times,
+//! Font's prepare 8x text outline draws the whole string **eight** more times,
 //! at every `(dx, dy)` in `{-1, 0, 1}²` except `(0, 0)`, each displaced by
-//! `dx * glyph.getShadowOffset()`, in the outline colour — then
-//! `TextFeatureRenderer` visits that output before the real glyphs.
+//! `dx * glyph.get_shadow_offset()`, in the outline colour — then
+//! The text feature renderer visits that output before the real glyphs.
 //!
 //! Eight copies of an ink-run layout would be an 8× vertex multiplier on a
 //! pass that already has a fixed budget, and it is unnecessary here: the
@@ -108,9 +108,9 @@
 //! per-glyph [`StyledRect::outline_grow`](super::nametag::StyledRect)
 //! (vanilla's own glyph-info shadow-offset accessor, half a pixel for a unihex glyph), and
 //! underline/strikethrough bars carry `0.0` there and so contribute no
-//! outline at all — vanilla's `outlineOutput.discardEffects()`.
+//! outline at all — vanilla's outline output's discard effects.
 //!
-//! Vanilla submits the outline through `DisplayMode.NORMAL` and the glyphs
+//! Vanilla submits the outline through the display mode's normal and the glyphs
 //! through `POLYGON_OFFSET`. Lodestone preserves both distinct render types
 //! and their order. Live probing additionally showed one correctly gathered
 //! side, two correctly submitted ranges, but thousands of opaque overlapping
@@ -119,10 +119,10 @@
 //!
 //! # Light: the branch that makes `has_glowing_text` mean anything
 //!
-//! `AbstractSignRenderer.submitSignText` sets three things off
-//! `signText.hasGlowingText()`, and the third one is the light coordinate:
-//! `15728880` (`LightCoordsUtil.FULL_BRIGHT` — sky 15 **and** block 15) when
-//! glowing, `state.lightCoords` (the sign block's own sampled light) when
+//! The abstract sign renderer's submit sign text sets three things off
+//! sign text's has glowing text, and the third one is the light coordinate:
+//! `15728880` (the light coords util's full bright — sky 15 **and** block 15) when
+//! glowing, state's light coords (the sign block's own sampled light) when
 //! not. The glyph colour and the outline were ported first; this is the
 //! third. Until it existed both arms produced identical pixels, because this
 //! pass sampled no lightmap at all — so a glowing sign and a plain one were
@@ -140,7 +140,7 @@
 //!   is not bright at all, which is exactly when a glowing sign has to be.
 //! * **The outline takes the same byte as the glyphs.** Vanilla submits it
 //!   through a different *display mode* but the same `lightVal`, and both
-//!   `DisplayMode.NORMAL` and `POLYGON_OFFSET` select a render type whose
+//!   The display mode's normal and `POLYGON_OFFSET` select a render type whose
 //!   shader does sample the lightmap (only `SEE_THROUGH` does not, and sign
 //!   text is never see-through). The outline only exists for a glowing side
 //!   anyway, so in practice it is always the full-bright byte.
@@ -545,7 +545,7 @@ const MAX_SIGN_TEXT_VERTICES: usize = 1_048_576;
 /// projects to nothing anyway.
 const BEHIND_EYE_SLACK: f32 = 1.0;
 
-/// The glowing outline's depth state — vanilla's `Font.DisplayMode.NORMAL` half
+/// The glowing outline's depth state — vanilla's font's display mode's normal half
 /// of an outlined text submission.
 ///
 /// **The reason previously written here was false and is worth recording,
@@ -570,7 +570,7 @@ const BEHIND_EYE_SLACK: f32 = 1.0;
 /// worth on this renderer's depth buffer.
 const SIGN_OUTLINE_DEPTH_BIAS: wgpu::DepthBiasState = CAMERA_DEPTH_BIAS;
 
-/// The ordinary ink's depth state — vanilla's `Font.DisplayMode.POLYGON_OFFSET`
+/// The ordinary ink's depth state — vanilla's font's display mode's polygon offset
 /// half, whose pipeline declares a scale factor of `1` and a constant of `10`.
 ///
 /// Twice [`CAMERA_DEPTH_BIAS`] rather than exactly one step. The doubling was
@@ -1279,14 +1279,14 @@ fn styled_spans(line: &[SignTextSpan], default_rgb: u32) -> Vec<TextSpan> {
 /// misread as a bug when you see it, and it is the reason a hanging sign's
 /// text stays inside a board that is a third narrower than a standing one's:
 /// vanilla's own sign-block-entity max-text-line-width accessor is 90 and
-/// `HangingSignBlockEntity`'s override is 60, and nothing else in the two
+/// The hanging sign block entity's override is 60, and nothing else in the two
 /// renderers constrains the text horizontally at all.
 ///
 /// Wraps through `crate::hud::wrap_spans_with`, this crate's one styled
 /// word-wrap (the same greedy break-on-space / hard-break-an-overlong-word
 /// body chat uses), measured by
 /// [`super::nametag::styled_advance_width`] — vanilla measures its own split
-/// with `StringSplitter`'s advance-only callback rather than by laying out
+/// with the string splitter's advance-only callback rather than by laying out
 /// ink, and doing the same here keeps a wrap from costing more than the draw.
 fn split_first_line(
     raster: &RasterFont,
@@ -1297,7 +1297,7 @@ fn split_first_line(
     let mut rows = crate::hud::wrap_spans_with(measure, spans, max_width);
     if rows.is_empty() {
         // `wrap_spans_with` documents that it never returns an empty vector;
-        // this is `components.isEmpty() ? FormattedCharSequence.EMPTY` anyway,
+        // this is components.isEmpty() ? formatted char sequence's empty anyway,
         // so the two agree on the degenerate case rather than one of them
         // panicking if the other's guarantee ever changes.
         return Vec::new();
@@ -1400,7 +1400,7 @@ fn push_side_layers_with_state(
     let matrix = sign_text_transform(pos, kind, orientation, is_front);
     let default_rgb = default_run_color(side);
     let max_width = kind.max_text_line_width();
-    // `AbstractSignRenderer.submitSignText`: `signMidpoint = 4 *
+    // The abstract sign renderer's submit sign text: `signMidpoint = 4 *
     // textLineHeight / 2`, i.e. two full lines — line `i`'s top sits at
     // `i * textLineHeight - signMidpoint`. The height is the **block
     // entity's**, not a constant: a hanging sign overrides it to 9.
@@ -1472,7 +1472,7 @@ fn push_side_layers_with_state(
         let x1 = -total_width / 2.0;
         let y_off = i as f32 * line_height - sign_midpoint;
         // Keep every outline in the first range and every glyph in the second.
-        // `TextFeatureRenderer.buildGroup` visits `prepare8xTextOutline` before
+        // The text feature renderer's build group visits `prepare8xTextOutline` before
         // `prepareText`; Lodestone preserves that ordering as two contiguous
         // ranges and two draws, with vanilla's NORMAL then POLYGON_OFFSET
         // pipelines. They share a physical plane but not a depth policy.
@@ -1949,7 +1949,7 @@ mod tests {
     ///
     /// The population it demands is not a round number picked to be
     /// comfortable: it is what a storage room looks like. `FULL_SIGNS` is a
-    /// four-line, two-sided sign, the most a `SignBlockEntity` can carry;
+    /// four-line, two-sided sign, the most a sign block entity can carry;
     /// `LABEL_SIGNS` is a one-line chest label, which is what people
     /// actually place dozens of.
     #[test]

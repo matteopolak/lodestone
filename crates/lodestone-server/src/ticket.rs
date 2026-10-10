@@ -510,7 +510,7 @@ impl TicketStore {
     }
 
     /// Every currently-resident position, ordered nearest-level-first — the
-    /// answer to "priority is the ticket level" (`ChunkTaskDispatcher.submit`,
+    /// answer to "priority is the ticket level" (the chunk task dispatcher's submit,
     /// Each entry carries the ticket priority used by a generation caller.
     #[must_use]
     pub fn resident_positions_by_level(&self) -> Vec<(i32, i32)> {

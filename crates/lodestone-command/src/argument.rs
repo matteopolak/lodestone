@@ -36,7 +36,7 @@ pub trait ArgumentType: Send + Sync {
     /// Static completion candidates for this type, given the partially-typed
     /// text for this slot (not yet filtered — [`crate::node::CommandTree::suggest`]
     /// does the case-insensitive prefix filter uniformly for every node kind,
-    /// mirroring `SharedSuggestionProvider.suggest`). Most primitive types
+    /// mirroring the game's suggestion helper). Most primitive types
     /// have none; [`BoolArgument`] is the one built-in exception.
     fn suggest(&self, _partial: &str) -> Vec<String> {
         Vec::new()
@@ -373,7 +373,7 @@ impl ArgumentType for ChoicesArgument {
     fn suggest(&self, _partial: &str) -> Vec<String> {
         // Unfiltered on purpose: `CommandTree::suggest` applies the
         // case-insensitive prefix filter uniformly for every node kind, exactly
-        // as `SharedSuggestionProvider.suggest` does. Filtering here as well
+        // as the game's suggestion helper does. Filtering here as well
         // would be harmless but would put the same rule in two places.
         self.provider.candidates()
     }

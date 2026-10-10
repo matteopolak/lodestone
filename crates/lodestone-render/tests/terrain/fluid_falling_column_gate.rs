@@ -6,12 +6,12 @@
 //!
 //! # The rule that was missing, and where
 //!
-//! Vanilla `FluidRenderer.tesselate` does not average corner heights
+//! Vanilla's fluid renderer tesselation does not average corner heights
 //! unconditionally. It first computes the fluid's own rendered height and
 //! short-circuits:
 //!
 //! ```text
-//! float heightSelf = this.getHeight(level, type, pos, blockState, fluidState);
+//! float heightSelf = this's get height;
 //! if (heightSelf >= 1.0F) {
 //!    heightNorthEast = heightNorthWest = heightSouthEast = heightSouthWest = 1.0F;
 //! } else {
@@ -19,12 +19,12 @@
 //! }
 //! ```
 //!
-//! `heightSelf` reaches `1.0` only via `FlowingFluid.getHeight`'s `hasSameAbove`,
-//! since `WaterFluid.Source.getAmount` is `8` and so even a source's own height is
+//! The own height reaches `1.0` only via the flowing fluid's height with its same-above flag,
+//! since a water source's amount is `8` and so even a source's own height is
 //! `8/9`. Every cell of a falling column has water above it, so vanilla draws the
 //! whole column at full height and it is seamless.
 //!
-//! `mesh_fluids` had `FlowingFluid.getHeight` right — `neighbor_height_in` really
+//! `mesh_fluids` had the flowing fluid's height right — `neighbor_height_in` really
 //! does return `1.0` for a cell with the same fluid above — and then averaged
 //! anyway, because the branch above it had no counterpart in this codebase at all.
 //! Against open air that average is `10 / 12 = 0.8333`: the full self cell at
@@ -103,7 +103,7 @@ impl FluidSectionView for TwoColumns {
     fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
         Self::is_water(x, y, z).then(|| FluidCell {
             kind: FluidKind::Water,
-            // Vanilla's falling water is `getFlowing(8, true)`: amount 8, falling.
+            // Vanilla's falling water is get flowing: amount 8, falling.
             // The amount is deliberately not 9 — nothing in the game has 9, which
             // is why `heightSelf` can only reach 1.0 through `hasSameAbove`.
             state: FluidState::new(8, true),

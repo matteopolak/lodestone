@@ -60,7 +60,7 @@ pub fn polar_bear_model() -> EntityModelDef {
 /// the always-shown player/zombie hat elsewhere in this corpus) and a `nose`.
 /// `arms` itself carries two direct cubes *and* a `left_shoulder` child
 /// (vanilla's own asymmetric shape: `arms` is the crossed-arms pose, only
-/// shown when `IllagerArmPose.CROSSED`; `right_arm`/`left_arm` are the normal
+/// shown when the arm pose is crossed; `right_arm`/`left_arm` are the normal
 /// separate arms). Sheet 64×64.
 fn illager_base_model() -> EntityModelDef {
     let head = PartDef::new(PartPose::ZERO)
@@ -197,7 +197,7 @@ pub fn ravager_model() -> EntityModelDef {
 
 /// vanilla's own allay model's body-layer construction: the mesh's *own* root is empty and holds one
 /// child, `"root"` (offset `(0, 23.5, 0)`), which vanilla's constructor then
-/// re-roots onto (`super(root.getChild("root"))`) — i.e. the part vanilla
+/// re-roots onto (`super(root.get_child("root"))`) — i.e. the part vanilla
 /// actually renders from is `"root"`, not the mesh's nominal top part. This
 /// port bakes that offset directly into `EntityModelDef.root`'s own pose
 /// (matching what vanilla actually renders) rather than reproducing the
@@ -364,7 +364,7 @@ pub fn mooshroom_model() -> EntityModelDef {
 pub fn arrow_model() -> EntityModelDef {
     let cross = || {
         let mut c = cube([-12.0, -2.0, 0.0], [16.0, 4.0, 0.0], [0.0, 0.0]);
-        // `addBox(..., CubeDeformation.NONE, xTexScale = 1.0, yTexScale = 0.8)`.
+        // a box with no grow and texture scales x = 1.0, y = 0.8.
         // The V divisor becomes `32 * 0.8 = 25.6`, which stretches the box's
         // 4 texels of height across 5 rows of the sheet — the shaft strip is 5
         // pixels tall in `arrow.png`, not 4.

@@ -23,8 +23,8 @@ impl WindowApp {
         }
     }
 
-    /// Whether the anvil rename box has focus this instant — `AnvilScreen`'s
-    /// `setCanLoseFocus(false)` plus `slotChanged`'s `setEditable(!itemStack.
+    /// Whether the anvil rename box has focus this instant — the anvil screen's
+    /// set can lose focus plus `slotChanged`'s `set editable(!itemStack.
     /// isEmpty())`, collapsed into one predicate since this box has no
     /// separate focus flag to track (see [`KeyGate::anvil_rename_active`]'s
     /// own doc): active exactly when the anvil screen is open and its input
@@ -250,7 +250,7 @@ impl WindowApp {
     /// ([`crate::container::beacon::BeaconSelection`]); the wire send
     /// happens on confirm, gated on
     /// [`crate::container::beacon::BeaconSelection::can_confirm`] the same
-    /// way vanilla's own `BeaconConfirmButton.active` gates the press —
+    /// way vanilla's own beacon confirm button's active gates the press —
     /// `updateEffects` never runs server-side for an inactive confirm
     /// either, so a click that lands there while it is disabled is simply
     /// consumed and does nothing, matching what the player sees.
@@ -301,14 +301,14 @@ impl WindowApp {
 
     /// The crafter's own click override (`SetContainerSlotState`
     /// remainder): a plain click on an empty, non-spectator crafter slot
-    /// toggles that slot's enabled/disabled state — `CrafterScreen.slotClicked`
+    /// toggles that slot's enabled/disabled state — the crafter screen's slot clicked
     /// (`.cache/mc/26.2/client-src`)'s `PICKUP` case: re-enable a disabled
     /// slot unconditionally, or disable an enabled one only when nothing is
     /// carried (so placing an item there still works normally).
     ///
     /// **Unlike [`Self::handle_beacon_click`]/[`Self::handle_enchant_click`],
     /// this never *consumes* the click** — vanilla's own override still calls
-    /// `super.slotClicked(...)` unconditionally right after its toggle check,
+    /// super's slot clicked unconditionally right after its toggle check,
     /// so the ordinary (here, effectively a no-op — the slot is empty and the
     /// cursor usually is too) container click still goes out alongside this
     /// one. Callers should invoke this as a side effect beside the normal
@@ -318,7 +318,7 @@ impl WindowApp {
     /// **Named simplifications**: only a plain click (`ContainerInput::PICKUP`)
     /// is handled — vanilla's `SWAP` case (pressing a hotbar number over a
     /// disabled slot holding a matching item) is not. And there is no local,
-    /// optimistic `containerData` mutation the way `CrafterMenu.setSlotState`
+    /// optimistic `containerData` mutation the way crafter menu's set slot state
     /// gives vanilla's own client — the toggle only becomes visible once the
     /// server's `container_set_data` echoes it back into
     /// [`lodestone_client::OpenMenuSnapshot::data`] (already threaded end to
@@ -439,7 +439,7 @@ impl WindowApp {
                 costs[index] = *value;
             }
         }
-        // `EnchantmentMenu`'s lapis slot is menu index 1 — the same constant
+        // The enchantment menu's lapis slot is menu index 1 — the same constant
         // `container::geometry::draw_enchanting_costs` reads.
         const LAPIS_SLOT: usize = 1;
         let lapis_count = menu.slot_item(LAPIS_SLOT).map_or(0, lodestone_game::item::ItemStack::count);
@@ -467,7 +467,7 @@ impl WindowApp {
     /// remainder for this screen — see
     /// [`crate::container::stonecutter`]'s module doc). Same shape as
     /// [`Self::handle_enchant_click`]: a hit *is* the send, pre-validated
-    /// client-side the same way vanilla's own `StonecutterMenu` mirror gates
+    /// client-side the same way vanilla's own stonecutter menu mirror gates
     /// `clickMenuButton` before ever reaching the network.
     ///
     /// `start_index` reads the persisted [`Self::stonecutter_scroll`] offset
@@ -475,7 +475,7 @@ impl WindowApp {
     /// **stale, corrected**: this used to be pinned at `0` with no scroll
     /// input wired anywhere, which was true when written and is not any
     /// more (see [`Self::scroll_stonecutter`]). The screen stays open
-    /// afterwards, matching `StonecutterScreen`: selecting a recipe never
+    /// afterwards, matching stonecutter screen: selecting a recipe never
     /// closes it.
     pub(super) fn handle_stonecutter_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
         if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Stonecutter) {
@@ -511,14 +511,14 @@ impl WindowApp {
     /// One `MouseWheel` notch over an open stonecutter screen: advances
     /// [`Self::stonecutter_scroll`] through
     /// [`crate::container::stonecutter::scroll_offset_after_wheel`] —
-    /// `StonecutterScreen.mouseScrolled`'s own step. Returns whether the
+    /// The stonecutter screen's mouse scrolled's own step. Returns whether the
     /// notch was consumed (the stonecutter screen is open and has a
     /// non-empty match list), the same "did this surface claim it" shape
     /// [`Self::handle_bundle_scroll`] uses, so a caller can gate any further
     /// scroll handling on it.
     ///
     /// Unlike vanilla's `mouseScrolled`, this does not check the cursor
-    /// position — vanilla does not either: `StonecutterScreen` overrides
+    /// position — vanilla does not either: the stonecutter screen overrides
     /// `mouseScrolled` with no bounds check at all, since the whole screen
     /// has exactly one scrollable region.
     pub(super) fn scroll_stonecutter(&mut self, notches: f64) -> bool {
@@ -548,9 +548,9 @@ impl WindowApp {
     /// pre-validated client-side against
     /// [`crate::container::loom::display_patterns`]/
     /// [`crate::container::loom::selectable_pattern_count`] the same way
-    /// vanilla's own `LoomMenu` mirror gates `clickMenuButton` before ever
+    /// vanilla's own loom menu mirror gates `clickMenuButton` before ever
     /// reaching the network. The screen stays open afterwards, matching
-    /// `LoomScreen`: selecting a pattern never closes it.
+    /// The loom screen: selecting a pattern never closes it.
     pub(super) fn handle_loom_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
         if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Loom) {
             return false;
@@ -584,7 +584,7 @@ impl WindowApp {
     /// One `MouseWheel` notch over an open loom screen — the same shape as
     /// [`Self::scroll_stonecutter`], advancing [`Self::loom_scroll`] through
     /// [`crate::container::loom::scroll_offset_after_wheel`]
-    /// (`LoomScreen.mouseScrolled`'s own step, also with no cursor-position
+    /// (the loom screen's mouse scrolled's own step, also with no cursor-position
     /// check, matching vanilla).
     pub(super) fn scroll_loom(&mut self, notches: f64) -> bool {
         let Some(menu) = self.active_container_menu() else { return false };
@@ -607,8 +607,8 @@ impl WindowApp {
     }
 
     /// Report this panel's open/filter state for `book_type` to the server —
-    /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`, sent from
-    /// `RecipeBookComponent`'s own toggle and filter handlers.
+    /// vanilla's recipe-book-change-settings packet, sent from
+    /// The recipe book component's own toggle and filter handlers.
     ///
     /// This is the **producer** half of a round trip whose two other thirds
     /// already existed: every protocol family encodes
@@ -859,7 +859,7 @@ impl WindowApp {
         let Some(action) = drop_selected_action(game_mode, ctrl) else {
             return;
         };
-        // Vanilla's `Minecraft.handleKeybinds` swings the main hand only when
+        // Vanilla's Minecraft's handle keybinds swings the main hand only when
         // `Player.drop` reports it actually dropped something, so an empty slot
         // is silent. `predict_drop_selected` is our answer to the same question,
         // which is why the swing hangs off its return value rather than off the

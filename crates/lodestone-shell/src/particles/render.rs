@@ -123,7 +123,7 @@ impl ParticleRenderer {
         // One deliberate deviation: vanilla's opaque pipeline has no blending at
         // all, and this one keeps `ALPHA_BLENDING`. `Behaviour::layer()` assigns
         // every `Terrain` particle to `Layer::Opaque` unconditionally, where
-        // vanilla's own by-sprite layer selection consults the sprite's own transparency and
+        // vanilla's by-sprite layer selection consults the sprite's transparency and
         // sends a translucent block texture to `TRANSLUCENT_TERRAIN` instead. So
         // a broken glass or ice block reaches this pipeline here and would not
         // in vanilla, and a non-blending pipeline would draw it as opaque

@@ -86,25 +86,25 @@ fn address() -> ServerAddress {
 /// **server's own** [`MobHandle`] (not the client's read model, which is
 /// covered separately below) two exact, hand-predicted numbers:
 ///
-/// * **Damage**: `vanilla's own player's own create attributes()`'s bare-hand `ATTACK_DAMAGE =
+/// * **Damage**: the player's bare-hand `ATTACK_DAMAGE =
 ///   1.0` (confirmed against the decompiled 26.2 player source) against a
 ///   real zombie's `ARMOR = 2.0`, no toughness
 ///   override (confirmed against the decompiled zombie and monster sources,
-///   `vanilla's own monster's own create monster attributes()`'s
+///   the monster attribute set's
 ///   base has no `ARMOR_TOUGHNESS`), through
-///   `vanilla's own combat rules's own get damage after absorb`: `toughness = 2 + 0/4 = 2`,
+///   the combat-rules armour absorption: `toughness = 2 + 0/4 = 2`,
 ///   `realArmor = clamp(2 - 1.0/2, 2*0.2, 20) = 1.5`, `frac = 1.5/25 =
 ///   0.06`, `damage = 1.0 * (1 - 0.06) = 0.94`.
 /// * **Knockback**: this is **two independent, chained impulses**, not one —
-///   vanilla's `vanilla's own living entity's own hurt server` unconditionally calls
-///   `dealDefaultKnockback` (flat `0.4`, gated on nothing but "damage was not
+///   the living entity's hurt handling unconditionally applies
+///   a default knockback (flat `0.4`, gated on nothing but "damage was not
 ///   `NO_KNOCKBACK`-tagged" — **not** on sprinting) and, separately,
-///   `vanilla's own player's own attack` calls `causeExtraKnockback` with `getKnockback(...) +
+///   the player's attack applies an extra knockback with the knockback value +
 ///   (sprintAttack ? 0.5F : 0.0F)` (`0.5` here: bare hand, no enchant,
 ///   sprinting). Direction for both, per `dealDefaultKnockback`'s own
-///   `source.getSourcePosition().x() - this.getX()` (source = attacker,
+///   get source position's get source position (source = attacker,
 ///   `this` = target): `dx = attacker_pos.x - target_pos.x = 0 - 1 = -1`,
-///   `dz = 0`. `knockback_impulse`'s formula (`vanilla's own living entity's own knockback`:
+///   `dz = 0`. `knockback_impulse`'s formula (the living entity's knockback:
 ///   `deltaMovement.x/2 - deltaVector.x`) chained twice, hand-derived here
 ///   and cross-checked against `lodestone-server/tests/mob_attack.rs`'s
 ///   `positive_knockback_power_produces_the_exact_predicted_velocity`
@@ -225,7 +225,7 @@ async fn real_client_attacks_a_live_mob_and_the_server_applies_damage_and_knockb
     // constant `0.5`, not `0.0` — see `SPRINT_ATTACK_KNOCKBACK_POWER`'s own
     // doc comment. This is a magnitude difference, not an on/off one: even a
     // non-sprinting bare-handed hit still gets vanilla's mandatory flat `0.4`
-    // default knockback (`vanilla's own living entity's own deal default knockback`, gated on
+    // default knockback (applied on every hurt, gated on
     // nothing but the damage source not being `NO_KNOCKBACK`-tagged) — see
     // `crates/lodestone-server/tests/mob_attack.rs`'s
     // `a_non_sprinting_hit_still_applies_the_default_knockback`. Sprinting

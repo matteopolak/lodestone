@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn would_survive_sugar_cane_ignores_adjacency_by_design() {
         // See BlockPredicate::WouldSurviveSugarCane's own doc: the
-        // water-adjacency half of CactusBlock's real-vanilla sibling
-        // (SugarCaneBlock.canSurvive) is deliberately NOT modelled here —
+        // water-adjacency half of the cactus block's real-vanilla sibling
+        // (the sugar-cane survival check) is deliberately NOT modelled here —
         // every patch_sugar_cane* placed feature re-checks it via an
         // explicit sibling `any_of(matching_fluids)`. This predicate alone
         // must therefore pass on bare sand with NO adjacent water.

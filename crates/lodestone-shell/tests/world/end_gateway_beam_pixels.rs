@@ -340,7 +340,7 @@ fn an_end_gateway_beam_draws_in_its_own_screen_rect() {
     );
 }
 
-/// `height <= 0` must draw nothing — `TheEndGatewayRenderer.submit`'s own
+/// `height <= 0` must draw nothing — the the end gateway renderer's submit's own
 /// `if (state.height > 0)` guard, and [`end_gateway_beam_vertices`]'s own
 /// early return. A regression here would draw a beam for every ordinary
 /// (non-spawning, non-cooling-down) gateway in the world.

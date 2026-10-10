@@ -5,10 +5,10 @@
 //! Vanilla surfaces a server's advertised links (`SERVER_LINKS`, decoded into
 //! [`lodestone_model::event::ClientEvent::ServerLinksReceived`] and folded by
 //! [`lodestone_game::serverinfo::ServerInfoStore`]) through the generic Dialog
-//! system: `PauseScreen.getCustomAdditions` adds a button labelled
+//! system: the pause screen's get custom additions adds a button labelled
 //! `menu.server_links` ("Server Links...") whenever `!serverLinks.isEmpty()`
 //! and no server-defined `PAUSE_SCREEN_ADDITIONS` dialog pre-empts it, and
-//! that button opens `Dialogs.SERVER_LINKS` — a `ServerLinksDialogScreen`,
+//! that button opens `Dialogs.SERVER_LINKS` — a server links dialog screen,
 //! one row per link, each a `ClickEvent.OpenUrl` action.
 //!
 //! This client has no generic dialog-registry renderer (`serverinfo`'s own
@@ -28,7 +28,7 @@
 //!   [`super::nav::PauseButton::ServerLinks`] is even in the row list — not
 //!   merely disabled, matching how `PauseButton::OpenToLan` is *omitted*
 //!   rather than greyed out once published (see that variant's own doc).
-//! - **Known links get vanilla's own captions.** `ServerLinks.KnownLinkType`'s
+//! - **Known links get vanilla's own captions.** server links's known link type's
 //!   ten `known_server_link.<name>` strings, transcribed in [`known_caption`]
 //!   — vanilla's own by-id-map continuous helper with an out-of-bounds-strategy of zero means an id outside
 //!   `0..=9` resolves to id `0`'s caption rather than erroring, which
@@ -41,8 +41,8 @@
 //!   overrunning_the_row`), so an oversized custom label degrades to a
 //!   clipped string rather than overhanging the screen.
 //! - **Opening a link asks first, naming the full URL, with vanilla's
-//!   untrusted-link warning.** `Screen.clickUrlAction` opens every server
-//!   link through `ConfirmLinkScreen(.., trusted: false)`: title
+//!   untrusted-link warning.** Screen's click url action opens every server
+//!   link through the confirm link screen(.., trusted: false): title
 //!   `chat.link.confirm` ("Are you sure you want to open the following
 //!   website?"), the literal URL as the message, and — because
 //!   `showWarning = !trusted` — `chat.link.warning` ("Never open links from
@@ -59,7 +59,7 @@
 //!
 //! ## What is deliberately not built
 //!
-//! - **No "Copy to Clipboard" button.** Vanilla's `ConfirmLinkScreen` has
+//! - **No "Copy to Clipboard" button.** Vanilla's confirm link screen has
 //!   three buttons for an untrusted link (Yes / Copy to Clipboard / No); this
 //!   screen has two. The URL is still shown as plain text on the confirm
 //!   view, so a player who wants it can still read and retype it — copying
@@ -96,36 +96,36 @@ use super::widget;
 pub const ROW_LABEL: &str = "Server Links...";
 /// `menu.server_links.title` — this screen's own title label.
 pub const TITLE: &str = "Server Links";
-/// `Dialogs.SERVER_LINKS`'s own back button — `CommonComponents.GUI_BACK`
+/// `Dialogs.SERVER_LINKS`'s own back button — the common components's gui back
 /// (vanilla's own dialogs declarations' `DEFAULT_BACK_BUTTON`), not `gui.done`: this is the one
 /// vanilla screen in this cluster whose footer button says "Back".
 pub const BACK_LABEL: &str = "Back";
 /// `chat.link.confirm` — the untrusted-link confirmation's title. Every
 /// server link takes vanilla's `trusted: false` path
-/// (`Screen.clickUrlAction`), so this is the only wording this screen needs;
+/// (Screen's click url action), so this is the only wording this screen needs;
 /// `chat.link.confirmTrusted` never applies here.
 pub const CONFIRM_TITLE: &str = "Are you sure you want to open the following website?";
 /// `chat.link.warning` — shown because `showWarning = !trusted` is always
 /// true for a server-supplied link.
 pub const CONFIRM_WARNING: &str = "Never open links from people that you don't trust!";
-/// `CommonComponents.GUI_YES` — `ConfirmLinkScreen`'s affirmative label for an
+/// The common components's gui yes — the confirm link screen's affirmative label for an
 /// untrusted link (`GUI_OPEN_IN_BROWSER` is the *trusted* wording only).
 pub const YES_LABEL: &str = "Yes";
-/// `CommonComponents.GUI_NO` — the untrusted-link negative label (a *trusted*
+/// The common components's gui no — the untrusted-link negative label (a *trusted*
 /// link says "Cancel" instead; never reached here).
 pub const NO_LABEL: &str = "No";
 
-/// `ConfirmLinkScreen`'s `WARNING_TEXT` colour, `-13108` as a signed ARGB
+/// The confirm link screen's `WARNING_TEXT` colour, `-13108` as a signed ARGB
 /// int with no alpha channel set (Java packs it as 24-bit RGB and the sign
-/// bit is `Component.withColor`'s own encoding artefact, not a real alpha):
+/// bit is Component's with color's own encoding artefact, not a real alpha):
 /// masking to the low 24 bits gives `0xFFCCCC` — R 255, G 204, B 204, a pale
 /// warning red. sRGB channel values written verbatim, this shell's own
 /// convention for GUI text (see `docs/vanilla-hud-text.md`); GUI text is not
 /// colour-managed the way block tint/shade is.
 const WARNING_COLOUR: [f32; 4] = [1.0, 204.0 / 255.0, 204.0 / 255.0, 1.0];
 
-/// `ServerLinks.KnownLinkType`'s ten `known_server_link.<name>` captions
-/// (`en_us.json`), in `KnownLinkType`'s own declaration order — which is also
+/// The server links's known link type's ten `known_server_link.<name>` captions
+/// (`en_us.json`), in the known link type's own declaration order — which is also
 /// its wire id order (vanilla's own server-links declarations: `BUG_REPORT(0, ..)` through
 /// `ANNOUNCEMENTS(9, ..)`).
 const KNOWN_CAPTIONS: [&str; 10] = [
@@ -156,7 +156,7 @@ fn known_caption(id: i32) -> &'static str {
 }
 
 /// The label to draw for `link` — `ServerLinks.Entry::displayName`'s
-/// `Either::map(KnownLinkType::displayName, identity)`, ported.
+/// An either-map over the known-link display name and identity, ported.
 ///
 /// A [`ServerLinkKind::Custom`] label goes through
 /// [`lodestone_model::Text::to_plain_string`] rather than a styled-span
@@ -192,7 +192,7 @@ pub enum ServerLinksOutcome {
     Close,
     /// The player confirmed opening this URL — the caller hands it to
     /// [`super::accounts::open_in_browser`] and then also returns to
-    /// [`super::Screen::Paused`] (vanilla's `ConfirmLinkScreen` always closes
+    /// [`super::Screen::Paused`] (vanilla's confirm link screen always closes
     /// back to the screen it was opened over, whichever button was pressed).
     OpenUrl(ServerLinkUrl),
 }
@@ -307,8 +307,8 @@ impl ServerLinksNav {
     }
 
     /// Escape: back out of the confirmation to the list, or close the whole
-    /// screen from the list — vanilla's `ConfirmScreen`
-    /// (`shouldCloseOnEsc() == false`, so the callback runs with `false`
+    /// screen from the list — vanilla's confirm screen
+    /// (`should_close_on_esc() == false`, so the callback runs with `false`
     /// rather than a bare close) applied one screen up, the same rule
     /// [`super::confirm::ConfirmNav::handle_key`] follows for world deletion.
     pub fn escape(&mut self) -> ServerLinksOutcome {
@@ -335,7 +335,7 @@ pub const NO_ROW: usize = 1;
 // already documents for its own vanilla screen -----------------------------
 
 /// Vanilla's `Dialogs.SERVER_LINKS`' own button width (vanilla's own dialogs declarations,
-/// `ServerLinksDialog(.., 1, 310)`'s last argument).
+/// The server links dialog(.., 1, 310)'s last argument).
 const ROW_W: f32 = 310.0;
 const ROW_H: f32 = options::WIDGET_H;
 /// Vertical gap between two link rows.

@@ -235,7 +235,7 @@ fn legacy_text_parser_tracks_color_and_format_segments() {
     assert_eq!(text.extra[1].content, TextContent::Literal("Red ".into()));
     assert_eq!(text.extra[1].style.color, Some(TextColor::Red));
     // A colour code clears formatting *explicitly*, not by leaving it
-    // unspecified — `Style.applyLegacyFormat`'s `default:` arm assigns
+    // unspecified — Style's apply legacy format's `default:` arm assigns
     // `bold = false`. `None` here would let an enclosing component's bold
     // inherit through the reset, which vanilla does not do; see
     // `apply_legacy_code`.
@@ -1707,7 +1707,7 @@ fn path_type_registry_resolves_ids() {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy `§` expansion — `StringDecomposer.iterateFormatted` parity
+// Legacy `§` expansion — string-decomposer parity
 // ---------------------------------------------------------------------------
 
 /// The fixture every legacy-expansion gate below shares: a colour, then a
@@ -1843,7 +1843,7 @@ fn the_non_expanding_flatten_really_leaves_the_codes_in_place() {
 }
 
 /// `§x§r§r§g§g§b§b` — the BungeeCord hex dialect — is **not** honoured by vanilla
-/// 26.2, and must not be honoured here either. `getByCode('x')` is null, so `§x`
+/// 26.2, and must not be honoured here either. get by code is null, so `§x`
 /// is dropped whole and the six pairs after it are read as six ordinary colour
 /// codes; the run ends up coloured by the last of them.
 #[test]

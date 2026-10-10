@@ -94,7 +94,7 @@ fn populate(world: ChunkWorld, cycles: usize) -> Vec<(String, MobCategory)> {
     populate_at(world, cycles, Difficulty::Normal)
 }
 
-/// [`populate`] at a chosen world difficulty — the input `SpawnPlacements`'
+/// [`populate`] at a chosen world difficulty — the input spawn placements'
 /// peaceful guard turns on.
 fn populate_at(
     world: ChunkWorld,
@@ -273,7 +273,7 @@ fn strip_namespace(key: &str) -> &str {
     key.split_once(':').map_or(key, |(_, path)| path)
 }
 
-/// A species with no `SpawnPlacements` registration is never proposed, so a
+/// A species with no spawn placements registration is never proposed, so a
 /// candidate always names something the spawner can actually place. The guard
 /// against a table that silently falls back to "no restrictions".
 #[test]

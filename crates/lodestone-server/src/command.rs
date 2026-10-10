@@ -348,7 +348,7 @@ pub const UNKNOWN_COMMAND: &str = "Unknown or incomplete command. See below for 
 /// this crate's problem would mean this crate knowing what a `World` is.
 pub trait CommandSink: Send + Sync {
     /// Run `command` (already stripped of its leading `/` by the wire format —
-    /// vanilla's `ServerboundChatCommandPacket` carries it without one) on
+    /// vanilla's chat-command packet carries it without one) on
     /// behalf of `caller`.
     ///
     /// Must not panic: this runs on a connection task, and a panic here takes

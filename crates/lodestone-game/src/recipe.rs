@@ -485,8 +485,8 @@ impl ShapedRecipe {
     /// `grid_w × grid_h` crafting grid, placing the pattern at a fixed,
     /// canonical offset — top-left (`0, 0`), never mirrored.
     ///
-    /// Vanilla's own recipe-book click (`ServerPlaceRecipe`/
-    /// `PlaceRecipeHelper.calculatePlacementFor`) places at the position the
+    /// Vanilla's own recipe-book click (the server place-recipe handler)
+    /// places at the position the
     /// server-sent `RecipeDisplay` itself carries. We do not decode that
     /// packet (`docs/crafting.md`'s "Remaining gaps"), so this is a
     /// deliberate, documented simplification rather than a guess at the real
@@ -512,7 +512,7 @@ impl ShapedRecipe {
         &self.result
     }
 
-    /// The pattern's own width — **not** the grid's. A `ShapedCraftingRecipeDisplay`
+    /// The pattern's own width — **not** the grid's. A shaped crafting recipe display
     /// carries the pattern's real dimensions, so a 2×2 recipe must not be
     /// advertised as a 3×3 with empty cells (a vanilla client would draw the ghost
     /// overlay in the wrong slots of a player-inventory grid).
@@ -647,7 +647,7 @@ impl ShapelessRecipe {
     }
 
     /// The ingredients in declaration order — what a
-    /// `ShapelessCraftingRecipeDisplay` carries, with no grid to lay them out in.
+    /// shapeless crafting recipe display carries, with no grid to lay them out in.
     #[must_use]
     pub fn ingredients(&self) -> &[Ingredient] {
         &self.ingredients
@@ -829,7 +829,7 @@ impl Recipe {
 /// ## Ordering
 ///
 /// [`match_grid`](Self::match_grid) returns the **first** matching recipe in
-/// id order. Vanilla's `RecipeManager` iterates an unordered map, so it relies
+/// id order. Vanilla's recipe manager iterates an unordered map, so it relies
 /// on the corpus containing no two grid recipes that match the same grid; the
 /// sorted order here just makes our answer deterministic when a datapack
 /// violates that.
@@ -837,7 +837,7 @@ impl Recipe {
 /// ## What this is *not*
 ///
 /// It is not the source of truth for an open crafting menu's result slot. A
-/// vanilla server computes that itself (`CraftingMenu.slotsChanged` sends a
+/// vanilla server computes that itself (its slots-changed hook sends a
 /// `container_set_slot` for slot 0), and this client honours the server the
 /// same way. Use this book for the recipe-book UI, ghost recipes, and
 /// latency-hiding prediction — never to overwrite a server-sent result slot.
@@ -1055,7 +1055,7 @@ impl RecipeBook {
 
     // -- Runtime registration -----------------------------
 
-    /// Registers a plugin's recipe, the `Bukkit.addRecipe` analogue.
+    /// Registers a plugin's recipe, the Bukkit's add recipe analogue.
     ///
     /// Unlike [`insert`](Self::insert) — which is the *loader's* door and
     /// silently replaces an existing id, because a datapack legitimately

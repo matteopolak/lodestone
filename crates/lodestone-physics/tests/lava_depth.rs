@@ -67,7 +67,7 @@ fn shallow_vs_deep_is_the_only_difference() {
     let world = EmptyWorld;
     let profile = PhysicsProfile::mc_1_21();
 
-    // 0.2: a shin-deep puddle, <= the 0.4 jump threshold => isInShallowFluid(LAVA).
+    // 0.2: a shin-deep puddle, <= the 0.4 jump threshold => is in shallow fluid.
     let shallow_fluid = FluidState {
         lava_height: 0.2,
         ..FluidState::NONE

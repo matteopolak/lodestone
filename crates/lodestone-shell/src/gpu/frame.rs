@@ -192,7 +192,7 @@ impl RenderState {
         // near-distance fade skip — see `RenderState::last_camera_block_pos`'s
         // doc for why this is the one write site rather than a threaded
         // parameter, and why one frame of staleness is harmless here. Vanilla
-        // reads the same rounding (`BlockPos cameraPosition = camera.blockPos`,
+        // reads the same rounding (`BlockPos cameraPosition = camera.block_pos`,
         // i.e. floored world coordinates), not the eye position's fractional
         // part.
         self.last_camera_block_pos.set(Some([
@@ -205,7 +205,7 @@ impl RenderState {
         // `Camera::view_projection_warped`'s doc for why injecting it here,
         // at the single upstream source every world-space uniform below is
         // rewritten from, reaches the same scope vanilla's own
-        // `RenderSystem.setProjectionMatrix` call in `GameRenderer.
+        // The render system's set projection matrix call in the game renderer.
         // renderLevel` does (the whole world pass) without a second call
         // site. `nausea_intensity`/`portal_intensity` default to `0.0`
         // (no live producer yet — see `docs/screen-overlays.md`), at which
@@ -974,8 +974,8 @@ impl RenderState {
             // fog tints a mob by distance, it does not put water in front of it.
             if !entity_batches.visible.is_empty() {
                 for batch in &entity_batches.visible {
-                    // `PlayerModel` is constructed with
-                    // `RenderTypes::entityTranslucent` in 26.2.  Its skin's
+                    // The player model is constructed with
+                    // The render types's entity translucent in 26.2.  Its skin's
                     // partially-alpha outer layer therefore blends with the
                     // `0.1` cutout threshold, while ordinary mob sheets stay
                     // on the opaque/cutout pipeline.  Both pipelines share
@@ -1280,7 +1280,7 @@ impl RenderState {
             // (terrain draws before any entity pass), so it must not write
             // depth itself or it would fight whatever draws over it next at
             // the same depth. See `EntityPipeline::shadow_pipeline`'s doc for
-            // the vanilla `RenderPipelines.ENTITY_SHADOW` state this mirrors.
+            // the vanilla render pipelines's entity shadow state this mirrors.
             if let Some(batch) = &shadow_batch
                 && let Some(texture) = &self.entities.shadow_texture
             {
@@ -1803,8 +1803,8 @@ impl RenderState {
             // This is vanilla's split, not a blanket move: `Layer::Opaque`
             // goes in the `solid` phase and `Layer::Translucent` in
             // `afterTerrain`, on either side of the translucent terrain draw
-            // (`SubmitNodeCollection.submitQuadParticleGroup` submits the
-            // group into both, and `QuadParticleFeatureRenderer.prepareGroup`
+            // (the submit node collection's submit quad particle group submits the
+            // group into both, and the quad particle feature renderer's prepare group
             // keeps only the layers whose `translucent()` matches). The
             // translucent half stays below, where every particle used to be.
             //
@@ -1975,7 +1975,7 @@ impl RenderState {
             // should read over the weather rather than be rained on.
             //
             // Vanilla runs this as its own pass against a dedicated
-            // `WEATHER_TARGET` (`WeatherEffectRenderer.render`) because it feeds
+            // `WEATHER_TARGET` (the weather effect renderer's render) because it feeds
             // its transparency-sorting chain; this client has no such chain, so a
             // second pass would only cost a depth attachment. See
             // `lodestone_render::weather_pipeline`'s module doc.
@@ -2022,7 +2022,7 @@ impl RenderState {
         // background opacity and vanilla blends it on gamma bytes. Both this
         // pass's pipelines are still drawn in one pass, and in the same order
         // as before, so the plate still paints over the opaque normal-pass
-        // glyphs exactly as `SubmitNodeCollection`'s phase list does.
+        // glyphs exactly as the submit node collection's phase list does.
         if draw_nametags
             && let Some(text_view) = world_text_target
         {
@@ -2110,7 +2110,7 @@ impl RenderState {
                         stats.freeze_overlay_drawn = true;
                     }
                     // Portal takes priority over confusion when both are
-                    // positive — vanilla's own hud rendering's own `if`/`else if`.
+                    // positive — vanilla's hud rendering's `if`/`else if`.
                     if screen_effects.portal_intensity > 0.0 {
                         let frame = (screen_effects.tick % u64::from(fx.portal_frame_count())) as u32;
                         fx.draw_portal(queue, encoder, view, frame, screen_effects.portal_intensity);

@@ -326,7 +326,7 @@ impl<'a> Search<'a> {
         if self.mob.can_float && self.world.is_water(x, y, z) {
             return f64::from(y) + 0.5;
         }
-        // getFloorLevel(level, pos): use the block below.
+        // get floor level: use the block below.
         f64::from(y - 1) + self.world.collision_top(x, y - 1, z)
     }
 
@@ -1220,7 +1220,7 @@ fn ordinal(pt: PathType) -> u8 {
 }
 
 fn pack(x: i32, y: i32, z: i32) -> i64 {
-    // BlockPos.asLong-style packing, sufficient as a cache key.
+    // BlockPos's as long-style packing, sufficient as a cache key.
     ((x as i64 & 0x3FF_FFFF) << 38) | ((z as i64 & 0x3FF_FFFF) << 12) | (y as i64 & 0xFFF)
 }
 

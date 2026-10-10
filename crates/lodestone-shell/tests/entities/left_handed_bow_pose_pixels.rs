@@ -1,5 +1,5 @@
 //! Pixel gate: a **left-handed** remote skeleton must draw its bow with its
-//! *left* arm, not its right — `Mob.isLeftHanded()`
+//! *left* arm, not its right — Mob's is left handed
 //! ([`lodestone_ecs::entity::MobState::left_handed`]) had zero readers before
 //! this fix, so an aggressive left-handed skeleton drew the ordinary
 //! right-handed pose. See `crates/lodestone-ecs/src/entity.rs`'s
@@ -72,7 +72,7 @@ const BODY_YAW: f32 = 0.0;
 
 /// `Mob.DATA_MOB_FLAGS_ID`'s aggressive bit.
 const AGGRESSIVE_BIT: u8 = 0x04;
-/// `Mob.DATA_MOB_FLAGS_ID`'s left-handed bit (`Mob.isLeftHanded()`).
+/// `Mob.DATA_MOB_FLAGS_ID`'s left-handed bit (Mob's is left handed).
 const LEFT_HANDED_BIT: u8 = 0x02;
 
 fn camera() -> Camera {

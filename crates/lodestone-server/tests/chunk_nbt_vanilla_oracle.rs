@@ -22,11 +22,11 @@
 //! | fact | source |
 //! |---|---|
 //! | `WORLD_SURFACE` tests `NOT_AIR = !state.isAir()` | `Heightmap.Types.WORLD_SURFACE` |
-//! | the stored value is `y + 1` of the highest non-air block | `Heightmap.primeHeightmaps`'s `heightmap.setHeight(x, z, y + 1)` call |
-//! | ... biased by `-chunk.getMinY()` | `Heightmap.setHeight` |
-//! | an all-air column stores `getMinY()`, i.e. a biased 0 | `Heightmap.update` |
+//! | the stored value is `y + 1` of the highest non-air block | Heightmap's prime heightmaps's heightmap's set height call |
+//! | ... biased by `-chunk.get_min_y()` | Heightmap's set height |
+//! | an all-air column stores get min y, i.e. a biased 0 | `Heightmap.update` |
 //! | the index is `x + z * 16` | `Heightmap.getIndex` |
-//! | 256 entries in a `SimpleBitStorage`, `64 / bits` per long | `Heightmap`'s constructor and `SimpleBitStorage`'s `(bits, size, data)` constructor |
+//! | 256 entries in a simple bit storage, `64 / bits` per long | `Heightmap`'s constructor and the simple bit storage's `(bits, size, data)` constructor |
 //!
 //! # The control
 //!
@@ -63,7 +63,7 @@ fn get<'a>(nbt: &'a Nbt, key: &str) -> Option<&'a Nbt> {
     }
 }
 
-/// Vanilla's non-spanning `SimpleBitStorage` read, for the heightmap itself.
+/// Vanilla's non-spanning simple bit storage read, for the heightmap itself.
 fn unpack_non_spanning(data: &[i64], count: usize, bits: u32) -> Vec<u32> {
     let per_long = (64 / bits) as usize;
     let mask = (1u64 << bits) - 1;

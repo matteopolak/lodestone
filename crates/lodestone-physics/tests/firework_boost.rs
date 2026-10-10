@@ -3,8 +3,8 @@
 //! Vanilla's own firework-rocket per-tick step's attached-to-a-glider branch:
 //!
 //! ```text
-//! lookAngle = attachedToEntity.getLookAngle();
-//! movement = attachedToEntity.getDeltaMovement();
+//! lookAngle = attached to entity's get look angle;
+//! movement = attached to entity's get delta movement;
 //! attachedToEntity.setDeltaMovement(movement.add(
 //!     lookAngle.x * 0.1 + (lookAngle.x * 1.5 - movement.x) * 0.5,
 //!     lookAngle.y * 0.1 + (lookAngle.y * 1.5 - movement.y) * 0.5,

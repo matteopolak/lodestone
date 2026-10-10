@@ -458,7 +458,7 @@ mod tests {
     /// it at all, because vanilla's dyed-item-color default lookup forces the
     /// colour opaque, which only
     /// touches the alpha byte, so a black dye's RGB portion is still `0` and
-    /// `dyeColor != 0` reads false. This is vanilla's own equipment-layer renderer's own
+    /// `dyeColor != 0` reads false. This is vanilla's equipment-layer renderer's
     /// behaviour, not a port bug — a
     /// "fix" that special-cases black would diverge from the game it ports.
     #[test]
@@ -1327,7 +1327,7 @@ mod tests {
 
         // Pitch 90 is a **ceiling** frame, not a floor one: vanilla's frame
         // direction-setter
-        // writes `xRot = -90 * direction.getAxisDirection().getStep()`, and
+        // writes `xRot = -90 * direction.get_axis_direction().get_step()`, and
         // the down direction's step is `-1`. So a pitch-90 frame faces down and its
         // item hangs *below* the entity. Reading it the other way round is the
         // mistake this arm exists to name, and it is invisible on a wall frame.
@@ -1779,7 +1779,7 @@ mod tests {
     /// the answer and neither is guessable from the other: it builds the wild sheet
     /// as `"entity/wolf/" + file_name`, and it registers that file name against a
     /// **registry key** — `register(context, ASHEN, "wolf_ashen", …)`, with
-    /// `ASHEN = createKey("ashen")`. So the wire's `minecraft:ashen` holder maps to
+    /// `ASHEN = create_key("ashen")`. So the wire's `minecraft:ashen` holder maps to
     /// the stem `wolf_ashen`, and `PALE` maps to the bare `wolf` rather than to
     /// `wolf_pale`, which is the one entry a uniform `"wolf_" + key` rule would get
     /// wrong. That asymmetry is asserted explicitly below.
@@ -3070,7 +3070,7 @@ mod tests {
     #[test]
     fn the_player_arm_rest_pose_is_a_pure_translation() {
         // What makes `rest_pose()[arm] * Rz(±0.1)` *exact* rather than an
-        // approximation of `arm.resetPose(); arm.zRot = ±0.1`: the authored rest
+        // approximation of `arm.reset_pose(); arm.zRot = ±0.1`: the authored rest
         // rotation is zero and the root above it is the identity, so replacing
         // zRot is the same as post-multiplying Rz. If a future corpus edit gave
         // the player arm a rest rotation, this fails instead of silently drifting.
@@ -3280,7 +3280,7 @@ mod tests {
 
         // Vanilla's held-item hand-layer submit function applies the item-arm
         // transform before the switch
-        // for every animation whose `hasCustomArmTransform()` is false, and
+        // for every animation whose has custom arm transform is false, and
         // the bow use-animation state's is false.
         let arm_transform =
             Mat4::from_translation(Vec3::new(i * 0.56, -0.52 + inverse_arm_height * -0.6, -0.72));

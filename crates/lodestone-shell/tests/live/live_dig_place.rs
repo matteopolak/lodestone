@@ -112,7 +112,7 @@ fn dig_and_place_reach_the_server() {
          Fix: start the survival 26.2 oracle on :25565 and run with `--features live`."
     );
     // Settle so we are alive and grounded, and past the server's ~3s client-load
-    // gate that drops player actions before `hasClientLoaded()`.
+    // gate that drops player actions before has client loaded.
     for _ in 0..80 {
         pump(&mut sim);
         std::thread::sleep(Duration::from_millis(20));
@@ -231,7 +231,7 @@ fn dig_and_place_reach_the_server() {
         std::thread::sleep(Duration::from_millis(20));
     }
     // Retry through the server's ~60-tick client-load gate, which silently drops
-    // `use_item_on` until `hasClientLoaded()`. Re-aim and re-send each attempt.
+    // `use_item_on` until has client loaded. Re-aim and re-send each attempt.
     let placed_ok = {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut ok = false;

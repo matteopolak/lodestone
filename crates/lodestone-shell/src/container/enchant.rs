@@ -17,13 +17,13 @@
 //!
 //! ## How it works
 //!
-//! [`offer_rect`] is vanilla's own enchantment-screen click handling's own click rect
+//! [`offer_rect`] is vanilla's enchantment-screen click handling's click rect
 //! (`xo + 60, yo + 14 + 19*i, 108, 19`) — the exact same local-widget-pixel
 //! geometry `container::geometry::draw_enchanting_costs` already draws the
 //! cost numbers at, so the clickable area and the drawn button always agree.
 //! [`offer_clickable`] is vanilla's own enchantment-menu button-click
 //! handling's own gate: it
-//! runs **client-side too** (the client's own `EnchantmentMenu` mirror calls
+//! runs **client-side too** (the client's own enchantment menu mirror calls
 //! it before sending anything), but its `access.execute` is a no-op there —
 //! so on the client it only ever answers "is this click worth sending",
 //! never mutates anything, the same "predict, then send" split every other
@@ -33,7 +33,7 @@
 //!
 //! ## How to change it
 //!
-//! `container_data` properties `0..3` are `EnchantmentMenu.costs[0..3]`
+//! `container_data` properties `0..3 are the enchantment menu's costs[0..3]`
 //! (`container::geometry::draw_enchanting_costs` already reads the same
 //! three); the lapis slot is menu slot index 1
 //! (`Menu::enchanting_table`/`docs/container-cost-screens.md`).
@@ -47,7 +47,7 @@ use lodestone_game::menu::{Menu, SpecialLayout};
 
 use super::layout::Rect;
 
-/// One offer row's local-widget-pixel rect — `EnchantmentScreen.mouseClicked`'s
+/// One offer row's local-widget-pixel rect — the enchantment screen's mouse clicked's
 /// own `xo + 60, yo + 14 + 19*i, 108, 19` (`i` is `row`, `0..3`).
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // row is always 0..3
@@ -60,7 +60,7 @@ pub fn offer_rect(row: i32) -> Rect {
     }
 }
 
-/// `EnchantmentMenu.clickMenuButton`'s client-visible gate: a lapis count of
+/// The enchantment menu's click menu button's client-visible gate: a lapis count of
 /// at least `row + 1`, a non-zero offer cost, and an experience level meeting
 /// both the row cost and the flat `row + 1` requirement — every check
 /// skipped outright when `has_infinite_materials` (creative) is set, exactly

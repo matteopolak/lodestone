@@ -138,7 +138,7 @@ pub(crate) fn entity_hitbox_vertices_with_states(
 
     let mut out = Vec::new();
     for draw in draws {
-        // `EntityHitboxDebugRenderer` has this as its outermost entity gate.
+        // The entity hitbox debug renderer has this as its outermost entity gate.
         // Hidden helper players must not leave a second F3+B box after their
         // renderer and nametag have been suppressed.
         if draw.invisible {
@@ -268,7 +268,7 @@ pub(crate) fn glowing_entity_outline_vertices(
     out
 }
 
-/// `Avatar.POSES` / `LivingEntity.getDimensions`: the player-specific box and
+/// `Avatar.POSES` / living entity's get dimensions: the player-specific box and
 /// eye-height pair for F3+B. `SLEEPING` and `DYING` are fixed dimensions, so
 /// unlike every scalable pose they deliberately do not consume
 /// `minecraft:scale`.
@@ -290,7 +290,7 @@ fn player_hitbox_metrics(pose: lodestone_model::EntityPose, scale: f32) -> (f32,
 
 /// F3+G: the borders of the chunk the player is standing in.
 ///
-/// Vanilla's `LevelRenderer.renderChunkBorders` draws the column's own edges
+/// Vanilla's level renderer's render chunk borders draws the column's own edges
 /// plus a horizontal ring at each section boundary. This draws the four corner
 /// uprights and the outline of every 16-block section slab, over
 /// `min_y..min_y + height` — the **real** world column, passed in by the caller
@@ -495,7 +495,7 @@ mod tests {
 /// Minimum on-screen width for F3 debug-line geometry (entity hitboxes, chunk
 /// borders, and any plugin's [`DebugLinesSource`] segments), in logical
 /// pixels, scaled the same way [`OutlineRenderer`]'s `MIN_LINE_WIDTH_PX` is
-/// (`Window.getAppropriateLineWidth`'s `max(min, windowWidth / reference *
+/// (Window's get appropriate line width's `max(min, windowWidth / reference *
 /// min)` shape) — thinner than the block-highlight box (`2.5`) because this
 /// is a diagnostic wireframe meant to read as a *line*, not a highlighted
 /// edge, but wide enough to survive the failure mode this pass used to have:
@@ -507,11 +507,11 @@ mod tests {
 pub(super) const MIN_LINE_WIDTH_PX: f32 = 1.5;
 pub(super) const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 
-/// `Window.getAppropriateLineWidth`'s own minimum — `max(2.5F, getWidth() /
+/// Window's get appropriate line width's own minimum — `max(2.5F, getWidth() /
 /// 1920.0F * 2.5F)` — for the passes that draw a line vanilla itself draws
 /// through its own generic-line render type rather than a diagnostic wireframe.
 ///
-/// The fishing line is one (`FishingHookRenderer` reads
+/// The fishing line is one (the fishing hook renderer reads
 /// `windowRenderState.appropriateLineWidth` verbatim), and so is the
 /// block-highlight box, which is why [`OutlineRenderer`] carries the same
 /// number under its own name. [`MIN_LINE_WIDTH_PX`] above is **not** this: it is
@@ -724,7 +724,7 @@ impl DebugLineRenderer {
     /// and is bounded by the device's maximum vertex-buffer size.
     /// `viewport_px` is the render target's size in physical pixels and
     /// `min_width_px` the on-screen thickness floor, scaled by
-    /// `Window.getAppropriateLineWidth`'s own `max(min, width / 1920 * min)`
+    /// Window's get appropriate line width's own `max(min, width / 1920 * min)`
     /// shape — see [`MIN_LINE_WIDTH_PX`]'s doc for why this pass is not a
     /// `LineList`, and [`VANILLA_LINE_WIDTH_PX`] for the other value callers
     /// pass.

@@ -130,7 +130,7 @@ fn painting_draw(id: i32, variant: Option<&'static str>, centre: glam::Vec3) -> 
         equipment_skin: Vec::new(),
         equipment_trim: Vec::new(),
         // A painting's wire position is the slab's **centre**, not a mob's
-        // feet — `Painting.calculateBoundingBox` places it there.
+        // feet — Painting's calculate bounding box places it there.
         feet: centre,
         // 180 puts the painting's *front* face toward a camera looking down
         // +Z: `painting_matrix` applies vanilla's `180 - yaw`, so this is the

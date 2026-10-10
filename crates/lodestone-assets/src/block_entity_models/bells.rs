@@ -9,14 +9,14 @@ use super::{BELL_SHEET, CubeDef, EntityModelDef, PartDef, PartPose};
 /// ```
 ///
 /// `bell_base` is **nested inside** `bell_body` in the real jar
-/// (`bellBody.addOrReplaceChild("bell_base", …)`), not a sibling under root.
+/// (bell body's add or replace child), not a sibling under root.
 /// Its own local pose `(-8, -12, -8)` exactly cancels `bell_body`'s pivot
 /// `(8, 12, 8)`, so the flared rim's *world* pivot lands at the block's own
 /// corner `(0, 0, 0)` — the rim (`4..12, 4..6, 4..12` texels there) then sits
 /// directly below the tapered body (`5..11, 6..13, 5..11` texels once
 /// `bell_body`'s own pivot is folded in), which is exactly what a bell's
 /// flared bottom skirt should do. The nesting also matters for the
-/// animation: `BellModel.setupAnim` only ever poses `bellBody.xRot`/`zRot`
+/// animation: the bell model's animation only ever poses the bell body's X/Z rotation
 /// (see [`crate::block_entity_models`]'s sibling doc in `lodestone-render`'s
 /// `bell_shake_angle`) and the rim swings with it *because* it is a child,
 /// the same "shared handle" reasoning [`chest_single_model`]'s doc gives for

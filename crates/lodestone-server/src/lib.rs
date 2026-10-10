@@ -70,7 +70,7 @@
 //!   [`ServerBound::CarriedItemChanged`] sets the selected hotbar slot, and
 //!   [`ServerBound::ContainerClicked`] is **derived** rather than trusted —
 //!   [`container_click::do_click`] re-runs vanilla's
-//!   `AbstractContainerMenu.doClick` from the click's slot/button/type, and the
+//!   The abstract container menu's do click from the click's slot/button/type, and the
 //!   client's claimed slot diff is compared against the result and never stored.
 //!   (This replaces an earlier scope cut in which the diff was applied verbatim,
 //!   which let any client name any item in any slot.)
@@ -125,7 +125,7 @@ pub mod block_tick_reaction;
 /// of the growth families [`growth_tick`] already models. Public because the
 /// producer is a right-click handler outside the tick loop.
 pub mod bone_meal;
-/// Placing a boat — `BoatItem.use`'s raytrace and the vehicle it creates. Public
+/// Placing a boat — the boat item's use's raytrace and the vehicle it creates. Public
 /// because the producer is a `USE_ITEM` handler outside the tick loop, exactly as
 /// [`bone_meal`] and [`spawn_egg`] are.
 pub mod boat;
@@ -306,12 +306,12 @@ pub mod light;
 pub mod loot;
 mod mob_spawn;
 /// Mob spawner blocks (`minecraft:spawner`): the delay/reroll cadence and the
-/// trigger→entity decision `BaseSpawner.serverTick` reduces to, driven by
+/// trigger→entity decision base spawner's server tick reduces to, driven by
 /// `tick::run_tick_loop` against the block entities `chunk_nbt` loads.
 pub mod mob_spawner;
 mod mobs;
 /// Natural mob spawning against a live world: the per-species
-/// `SpawnPlacements` table, a per-column light cache over the real light engine,
+/// The spawn placements table, a per-column light cache over the real light engine,
 /// and the `NaturalSpawner` that runs vanilla's cluster loop over real terrain
 /// and biome spawn lists. Driven by `tick::run_tick_loop`.
 pub mod natural_spawn;

@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// The boss bar's four vanilla clauses (`BossHealthOverlay.extractBar`,
+/// The boss bar's four vanilla clauses (the boss health overlay's extract bar,
 /// `.cache/mc/26.2/client-src`), each pinned to the layer that actually
 /// emits geometry (`HudGeometry::sprite_verts`, via a real
 /// [`GuiAtlas`]) rather than to [`crate::overlay::BossBarView`]'s model —
@@ -126,7 +126,7 @@ fn boss_bar_reaches_the_sprite_geometry_layer_not_just_the_model() {
 ///
 /// Also the mutual-exclusion contract `sprite_vitals`'s own doc names:
 /// a non-empty `locator` must draw *instead of* the XP bar, not
-/// alongside it, even when `frame.xp` is `Some` — `ContextualBar` is one
+/// alongside it, even when `frame.xp` is `Some` — the contextual bar is one
 /// slot in vanilla, never two bars stacked.
 #[test]
 fn locator_bar_reaches_the_sprite_geometry_layer_and_outranks_the_xp_bar() {
@@ -134,7 +134,7 @@ fn locator_bar_reaches_the_sprite_geometry_layer_and_outranks_the_xp_bar() {
     let stats = DebugStats::default();
     let (w, h) = (640u32, 480u32);
     let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
-    // `ContextualBar::left`/`top`, the same expressions `sprite_vitals`
+    // The contextual bar's left/`top`, the same expressions `sprite_vitals`
     // derives `hx`/`bar_top` from — not restated as an independent
     // constant, so a change to the hotbar's own layout moves this
     // prediction with it instead of silently drifting from it.

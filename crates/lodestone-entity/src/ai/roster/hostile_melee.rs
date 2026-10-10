@@ -74,7 +74,7 @@
 //!   A drowned now throws its trident when it spawned holding one
 //!   ([`crate::spawn_equipment`]'s ~6.25% roll): [`DROWNED`]'s trident row
 //!   registers [`super::ranged::trident_attack`] unconditionally, exactly as
-//!   vanilla's own behaviour-goals helper does, and the goal's own `can_use` gates on
+//!   vanilla's behaviour-goals helper does, and the goal's `can_use` gates on
 //!   [`crate::ai::MobController::main_hand_item`] rather than on
 //!   registration.
 //! * **Target rows naming another species ask the host for a

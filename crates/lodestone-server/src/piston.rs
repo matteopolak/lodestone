@@ -115,7 +115,7 @@ use crate::neighbor_update::ALL_DIRECTIONS;
 pub use crate::neighbor_update::Direction;
 use crate::redstone;
 
-/// `PistonStructureResolver.MAX_PUSH_DEPTH`.
+/// The piston structure resolver's max push depth.
 pub const MAX_PUSH_DEPTH: usize = 12;
 
 /// The scheduled-tick kind a piston's extend/retract check runs under, in the same
@@ -135,7 +135,7 @@ pub enum PushReaction {
     PushOnly,
 }
 
-/// Blocks whose `Properties` set `pushReaction(PushReaction.DESTROY)`.
+/// Blocks whose `Properties` set push reaction.
 static DESTROY: &[Block] = &[
     Block::OakSapling,
     Block::SpruceSapling,
@@ -339,7 +339,7 @@ static DESTROY: &[Block] = &[
     Block::FireflyBush,
 ];
 
-/// Blocks whose `Properties` set `pushReaction(PushReaction.BLOCK)`.
+/// Blocks whose `Properties` set push reaction.
 static BLOCKED: &[Block] = &[
     Block::PistonHead,
     Block::MovingPiston,
@@ -354,7 +354,7 @@ static BLOCKED: &[Block] = &[
     Block::Lodestone,
 ];
 
-/// `pushReaction(PushReaction.PUSH_ONLY)` — the sixteen glazed terracottas, the
+/// push reaction — the sixteen glazed terracottas, the
 /// only blocks in the game that use it.
 static PUSH_ONLY: &[Block] = &[
     Block::WhiteGlazedTerracotta,
@@ -376,7 +376,7 @@ static PUSH_ONLY: &[Block] = &[
 ];
 
 /// The `PushReaction` for a block state, defaulting to
-/// [`Normal`](PushReaction::Normal) as `BlockBehaviour.Properties` does.
+/// [`Normal`](PushReaction::Normal) as the block behaviour's properties does.
 #[must_use]
 pub fn push_reaction(state: StateId) -> PushReaction {
     let base = state.block();
@@ -426,7 +426,7 @@ pub fn is_piston_head_id(state: StateId) -> bool {
     state.block() == Block::PistonHead
 }
 
-/// `PistonStructureResolver.isSticky`: slime or honey. Note **not** the piston's
+/// The piston structure resolver's is sticky: slime or honey. Note **not** the piston's
 /// own stickiness — this is about the *pushed* block dragging its neighbours.
 #[must_use]
 pub fn is_sticky_block(state: StateId) -> bool {
@@ -438,7 +438,7 @@ pub fn is_sticky_block_id(state: StateId) -> bool {
     matches!(state.block(), Block::SlimeBlock | Block::HoneyBlock)
 }
 
-/// `PistonStructureResolver.canStickToEachOther`: slime and honey each stick to
+/// The piston structure resolver's can stick to each other: slime and honey each stick to
 /// everything sticky **except each other**. The asymmetric-looking pair of early
 /// returns in vanilla is symmetric in effect, and both orders are checked here for
 /// the same reason vanilla writes both.
@@ -480,7 +480,7 @@ pub fn piston_extended_id(state: StateId) -> bool {
         == Some(BuiltinPropertyValue::True)
 }
 
-/// `PistonBaseBlock.isPushable`.
+/// The piston base block's is pushable.
 ///
 /// `allow_destroyable` is vanilla's own parameter name: the *first* block of a run
 /// may be destroyed, blocks further along may not, and passing the wrong one is a
@@ -514,14 +514,14 @@ pub fn is_pushable(
         PushReaction::Block => false,
         PushReaction::Destroy => allow_destroyable,
         PushReaction::PushOnly => direction == connection_direction,
-        // `!state.hasBlockEntity()`: a chest or a furnace is never pushed, read
+        // `!state.has_block_entity()`: a chest or a furnace is never pushed, read
         // off the real per-state census rather than a hand-kept name list.
         PushReaction::Normal => !has_block_entity(state),
     }
 }
 
 /// Whether a state carries a block entity, so a piston refuses to push it —
-/// vanilla's final `!state.hasBlockEntity()`.
+/// vanilla's final `!state.has_block_entity()`.
 ///
 /// A state the 26.2 census cannot resolve reads as "no block entity", i.e.
 /// pushable. That is the same direction every other unresolvable-state fallback in
@@ -547,7 +547,7 @@ pub struct Resolution {
     pub push_direction: Direction,
 }
 
-/// `PistonStructureResolver.resolve`. `None` is vanilla's `false`: the piston does
+/// The piston structure resolver's resolve. `None` is vanilla's `false`: the piston does
 /// not move at all.
 #[must_use]
 pub fn resolve<F>(
@@ -567,7 +567,7 @@ where
     };
 
     // **The head is gone before the resolver runs.** Vanilla's `moveBlocks` sets the
-    // arm cell to air *before* constructing the `PistonStructureResolver` when
+    // arm cell to air *before* constructing the piston structure resolver when
     // retracting, so the resolver never sees `piston_head` — which is a `BLOCK`
     // push reaction and would refuse the whole pull. Reproduced by masking the cell
     // rather than by special-casing `piston_head` inside `is_pushable`, because
@@ -640,7 +640,7 @@ impl<F> Resolver<'_, F>
 where
     F: Fn(BlockPos) -> redstone::WorldState,
 {
-    /// `PistonStructureResolver.addBlockLine`.
+    /// The piston structure resolver's add block line.
     fn add_block_line(&mut self, start: BlockPos, direction: Direction) -> bool {
         let mut next_state = (self.lookup)(start);
         if next_state.block() == Block::Air {
@@ -729,7 +729,7 @@ where
         }
     }
 
-    /// `PistonStructureResolver.reorderListAtCollision` — three splices, in this
+    /// The piston structure resolver's reorder list at collision — three splices, in this
     /// order. **Do not simplify.** The whole point is that the line added last
     /// jumps ahead of the line it collided with, and any other arrangement moves a
     /// different block into the vacated cell.
@@ -745,7 +745,7 @@ where
         self.to_push.extend(collision_to_line);
     }
 
-    /// `PistonStructureResolver.addBranchingBlocks`: a sticky block drags its
+    /// The piston structure resolver's add branching blocks: a sticky block drags its
     /// perpendicular neighbours. Only perpendicular — the push axis is already
     /// covered by the line walk.
     fn add_branching_blocks(&mut self, from_pos: BlockPos) -> bool {
@@ -781,7 +781,7 @@ pub fn relative_n(pos: BlockPos, direction: Direction, n: i32) -> BlockPos {
     BlockPos::new(pos.x + dx * n, pos.y + dy * n, pos.z + dz * n)
 }
 
-/// `Direction.getAxis()`, as the three characters `x`/`y`/`z`.
+/// Direction's get axis, as the three characters `x`/`y`/`z`.
 fn axis_of(direction: Direction) -> char {
     match direction {
         Direction::Down | Direction::Up => 'y',
@@ -792,7 +792,7 @@ fn axis_of(direction: Direction) -> char {
 
 // --- the signal rule (quasi-connectivity) ---------------------------------
 
-/// `PistonBaseBlock.getNeighborSignal` — **including quasi-connectivity**.
+/// The piston base block's get neighbor signal — **including quasi-connectivity**.
 ///
 /// Three blocks, in vanilla's order:
 ///
@@ -973,7 +973,7 @@ fn piston_head_state(direction: Direction, sticky: bool) -> StateId {
 /// block key as the entity type id resolves to a different entity or to none.
 pub const PISTON_BLOCK_ENTITY: &str = "minecraft:piston";
 
-/// `PistonMovingBlockEntity.tick`'s `progress += 0.5F`, so a whole travel is two
+/// The piston moving block entity's tick's `progress += 0.5F`, so a whole travel is two
 /// ticks of ramp.
 ///
 /// The server does **not** stream this: `saveAdditional` writes `progressO`, the
@@ -1013,7 +1013,7 @@ pub const PISTON_MOVE_DELAY: u64 = 2;
 /// than compared for equality.
 pub const TICK_PISTON_FINISH: &str = "redstone:piston_finish";
 
-/// One in-flight `PistonMovingBlockEntity`: the four fields that decide both what
+/// One in-flight piston moving block entity: the four fields that decide both what
 /// a client draws and what the world commits.
 ///
 /// `progress` is deliberately absent. It is always [`PISTON_INITIAL_PROGRESS`] at
@@ -1028,7 +1028,7 @@ pub struct MovingBlockEntity {
     /// `facing` — the **piston's** facing, not the direction blocks travel. The
     /// two differ on every retraction, and a client derives the travel direction
     /// itself from `facing` plus `extending`
-    /// (`PistonMovingBlockEntity.getMovementDirection`).
+    /// (the piston moving block entity's get movement direction).
     pub direction: Direction,
     /// `extending`. Also selects the sign of `getExtendedProgress`
     /// (`extending ? p - 1 : 1 - p`).
@@ -1066,7 +1066,7 @@ impl MovingBlockEntity {
         self.runtime_state
     }
 
-    /// `Direction.get3DDataValue()` — the byte `Direction.LEGACY_ID_CODEC` stores
+    /// Direction's get 3d data value — the byte `Direction.LEGACY_ID_CODEC` stores
     /// for `facing`.
     ///
     /// The order is vanilla's own enum declaration order, which is neither
@@ -1096,7 +1096,7 @@ impl MovingBlockEntity {
     /// The direction the *carried block* actually travels, as distinct from
     /// [`Self::direction`] — the piston's own facing, unchanged by whether
     /// this is an extension or a retraction. Vanilla's own
-    /// `PistonMovingBlockEntity.getMovementDirection`.
+    /// The piston moving block entity's get movement direction.
     #[must_use]
     pub fn push_direction(&self) -> Direction {
         if self.extending { self.direction } else { self.direction.opposite() }
@@ -1125,7 +1125,7 @@ pub fn is_moving_piston_id(state: StateId) -> bool {
 
 /// Serialises a [`MovingBlockEntity`] into a scheduled-tick kind.
 ///
-/// **The pending commit tick *is* this crate's `PistonMovingBlockEntity`.** There
+/// **The pending commit tick *is* this crate's piston moving block entity.** There
 /// is no per-position block-entity map on the path a piston move runs on
 /// (`crate::random_tick`'s reaction surface holds a `ChunkColumn` and a
 /// [`crate::scheduled_tick::ScheduledTickQueue`] and nothing else), and the queue
@@ -1192,7 +1192,7 @@ pub struct MoveStart {
     /// tick rather than on the commit tick.
     ///
     /// `Some` on extension (`setBlock(pos, extendedState, 67)` in
-    /// `PistonBaseBlock.triggerEvent`, immediate and client-visible) and `None`
+    /// The piston base block's trigger event, immediate and client-visible) and `None`
     /// on retraction, where the base cell is itself one of [`moving`](Self::moving)
     /// — that is what animates the head coming home.
     pub base_now: Option<StateId>,
@@ -1244,10 +1244,10 @@ pub fn begin_move(
             lodestone_data::block_properties::PropertyValue::builtin(BuiltinPropertyValue::True),
         );
     } else {
-        // `PistonBaseBlock.triggerEvent`'s contract arm: the base cell itself
+        // The piston base block's trigger event's contract arm: the base cell itself
         // becomes a `moving_piston` carrying the *base* block, which is the only
         // record a client can draw a retracting head from
-        // (`PistonHeadRenderer`'s `isSourcePiston && !isExtending` arm builds the
+        // (the piston head renderer's `isSourcePiston && !isExtending` arm builds the
         // head from the base's own `facing` and stickiness).
         start.moving.push((
             piston_pos,
@@ -1273,7 +1273,7 @@ pub fn begin_move(
 /// after [`begin_move`].
 ///
 /// Each cell commits *itself* from its own block entity — vanilla's
-/// `PistonMovingBlockEntity.tick` writes `entity.movedState` with no reference to
+/// The piston moving block entity's tick writes `entity.movedState` with no reference to
 /// the piston that started the move, which is why a caller can schedule one
 /// independent tick per cell rather than replaying the whole move.
 ///
@@ -1296,7 +1296,7 @@ pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
 
 // --- interruption -----------------------------------------------------
 
-/// `PistonMovingBlockEntity.finalTick()` — the write a pending commit performs
+/// The piston moving block entity's final tick — the write a pending commit performs
 /// when it is interrupted *before* its own [`PISTON_MOVE_DELAY`] elapses,
 /// because a fresh move started at the same piston while the previous one was
 /// still animating.
@@ -1313,7 +1313,7 @@ pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
 ///   `redstone_piston_order_oracle_gate.rs`): interrupting an extending arm
 ///   cell leaves it reading `minecraft:air`, never `minecraft:piston_head`.
 /// * otherwise → `entity.moved_state`, same as [`finish_move`]. Vanilla wraps
-///   this in `Block.updateFromNeighbourShapes`, which this crate does not
+///   this in Block's update from neighbour shapes, which this crate does not
 ///   model (no neighbour-shape system — see this module's own "How to change
 ///   it" section on why `finish_move` already takes the same reduction); the
 ///   moved state itself is unaffected by that gap for every family this crate
@@ -1323,7 +1323,7 @@ pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
 /// [`crate::scheduled_tick::ScheduledTickQueue::take_matching`], which is
 /// where the corresponding scheduled commit is removed so it cannot also fire
 /// later against a cell this function has already rewritten. Vanilla's own
-/// `PistonBaseBlock.triggerEvent` (`b0 == 1 || b0 == 2` branch) checks **two**
+/// The piston base block's trigger event (`b0 == 1 || b0 == 2` branch) checks **two**
 /// cells on retract, never a cell further out that a run may have pushed a
 /// block into:
 ///
@@ -1607,8 +1607,8 @@ mod tests {
 
     // --- the two-phase move -----------------------------------------------
     //
-    // The outside expectation for everything below is `PistonBaseBlock.moveBlocks`
-    // plus `PistonMovingBlockEntity.tick`, read as record definitions, and — for
+    // The outside expectation for everything below is the piston base block's move blocks
+    // plus piston moving block entity's tick, read as record definitions, and — for
     // the byte-identity gate — the *already verified* one-step path. Comparing the
     // animated path against behaviour that was gated before it existed is a
     // legitimate outside expectation; comparing it against a fresh guess would not
@@ -2282,7 +2282,7 @@ mod tests {
         }
     }
 
-    /// `Direction.get3DDataValue()` for all six, against vanilla's own enum
+    /// Direction's get 3d data value for all six, against vanilla's own enum
     /// declaration order. Pairwise distinct, and every value differs from what an
     /// alphabetical or horizontal-facing ordering would produce for at least one
     /// direction — which is the ordering a hand-count reaches for.

@@ -33,8 +33,8 @@
 //!   right rotation. Vanilla's unbaked special-model-wrapper bake function composes it *under* the
 //!   display transform via its transformation-record compose function (`Transformation.compose(parent, this.transformation)`),
 //!   and its model-bakery class seeds the root with the identity.
-//! * **the mesh** — vanilla's skull model's head-model-creation function's `addBox(-4, -8, -4, 8, 8, 8)`,
-//!   divided by 16 like every `ModelPart`, so `y ∈ [-0.5, 0]`: authored **Y-down**,
+//! * **the mesh** — the skull head model's box `(-4, -8, -4, 8, 8, 8)`,
+//!   divided by 16 like every model part, so `y ∈ [-0.5, 0]`: authored **Y-down**,
 //!   which is the whole reason the node transformation flips it.
 //!
 //! Neither vanilla's skull special-renderer's submit function nor its player-head
@@ -182,8 +182,8 @@ const SKULL_HEAD_LO: Vec3 = Vec3::new(-0.25, -0.5, -0.25);
 /// The other corner of [`SKULL_HEAD_LO`]'s box.
 const SKULL_HEAD_HI: Vec3 = Vec3::new(0.25, 0.0, 0.25);
 
-/// vanilla's skull model's humanoid-head-layer function's `"hat"` overlay is the same box
-/// under `new CubeDeformation(0.25F)`, which inflates symmetrically — so it
+/// vanilla's humanoid head layer's `"hat"` overlay is the same box
+/// grown by 0.25, which inflates symmetrically — so it
 /// widens the model's extent by a quarter texel on each of the six faces.
 ///
 /// `0.25 / 16.0`, spelled out because it is the difference between the two
@@ -210,10 +210,10 @@ fn the_skull_rig_is_authored_y_down_exactly_as_vanilla_authors_it() {
     //
     // This gate once asserted the bare head box for **both** models, which was
     // right for `skull_mob` and stale for `skull_humanoid`:
-    // `createHumanoidHeadLayer` adds a `"hat"` child inflated `0.25`, and the
+    // The humanoid head layer adds a `"hat"` child inflated `0.25`, and the
     // item path bakes the very same layer the block-entity path does
-    // (vanilla's skull block-renderer's create-model function → `ModelLayers.PLAYER_HEAD` →
-    // `humanoidHeadLayer`), with vanilla's own `getExtentsForGui` walking the
+    // (vanilla's skull block renderer's model creation → the player-head layer →
+    // the humanoid head layer), with vanilla's own extents-for-GUI walking the
     // whole root. So the hatted extent is the one vanilla measures for a held
     // head too, and asserting the bare box here was asserting the absence of a
     // layer rather than the authoring convention this gate is named for.
@@ -243,7 +243,7 @@ fn a_held_player_head_lands_where_the_jar_says_and_nowhere_near_the_alternatives
 
     // The premise this whole gate rests on, asserted rather than assumed: the
     // jar declares no first-person slot for a skull, so `hand_transform` must
-    // answer with the identity — vanilla's `ItemTransform.NO_TRANSFORM`.
+    // answer with the identity — vanilla's no-transform item transform.
     assert!(
         display.declared(DisplaySlot::FirstPersonRightHand).is_none(),
         "the fixture gained a firstperson_righthand slot; re-read \
@@ -266,8 +266,8 @@ fn a_held_player_head_lands_where_the_jar_says_and_nowhere_near_the_alternatives
     // y ∈ [-0.515625, 0.015625] to [-0.015625, 0.515625] and leaves
     // |x|, |z| ≤ 0.265625.
     //
-    // The half-extent is `4 + 0.25` texels, not `4`: `ModelLayers.PLAYER_HEAD`
-    // is `createHumanoidHeadLayer`, whose `"hat"` child is inflated `0.25`,
+    // The half-extent is `4 + 0.25` texels, not `4`: the player-head layer
+    // is the humanoid head layer, whose `"hat"` child is inflated `0.25`,
     // and the held-item path bakes that same layer
     // (vanilla's skull block-renderer's create-model function, shared with the block-entity path)
     // while vanilla's skull special-renderer's extents function measures the whole root through

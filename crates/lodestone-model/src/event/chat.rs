@@ -93,7 +93,7 @@ pub enum PackedMessageSignature {
 }
 
 /// The anchor point used by the player look at packet's
-/// `EntityAnchorArgument.Anchor`.
+/// entity-anchor argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LookAnchor {
     /// Anchor at the entity's feet.

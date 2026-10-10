@@ -749,7 +749,7 @@ mod special_item_tests {
     /// An undecorated pot resolves to five instances — the base plus all
     /// four sides, every side falling back to
     /// [`DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM`] — matching
-    /// vanilla's own decorated-pot renderer's own unconditional four
+    /// vanilla's decorated-pot renderer's unconditional four
     /// part-submit calls: a blank side is drawn with the default
     /// sprite, not skipped.
     #[test]

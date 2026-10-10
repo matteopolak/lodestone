@@ -274,7 +274,7 @@ fn an_amethyst_shard_duplicates_an_allay_that_recently_heard_a_noteblock() {
 
 /// **Control**: the identical shard interaction against an allay that
 /// has never heard a note block must do nothing — proving the
-/// `isDancing()` substitute is a real gate, not one that always fires
+/// is dancing substitute is a real gate, not one that always fires
 /// on an amethyst shard.
 #[test]
 fn an_amethyst_shard_does_nothing_to_an_allay_that_never_heard_a_noteblock() {

@@ -1,6 +1,6 @@
 //! Hermetic wiring test for `CONTAINER_SLOT_STATE_CHANGED`, the auto-crafting
-//! `Crafter` block entity's own remainder: a crafter's per-slot enable/
-//! disable toggle. `ServerboundContainerSlotStateChangedPacket`'s wire layout
+//! A crafter's remainder: a per-slot enable/
+//! disable toggle. The container-slot-state-changed packet's wire layout
 //! is a VarInt `slotId`, a VarInt `containerId`, then a plain boolean
 //! `newState` (`crates/versions/26.2/src/packets/game.rs`'s
 //! `ContainerSlotStateChanged` struct documents the same layout).

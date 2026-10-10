@@ -4,7 +4,7 @@
 //!
 //! Block models are JSON and resolve through [`crate::model`]. Entity models are
 //! **not data** in vanilla — they are Java code that assembles a cuboid hierarchy
-//! (`LayerDefinition` → `MeshDefinition` → `PartDefinition` → `CubeDefinition`),
+//! (layer definition → mesh definition → part definition → cube definition),
 //! each part carrying a pivot (`PartPose`) and each cube carrying a box + a
 //! texel offset that is unwrapped onto a single per-entity texture sheet by a
 //! fixed "box unwrap". Nothing in `.cache/mc/26.2/generated/` or
@@ -30,7 +30,7 @@
 use crate::model::Direction;
 
 /// A cuboid "grow"/inflation applied symmetrically to a box before unwrapping,
-/// mirroring vanilla's `CubeDeformation`. Overlay layers (hat, sleeves, armour)
+/// mirroring vanilla's cube deformation. Overlay layers (hat, sleeves, armour)
 /// use a small positive grow so they sit just outside the base layer.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Deformation {
@@ -43,7 +43,7 @@ pub struct Deformation {
 }
 
 impl Deformation {
-    /// A uniform grow of `v` texels on every axis (vanilla `CubeDeformation(v)`).
+    /// A uniform grow of `v` texels on every axis.
     pub fn uniform(v: f32) -> Self {
         Self { x: v, y: v, z: v }
     }
@@ -266,9 +266,9 @@ pub enum EntityVariant {
     /// The climate family a mob spawned into. 26.2 gave pigs, cows, chickens and
     /// several others per-temperature skins instead of one universal sheet.
     Temperature(Temperature),
-    /// A horse's colour coat (`Horse.Variant` / `HorseRenderer.getTextureLocation`).
+    /// A horse's colour coat (the horse variant, as its renderer resolves the texture).
     /// This is deliberately *only* the base-colour layer: vanilla's markings
-    /// overlay (`Markings`, drawn by `HorseMarkingLayer` as an independent
+    /// overlay (the markings, drawn by the markings layer as an independent
     /// second translucent pass over the same model) is a second, unrelated
     /// selection axis, not a sub-case of colour, and `EntityTexture`/`ByVariant`
     /// only carry one path, so the renderer resolves it separately
@@ -289,7 +289,7 @@ pub enum EntityVariant {
     },
     /// A parrot's plumage colour (vanilla's own parrot variant field).
     Parrot(ParrotColor),
-    /// A mooshroom's mushroom colour (`MushroomCow.Variant`), reusing the
+    /// A mooshroom's mushroom colour (the mushroom-cow variant), reusing the
     /// plain cow mesh — an independent axis from `Temperature`, since a
     /// mooshroom is never re-skinned by climate.
     Mooshroom(MooshroomColor),
@@ -397,7 +397,7 @@ pub enum CatCoat {
 /// A wolf's breed (vanilla's own wolf-variant registry). Ordered as vanilla registers them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WolfCoat {
-    /// `entity/wolf/wolf`, vanilla's default breed (`WolfVariants.DEFAULT`).
+    /// `entity/wolf/wolf`, vanilla's default breed.
     Pale,
     /// `entity/wolf/wolf_spotted`.
     Spotted,
@@ -447,8 +447,8 @@ pub enum ParrotColor {
     Gray,
 }
 
-/// A mooshroom's mushroom colour (`MushroomCow.Variant`,
-/// `MushroomCowRenderer.TEXTURES`).
+/// A mooshroom's mushroom colour (the mushroom-cow variant,
+/// as its renderer's texture table).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MooshroomColor {
     /// `entity/cow/mooshroom_red`, vanilla's default.
@@ -715,7 +715,7 @@ fn bake_cube(cube: &CubeDef, world: &Affine, tw: f32, th: f32, out: &mut Vec<Ent
     let [w, h, d] = cube.size;
     let (mut min_x, mut min_y, mut min_z) = (ox, oy, oz);
     let (mut max_x, mut max_y, mut max_z) = (ox + w, oy + h, oz + d);
-    // Grow (CubeDeformation) inflates the box symmetrically.
+    // Grow (cube deformation) inflates the box symmetrically.
     min_x -= cube.grow.x;
     min_y -= cube.grow.y;
     min_z -= cube.grow.z;
@@ -823,7 +823,7 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     }
 }
 
-/// `HumanoidModel.OVERLAY_SCALE` — the grow every player skin overlay cube
+/// The humanoid overlay scale — the grow every player skin overlay cube
 /// (jacket, both sleeves, both pants legs) sits at relative to its base-layer
 /// cube in [`player_model`].
 ///
@@ -835,7 +835,7 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
 /// reintroduce exactly that. See `player_overlay_and_armour_inflations_differ`.
 pub const PLAYER_OVERLAY_INFLATION: f32 = 0.25;
 
-/// `HumanoidModel.HAT_OVERLAY_SCALE` — the player skin's `hat` cube's own grow
+/// The humanoid hat overlay scale — the player skin's `hat` cube's own grow
 /// (a child of `head`, so this is its *own* extra grow on top of whatever the
 /// head cube itself carries — `0.0` for the bare skin in [`player_model`],
 /// see [`crate::equipment::HAT_OVERLAY_INFLATION`] for the armour-mesh case

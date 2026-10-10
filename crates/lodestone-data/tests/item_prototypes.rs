@@ -89,7 +89,7 @@ struct Row {
 
 /// Maps vanilla's own equipment-slot enum's serialized-name accessor to the model enum.
 ///
-/// The names come from vanilla's own equipment-slot enum's own enum-constant
+/// The names come from vanilla's equipment-slot enum's enum-constant
 /// constructor arguments;
 /// an unknown one is a hard failure rather than a
 /// silent `None`, because "this item is not equippable" and "this build does not

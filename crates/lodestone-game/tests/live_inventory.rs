@@ -29,7 +29,7 @@
 //!   authority. (This is exactly why the hand-rolled tests force a resync with a
 //!   stale-state_id `container_click`, which we cannot use here — `container_click`
 //!   is `Unsupported` in v26-2.)
-//! - **The load gate.** Player actions are dropped until `hasClientLoaded()`; the
+//! - **The load gate.** Player actions are dropped until has client loaded; the
 //!   real driver never sends `player_loaded` and no `ClientAction` triggers it, so
 //!   the server auto-loads us only after ~60 ticks (~3s). Every drop before that is
 //!   a silent no-op, so we retry and stop on the first decrement.
@@ -374,7 +374,7 @@ async fn inventory_mutation_round_trips_through_client() {
         let mut menu = folded_menu(&w);
         // `DropSelectedItem` (Q) removes one from the held slot; the click
         // machine's throw-drop-one on the same slot has the identical slot effect
-        // (verified against vanilla `AbstractContainerMenu.doClick` THROW).
+        // (verified against the vanilla container click handler's THROW).
         Click::drop_one(MAINHAND_MENU).apply(&mut menu, PlayerCtx::survival());
         menu.slot_item(MAINHAND_MENU).map(|s| s.count() as u32)
     };
@@ -388,20 +388,20 @@ async fn inventory_mutation_round_trips_through_client() {
     // --- Serverbound half: send a real action through ClientHandle, observed
     //     via RCON server-truth ---
     //
-    // Two hazards, both verified against 26.2 `ServerGamePacketListenerImpl`:
+    // Two hazards, both verified against the 26.2 server packet listener:
     //
-    //  1. **Load gate.** Player actions are dropped until `hasClientLoaded()`
-    //     (`clientLoadedTimeoutTimer <= 0`). The timer starts at
-    //     `CLIENT_LOADED_TIMEOUT_TIME = 60` ticks and only decrements — the real
+    //  1. **Load gate.** Player actions are dropped until the client-loaded flag
+    //     is set (its timeout timer reaching zero). The timer starts at
+    //     60 ticks and only decrements — the real
     //     `ClientHandle`/driver never sends `player_loaded` and no `ClientAction`
     //     triggers it, so the server auto-loads us only after ~60 ticks (~3s). A
     //     drop before that is silently discarded; hence we retry.
     //
     //     DO NOT "harmonise" this retry loop with the container-click test's: the
     //     two differ *deliberately*. `DropSelectedItem` lowers to
-    //     `ServerboundPlayerActionPacket(DROP_ITEM)`, routed to `handlePlayerAction`
-    //     which **is** `hasClientLoaded()`-gated (verified `:1810`), so it needs
-    //     the ~3s retry. `handleContainerClick` (`:1940`) is **not** gated, so the
+    //     a drop-item player-action packet, routed to the player-action handler
+    //     which **is** gated on the client-loaded flag, so it needs
+    //     the ~3s retry. The container-click handler is **not** gated, so the
     //     click test lands on attempt 0. Same-looking loops, different reason —
     //     collapsing them reintroduces a silent flake on whichever side loses its
     //     gate handling.
@@ -511,8 +511,8 @@ async fn inventory_mutation_round_trips_through_client() {
 /// observable, and it is exactly the authoritative half a stubbed encoder cannot
 /// fake.
 ///
-/// Unlike the drop test, `handleContainerClick` is **not** gated on
-/// `hasClientLoaded()` (verified in 26.2 `ServerGamePacketListenerImpl:1940`), so
+/// Unlike the drop test, the container-click handler is **not** gated on
+/// the client-loaded flag (verified in the 26.2 server packet listener), so
 /// no ~3s load wait is needed; the short retry only tolerates tick/RCON latency.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires the lodestone-creative server on 127.0.0.1:25570 (RCON :25571)"]

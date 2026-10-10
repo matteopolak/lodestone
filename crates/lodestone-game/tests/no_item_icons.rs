@@ -17,8 +17,8 @@ fn icon(menu: &Menu, index: usize) -> Option<&'static str> {
     menu.slot(index).and_then(|s| s.no_item_icon)
 }
 
-/// `InventoryMenu`'s constructor walks `SLOT_IDS = {HEAD, CHEST, LEGS, FEET}`
-/// (`:44`) placing menu slots 5..=8 in that order, and pushes the off-hand at 45
+/// The inventory menu's constructor walks the head, chest, legs, feet slot ids
+/// placing menu slots 5..=8 in that order, and pushes the off-hand at 45
 /// with the shield sprite. Head is the *top* slot, so 5 is the helmet.
 #[test]
 fn the_player_menu_declares_vanillas_five_empty_slot_sprites() {

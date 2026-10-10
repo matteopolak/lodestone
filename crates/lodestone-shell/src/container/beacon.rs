@@ -7,26 +7,26 @@
 //! (`crates/protocol/v770/src/adapter/serverbound.rs`'s `encode_set_beacon`)
 //! with zero shell callers — the outbound-island shape `ClientAction::SetFlying`
 //! was caught in. This module is the producer: [`power_buttons`]/
-//! [`upgrade_button`] lay out `BeaconScreen`'s eight power buttons exactly
+//! [`upgrade_button`] lay out beacon screen's eight power buttons exactly
 //! where vanilla puts them, [`BeaconSelection`] tracks which of them the
-//! player has picked (mirroring `BeaconScreen`'s own screen-local
+//! player has picked (mirroring beacon screen's own screen-local
 //! `primary`/`secondary` fields), and [`button_hit_test`] resolves a click
 //! against both.
 //!
 //! ## How it works
 //!
-//! `BeaconMenu`'s three `container_data` properties are `0` = pyramid
+//! The beacon menu's three `container_data` properties are `0` = pyramid
 //! `levels`, `1`/`2` = the primary/secondary power, each encoded
-//! `BeaconMenu.encodeEffect`'s way: `0` for none, else the
+//! The beacon menu's encode effect's way: `0` for none, else the
 //! `minecraft:mob_effect` registry id `+ 1`. [`BeaconSelection::sync`] is
-//! `BeaconScreen`'s `ContainerListener::dataChanged` — it re-derives the
+//! The beacon screen's container listener's data changed — it re-derives the
 //! local selection from those two properties, but only when they actually
 //! change, so a pending local click (not yet confirmed, and therefore not
 //! yet reflected in `container_data`) survives frame to frame instead of
 //! being stomped by a redundant resync. `AnvilRenameState::sync` is the
 //! same shape for the identical reason: see its own doc.
 //!
-//! [`power_buttons`]' pixel arithmetic is `BeaconScreen.init`'s own
+//! [`power_buttons`]' pixel arithmetic is the beacon screen's init's own
 //! `leftPos + 76 + c*24 - totalWidth/2`/`topPos + 22 + tier*25` (tiers 0..=2)
 //! and `leftPos + 167 + c*24 - totalWidth/2`/`topPos + 47` (tier 3),
 //! `leftPos`/`topPos` folded to `0` since these are local widget pixels —
@@ -35,7 +35,7 @@
 //!
 //! ## How to change it
 //!
-//! [`BEACON_EFFECT_TIERS`] is `BeaconBlockEntity.BEACON_EFFECTS`
+//! [`BEACON_EFFECT_TIERS`] is the beacon block entity's beacon effects
 //! (`.cache/mc/26.2/src`), duplicated rather than imported from
 //! `lodestone-server`'s own copy (`crate::beacon::BEACON_EFFECT_TIERS`) —
 //! that crate is off limits to this pass, and this repo already duplicates
@@ -47,7 +47,7 @@
 //! `container::geometry`'s draw side blits the real vanilla art for these:
 //! a `22x22` `container/beacon/button*` state sprite per button, then the
 //! effect's own `mob_effect/<id>` icon `18x18` two pixels in — the two blits
-//! `BeaconScreenButton.extractContents`/`extractIcon` make.
+//! The beacon screen button's extract contents/`extractIcon` make.
 //!
 //! It used to draw a hash-derived tint swatch instead, above a note saying no
 //! effect-icon art existed in this tree. That was written from a search of
@@ -69,7 +69,7 @@ use lodestone_model::ResourceKey;
 
 use super::layout::Rect;
 
-/// `BeaconBlockEntity.BEACON_EFFECTS` — the four beacon power tiers, index 0
+/// The beacon block entity's beacon effects — the four beacon power tiers, index 0
 /// = the tier a level-1 pyramid unlocks. Tier 3 (regeneration) is the
 /// level-4-only, secondary-only power. See the module doc for why this is a
 /// duplicate of `lodestone-server`'s own copy rather than a shared import.
@@ -98,7 +98,7 @@ pub struct PowerButton {
     pub y: f32,
 }
 
-/// A power button's square side length (`BeaconScreenButton`'s own `22, 22`).
+/// A power button's square side length (the beacon screen button's own `22, 22`).
 pub const BUTTON: f32 = 22.0;
 
 #[allow(clippy::cast_precision_loss)] // tier/count/index are always tiny (<= 4)
@@ -123,11 +123,11 @@ fn tier_row(tier: u8, effects: &[&str], base_x: f32, y: f32) -> Vec<PowerButton>
         .collect()
 }
 
-/// `BeaconScreen.init`'s eight *static* power buttons: the three primary
+/// The beacon screen's init's eight *static* power buttons: the three primary
 /// rows (tiers 0..=2) and tier 3's single regeneration secondary. Does
 /// **not** include the dynamic "upgrade current primary" secondary slot —
 /// see [`upgrade_button`], which needs the live `primary` selection
-/// `BeaconScreen.init` closes over instead.
+/// The beacon screen's init closes over instead.
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // tier/count/index are always tiny (<= 4)
 pub fn power_buttons() -> Vec<PowerButton> {
@@ -158,9 +158,9 @@ pub fn power_buttons() -> Vec<PowerButton> {
     buttons
 }
 
-/// `BeaconUpgradePowerButton` — the dynamic secondary slot that mirrors
+/// The beacon upgrade power button — the dynamic secondary slot that mirrors
 /// whatever `primary` is currently chosen (`updateStatus`'s own `visible =
-/// primary != null`; `setEffect(primary)` each time it changes). `None` with
+/// primary != null`; set effect each time it changes). `None` with
 /// no primary chosen yet, matching that visibility gate exactly: an
 /// invisible vanilla button also cannot be pressed.
 #[must_use]
@@ -180,7 +180,7 @@ pub fn upgrade_button(primary: Option<&ResourceKey>) -> Option<PowerButton> {
     })
 }
 
-/// The confirm button (`BeaconScreen.CONFIRM_SPRITE`), local widget pixels.
+/// The confirm button (the beacon screen's confirm sprite), local widget pixels.
 #[must_use]
 pub fn confirm_rect() -> Rect {
     Rect {
@@ -191,7 +191,7 @@ pub fn confirm_rect() -> Rect {
     }
 }
 
-/// The cancel button (`BeaconScreen.CANCEL_SPRITE`), local widget pixels.
+/// The cancel button (the beacon screen's cancel sprite), local widget pixels.
 #[must_use]
 pub fn cancel_rect() -> Rect {
     Rect {
@@ -284,8 +284,8 @@ pub fn button_hit_test(
 }
 
 /// Local pending primary/secondary power selection — vanilla's
-/// `BeaconScreen`'s own `primary`/`secondary` fields. See the module doc for
-/// [`Self::sync`]'s relationship to `ContainerListener::dataChanged`.
+/// The beacon screen's own `primary`/`secondary` fields. See the module doc for
+/// [`Self::sync`]'s relationship to the container listener's data changed.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BeaconSelection {
     /// The currently chosen primary power, or `None`.
@@ -293,7 +293,7 @@ pub struct BeaconSelection {
     /// The currently chosen secondary power, or `None`.
     pub secondary: Option<ResourceKey>,
     /// The last `(primary_id, secondary_id)` pair [`Self::sync`] resolved
-    /// against — `container_data` properties `1`/`2`, `BeaconMenu.encodeEffect`'s
+    /// against — `container_data` properties `1`/`2`, the beacon menu's encode effect's
     /// wire form. `None` before the first sync (nothing observed yet).
     signature: Option<(i32, i32)>,
 }
@@ -313,7 +313,7 @@ impl BeaconSelection {
         Self::default()
     }
 
-    /// `ContainerListener::dataChanged`'s reset: re-derives
+    /// The container listener's data changed's reset: re-derives
     /// [`Self::primary`]/[`Self::secondary`] from `container_data`
     /// properties `1`/`2` exactly when that pair changes (vanilla fires this
     /// on *every* `beaconData.set` — the initial full send on open, and
@@ -330,8 +330,8 @@ impl BeaconSelection {
         true
     }
 
-    /// `BeaconPowerButton.onPress` for a **primary** tier button: a no-op if
-    /// it is already selected (`isSelected()`'s guard); otherwise it becomes
+    /// The beacon power button's on press for a **primary** tier button: a no-op if
+    /// it is already selected (is selected's guard); otherwise it becomes
     /// the primary, and the secondary is cleared unless it is the *exact
     /// same* effect (the level-II amplifier boost, `Objects.equals`).
     pub fn select_primary(&mut self, effect: ResourceKey) {
@@ -344,7 +344,7 @@ impl BeaconSelection {
         self.primary = Some(effect);
     }
 
-    /// `BeaconPowerButton.onPress` for a **secondary** button (the tier-3
+    /// The beacon power button's on press for a **secondary** button (the tier-3
     /// regeneration slot or the dynamic upgrade slot): the same no-op guard,
     /// no clearing.
     pub fn select_secondary(&mut self, effect: ResourceKey) {
@@ -354,7 +354,7 @@ impl BeaconSelection {
         self.secondary = Some(effect);
     }
 
-    /// `BeaconConfirmButton.updateStatus`'s `active` gate: a payment item
+    /// The beacon confirm button's update status's `active` gate: a payment item
     /// must occupy the payment slot and a primary power must be chosen.
     #[must_use]
     pub fn can_confirm(&self, has_payment: bool) -> bool {
@@ -462,7 +462,7 @@ mod tests {
         assert_eq!(sel.secondary, None, "a different primary clears the secondary");
 
         // The upgrade case: secondary == primary survives re-selecting the
-        // same primary (the `isSelected()` no-op guard means this needs a
+        // same primary (the is selected no-op guard means this needs a
         // *different* primary in between to exercise the non-clearing arm).
         sel.select_primary(speed.clone());
         sel.select_secondary(strength.clone());

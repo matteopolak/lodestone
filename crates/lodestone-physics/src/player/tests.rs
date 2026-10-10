@@ -64,7 +64,7 @@ mod tests {
         let bf = mth::compute_modified_friction(0.6, 1.0);
 
         // base 0.1 + sprint (AddMultipliedTotal 0.3) + Speed I (AddMultipliedTotal
-        // 0.2), all one class => 0.1 * (1+0.3) * (1+0.2), per calculateValue().
+        // 0.2), all one class => 0.1 * (1+0.3) * (1+0.2), per calculate value.
         let attr = 0.1_f64 * (1.0 + 0.3) * (1.0 + 0.2);
         let mut s = PlayerState::at(Vec3d::new(0.0, 0.0, 0.0), 0.0).with_movement_speed(attr);
         s.on_ground = true;
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn fluid_jump_threshold_boundary_is_the_swimming_eye_height() {
-        // Vanilla's own fluid-jump threshold = `getEyeHeight() < 0.4 ? 0.0 : 0.4`.
+        // Vanilla's own fluid-jump threshold = `get_eye_height() < 0.4 ? 0.0 : 0.4`.
         // The swimming pose's eye height is *exactly* 0.4, so it sits on
         // the false side of a strict `<` and
         // keeps the 0.4 threshold. Coding this as `<=` would collapse a swimmer's
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn swimming_is_sustained_while_sprinting_in_water_even_when_eye_surfaces() {
-        // Once swimming, the pose persists on `sprinting && isInWater()` alone —
+        // Once swimming, the pose persists on `sprinting && is_in_water()` alone —
         // you keep swimming as you break the surface (eye leaves the water) until
         // you stop sprinting or leave the water. Uses a one-block-deep pool so the
         // box is in water but the eye (feet + 1.62) is above it.
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn jump_boost_power_is_tenth_per_level_as_float() {
-        // getJumpBoostPower() = 0.1F*(amp+1) in float. Amp 0 (Jump Boost I) => 0.1F;
+        // get jump boost power = 0.1F*(amp+1) in float. Amp 0 (Jump Boost I) => 0.1F;
         // amp 1 (Jump Boost II) => 0.2F. The float literal matters (0.1 is inexact).
         assert_eq!(jump_boost_power(None), 0.0f32);
         assert_eq!(jump_boost_power(Some(0)).to_bits(), 0.1f32.to_bits());

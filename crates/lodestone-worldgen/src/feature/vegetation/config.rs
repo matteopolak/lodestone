@@ -116,7 +116,7 @@ pub(super) fn parse_predicate_list(v: &Value) -> Vec<BlockPredicate> {
         .unwrap_or_default()
 }
 
-/// A `HolderSet<Block>`-shaped JSON field: one id, or a list of ids. A `#tag`
+/// A holder-set-shaped JSON field: one id, or a list of ids. A `#tag`
 /// reference resolves to nothing here (the closure needs a `Resolver` this
 /// function does not have) — every `valid_blocks`/`replaceable`/`can_be_placed_on`
 /// in the bundled data is a literal list, and a tag would degrade to "matches

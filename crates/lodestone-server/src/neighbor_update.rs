@@ -347,7 +347,7 @@ mod tests {
         BlockPos::new(x, y, z)
     }
 
-    /// `getOpposite()` pins direct from the real direction enum's own
+    /// get opposite pins direct from the real direction enum's own
     /// opposite-index field: down/up, north/south, west/east.
     #[test]
     fn opposite_pairs_match_the_real_field() {

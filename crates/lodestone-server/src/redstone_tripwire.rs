@@ -7,14 +7,14 @@
 //!
 //! # What it is
 //!
-//! Vanilla's own `TripWireHookBlock.calculateState` —
+//! Vanilla's own trip wire hook block's calculate state —
 //! the up-to-41-cell scan along a hook's `FACING` that decides whether it has
 //! found a matching hook facing back at it (`attached`), and whether the
 //! string between them is armed and reporting powered (`powered`). Both
 //! endpoints of a completed run get rewritten together, and every scanned
 //! wire segment's own `attached` flag is kept in step with the hook's.
 //!
-//! **Deliberately not modelled: entity crossing.** `TripWireBlock.entityInside`
+//! **Deliberately not modelled: entity crossing.** trip wire block's entity inside
 //! /`checkPressed` is what actually sets a wire segment's `powered=true` in
 //! the common case (something standing on the string) — that needs an
 //! entity-AABB census this crate does not have anywhere (the same gap
@@ -31,7 +31,7 @@
 //! * **Trigger**: not a neighbour notification at all — vanilla drives this
 //!   from **placement** (`setPlacedBy`/`onPlace`) and from a **periodic
 //!   10-tick recheck** the scan itself schedules, never from
-//!   `neighborChanged` (`TripWireHookBlock` overrides neither). So
+//!   `neighborChanged` (the trip wire hook block overrides neither). So
 //!   [`calculate_state`]/[`find_controlling_hooks`] are wired into
 //!   `react_at_placement`, the existing seam for "the placed block owes
 //!   itself a reaction the neighbour pass cannot deliver" (already used for
@@ -77,11 +77,11 @@ use lodestone_model::BlockPos;
 pub const TRIPWIRE: Block = Block::Tripwire;
 pub const TRIPWIRE_HOOK: Block = crate::redstone::TRIPWIRE_HOOK;
 
-/// `TripWireHookBlock.WIRE_DIST_MAX` (`:40`) — the scan runs `1..42`, so the
+/// The trip wire hook block's wire dist max (`:40`) — the scan runs `1..42`, so the
 /// farthest a receiving hook can sit is 41 cells away.
 pub const WIRE_DIST_MAX: i32 = 42;
 
-/// `TripWireHookBlock.RECHECK_PERIOD` (`:41`).
+/// The trip wire hook block's recheck period (`:41`).
 pub const RECHECK_DELAY: u32 = 10;
 
 /// `redstone:tripwire_recheck` — the periodic-recheck scheduled-tick kind.
@@ -139,13 +139,13 @@ pub struct CalculatedState {
     pub powered: bool,
 }
 
-/// Vanilla's own `TripWireHookBlock.calculateState`,
+/// Vanilla's own trip wire hook block's calculate state,
 /// minus the sound/game-event pair (`emitState`) and the mid-call
 /// self-removal branch — see this module's own doc comment for both.
 ///
 /// `state` is the hook's own current state at `pos` (its `FACING` is read
 /// from here, not passed separately, matching the jar reading
-/// `state.getOptionalValue(FACING)`). `wire_source`, when present, is the one
+/// state's get optional value). `wire_source`, when present, is the one
 /// scanned cell whose state the caller supplies directly rather than asking
 /// `lookup` — see [`WireSource`].
 #[must_use]
@@ -260,7 +260,7 @@ fn hook_state(facing: Direction, attached: bool, powered: bool) -> StateId {
     .expect("tripwire hook powered property is a generated state")
 }
 
-/// Vanilla's own `TripWireBlock.updateSource` — from a wire
+/// Vanilla's own trip wire block's update source — from a wire
 /// segment at `pos`, scan **south and west only** (vanilla's own fixed pair;
 /// the opposite two directions are covered because a hook facing this wire
 /// runs its *own* [`calculate_state`] scan toward it) for a hook whose
@@ -301,8 +301,8 @@ where
 }
 
 /// [`find_controlling_hooks`] with `POWERED` forced to `true` on the wire
-/// state passed to each found hook — vanilla's own `TripWireBlock
-/// ::affectNeighborsAfterRemoval`'s `state.setValue(POWERED, true)`,
+/// state passed to each found hook — vanilla's own trip wire block
+/// ::affect neighbors after removal`'s state's set value,
 /// the "the string just broke" instantaneous
 /// pulse. Called from `crate::random_tick::react_at_removal`, which
 /// `crate::server::destroy_block` reaches through

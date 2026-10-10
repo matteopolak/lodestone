@@ -293,7 +293,7 @@ pub struct ArgumentSignatureEntry {
 ///
 /// Wire layout (vanilla's own serverbound signed-chat-command packet,
 /// confirmed against the decompiled 26.2 source):
-/// an unbounded string command (without the leading `/`, `readUtf()` with no
+/// an unbounded string command (without the leading `/`, read utf with no
 /// explicit cap), a big-endian 64-bit timestamp (epoch milliseconds), a
 /// big-endian 64-bit salt, a varint-prefixed list of
 /// [`ArgumentSignatureEntry`] (vanilla's own argument-signatures max count
@@ -722,7 +722,7 @@ pub struct PlayerLoaded;
 /// Serverbound `command_suggestion` packet (tab-completion request).
 ///
 /// Wire layout: a VarInt transaction id, then a VarInt-length-prefixed UTF-8
-/// command string (vanilla's own serverbound command suggestion packet's `readUtf(32500)` /
+/// command string (vanilla's own serverbound command suggestion packet's read utf /
 /// `writeUtf`).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:command_suggestion", state = Play, bound = Server)]
@@ -737,7 +737,7 @@ pub struct CommandSuggestion {
 /// Serverbound `swing` packet (arm-swing animation).
 ///
 /// Wire layout: a single VarInt interaction-hand ordinal — `0` main hand, `1`
-/// off hand — written as vanilla's own enum-ordinal writer does for `InteractionHand`.
+/// off hand — written as vanilla's enum-ordinal writer does for the interaction hand.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:swing", state = Play, bound = Server)]
 pub struct Swing {
@@ -801,8 +801,8 @@ pub struct RecipeBookChangeSettings {
 /// Serverbound `recipe_book_seen_recipe` packet.
 ///
 /// Marks a recipe as seen, clearing its "new" highlight
-/// (vanilla's own serverbound recipe book seen recipe packet). Wire layout: a single VarInt
-/// `RecipeDisplayId` index.
+/// (the serverbound recipe-book seen-recipe packet). Wire layout: a single VarInt
+/// recipe display id index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:recipe_book_seen_recipe", state = Play, bound = Server)]
 pub struct RecipeBookSeenRecipe {
@@ -814,8 +814,8 @@ pub struct RecipeBookSeenRecipe {
 /// Serverbound `place_recipe` packet.
 ///
 /// Auto-places a recipe book entry's ingredients into an open crafting
-/// container (vanilla's own serverbound place recipe packet). Wire layout: VarInt container
-/// id, VarInt `RecipeDisplayId` index, then a trailing boolean for
+/// container (the serverbound place-recipe packet). Wire layout: VarInt container
+/// id, VarInt recipe display id index, then a trailing boolean for
 /// "use max items".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:place_recipe", state = Play, bound = Server)]
@@ -882,7 +882,7 @@ pub struct GameEvent {
 /// Clientbound `set_default_spawn_position` packet.
 ///
 /// Sets the world's compass target / default respawn anchor. Reshaped in 1.21.9
-/// to carry a full `RespawnData` (a dimension-qualified [`GlobalPos`] plus a yaw
+/// to carry a full respawn-data record (a dimension-qualified [`GlobalPos`] plus a yaw
 /// and pitch) rather than the older bare block position and single angle.
 ///
 /// Wire layout: a [`GlobalPos`] (identifier dimension then a packed 64-bit block
@@ -1024,7 +1024,7 @@ pub struct PlayerAction {
 
 /// Serverbound `use_item_on` packet (right-click a block face).
 ///
-/// Wire layout: VarInt hand, then an inlined `BlockHitResult` — packed
+/// Wire layout: VarInt hand, then an inlined block hit result — packed
 /// `BlockPos` long, VarInt face ordinal, three `f32` cursor components relative
 /// to the block, and an `inside_block` bool — then a VarInt prediction sequence.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
@@ -1293,7 +1293,7 @@ pub struct PickItemFromEntity {
 
 /// Clientbound `set_held_slot` packet — the server's answer to a middle-click
 /// pick, resynchronising the client's selected hotbar slot after
-/// `ServerGamePacketListenerImpl::tryPickItem`. Also the packet a real
+/// the server's try-pick-item handler. Also the packet a real
 /// vanilla server sends for any other server-initiated selection change; this
 /// crate's client already decodes it into `ClientEvent::HeldSlotChanged`
 /// (`adapter::player::handle_play_player`) and had no server-side encoder.
@@ -1491,8 +1491,8 @@ pub struct SetJigsawBlock {
 ///
 /// Wire layout (vanilla's own serverbound set-structure-block packet): packed
 /// `BlockPos`
-/// long; VarInt vanilla's own structure-block update-type ordinal and VarInt
-/// `StructureMode` ordinal (both a plain enum-ordinal writer, i.e. a plain
+/// long; VarInt of the structure-block update-type ordinal and VarInt
+/// structure-mode ordinal (both a plain enum-ordinal writer, i.e. a plain
 /// VarInt of the ordinal — **not** the id-mapper codec used
 /// elsewhere in this file, though the two encode identically as a VarInt so
 /// the wire bytes are the same either way); a UTF structure name; six signed
@@ -1511,7 +1511,7 @@ pub struct SetStructureBlock {
     /// Vanilla's own structure-block update-type ordinal.
     #[mc(varint)]
     pub update_type: i32,
-    /// `StructureMode` ordinal.
+    /// Structure-mode ordinal.
     #[mc(varint)]
     pub mode: i32,
     /// Structure name (save/load identifier).

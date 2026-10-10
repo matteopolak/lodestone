@@ -9,7 +9,7 @@ const SILVER_RATIO_64: i64 = 7_640_891_576_956_012_809;
 const FLOAT_MULTIPLIER: f32 = 5.960_464_5e-8;
 const DOUBLE_MULTIPLIER: f64 = 1.110_223e-16_f32 as f64;
 
-/// `RandomSupport.mixStafford13` — the finaliser applied to seed halves.
+/// The Stafford-13 mixer — the finaliser applied to seed halves.
 #[must_use]
 pub(crate) fn mix_stafford13(mut z: i64) -> i64 {
     z = (z ^ ((z as u64 >> 30) as i64)).wrapping_mul(-4_658_895_280_553_007_687);
@@ -17,7 +17,7 @@ pub(crate) fn mix_stafford13(mut z: i64) -> i64 {
     z ^ ((z as u64 >> 31) as i64)
 }
 
-/// `RandomSupport.upgradeSeedTo128bit`: expand a 64-bit seed into a mixed
+/// Expands a 64-bit seed into a mixed
 /// 128-bit `(lo, hi)` pair.
 fn upgrade_seed_to_128bit(legacy_seed: i64) -> (i64, i64) {
     let lo = legacy_seed ^ SILVER_RATIO_64;
@@ -25,7 +25,7 @@ fn upgrade_seed_to_128bit(legacy_seed: i64) -> (i64, i64) {
     (mix_stafford13(lo), mix_stafford13(hi))
 }
 
-/// `RandomSupport.seedFromHashOf`: the 128-bit seed derived from an MD5 digest.
+/// The 128-bit seed derived from an MD5 digest.
 fn seed_from_hash_of(name: &str) -> (i64, i64) {
     let digest = md5(name.as_bytes());
     let lo = i64::from_be_bytes(digest[0..8].try_into().unwrap());

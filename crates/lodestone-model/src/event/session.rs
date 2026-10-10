@@ -7,7 +7,7 @@ use crate::*;
 /// One unlocked recipe, from the recipe book add packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeBookEntry {
-    /// The server's `RecipeDisplayId` — the handle
+    /// The server's recipe display id — the handle
     /// [`ClientEvent::RecipeBookRemoved`] and
     /// [`crate::ClientAction::PlaceRecipe`] both use. **Not** a recipe
     /// `Identifier`: 26.x replaced the name with a per-session index.
@@ -189,12 +189,12 @@ mod server_link_url_tests {
 
 /// A server link's label: one of vanilla's known kinds, or a custom component.
 ///
-/// The wire is `ByteBufCodecs.either`, a boolean where `true` means *Left* — and
+/// The wire is a boolean-tagged either, where `true` means *Left* — and
 /// Left is the **known** id, not the custom label. Getting that polarity
 /// backwards produces a plausible-looking decode of the wrong half.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerLinkKind {
-    /// One of vanilla's ten `KnownLinkType`s, by id.
+    /// One of vanilla's ten known link types, by id.
     Known(i32),
     /// A server-authored label.
     Custom(Text),
@@ -272,8 +272,8 @@ pub struct MapDecoration {
     pub name: Option<Text>,
 }
 
-/// A rectangular sub-region of a map's 128×128 colour grid, from vanilla's
-/// `MapItemSavedData.MapPatch`.
+/// A rectangular sub-region of a map's 128×128 colour grid, from vanilla's map
+/// patch.
 ///
 /// **This is a sub-rectangle, not the whole frame.** Vanilla only ever sends the
 /// dirty columns, so a moving player produces a tall 1-or-2-column-wide patch,
@@ -295,7 +295,7 @@ pub struct MapPatch {
 }
 
 /// Which frame vanilla draws around an advancement's icon — the wire ordinal
-/// order of `AdvancementType`.
+/// order of the advancement type.
 ///
 /// **The ordinals are `TASK`, `CHALLENGE`, `GOAL`**, which is not the order the
 /// three are usually listed in; reading it as task/goal/challenge swaps the two
@@ -311,7 +311,7 @@ pub enum AdvancementFrame {
 }
 
 impl AdvancementFrame {
-    /// From the wire ordinal (`FriendlyByteBuf::readEnum`, a VarInt).
+    /// From the wire ordinal (a VarInt enum).
     #[must_use]
     pub const fn from_ordinal(ordinal: i32) -> Option<Self> {
         Some(match ordinal {
@@ -323,12 +323,12 @@ impl AdvancementFrame {
     }
 }
 
-/// The presentation half of an advancement, from vanilla's `DisplayInfo`.
+/// The presentation half of an advancement, from vanilla's display info.
 ///
 /// # `x`/`y` exist only here
 ///
 /// 26.2's advancement JSON on disk carries no position — vanilla computes the
-/// tidy-tree layout server-side in `TreeNodePosition` and writes the result to
+/// tidy-tree layout server-side in its tree-node-position pass and writes the result to
 /// the wire. So these two floats are the *only* source of vanilla's own layout,
 /// which is what makes this decode load-bearing rather than cosmetic.
 ///
@@ -346,7 +346,7 @@ pub struct AdvancementDisplay {
     pub title: Text,
     /// Description component.
     pub description: Text,
-    /// The icon stack (`ItemStackTemplate`: item, count, components).
+    /// The icon stack (item, count, components).
     pub icon: ItemStack,
     /// Frame shape.
     pub frame: AdvancementFrame,
@@ -362,7 +362,7 @@ pub struct AdvancementDisplay {
     pub y: f32,
 }
 
-/// One node of the advancement tree, from vanilla's `AdvancementHolder`.
+/// One node of the advancement tree, from vanilla's advancement holder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdvancementEntry {
     /// The advancement id, e.g. `minecraft:story/mine_stone`.
@@ -414,7 +414,7 @@ pub struct AdvancementEntry {
 /// | [`shell`](Route::shell) | a `debug_assert!` on the catch-all of `lodestone_shell::net::forward` |
 /// | [`shell_conditional`](Route::shell_conditional) | nothing; it exists only to keep that assert correct |
 /// | [`client`](Route::client) | nothing; documentation, so that [`Route::NOWHERE`] means what it says |
-/// One recipe book's stored UI state, from `RecipeBookSettings.TypeSettings`.
+/// One recipe book's stored UI state, from the recipe-book type settings.
 ///
 /// Both fields default to `false`, which is vanilla's own default for a book no
 /// server has reported: closed, unfiltered.

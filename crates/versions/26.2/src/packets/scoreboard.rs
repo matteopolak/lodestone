@@ -24,13 +24,13 @@ use lodestone_core::{Ctx, Decode, Error, Reader, Result, read_network_nbt};
 use lodestone_model::Text;
 use uuid::Uuid;
 
-/// Vanilla `readUtf()` default cap (32767 UTF-16 units).
+/// Vanilla read utf default cap (32767 UTF-16 units).
 const MAX_STRING: usize = 32_767;
 /// Defensive upper bound on a team member list, to avoid a hostile VarInt
 /// count triggering a huge allocation.
 const MAX_MEMBERS: i32 = 1 << 16;
 
-/// Optional per-score/objective number format (`NumberFormatTypes`).
+/// Optional per-score/objective number format.
 ///
 /// The wire is `optional(registry-dispatched)`: a present flag, then a VarInt
 /// registry id (`0` blank, `1` styled, `2` fixed) and the type's payload.
@@ -201,7 +201,7 @@ pub struct TeamParameters {
     pub name_tag_visibility: i32,
     /// Collision-rule id (same ordering as visibility, with push semantics).
     pub collision_rule: i32,
-    /// Colour id (`ChatFormatting`, `0..=15` for the sixteen colours), or
+    /// Colour id (the chat-formatting ordinal, `0..=15` for the sixteen colours), or
     /// `None` when the optional colour was absent.
     pub color: Option<i32>,
     /// Whether members can damage each other (options bit 0).

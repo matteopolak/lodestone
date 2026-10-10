@@ -34,7 +34,7 @@ use lodestone_data::item::Item;
 
 use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 
-/// `EntityTypes.FIREWORK_ROCKET`'s registry path, as `EntityDraw::type_path`
+/// The entity types's firework rocket's registry path, as `EntityDraw::type_path`
 /// carries it (namespace stripped).
 ///
 /// A type check rather than a `thrown_item_for` row: see
@@ -52,7 +52,7 @@ const FIREWORK_ROCKET_ITEM: &str = "minecraft:firework_rocket";
 /// [`lodestone_assets::DisplayContextItemContext`] is the same idea and is the
 /// thing to reach for anywhere a slot is known; it takes a non-optional
 /// [`DisplaySlot`], and `DisplaySlot` deliberately has no `NONE` variant
-/// (`ItemDisplayContext.NONE` selects no `display` key). A `/summon
+/// (the item display context's none selects no `display` key). A `/summon
 /// item_display` with no `item_display` tag *is* `NONE` — vanilla's own
 /// accessor default — so this seam needs a context that can answer
 /// `minecraft:display_context` with `"none"`, which is
@@ -126,8 +126,8 @@ impl RenderState {
     ///
     /// Returns `None` — and draws nothing — when there is no vanilla model pass,
     /// or when nothing on screen resolves to baked item geometry. For a drop that
-    /// last case is vanilla's own behaviour: `ItemEntityRenderer.submit` returns
-    /// immediately on an empty stack, and so does `ItemInHandLayer` on an empty
+    /// last case is vanilla's own behaviour: the item entity renderer's submit returns
+    /// immediately on an empty stack, and so does item in hand layer on an empty
     /// hand.
     ///
     /// # One mesh, not one per item
@@ -210,7 +210,7 @@ impl RenderState {
             // no 3-D geometry: draw nothing rather than a stand-in.
             //
             // `DisplaySlot::Ground` is the context vanilla's
-            // `ItemEntityRenderer.extractRenderState` resolves in, and it is a real
+            // The item entity renderer's extract render state resolves in, and it is a real
             // branch: `spyglass`, `trident` and the spears list `ground` alongside
             // `gui` in their `display_context` case, so a drop must resolve there
             // rather than inherit whatever the inventory picked.
@@ -247,7 +247,7 @@ impl RenderState {
             // chain that declares no `ground` at all.
             let ground = ground_transform(&geometry.display, geometry.gui_light);
             // Vanilla draws a *stack* as up to five copies —
-            // `ItemEntityRenderer.submitMultipleFromCount`. The first is
+            // The item entity renderer's submit multiple from count. The first is
             // unperturbed; the rest scatter, and how they scatter depends on the
             // posed model's own depth: a solid model jitters in all three axes,
             // a flat sprite instead fans evenly along `z` with a smaller jitter,
@@ -278,7 +278,7 @@ impl RenderState {
                     draw.anim.age_ticks,
                     item_bob_offset(EntityNetworkId::from_raw(draw.id)),
                     // Every copy of the stack shares the drop's one sample:
-                    // `ItemEntityRenderer` reads `state.lightCoords` once and
+                    // The item entity renderer reads state's light coords once and
                     // `submitMultipleFromCount` reuses it for all five.
                     entity_light(&self.entity_light, draw),
                 );
@@ -311,16 +311,16 @@ impl RenderState {
         self.merge_vault_items(model, camera, &frustum, &mut combined, stats);
         // Brushable-block revealed items. Same reason as campfire/vault: the
         // suspicious sand/gravel a player sees is entirely a real block
-        // model, and `BrushableBlockRenderer` draws only the single revealed
+        // model, and the brushable block renderer draws only the single revealed
         // item on top of it.
         self.merge_brushable_items(model, camera, &frustum, &mut combined, stats);
         // Shelved items. Same reason as campfire/vault/brushable: a shelf's
         // board/back/sides are all real block-model geometry, and
-        // `ShelfRenderer` draws only up to three item models on top of it.
+        // The shelf renderer draws only up to three item models on top of it.
         self.merge_shelf_items(model, camera, &frustum, &mut combined, stats);
         // Items hanging in item frames. Same reason again: the frame's border and
         // back plate are a block model (`gpu/moving_blocks.rs` draws them), and
-        // `ItemFrameRenderer`'s item branch is one `ItemStackRenderState.submit`
+        // The item frame renderer's item branch is one item stack render state's submit
         // on top. This is the *ordinary*-item half — a sword, an ingot, a block
         // item; a chest or a skull is `minecraft:special` and goes through the
         // block-entity rig in `entity_passes.rs` instead, exactly as it does when
@@ -343,7 +343,7 @@ impl RenderState {
     }
 
     /// Merge every ordinary item hanging in an item frame into `combined` —
-    /// vanilla's `ItemFrameRenderer.submit` item branch.
+    /// vanilla's item frame renderer's submit item branch.
     ///
     /// # What this closes
     ///
@@ -358,8 +358,8 @@ impl RenderState {
     ///
     /// # `DisplaySlot::Fixed`, not `Ground`
     ///
-    /// `ItemFrameRenderer.extractRenderState` resolves the stack in
-    /// `ItemDisplayContext.FIXED`, the same context the campfire path uses and
+    /// The item frame renderer's extract render state resolves the stack in
+    /// The item display context's fixed, the same context the campfire path uses and
     /// the single easiest thing to get wrong here, because the *drop* on this
     /// same path is `Ground`. Reusing `Ground` lays a framed sword flat.
     ///
@@ -473,16 +473,16 @@ impl RenderState {
     }
 
     /// Merge every `item_display` entity on screen — vanilla's
-    /// `DisplayRenderer.ItemDisplayRenderer`, which is the whole of that
+    /// The display renderer's item display renderer, which is the whole of that
     /// renderer.
     ///
     /// # The pose, in vanilla's own composition order
     ///
-    /// `DisplayRenderer.submit` pushes the billboard orientation and then the
+    /// The display renderer's submit pushes the billboard orientation and then the
     /// synced `Transformation` — that pair is
     /// [`DisplayDraw::placement`](crate::display_entities::DisplayDraw::placement),
     /// shared with the block-display and text-display consumers so the three
-    /// cannot drift. `ItemDisplayRenderer.submitInner` then pushes
+    /// cannot drift. The item display renderer's submit inner then pushes
     /// `Axis.YP.rotation(PI)` before `state.item.submit(…)`, and the item's own
     /// `display` transform for its context is applied *inside* that submit —
     /// which is why [`display_matrix`](lodestone_render::display_matrix)
@@ -494,17 +494,17 @@ impl RenderState {
     /// item facing the wrong way rather than an obviously broken one. It is
     /// asserted separately for that reason.
     ///
-    /// # `ItemDisplayContext.NONE` is a real context, not a missing one
+    /// # item display context's none is a real context, not a missing one
     ///
     /// `Display.ItemDisplay`'s accessor default is `NONE`, and
-    /// `ItemTransforms.getTransform` answers it with `ItemTransform.NO_TRANSFORM`
+    /// The item transforms's get transform answers it with the item transform's no transform
     /// — the identity pose. So a `/summon item_display {item:{…}}` with no
     /// `item_display` tag draws its model unscaled and unrotated, filling the
     /// whole block. `display_slot_for_context` returns `None` for it and this
     /// poses with `DisplayTransform::default()`, which *is* `NO_TRANSFORM`.
     /// Substituting `Fixed` there would silently halve every such hologram.
     ///
-    /// # Named deviations from `ItemDisplayRenderer`
+    /// # Named deviations from the item display renderer
     ///
     /// * **No interpolation and no `viewRange` cull**, for the reasons
     ///   `gpu/moving_blocks.rs`'s `merge_block_displays` records — the same two
@@ -541,7 +541,7 @@ impl RenderState {
             let Some(geometry) = model.items.get(&id).and_then(|v| v.resolve(&ctx)) else {
                 continue;
             };
-            // `slot`'s `None` arm is `ItemTransform.NO_TRANSFORM`, which is
+            // `slot`'s `None` arm is the item transform's no transform, which is
             // exactly `DisplayTransform::default()` — see this function's doc.
             let item_transform = slot.map_or_else(Default::default, |s| geometry.display.get(s));
             let pose = draw.placement(camera.yaw, camera.pitch)
@@ -603,12 +603,12 @@ impl RenderState {
     }
 
     /// Merge every campfire's cooking items into `combined` — vanilla's
-    /// `CampfireRenderer`, which is the whole of that renderer.
+    /// The campfire renderer, which is the whole of that renderer.
     ///
     /// # Why this lives in the item pass and not with the other block entities
     ///
-    /// `CampfireRenderer` bakes no layer, binds no sheet and has no model field:
-    /// its `submit` is four `ItemStackRenderState.submit` calls at four poses. The
+    /// The campfire renderer bakes no layer, binds no sheet and has no model field:
+    /// its `submit` is four item stack render state's submit calls at four poses. The
     /// fire, the logs and the smoke a player sees are the *block* model, drawn by
     /// the terrain mesher with no help from here — so an unset
     /// [`CampfireSource`](super::CampfireSource) leaves a complete campfire
@@ -618,12 +618,12 @@ impl RenderState {
     /// # `DisplaySlot::Fixed`, not `Ground`
     ///
     /// `extractRenderState` calls
-    /// `updateForTopItem(.., ItemDisplayContext.FIXED, ..)` — the item-frame
+    /// update for top item — the item-frame
     /// context. Reusing the drop path's `Ground` would pose a steak on its edge,
     /// and it is the single easiest thing to get wrong here because every other
     /// world item on this path *is* `Ground`.
     ///
-    /// No glint arm: a campfire cooks food, and `ItemStackRenderState`'s foil is
+    /// No glint arm: a campfire cooks food, and the item stack render state's foil is
     /// not derivable from the `Items` NBT we read (which carries no `components`
     /// parse). An enchanted item on a campfire therefore draws without its
     /// shimmer rather than with a wrong one.
@@ -666,12 +666,12 @@ impl RenderState {
     }
 
     /// Merge every vault's display-item cluster into `combined` — vanilla's
-    /// `VaultRenderer`.
+    /// The vault renderer.
     ///
     /// # Why this lives in the item pass and not with the other block entities
     ///
-    /// `VaultRenderer` bakes no layer and binds no sheet: its `submit` is
-    /// `ItemEntityRenderer.renderMultipleFromCount` at a fixed pose. The cage,
+    /// The vault renderer bakes no layer and binds no sheet: its `submit` is
+    /// The item entity renderer's render multiple from count at a fixed pose. The cage,
     /// door and base a player sees are the *block* model, drawn by the terrain
     /// mesher with no help from here — `blockstates/vault.json` is a plain
     /// `variants` map, the same shape the mob-spawner cage and trial-spawner's
@@ -681,12 +681,12 @@ impl RenderState {
     ///
     /// # `DisplaySlot::Ground`, matching a dropped item
     ///
-    /// `VaultRenderer.extractRenderState` resolves the display item in
-    /// `ItemDisplayContext.GROUND` — the identical context a drop resolves in
+    /// The vault renderer's extract render state resolves the display item in
+    /// The item display context's ground — the identical context a drop resolves in
     /// — which is why this reuses [`ground_transform`] rather than a
     /// vault-specific display slot, and why the multi-copy loop below is the
     /// same flat/solid fan-vs-jitter split the drop loop above uses (both
-    /// port `ItemEntityRenderer.renderMultipleFromCount`/`submitMultipleFromCount`,
+    /// port the item entity renderer's render multiple from count/`submitMultipleFromCount`,
     /// the same algorithm under two names in the real jar).
     ///
     /// No glint arm, for the reason [`merge_campfire_items`] has none: the
@@ -758,12 +758,12 @@ impl RenderState {
     }
 
     /// Merge every brushable block's revealed item into `combined` — vanilla's
-    /// `BrushableBlockRenderer`.
+    /// The brushable block renderer.
     ///
     /// # Why this lives in the item pass and not with the other block entities
     ///
-    /// `BrushableBlockRenderer` bakes no layer, binds no sheet and has no model
-    /// field: its `submit` is a single `ItemStackRenderState.submit` at one
+    /// The brushable block renderer bakes no layer, binds no sheet and has no model
+    /// field: its `submit` is a single item stack render state's submit at one
     /// pose. The suspicious sand/gravel a player sees is the *block* model,
     /// drawn by the terrain mesher with no help from here — so an unset
     /// [`BrushableSource`](super::BrushableSource) leaves a complete,
@@ -771,7 +771,7 @@ impl RenderState {
     ///
     /// # `DisplaySlot::Fixed`, matching a campfire item
     ///
-    /// `extractRenderState` calls `updateForTopItem(.., ItemDisplayContext.FIXED,
+    /// `extractRenderState` calls `update for top item(.., the item display context's fixed,
     /// ..)`, the identical context [`merge_campfire_items`] resolves in — the
     /// item-frame pose, not `Ground`.
     ///
@@ -814,12 +814,12 @@ impl RenderState {
     }
 
     /// Merge every shelf's occupied-slot items into `combined` — vanilla's
-    /// `ShelfRenderer`.
+    /// The shelf renderer.
     ///
     /// # Why this lives in the item pass and not with the other block entities
     ///
-    /// `ShelfRenderer` bakes no layer, binds no sheet and has no model field:
-    /// its `submit` is up to three `ItemStackRenderState.submit` calls, one
+    /// The shelf renderer bakes no layer, binds no sheet and has no model field:
+    /// its `submit` is up to three item stack render state's submit calls, one
     /// per occupied slot. A shelf's board/back/sides are all *block* model
     /// geometry the terrain mesher already draws, so an unset
     /// [`ShelfSource`](super::ShelfSource) leaves a complete, empty shelf,
@@ -827,7 +827,7 @@ impl RenderState {
     ///
     /// # `DisplaySlot::OnShelf`, a third display context beside `Fixed`/`Ground`
     ///
-    /// `extractRenderState` resolves each item in `ItemDisplayContext.ON_SHELF`
+    /// `extractRenderState` resolves each item in the item display context's on shelf
     /// — its own context, distinct from campfire's `Fixed` and a drop's
     /// `Ground`. [`shelf_item_mesh`] is the one caller in this codebase that
     /// needs it.
@@ -872,11 +872,11 @@ impl RenderState {
     }
 
     /// Merge one thrown item projectile into `combined` as a camera-facing
-    /// billboard of its item model — vanilla's `ThrownItemRenderer`.
+    /// billboard of its item model — vanilla's thrown item renderer.
     ///
     /// # Which item id, and why the wire is preferred over the table
     ///
-    /// `ThrowableItemProjectile`, `Fireball` and `EyeOfEnder` all sync their stack
+    /// The throwable item projectile, `Fireball` and `EyeOfEnder` all sync their stack
     /// through `DATA_ITEM_STACK` — the **same** `ITEM_STACK` serializer a dropped
     /// item uses (the decode keys on the serializer, not the index, and
     /// `apply_entity_metadata` inserts `DisplayItem` for any entity type), so
@@ -909,20 +909,20 @@ impl RenderState {
     ///
     /// # Why this is not a row in `thrown_item_for`
     ///
-    /// `FireworkEntityRenderer` really does draw a billboarded item model in
-    /// `ItemDisplayContext.GROUND`, exactly as `ThrownItemRenderer` does, so the
+    /// The firework entity renderer really does draw a billboarded item model in
+    /// The item display context's ground, exactly as the thrown item renderer does, so the
     /// temptation to add a row is real. It would be wrong: that table means
-    /// "entity types registered to `ThrownItemRenderer` in `EntityRenderers`",
+    /// "entity types registered to the thrown item renderer in the entity renderers",
     /// its membership is checked against the vanilla registration list by a
     /// parity gate, and a firework is not one of them. Widening it would change
     /// what the table *means* and take the parity gate's premise with it. The
     /// two mechanical differences would not fit either: a firework has no scale
-    /// term (`ThrownItemRenderer` scales before the billboard; this does not)
+    /// term (the thrown item renderer scales before the billboard; this does not)
     /// and it carries a rotation the table has no column for.
     ///
     /// # The three rotations
     ///
-    /// `FireworkEntityRenderer.submit`, for the shot-at-angle case, appends
+    /// The firework entity renderer's submit, for the shot-at-angle case, appends
     /// `Axis.ZP 180 deg`, `Axis.YP 180 deg`, `Axis.XP 90 deg` **after** the
     /// camera orientation, tipping the sprite out of the camera plane. Composed
     /// into the `orientation` argument rather than added as a parameter to
@@ -931,7 +931,7 @@ impl RenderState {
     /// # Two suppressions, both vanilla's
     ///
     /// A rocket **attached to a gliding player** draws nothing at all —
-    /// `FireworkRocketEntity.shouldRender` returns false — because that is the
+    /// The firework rocket entity's should render returns false — because that is the
     /// elytra boost riding inside the player rather than a rocket in flight.
     /// And the stack falls back to a plain `minecraft:firework_rocket` when the
     /// wire never reported one, which is faithful rather than a papering-over:
@@ -970,7 +970,7 @@ impl RenderState {
         if !frustum.intersects_aabb(draw.feet - slack, draw.feet + slack) {
             return;
         }
-        // `FireworkEntityRenderer` has no `getBlockLightLevel` override, so the
+        // The firework entity renderer has no `getBlockLightLevel` override, so the
         // world sample applies — a rocket climbing out of a dark shaft dims.
         let light = entity_light(&self.entity_light, draw);
         let orientation = if flags.shot_at_angle {
@@ -1010,7 +1010,7 @@ impl RenderState {
         // baked geometry should fall through to the default too, not draw nothing.
         //
         // `Ground`, as the drop pass: `extractRenderState` resolves a projectile's
-        // item in `ItemDisplayContext.GROUND` too, which is the same reason the
+        // item in the item display context's ground too, which is the same reason the
         // pose below is `ground_transform` and not a projectile-specific one.
         let ctx = ItemStateContext::new(DisplaySlot::Ground);
         let geometry = draw
@@ -1037,7 +1037,7 @@ impl RenderState {
             entity_light(&self.entity_light, draw)
         };
         // `display.ground`: `extractRenderState` resolves the item in
-        // `ItemDisplayContext.GROUND`, the same context a drop uses — which is why
+        // The item display context's ground, the same context a drop uses — which is why
         // this is `ground_transform` and not a projectile-specific transform.
         let ground = ground_transform(&geometry.display, geometry.gui_light);
         let mut mesh = thrown_item_mesh(
@@ -1069,7 +1069,7 @@ impl RenderState {
     }
 
     /// Merge an ominous item spawner's floating item into `combined` —
-    /// `OminousItemSpawnerRenderer.submit`.
+    /// The ominous item spawner renderer's submit.
     ///
     /// The spawner entity itself has **no** geometry at all: vanilla's renderer
     /// draws only the contained stack, so an entity whose `DATA_ITEM` has not
@@ -1111,7 +1111,7 @@ impl RenderState {
     ) {
         use lodestone_render::entity_sprite as sprite;
 
-        // `ItemDisplayContext.GROUND` — `extractItemGroupRenderState` resolves
+        // The item display context's ground — `extractItemGroupRenderState` resolves
         // in `GROUND`, the same context a drop and a thrown projectile use.
         let Some(geometry) = draw
             .item
@@ -1201,13 +1201,13 @@ impl RenderState {
     ///   nothing.
     /// * **`Body` and `Saddle`.** Neither is humanoid armour and neither has a
     ///   mesh: `BODY` is `ANIMAL_ARMOR` (wolf armour, horse barding —
-    ///   `WolfArmorLayer`, `HorseArmorLayer`) and `SADDLE` is its own type with
+    ///   The wolf armor layer, `HorseArmorLayer`) and `SADDLE` is its own type with
     ///   eleven per-mount layer types. See [`humanoid_armour_slot`] for why
     ///   folding `Body` into `Chest` is specifically wrong.
     /// * **Rigs with no arm.** A creeper with a `MainHand` item (a plugin can do
     ///   this) resolves no `right_arm` part, so nothing is drawn. Vanilla agrees:
-    ///   `ItemInHandLayer` is only attached to renderers whose model implements
-    ///   `ArmedModel`.
+    ///   The item in hand layer is only attached to renderers whose model implements
+    ///   The armed model.
     fn merge_held_items(
         &self,
         model: &ModelRenderer,
@@ -1252,15 +1252,15 @@ impl RenderState {
         // `entities.rs` already uses to pick `BABY_LIMB_SCALE`.
         let baby = draw.scale < 1.0;
         // The *holder's* light, not the item's own position: vanilla's
-        // `ItemInHandLayer` is a layer of the holder's renderer and draws with the
-        // holder's `state.lightCoords`, so a sword follows the hand that carries
+        // The item in hand layer is a layer of the holder's renderer and draws with the
+        // holder's state's light coords, so a sword follows the hand that carries
         // it — eye-probed and fire-forced like every other layer.
         let light = entity_light(&self.entity_light, draw);
 
         for (slot, id) in &draw.equipment {
-            // `Mob.getMainArm()` is `RIGHT` unless `draw.main_arm_left` is set
-            // (`Mob.isLeftHanded()`, decoded off the same mob-flags byte as
-            // `Mob.isAggressive()`), in which case both hands flip sides.
+            // Mob's get main arm is `RIGHT` unless `draw.main_arm_left` is set
+            // (Mob's is left handed, decoded off the same mob-flags byte as
+            // Mob's is aggressive), in which case both hands flip sides.
             let arm = match (slot, draw.main_arm_left) {
                 (EquipmentSlot::MainHand, false) | (EquipmentSlot::OffHand, true) => Arm::Right,
                 (EquipmentSlot::MainHand, true) | (EquipmentSlot::OffHand, false) => Arm::Left,
@@ -1276,7 +1276,7 @@ impl RenderState {
             //   makes a mob's spyglass the 3-D tube rather than the flat sprite;
             // * whether this entity is using an item at all;
             // * **and which hand it is using.** Vanilla's `using_item` is
-            //   `owner.isUsingItem() && owner.getUseItem() == itemStack`, so a
+            //   `owner.is_using_item() && owner.get_use_item() == itemStack`, so a
             //   skeleton drawing a bow in its main hand must not also draw its
             //   off-hand item mid-use. `ItemUse::off_hand` is exactly that test —
             //   compared against the *slot* this loop iteration is drawing rather

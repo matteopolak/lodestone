@@ -336,7 +336,7 @@ fn texel_at(rgba: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 /// Vanilla's own mipmap-generator "generate mip levels" step runs its own
 /// texture-util "solidify" step
 /// on `currentMips[0]` **in place** and then sets `result[0] = currentMips[0]`,
-/// and that same `NativeImage` is what its own sprite-contents "upload first
+/// and that same native image is what its own sprite-contents "upload first
 /// frame" step
 /// uploads at level 0. This builder used to blit the raw image at level 0 while
 /// levels 1..n came from the solidified copy, so level 0 was the one level in

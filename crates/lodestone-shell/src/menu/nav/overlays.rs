@@ -154,16 +154,16 @@ pub fn book_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super:
 /// through a live world, so `owns_frame_agrees_with_frame_for_on_every_screen`
 /// walked straight past the broken case.
 ///
-/// The record settles which is right: `Screen.extractBackground` forks on
+/// The record settles which is right: Screen's extract background forks on
 /// `this.minecraft.level == null` — panorama with no level, the in-world
 /// wash otherwise — exactly [`UiState::settings_in_world`]'s own fork, so
 /// this now mirrors [`settings_overlay_frame`] instead of
-/// [`sign_edit_overlay_frame`]: `Dim` (plus the blur — `PackConfirmScreen`
-/// does not override `isInGameUi()`) when
+/// [`sign_edit_overlay_frame`]: `Dim` (plus the blur — the pack confirm screen
+/// does not override is in game ui) when
 /// [`UiState::resource_pack_prompt_in_world`], the untouched `Panorama`
 /// default otherwise (`Screen::Connecting` has no level, matching vanilla's
 /// `level == null` arm). Vanilla actually blurs there too — the `blur`
-/// call in `extractBackground` is unconditional once `isInGameUi()` is
+/// call in `extractBackground` is unconditional once is in game ui is
 /// ruled out, panorama or not — but this port scopes the blur pass to
 /// [`MenuRenderer::render_overlay`] frames only (see `render::blur`'s module
 /// doc), so the Connecting-screen panorama stays unblurred, a stated cut
@@ -217,7 +217,7 @@ pub fn resource_pack_prompt_overlay_frame<'a>(
 /// [`crate::menu::render::MenuBackdrop::Dim`], and it is set here rather than in
 /// `settings_frame`. Out of a world the settings tree sits on the panorama; in one
 /// it must leave the paused world visible, which is vanilla's own fork
-/// (`OptionsScreen` over the level vs over the title). `settings_frame` defaults to
+/// (the options screen over the level vs over the title). `settings_frame` defaults to
 /// `Panorama` and nothing was overriding it, so in-world Options drew the panorama
 /// *over* the paused world — the same 2026-08-04 report that made this an overlay
 /// in the first place, still live because routing the frame to `render_overlay`
@@ -241,7 +241,7 @@ pub fn settings_overlay_frame<'a>(
     );
     super::render::stamp_canvas_facts(&mut frame, ui, nav);
     frame.backdrop = super::render::MenuBackdrop::Dim;
-    // `OptionsScreen` does not override `isInGameUi()` either, so vanilla
+    // The options screen does not override is in game ui either, so vanilla
     // blurs behind in-world Options — see `MenuFrame::blur`'s own doc.
     frame.blur = true;
     Some(frame)
@@ -269,7 +269,7 @@ pub fn stats_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::ren
     let mut frame = crate::menu::stats::frame(nav.stats(), nav.stats_snapshot());
     super::render::stamp_canvas_facts(&mut frame, ui, nav);
     frame.backdrop = super::render::MenuBackdrop::Dim;
-    // `StatsScreen` does not override `isInGameUi()` — see `MenuFrame::blur`'s
+    // The stats screen does not override is in game ui — see `MenuFrame::blur`'s
     // own doc.
     frame.blur = true;
     Some(frame)
@@ -298,7 +298,7 @@ pub fn social_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::re
     let mut frame = crate::menu::social::frame(nav.social(), ui.kind());
     super::render::stamp_canvas_facts(&mut frame, ui, nav);
     frame.backdrop = super::render::MenuBackdrop::Dim;
-    // `SocialInteractionsScreen` does not override `isInGameUi()` either.
+    // The social interactions screen does not override is in game ui either.
     frame.blur = true;
     Some(frame)
 }
@@ -344,7 +344,7 @@ pub fn server_links_overlay_frame<'a>(
     frame.backdrop = super::render::MenuBackdrop::Dim;
     // This client has no dedicated `ServerLinksScreen` in vanilla to check —
     // it stands in for `Dialogs.SERVER_LINKS`, a dialog over the pause
-    // screen, which inherits `PauseScreen`'s own non-`isInGameUi` fork. See
+    // screen, which inherits pause screen's own non-`isInGameUi` fork. See
     // `MenuFrame::blur`'s own doc.
     frame.blur = true;
     Some(frame)
@@ -404,7 +404,7 @@ pub fn command_block_overlay_frame<'a>(
 /// `Screen::CommandBlockEdit` is in the set for the same reason `Paused` and
 /// `Death` are: it is an overlay ([`render::owns_frame`](super::render::
 /// owns_frame) is `false` for it, deliberately — the world keeps rendering
-/// behind it, matching vanilla's `isInGameUi() == true`) with its own rows to
+/// behind it, matching vanilla's `is_in_game_ui() == true`) with its own rows to
 /// hover, click and type into. Without it the screen opened, and neither a
 /// click nor a keystroke ever reached it.
 ///
@@ -451,7 +451,7 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
 /// Steps `i` one row in `forward`'s direction, wrapping, and keeps stepping
 /// while the row it lands on is disabled.
 ///
-/// This is vanilla's own focus rule: `AbstractWidget::nextFocusPath` returns
+/// This is vanilla's own focus rule: the abstract widget's next focus path returns
 /// `null` for an inactive widget, so keyboard
 /// navigation never *lands* on a greyed-out button — which is what makes it safe
 /// to reproduce vanilla's full widget list with most of it disabled without the

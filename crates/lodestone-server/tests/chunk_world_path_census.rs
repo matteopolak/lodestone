@@ -184,7 +184,7 @@ fn real_census_forces_a_lava_detour_the_old_solid_air_model_would_walk_straight_
 
 /// `ChunkWorld::collision_top` used to be a hardcoded `1.0`/`0.0` regardless
 /// of what was actually there. This pins it to the real per-state shape max
-/// (`WalkNodeEvaluator.getFloorLevel`:
+/// (the walk node evaluator's get floor level:
 /// `shape.isEmpty() ? 0.0 : shape.max(Direction.Axis.Y)`) for four states a
 /// full-cell assumption gets wrong in three different directions: a slab
 /// (shorter than a full cell), a fence (taller), and a fluid (no collision at

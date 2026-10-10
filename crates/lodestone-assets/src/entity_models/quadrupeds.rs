@@ -97,7 +97,7 @@ pub fn sheep_model() -> EntityModelDef {
 ///
 /// * **A different inflation per part**, not one uniform grow: `head` at
 ///   `+0.6`, `body` at `+1.75`, all four legs at `+0.5`
-///   (`CubeDeformation`s baked into each `addBox` call). The head and body
+///   (grows baked into each box call). The head and body
 ///   boxes are vanilla's own literal origin/size, not `sheep_model`'s — in
 ///   particular the head's wool box is one texel *shallower* in Z
 ///   (`(-3,-4,-4)`, size `(6,6,6)`) than the body mesh's head box
@@ -111,7 +111,7 @@ pub fn sheep_model() -> EntityModelDef {
 /// * **No mirroring anywhere.** `sheep_model` mirrors its right legs' UV
 ///   (`quadruped_root`'s `mirror_right`, matching vanilla's own quadruped-model
 ///   leg construction),
-///   but vanilla's own sheep-fur-model fur-layer construction builds one `CubeListBuilder` and reuses
+///   but vanilla's own sheep-fur-model fur-layer construction builds one cube-list builder and reuses
 ///   it for all four legs with no `.mirror()` call, so the wool sheet's leg
 ///   region is not flipped for the right side the way the body's is.
 ///
@@ -156,8 +156,8 @@ pub fn sheep_wool_model() -> EntityModelDef {
     }
 }
 
-/// Sheep wool tint: `ColorLerper.Type.SHEEP`'s per-`DyeColor` modified colour at
-/// vanilla's fixed `brightness = 0.75` (`SheepRenderState.getWoolColor`'s
+/// Sheep wool tint: the sheep colour-lerp's per-dye-colour modified colour at
+/// vanilla's fixed `brightness = 0.75` (the sheep render state's wool colour
 /// non-`jeb_` branch — the rainbow name easter egg is not modelled here, see
 /// the gap note in `docs/entity-rendering.md`).
 ///
@@ -169,8 +169,8 @@ pub fn sheep_wool_model() -> EntityModelDef {
 /// doesn't recognise.
 ///
 /// White is vanilla's own hardcoded special case, not `0.75 * (255,255,255)`:
-/// `ColorLerper.getModifiedColor` returns the literal constant `-1644826`
-/// (`0xE6E6E6`, `(230,230,230)`) for `DyeColor.WHITE` rather than running the
+/// the colour modifier returns the literal constant `-1644826`
+/// (`0xE6E6E6`, `(230,230,230)`) for white dye rather than running the
 /// brightness multiply, which is why this table is hand-transcribed per entry
 /// rather than computed here from `DyeColor.textureDiffuseColor` — the two
 /// happen to be the *same* formula for every other colour

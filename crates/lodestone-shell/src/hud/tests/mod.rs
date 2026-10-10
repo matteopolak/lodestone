@@ -129,7 +129,7 @@ fn quad_boxes(verts: &[f32], cw: f32, ch: f32) -> Vec<(f32, f32, f32, f32)> {
 /// A minimal synthetic pack covering the locator bar's two sprite ids —
 /// same "geometry gate, not a pixel-colour gate" shape as
 /// [`boss_bar_synthetic_atlas`], and at the bar's real native sizes:
-/// 182x5 for the background, 9x9 for the dot (`LocatorBar::DOT_SIZE`).
+/// 182x5 for the background, 9x9 for the dot (the locator bar's dot size).
 fn locator_bar_synthetic_atlas() -> GuiAtlas {
     let mut src = lodestone_assets::MemorySource::new("locator-bar-test");
     for (id, size, rgba) in [

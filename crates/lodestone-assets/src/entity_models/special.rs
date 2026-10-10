@@ -1,8 +1,8 @@
 use super::*;
 
 /// vanilla's own end crystal model's body-layer construction: `outer_glass` (8³) with a nested
-/// `inner_glass` (same box, `withScale(0.875)`) and a further-nested `cube`
-/// (`withScale(0.765625)` = `0.875²`, a literal in vanilla, not computed) plus
+/// `inner_glass` (same box, with scale) and a further-nested `cube`
+/// (with scale = `0.875²`, a literal in vanilla, not computed) plus
 /// a separate `base` box. Sheet 64×32.
 pub fn end_crystal_model() -> EntityModelDef {
     let glass_cube = || cube([-4.0, -4.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]);
@@ -44,7 +44,7 @@ pub fn end_crystal_model() -> EntityModelDef {
 /// but overrides head/body/arms/legs entirely with armor-stand-specific boxes
 /// and adds `right_body_stick`/`left_body_stick`/`shoulder_stick`/`base_plate`.
 /// The inherited `hat` child from the base humanoid mesh survives the
-/// `addOrReplaceChild("head", ...)` merge (vanilla's `PartDefinition` keeps a
+/// head-replacement merge (vanilla's part definition keeps a
 /// replaced node's *children*), but the constructor unconditionally sets
 /// `this.hat.visible = false` and nothing ever re-enables it — so `hat` is
 /// excluded here rather than baked as a permanently-invisible box. Sheet

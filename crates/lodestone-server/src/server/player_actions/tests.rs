@@ -76,7 +76,7 @@ fn recipe_book_seen_accepts_only_advertised_display_ids() {
 }
 
 /// `swing_action`'s two real inputs, against vanilla's own
-/// `ClientboundAnimatePacket` constants (`SWING_MAIN_HAND = 0`,
+/// Animate packet constants (`SWING_MAIN_HAND = 0`,
 /// `SWING_OFF_HAND = 3`) rather than the plausible-but-wrong `0`/`1`.
 #[test]
 fn swing_action_maps_hand_to_vanillas_animate_byte() {

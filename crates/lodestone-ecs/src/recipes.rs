@@ -1,4 +1,4 @@
-//! Runtime recipe registration for plugins — the `Bukkit.addRecipe`
+//! Runtime recipe registration for plugins — the Bukkit's add recipe
 //! analogue.
 //!
 //! # What this is
@@ -246,7 +246,7 @@ impl Plugin for RecipeRegistryPlugin {
 /// `App`-level recipe registration, so a plugin's `build` reads as one call
 /// rather than four lines of resource plumbing.
 ///
-/// The shape mirrors `Bukkit.addRecipe` deliberately, for portability:
+/// The shape mirrors Bukkit's add recipe deliberately, for portability:
 /// a plugin author coming from Paper looks for a one-call registration on
 /// the server handle, and `App` is this framework's server handle.
 pub trait RecipeRegistryExt {

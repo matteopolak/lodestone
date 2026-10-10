@@ -73,11 +73,11 @@ pub struct MenuRow {
     /// from the widget. Without it, the fallback draws the whole label with a
     /// caret parked after it.
     pub field: bool,
-    /// Draw the row's background as vanilla's `AbstractSliderButton` track
+    /// Draw the row's background as vanilla's abstract slider button track
     /// instead of a `Button`.
     ///
     /// A settings screen's numeric options are sliders and its enums and
-    /// booleans are `CycleButton`s, and the two
+    /// booleans are the cycle buttons, and the two
     /// look nothing alike — a slider track has no bevel and no disabled variant.
     ///
     /// Numeric options use this track, while enums and booleans use cycle
@@ -87,7 +87,7 @@ pub struct MenuRow {
     /// `has_a_known_value`.
     pub slider: bool,
     /// The `[0, 1]` fraction along the track where the handle sits —
-    /// `AbstractSliderButton.value` —
+    /// The abstract slider button's value —
     /// or `None` when [`Self::slider`] is `true` but this client holds no
     /// value for the option at all yet.
     ///
@@ -95,7 +95,7 @@ pub struct MenuRow {
     /// otherwise. See [`super::options::Cell::slider_fraction`] for where a
     /// `Some` comes from — either the real live config value
     /// (`mouseWheelSensitivity`) or vanilla's own default double for a
-    /// `UnitDouble`-based option this client does not wire, which is not a
+    /// The unit double-based option this client does not wire, which is not a
     /// fabricated value: it is the same constant a fresh vanilla install
     /// boots with.
     pub slider_value: Option<f32>,
@@ -105,7 +105,7 @@ pub struct MenuRow {
     /// This is the one piece of menu state that is not derivable from the screen
     /// (a caret and a scroll offset are not), so the widget outlives the frame
     /// and the frame carries a copy. `build`'s `draw_edit_box` repositions the
-    /// copy into this frame's rect — `OptionsSubScreen.repositionElements`'
+    /// copy into this frame's rect — the options sub screen's reposition elements'
     /// order, not `rebuildWidgets`' — and then *asks* it for its geometry rather
     /// than restating any of `EditBox`'s arithmetic here. See
     /// [`super::edit_box`] and [`super::nav::EditForm`].
@@ -116,7 +116,7 @@ pub struct MenuRow {
     /// the server list, the edit form, Options and the error screen use.
     pub slot: Option<Slot>,
     /// A GUI sprite id drawn centred in the widget **instead of** `label` —
-    /// vanilla's `SpriteIconButton.CenteredIcon`
+    /// vanilla's sprite icon button's centered icon
     ///. `label` is still carried (it is the
     /// tooltip/narration text in vanilla) but not drawn.
     pub icon: Option<&'static str>,
@@ -129,7 +129,7 @@ pub struct MenuRow {
     /// exposes.
     pub book_page: Option<BookPageButton>,
     /// Set on a [`super::Screen::ServerList`] row: everything an
-    /// `OnlineServerEntry` draws that a button row has no field for.
+    /// The online server entry draws that a button row has no field for.
     ///
     /// Its presence is what routes the row to [`draw_server_entry`] instead of
     /// [`draw_widget`], *before* the `slot` test — a list entry is not a button
@@ -151,7 +151,7 @@ pub struct MenuRow {
     ///
     /// Routes the row to [`draw_world_entry`] and, in [`row_rect`], to
     /// [`world_list_row_rect`] — both tested *before* `slot`, for [`Self::entry`]'s
-    /// reason twice over: a list entry is not a button, and `getRowLeft()` is
+    /// reason twice over: a list entry is not a button, and get row left is
     /// `floor(w / 2) - floor(270 / 2)`, two integer divisions a `Slot` cannot
     /// express.
     ///
@@ -167,7 +167,7 @@ pub struct MenuRow {
     /// [`draw_widget`], which is the **only** thing it decides. Unlike
     /// [`Self::entry`]/[`Self::account`]/[`Self::world`] it is tested *after*
     /// `slot` rather than before, and that is not an inconsistency: those three
-    /// lists are positioned by `getRowLeft()`'s two integer divisions, which a
+    /// lists are positioned by get row left's two integer divisions, which a
     /// [`Slot`] cannot express, so they need their own [`row_rect`] arm as well.
     /// A pack row's rect **is** a `Slot` ([`super::packs::placement_anchor`]), so
     /// `row_rect` needs no arm and this field is a draw selector alone.
@@ -195,13 +195,13 @@ pub struct MenuRow {
     /// is upper-case 5×7 with no arrow glyph, and is why these buttons were
     /// lettered `"U"`/`"D"` before this existed.
     pub arrow: Option<Arrow>,
-    /// Vanilla's `AbstractWidget.setTooltip` text for this row, as one string —
+    /// Vanilla's abstract widget's set tooltip text for this row, as one string —
     /// `\n` separated where the source component has explicit breaks, wrapped to
     /// vanilla's own 170 px by the draw.
     ///
     /// **Held here rather than resolved in the draw** because it is a property of the
     /// control, and only the screen's own table knows it: on the settings tree it
-    /// comes from the `OptionInstance`'s `TooltipSupplier`, keyed by the option, and
+    /// comes from the option instance's tooltip supplier, keyed by the option, and
     /// 33 of 143 controls have one. That ratio is vanilla's — most options carry no
     /// tooltip at all — so a `None` here is faithful rather than unfinished.
     ///
@@ -218,7 +218,7 @@ pub struct MenuRow {
     /// with a label in it, it draws a different sprite set keyed by
     /// `(selected, hovered)` rather than `(active, hoveredOrFocused)`, plus an
     /// underline the generic path has no field for. `label` (the tab's own
-    /// caption) and `enabled` (vanilla's `active`, `StatsScreen.
+    /// caption) and `enabled` (vanilla's `active`, the stats screen.
     /// setTabActiveStateAndTooltip`) are read off the row itself, exactly as a
     /// pack row reads `label`/`favicon` off `MenuRow` rather than duplicating
     /// them here — this view carries only `selected`, which has nowhere else to
@@ -227,7 +227,7 @@ pub struct MenuRow {
     pub tab: Option<TabEntryView>,
 }
 
-/// Which of vanilla's two [`PageButton`](BookPageButton) sprites a book row
+/// Which of vanilla's two [page button](BookPageButton) sprites a book row
 /// draws. Kept on the row because both drawing and hit-testing already consume
 /// the same row geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,7 +249,7 @@ impl MenuRow {
     /// about the slot sees one of them. [`Origin::is_scrolling_list_row`] was the
     /// whole test for a while, and it left the three `MenuRow::entry`/`account`/
     /// `world` lists unclipped in the hit-test: those rows carry **no** slot at all
-    /// (their columns are `getRowLeft()`'s two separate integer divisions, which a
+    /// (their columns are get row left's two separate integer divisions, which a
     /// [`Slot`] cannot express), so the slot test simply did not fire and the row
     /// stayed hit-testable everywhere. The reported symptom was on the multiplayer
     /// screen (2026-08-07): with a server row scrolled under the footer, pressing
@@ -265,14 +265,14 @@ impl MenuRow {
     ///
     /// ## Why it is not "every row on a screen that has a list"
     ///
-    /// A footer button, a title, a search field and `OptionsScreen`'s own arranged
+    /// A footer button, a title, a search field and the options screen's own arranged
     /// grid live *outside* the band by construction. Clipping them to it would
     /// erase them, and rejecting them outside it would make them unclickable — the
     /// exact bug, mirrored. See [`Origin::is_scrolling_list_row`] for which
     /// placements are which, and why that match has no `_ =>` arm.
     #[must_use]
     pub fn is_scrolling_list_row(&self) -> bool {
-        // The three `AbstractSelectionList` screens, whose rows are placed by
+        // The three abstract selection list screens, whose rows are placed by
         // `row_rect`'s own arms rather than by a `Slot` — the multiplayer list, the
         // account list and the world/save list.
         self.entry.is_some()
@@ -309,8 +309,8 @@ pub struct PackEntryView {
     /// Vanilla's own pack-selection-model entry's can-select check — this row is in **Available**, so
     /// activating it moves the pack into Selected.
     pub can_select: bool,
-    /// `canUnselect()` — this row is a removable **Selected** entry. False for
-    /// the built-in pack, which is `isFixedPosition() && isRequired()` and
+    /// can unselect — this row is a removable **Selected** entry. False for
+    /// the built-in pack, which is `is_fixed_position() && is_required()` and
     /// therefore draws no overlay at all, exactly as vanilla's does not.
     pub can_unselect: bool,
 }
@@ -371,7 +371,7 @@ pub struct WorldEntryView {
     pub index: usize,
     /// Whether this is vanilla's own world-selection list's get-selected-opt
     /// accessor's entry, which gets
-    /// `AbstractSelectionList.extractItem`'s 1 px outline plus black interior.
+    /// The abstract selection list's extract item's 1 px outline plus black interior.
     ///
     /// A different question from [`MenuFrame::selected`], which on this screen
     /// carries the **focused** row, and from [`MenuFrame::hovered`], which carries
@@ -414,7 +414,7 @@ pub struct AccountEntryView {
     /// placed from, so the bar and the rows cannot read different offsets.
     pub scroll: f32,
     /// Whether the list cursor is on this row — `AccountsNav::highlighted`, which
-    /// gets `AbstractSelectionList.extractItem`'s 1 px outline plus black
+    /// gets abstract selection list's extract item's 1 px outline plus black
     /// interior.
     ///
     /// A different question from [`MenuFrame::selected`], which on this screen
@@ -503,7 +503,7 @@ pub(super) fn notice_lines(notice: &MenuNotice, width: f32, height: f32) -> usiz
 }
 
 /// One multiplayer-list row's state, in the form
-/// `ServerSelectionList.OnlineServerEntry.extractContent` needs it.
+/// The server selection list's online server entry.extract_content needs it.
 ///
 /// Everything here is resolved by [`server_list_frame`] — which sprite, which
 /// colour, whether the move arrows apply — so the draw decides nothing except
@@ -512,7 +512,7 @@ pub(super) fn notice_lines(notice: &MenuNotice, width: f32, height: f32) -> usiz
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ServerEntryView {
     /// The row's index in the list — vanilla's
-    /// `ServerSelectionList.this.children().indexOf(this)`, which is what the
+    /// The server selection list's this.children().indexOf(this), which is what the
     /// pinging animation's phase and both move arrows key on.
     pub index: usize,
     /// The MOTD, unwrapped and possibly multi-line. Wrapped at draw time,
@@ -547,7 +547,7 @@ pub struct ServerEntryView {
     /// The `server_list/*` sprite for this row's state — see
     /// [`super::status::status_sprite`], which is the only thing that picks one.
     pub status_sprite: &'static str,
-    /// Whether this is the list's selected entry (`getSelected() == this`), which
+    /// Whether this is the list's selected entry (`get_selected() == this`), which
     /// is a different question from [`MenuFrame::selected`]: on this screen that
     /// field carries the *footer button* the cursor is over.
     pub selected: bool,
@@ -584,12 +584,12 @@ pub struct ServerEntryView {
 ///
 /// # The three states, read off the 26.2 record rather than guessed
 ///
-/// `Screen.extractBackground` is the base implementation, and out of world it is
+/// Screen's extract background is the base implementation, and out of world it is
 /// panorama (gated on `minecraft.level == null`) → blur → `menu_background.png`:
 ///
 /// | this enum | vanilla | screens |
 /// |---|---|---|
-/// | [`Self::Panorama`] | the base `extractBackground` | every out-of-world screen, **including** `ConnectScreen` (no override) and `LevelLoadingScreen`'s `OTHER` reason, whose override calls `extractPanorama` with **no** `level == null` gate |
+/// | [`Self::Panorama`] | the base `extractBackground` | every out-of-world screen, **including** connect screen (no override) and the level loading screen's `OTHER` reason, whose override calls `extractPanorama` with **no** `level == null` gate |
 /// | [`Self::Dim`] | `extractTransparentBackground` / `inworld_menu_background.png` | the pause, death and command-block screens, drawn over a live world |
 /// | [`Self::Opaque`] | nothing in vanilla | our fallback when no panorama textures are loaded, e.g. a jar-less or headless run |
 ///
@@ -630,7 +630,7 @@ pub enum MenuBackdrop {
     Dim,
     /// [`Self::Dim`]'s vertical-gradient sibling, for the death screen alone.
     /// Vanilla does not reuse `Screen`'s flat `extractTransparentBackground` for
-    /// `DeathScreen`: `extractDeathBackground` calls `fillGradient` with two
+    /// The death screen: `extractDeathBackground` calls `fillGradient` with two
     /// distinct ARGB endpoints, so the screen reads as
     /// "you died" rather than as a plain pause. Same translucent-over-world
     /// contract as [`Self::Dim`] — it never wants the panorama either — the only
@@ -692,7 +692,7 @@ pub struct MenuFrame<'a> {
     ///
     /// `None` on every screen with a row cursor, which is every screen except
     /// [`super::Screen::WorldSelect`] — so nothing about the existing screens'
-    /// pixels changes. Vanilla's sprite argument is `isHoveredOrFocused()`
+    /// pixels changes. Vanilla's sprite argument is is hovered or focused
     ///, the `||` of the two, and
     /// [`Widget::is_hovered_or_focused`] is where that join lives; this field is
     /// only how the second operand reaches it. See
@@ -734,13 +734,13 @@ pub struct MenuFrame<'a> {
     /// this frame's widgets.
     ///
     /// **Not implied by `backdrop == MenuBackdrop::Dim`.** Vanilla's own fork
-    /// (`Screen::isInGameUi`) is a *third* axis, orthogonal to translucency:
-    /// `Screen::extractBackground` blurs for every screen where
-    /// `isInGameUi()` is `false` (Pause, in-world Options, Statistics, Social,
+    /// (Screen's is in game ui) is a *third* axis, orthogonal to translucency:
+    /// Screen's extract background blurs for every screen where
+    /// is in game ui is `false` (Pause, in-world Options, Statistics, Social,
     /// Server Links, the in-world resource-pack prompt — vanilla's
     /// `INWORLD_MENU_BACKGROUND` wash, which this client already approximates
     /// with the `Dim` quad) and does **not** for the screens that override it
-    /// to `true` (`AbstractContainerScreen` and its sign-edit/command-block-edit
+    /// to `true` (the abstract container screen and its sign-edit/command-block-edit
     /// siblings — `extractTransparentBackground`'s flat gradient only, no
     /// blur), even though those also use `Dim` here. So each overlay-frame
     /// builder sets this by hand, the same way each already sets `backdrop`
@@ -768,7 +768,7 @@ pub struct MenuFrame<'a> {
     pub vignette: bool,
     /// Logical pixels the tiled screen background is shifted up, so it can scroll.
     pub background_scroll: f32,
-    /// Blit `BookViewScreen.BOOK_LOCATION`'s top-left 192×192 region behind
+    /// Blit book view screen's book location's top-left 192×192 region behind
     /// this frame. The texture is supplied by the menu atlas, rebuilt from the
     /// active resource-pack stack whenever its generation advances.
     pub book_background: bool,
@@ -851,7 +851,7 @@ pub struct MenuFrame<'a> {
     pub tooltip: Option<Vec<String>>,
 }
 
-/// Vanilla's `LevelLoadingScreen` progress bar, as a frame primitive.
+/// Vanilla's level loading screen progress bar, as a frame primitive.
 ///
 /// Geometry is transcribed from vanilla's own level-loading screen rendering: `PROGRESS_BAR_WIDTH =
 /// 200`, two pixels tall, black background, filled to `round(progress * 200)` in
@@ -870,19 +870,19 @@ pub struct MenuProgress {
     pub dy: f32,
 }
 
-/// `LevelLoadingScreen.PROGRESS_BAR_WIDTH`.
+/// The level loading screen's progress bar width.
 pub const PROGRESS_BAR_W: f32 = 200.0;
 
-/// The bar's height. `LevelLoadingScreen` fills `textTop + 12` to `textTop + 14`.
+/// The bar's height. The level loading screen fills `textTop + 12` to `textTop + 14`.
 pub const PROGRESS_BAR_H: f32 = 2.0;
 
-/// The unfilled track — `LevelLoadingScreen`'s `0xFF000000`.
+/// The unfilled track — the level loading screen's `0xFF000000`.
 pub const PROGRESS_BAR_BG: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
-/// The filled portion — `LevelLoadingScreen`'s `0xFF00FF00`.
+/// The filled portion — the level loading screen's `0xFF00FF00`.
 pub const PROGRESS_BAR_FG: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 
-/// Vanilla's `LevelLoadingScreen` chunk-status grid, as a frame
+/// Vanilla's level loading screen chunk-status grid, as a frame
 /// primitive — the [`crate::menu::loading::TerrainChunkGrid`] data plus the
 /// one thing that is a render decision rather than an observation: where its
 /// centre sits.
@@ -898,7 +898,7 @@ pub struct ChunkGridView {
     pub dy: f32,
 }
 
-/// `LevelLoadingScreen.extractChunksForRendering`'s cell size — `size = 2` at
+/// The level loading screen's extract chunks for rendering's cell size — `size = 2` at
 /// its own call site (`margin` is `0` there too, so cells sit flush).
 pub const CHUNK_CELL_SIZE: f32 = 2.0;
 
@@ -980,7 +980,7 @@ pub const fn chunk_cell_colour(status: crate::menu::loading::ChunkCellStatus) ->
 /// `diameter`-cells-square grid centred at `(center_x, center_y)` — logical
 /// pixels, floored the same way [`super::draw::build`]'s bar geometry is.
 ///
-/// Transcribed from `LevelLoadingScreen.extractChunksForRendering` with
+/// Transcribed from the level loading screen's extract chunks for rendering with
 /// `margin = 0` (its own call site's value):
 ///
 /// ```text

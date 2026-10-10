@@ -29,7 +29,7 @@
 //! `lodestone_worldgen::structure::template::StructureTemplate`:
 //!
 //! * That parser deliberately drops each block's `nbt` compound, and the
-//!   `BlockIgnoreProcessor` drops the marker block itself — exactly as vanilla
+//!   The block ignore processor drops the marker block itself — exactly as vanilla
 //!   does, since the marker is not meant to be a block in the finished world.
 //!   The *metadata* string only exists in the raw file.
 //! * The bytes are already embedded in this crate (`assets/structure/`, via
@@ -176,7 +176,7 @@ pub fn chests_from_coded(
 #[must_use]
 fn marker_loot_table(structure: &str, marker: &str, big: bool) -> Option<&'static str> {
     match (structure, marker) {
-        // `ShipwreckPieces.MARKERS_TO_LOOT`.
+        // The shipwreck pieces's markers to loot.
         (_, "map_chest") => Some("minecraft:chests/shipwreck_map"),
         (_, "treasure_chest") => Some("minecraft:chests/shipwreck_treasure"),
         (_, "supply_chest") => Some("minecraft:chests/shipwreck_supply"),
@@ -196,8 +196,8 @@ fn marker_loot_table(structure: &str, marker: &str, big: bool) -> Option<&'stati
 /// Whether this marker has to write the chest block itself, and at which offset
 /// from the marker.
 ///
-/// `OceanRuinPieces.handleDataMarker` calls `level.setBlock(position, CHEST)` —
-/// the chest is not in the template. `ShipwreckPieces`/`IglooPieces` instead
+/// The ocean ruin pieces's handle data marker calls `level.setBlock(position, CHEST)` —
+/// the chest is not in the template. The shipwreck pieces/igloo pieces instead
 /// decorate a chest the template already placed one block **below** the marker.
 #[must_use]
 fn marker_places_chest(structure: &str) -> (i32, Option<&'static str>) {
@@ -424,7 +424,7 @@ fn chest_seed(pos: BlockPos) -> u64 {
 /// Distributes `items` across a fresh `generic_9x3` container the way vanilla's
 /// `LootTable.fill` does: empty stacks dropped, and the rest scattered over
 /// random free slots rather than packed from slot `0`
-/// (`LootTable.shuffleAndSplitItems`).
+/// (LootTable's shuffle and split items).
 fn fill_container(items: Vec<ItemStack>, rng: &mut SpawnRng) -> BlockEntity {
     let mut slots: Vec<Option<ItemStack>> = vec![None; CONTAINER_9X3_SIZE];
     let mut free: Vec<usize> = (0..CONTAINER_9X3_SIZE).collect();
@@ -467,7 +467,7 @@ struct TemplateLoot {
 /// marker is an instruction to the piece's `handleDataMarker`, which looks the
 /// table up from the marker's *metadata string* and a per-structure table
 /// ([`marker_loot_table`]). A `LootTable` field is the container **naming its own
-/// table**, resolved by `StructureTemplate.placeInWorld` writing the block entity
+/// table**, resolved by StructureTemplate's place in world writing the block entity
 /// straight through — no marker, no `handleDataMarker`, nothing for the marker pass
 /// to find.
 ///
@@ -499,7 +499,7 @@ fn template_loot(bytes: &[u8]) -> Vec<TemplateLoot> {
             let Some(pos) = compound_field(entry, "pos").and_then(int_triple) else {
                 continue;
             };
-            // `LootTableSeed` is a `Long` in vanilla's `RandomizableContainer`
+            // `LootTableSeed` is a `Long` in vanilla's randomizable container
             // codec and is **optional**: absent, or present and zero, both mean
             // "roll from a fresh seed", which for us means the position-derived one.
             // Treating a zero as a real seed would give every unseeded container in
@@ -520,9 +520,9 @@ fn template_loot(bytes: &[u8]) -> Vec<TemplateLoot> {
 
 /// Reads every `structure_block` DATA marker out of a raw template file.
 ///
-/// This is `StructureTemplate.filterBlocks(…, Blocks.STRUCTURE_BLOCK)` plus the
-/// `mode == StructureMode.DATA` test from
-/// `TemplateStructurePiece.postProcess:95-100`. Palette membership is checked by
+/// This is StructureTemplate's filter blocks plus the
+/// mode == structure mode's data test from
+/// The template structure piece's post process:95-100. Palette membership is checked by
 /// *name*, so a marker in any of a multi-palette template's palettes is found
 /// (every shipwreck ships 8 palettes and the marker is in all of them).
 fn data_markers(bytes: &[u8]) -> Vec<DataMarker> {
@@ -726,11 +726,11 @@ mod tests {
     }
 
     /// The markers really are in vanilla's own shipwreck template, with the
-    /// three metadata strings `ShipwreckPieces.MARKERS_TO_LOOT` keys on.
+    /// three metadata strings shipwreck pieces's markers to loot keys on.
     ///
     /// The expected values come from the file and from the decompiled source,
     /// not from this module: `with_mast.nbt` is Mojang's own, and the three
-    /// marker names are the literal keys in `ShipwreckPieces.MARKERS_TO_LOOT`.
+    /// marker names are the literal keys in the shipwreck pieces's markers to loot.
     #[test]
     fn a_shipwreck_template_carries_its_three_chest_markers() {
         let bytes = crate::worldgen_data::embedded_structure_template("minecraft:shipwreck/with_mast")

@@ -100,7 +100,7 @@ impl RailShape {
         })
     }
 
-    /// `RailShape.isSlope()` for the six straight-only values.
+    /// RailShape's is slope for the six straight-only values.
     #[must_use]
     pub fn is_slope(self) -> bool {
         matches!(

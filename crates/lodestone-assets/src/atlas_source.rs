@@ -479,7 +479,7 @@ impl AtlasDefinition {
     /// it will produce. `unknown` sources contribute nothing.
     ///
     /// When two sources name the same sprite id, the **later** source wins —
-    /// vanilla's own sprite-source-list "list" step's own output-add step is a plain
+    /// vanilla's sprite-source-list "list" step's output-add step is a plain
     /// `Map<Identifier, …>.put`, so a source later in [`Self::sources`]
     /// (whether a second entry in one file, or a higher-priority pack's
     /// descriptor appended by [`Self::load_stacked`]) silently replaces an

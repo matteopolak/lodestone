@@ -53,7 +53,7 @@ fn attack_strength_delay_follows_a_reported_attack_speed_attribute() {
 
 /// [`Sim::attack_entity`] must reset the ticker **immediately**, in the
 /// same call, not on the next tick — vanilla's
-/// `MultiPlayerGameMode.attack` calls `resetAttackStrengthTicker()`
+/// The multi player game mode's attack calls reset attack strength ticker
 /// synchronously right after `player.attack(entity)`.
 #[test]
 fn attacking_an_entity_resets_the_strength_ticker_immediately() {
@@ -130,7 +130,7 @@ fn crit_particle_count(sim: &mut Sim) -> usize {
 }
 
 /// The positive case: full strength, airborne (falling, not grounded),
-/// not sprinting, not submerged, target is a `LivingEntity` — vanilla's
+/// not sprinting, not submerged, target is a living entity — vanilla's
 /// `canCriticalAttack` is satisfied on every
 /// clause this port models, so the attack must spawn crit particles.
 #[test]
@@ -409,7 +409,7 @@ fn the_view_ray_never_picks_a_dropped_item_or_an_experience_orb() {
 /// rather than against the handful of names the bug happened to involve.
 ///
 /// The count is the drift guard. The predicate is a reduction over ten vanilla
-/// `isPickable()` declaring classes, and a version bump that adds an entity type
+/// is pickable declaring classes, and a version bump that adds an entity type
 /// lands it in exactly one of two buckets — the census's `is_living` column, or
 /// this module's explicit non-living lists. A new *living* type moves this total
 /// and the test names it; a new non-living one does not move it and stays

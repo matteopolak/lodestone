@@ -3,7 +3,7 @@
 //! Land navigation classifies each block a mob might stand in or move through
 //! into a *path type*: is it open, blocked, water, lava, a fence it cannot step
 //! over, a closed door, a rail, damaging, and so on. Vanilla computes this in
-//! `WalkNodeEvaluator.getPathTypeFromState` from the block's tags, class and
+//! its walk-node evaluator from the block's tags, class and
 //! fluid state; the result drives both traversability and pathfinding cost.
 //!
 //! Like block-state resolution (see [`crate::registry`]), the *base* per-state

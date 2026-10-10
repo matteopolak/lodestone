@@ -101,7 +101,7 @@ fn read_string(r: &mut Reader) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Vanilla's own bound chat type as it appears on the wire: a registry `Holder<ChatType>`
+/// Vanilla's own bound chat type as it appears on the wire: a registry holder of chat type
 /// (a VarInt reference id, since chat types are registered during config),
 /// a decorated sender name, and an optional target name.
 #[derive(Debug)]
@@ -144,7 +144,7 @@ struct SystemChat {
     overlay: bool,
 }
 
-/// `ClientboundSystemChatPacket` = trusted NBT component + bool overlay.
+/// System chat packet = trusted NBT component + bool overlay.
 fn decode_system_chat(payload: &[u8]) -> SystemChat {
     let mut r = Reader::new(payload);
     let content = Text::from_nbt(&read_network_nbt(&mut r).expect("system chat content"));
@@ -164,7 +164,7 @@ struct DisguisedChat {
     chat_type: BoundChatType,
 }
 
-/// `ClientboundDisguisedChatPacket` = trusted NBT component + a bound chat type.
+/// Disguised chat packet = trusted NBT component + a bound chat type.
 fn decode_disguised_chat(payload: &[u8]) -> DisguisedChat {
     let mut r = Reader::new(payload);
     let message = Text::from_nbt(&read_network_nbt(&mut r).expect("disguised chat message"));
@@ -191,7 +191,7 @@ struct PlayerChat {
     chat_type: BoundChatType,
 }
 
-/// `ClientboundPlayerChatPacket`: global index, sender UUID, per-sender index,
+/// Player chat packet: global index, sender UUID, per-sender index,
 /// optional signature, the signed body (content + timestamp + salt + last-seen
 /// packed), optional unsigned content, the filter mask, and the chat type.
 fn decode_player_chat(payload: &[u8]) -> PlayerChat {

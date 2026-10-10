@@ -69,7 +69,7 @@ pub const HELD_ITEM_OFFSET_TEXELS: [f32; 3] = [1.0, 2.0, -10.0];
 
 /// The same offsets for a **baby** (vanilla's own baby-offset flag): `0.0`, `1.0`, `-4.5`.
 ///
-/// Vanilla's predicate is `state.isBaby && state.entityType != ARMOR_STAND`; an
+/// Vanilla's predicate is `state.isBaby && state.entity_type != ARMOR_STAND`; an
 /// armour stand is never a baby in the shell's data, so the caller's
 /// "is this mob drawn small?" test is sufficient.
 pub const HELD_ITEM_BABY_OFFSET_TEXELS: [f32; 3] = [0.0, 1.0, -4.5];
@@ -252,7 +252,7 @@ pub const HAND_FAR: f32 = 100.0;
 /// render function
 /// does a pose-stack multiply by the inverse of its own model-view matrix while
 /// pushing that model-view matrix onto a separate stack, and the shader
-/// multiplies `Proj · ModelViewStack · PoseStack` — so the view rotation
+/// multiplies projection · model-view stack · pose stack — so the view rotation
 /// cancels exactly and
 /// the arm pose is already in **camera space**. That model-view matrix there is
 /// the camera state's own view-rotation matrix, rotation-only, which is why nothing has to
@@ -597,11 +597,11 @@ pub fn first_person_item_attack_chain(arm: Arm, attack_anim: f32) -> Mat4 {
 ///
 /// ```text
 /// T(i·0.56, -0.52 + h·-0.6, -0.72)          -- applyItemArmTransform
-///   · T(i·xs, ys, zs) · applyItemArmAttackTransform(arm, a)   -- swingArm
+///   · T(i·xs, ys, zs) · apply item arm attack transform   -- swingArm
 /// ```
 ///
 /// `inverse_arm_height` is vanilla's own equip-height term — the equip/swap dip,
-/// `swapAnimationScale(item) · (1 - lerp(oHeight, height))`. Pass `0.0` for a
+/// `swap_animation_scale(item) · (1 - lerp(oHeight, height))`. Pass `0.0` for a
 /// fully-equipped hand; the shell tracks neither height, the same gap
 /// [`first_person_arm_chain`] documents.
 ///
@@ -763,7 +763,7 @@ pub fn first_person_eat_transform(arm: Arm, curr_usage_time: f32, use_duration: 
 ///   the eat-transform step. Putting the offset first instead — the order every other
 ///   pose here uses — rotates the item about the camera rather than about the hand,
 ///   which swings it across the whole screen.
-/// * **There is no swing.** The `player.isUsingItem()` branch never reaches
+/// * **There is no swing.** The player's is using item branch never reaches
 ///   vanilla's own swing-arm step, so [`ItemSwingTerms`] and [`first_person_item_attack_chain`] do not
 ///   apply. Left-clicking while eating must not move the item.
 #[must_use]

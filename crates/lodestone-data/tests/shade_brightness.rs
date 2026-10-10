@@ -10,7 +10,7 @@
 //! Vanilla's own "prepare quad ambient occlusion" step darkens a smooth-lit vertex
 //! by its own shade-brightness cache accessor, i.e.
 //! vanilla's own "get shade brightness" accessor:
-//! `state.isCollisionShapeFullBlock(level, pos) ? 0.2F : 1.0F`, with seven class
+//! `state.is_collision_shape_full_block(level, pos) ? 0.2F : 1.0F`, with seven class
 //! overrides. That is a **collision** predicate, and a renderer naturally has a
 //! *culling* one to hand instead — the two agree on stone, slabs, water and
 //! glass and disagree on leaves, which is why this table has to exist rather
@@ -40,7 +40,7 @@
 //! And `O <block> <class>` is the override census, read by reflection over the
 //! class hierarchy: it makes "exactly seven classes override this" a
 //! measurement, and it is the reason no block name is hand-typed here.
-//! `TransparentBlock` alone covers 26 registered blocks.
+//! The transparent-block class alone covers 26 registered blocks.
 //!
 //! # Refreshing after a version bump
 //!
@@ -105,7 +105,7 @@ struct Dump {
     blocks: Vec<(usize, String)>,
     /// `S`: `getShadeBrightness(..) == 0.2F`, per state.
     shade_occludes: Vec<bool>,
-    /// `F`: `isCollisionShapeFullBlock(..)`, per state.
+    /// `F`: is collision shape full block, per state.
     full_collision_cube: Vec<bool>,
 }
 
@@ -452,12 +452,12 @@ fn the_divergence_population_matches_vanilla_by_name() {
         ("minecraft:slime_block", true),
         ("minecraft:spawner", true),
         ("minecraft:beacon", true),
-        // `IceBlock extends HalfTransparentBlock`, which does **not** override
-        // getShadeBrightness — only `TransparentBlock` does. So ice darkens.
+        // The ice class extends the half-transparent class, which does **not** override
+        // the shade-brightness query — only the transparent class does. So ice darkens.
         ("minecraft:ice", true),
         ("minecraft:packed_ice", true),
         ("minecraft:blue_ice", true),
-        // `TransparentBlock` overrides to 1.0, so these agree with culling.
+        // The transparent class overrides to 1.0, so these agree with culling.
         ("minecraft:glass", false),
         ("minecraft:red_stained_glass", false),
         ("minecraft:tinted_glass", false),
@@ -497,7 +497,7 @@ fn the_divergence_population_matches_vanilla_by_name() {
     }
 }
 
-/// `SnowLayerBlock` is the one override that is per **state**, not per block:
+/// The snow-layer block is the one override that is per **state**, not per block:
 /// only the eight-layer state (a full cube) darkens. A block-keyed table could
 /// not express this, which is why the census is state-keyed.
 #[test]

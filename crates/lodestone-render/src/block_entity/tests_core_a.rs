@@ -195,7 +195,7 @@
 
     /// Vanilla's own per-direction offset override, predicted from the real jar's
     /// arithmetic rather than restated: at `dust_progress = 3` (the maximum,
-    /// vanilla's own completion-state accessor's own ceiling),
+    /// vanilla's completion-state accessor's ceiling),
     /// `completionOffset = 3 / 10.0 * 0.75 = 0.225`, so an `EAST` hit pushes the
     /// item's `x` to `0.73 + 0.225 = 0.955` and leaves `y`/`z` at the base
     /// `0.0`/`0.5`.
@@ -440,7 +440,7 @@
         assert!(local_z.dot(Vec3::Z) > 0.999, "local Z must NOT flip: {local_z:?}");
     }
 
-    /// `(slot + facing.get2DDataValue()) % 4`: turning the campfire a quarter turn
+    /// `(slot + facing.get_2d_data_value()) % 4`: turning the campfire a quarter turn
     /// moves slot 0 to where slot 1 was, so a campfire facing west puts its first
     /// item where a south-facing one puts its second.
     ///

@@ -6,7 +6,7 @@
 //!
 //! `lodestone-render`'s `entity_anim` gates prove the *rig*: given a pose, the
 //! six part rotations are assigned over the humanoid base pass exactly as
-//! `ArmorStandArmorModel.setupAnim` does. They install their own `AnimInput`,
+//! The armor stand armor model's setup anim does. They install their own `AnimInput`,
 //! so they are structurally blind to the question this file asks — **what
 //! constructs that input in production, and does it contain a pose at all?**
 //!

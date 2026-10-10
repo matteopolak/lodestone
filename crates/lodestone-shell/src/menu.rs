@@ -6,7 +6,7 @@
 //! | module | what it owns |
 //! |---|---|
 //! | [`command_block`] | the command block edit screen |
-//! | [`confirm`] | vanilla's `ConfirmScreen`, the gate an irreversible action passes through |
+//! | [`confirm`] | vanilla's confirm screen, the gate an irreversible action passes through |
 //! | [`nav`] | selection, the add/edit form, what a keypress means |
 //! | [`options`] | the whole settings tree, unsupported controls disabled |
 //! | [`render`] | layout + a self-contained GPU pipeline |
@@ -44,7 +44,7 @@ pub mod accounts;
 /// 5 roots, extracted from the data pack's own JSONs. Read by
 /// [`advancements`] and positioned by [`advancement_tree`].
 pub mod advancement_data;
-/// Vanilla's `TreeNodePosition`: the tidy-tree layout that decides
+/// Vanilla's tree node position: the tidy-tree layout that decides
 /// where each advancement widget sits. 26.2's JSON carries no `x`/`y`, so this
 /// has to be run client-side — see the module doc.
 pub mod advancement_tree;
@@ -149,7 +149,7 @@ pub enum Screen {
     /// [`nav::MainButton::Accounts`]'s docs for why real Minecraft has
     /// nothing equivalent to reproduce.
     Accounts,
-    /// The settings screen — vanilla's whole `OptionsScreen` tree,
+    /// The settings screen — vanilla's whole options screen tree,
     /// nine pages of it, with every control present and the majority this
     /// client does not honour drawn inactive (118 of 143 outside a world, 119
     /// inside one — the root's Online button is the one row whose liveness
@@ -181,9 +181,9 @@ pub enum Screen {
     /// released and gameplay input frozen while the world keeps rendering.
     Container,
     /// The command block edit screen: vanilla's
-    /// `CommandBlockEditScreen` — pointer released and gameplay input frozen
+    /// The command block edit screen — pointer released and gameplay input frozen
     /// over the still-rendering world, the same shape as [`Screen::Chat`] and
-    /// [`Screen::Container`] (vanilla's own `isInGameUi() == true`). Opened by
+    /// [`Screen::Container`] (vanilla's own `is_in_game_ui() == true`). Opened by
     /// [`open_command_block`](Self::open_command_block) with the block's
     /// current NBT (command, mode, conditional, redstone, track-output,
     /// previous output); closed by
@@ -193,7 +193,7 @@ pub enum Screen {
     ///
     /// Reached from `WindowApp::try_use` — a right-click on a command block
     /// with the crosshair on it, which is where vanilla resolves this screen
-    /// too (`CommandBlock.useWithoutItem` → `LocalPlayer.openCommandBlock`,
+    /// too (CommandBlock's use without item → LocalPlayer's open command block,
     /// client-side, no packet).
     ///
     /// [`crate::command_block_source`] reads the payload straight from the
@@ -204,12 +204,12 @@ pub enum Screen {
     /// waits on the `COMMANDS` (16) decode, which does not exist in any
     /// family.
     CommandBlockEdit,
-    /// The sign-editing screen: vanilla's `SignEditScreen`/`HangingSignEditScreen`
+    /// The sign-editing screen: vanilla's sign edit screen/hanging sign edit screen
     /// — pointer released and gameplay input frozen over the still-rendering
     /// world, the same overlay shape as [`Screen::CommandBlockEdit`].
     ///
     /// Unlike `CommandBlockEdit`, this screen is **server-authorised**: it opens
-    /// from `ClientboundOpenSignEditorPacket`
+    /// from open-sign-editor packet
     /// ([`lodestone_model::event::ClientEvent::SignEditorOpened`]), not from a
     /// client-local right-click, because the server alone decides whether the
     /// player may edit this sign right now (waxed, another player already
@@ -223,16 +223,16 @@ pub enum Screen {
     /// vanilla's `removed()`, which is unconditional. There is no Cancel that
     /// skips the send.
     SignEdit,
-    /// The book-and-quill editing screen: vanilla's `BookEditScreen`/
-    /// `BookSignScreen`, folded into one [`Screen`] with a `signing` flag on
+    /// The book-and-quill editing screen: vanilla's book edit screen/
+    /// The book sign screen, folded into one [`Screen`] with a `signing` flag on
     /// [`crate::menu::book_edit::BookEditState`] — see that module's doc for
     /// why. Same overlay shape as [`Screen::CommandBlockEdit`]/
     /// [`Screen::SignEdit`] (pointer released, world keeps rendering behind
-    /// it, `isInGameUi() == true` in vanilla for both of the screens this
+    /// it, `is_in_game_ui() == true` in vanilla for both of the screens this
     /// folds).
     ///
     /// **Client-local, like `CommandBlockEdit`, not server-authorised like
-    /// `SignEdit`**: vanilla opens `BookEditScreen` the instant the player
+    /// `SignEdit`**: vanilla opens book edit screen the instant the player
     /// uses a `minecraft:writable_book` in hand, with no server round trip —
     /// see `WindowApp::try_use`'s fork for a writable book, the same shape
     /// its command-block fork already has.
@@ -240,15 +240,15 @@ pub enum Screen {
     /// Opened by [`open_book_edit`](Self::open_book_edit); closed by
     /// [`close_book_edit`](Self::close_book_edit). **Escape always fully
     /// closes the whole flow, from either layout, sending nothing** —
-    /// neither `BookEditScreen` nor `BookSignScreen` overrides `onClose`, so
+    /// neither book edit screen nor book sign screen overrides `onClose`, so
     /// vanilla's default `Screen.keyPressed`'s Escape arm
-    /// (`this.onClose()` → `setScreen(null)`) drops unsaved changes outright
-    /// rather than returning `BookSignScreen`'s Cancel to the page editor.
+    /// (this's on close → set screen) drops unsaved changes outright
+    /// rather than returning book sign screen's Cancel to the page editor.
     /// Only a real click on Done or Finalize sends
     /// [`crate::menu::book_edit::BookEditState::to_save_action`]/
     /// [`to_sign_action`](crate::menu::book_edit::BookEditState::to_sign_action).
     BookEdit,
-    /// The signed-book reading screen: vanilla's `BookViewScreen`, opened by
+    /// The signed-book reading screen: vanilla's book view screen, opened by
     /// using a `minecraft:written_book` in hand — see
     /// [`crate::menu::book_view`]'s module doc.
     ///
@@ -310,7 +310,7 @@ pub enum Screen {
     /// the death-screen reconciliation. See `docs/credits-screen.md`.
     Credits,
     /// The Social Interactions screen: vanilla's
-    /// `SocialInteractionsScreen`, an online-player list with a per-player
+    /// The social interactions screen, an online-player list with a per-player
     /// Hide/Show-in-Chat toggle and a Report button. Reached from the pause
     /// menu's Player Reporting icon button
     /// ([`nav::PauseButton::PlayerReporting`]); Escape or the screen's own
@@ -326,7 +326,7 @@ pub enum Screen {
     /// The account-scoped Friends service. It is reached from the title or the
     /// pause menu and returns to the screen that opened it.
     Friends,
-    /// The Statistics screen: vanilla's `StatsScreen`. Reached
+    /// The Statistics screen: vanilla's stats screen. Reached
     /// from the pause menu's Statistics button
     /// ([`nav::PauseButton::Statistics`], now live); Escape or the screen's
     /// own Done button returns to [`Screen::Paused`].
@@ -347,7 +347,7 @@ pub enum Screen {
     /// vanilla's own pause-screen custom-additions). This client has no generic
     /// dialog-registry renderer, so it is a dedicated screen instead: a flat
     /// list of the server's links, and a link-open confirmation reusing
-    /// vanilla's `ConfirmLinkScreen` wording — see [`server_links`]'s module
+    /// vanilla's confirm link screen wording — see [`server_links`]'s module
     /// doc for the clauses this reproduces and the ones it deliberately
     /// does not (no "Copy to Clipboard" button, no keyboard row-stepping).
     ///
@@ -357,13 +357,13 @@ pub enum Screen {
     /// vanilla's own row presence uses; Escape or the screen's own Back
     /// button returns to [`Screen::Paused`].
     ServerLinks,
-    /// The Advancements screen: vanilla's `AdvancementsScreen`.
+    /// The Advancements screen: vanilla's advancements screen.
     /// Reached from the pause menu's Advancements button
     /// ([`nav::PauseButton::Advancements`], now live); Escape returns to
     /// [`Screen::Paused`].
     ///
     /// The real 26.2 tree — 126 advancements over 5 tabs, laid out by our port of
-    /// vanilla's own `TreeNodePosition` — with **everything unobtained**, because
+    /// vanilla's own tree node position — with **everything unobtained**, because
     /// nothing decodes `UPDATE_ADVANCEMENTS`. Same trade [`Screen::Statistics`]
     /// made, and the same honest zero: see [`advancements`]'s module docs.
     Advancements,
@@ -388,7 +388,7 @@ pub enum Screen {
     /// difficulty, `generate_structures`, `bonus_chest`, `allow_cheats` and
     /// `data_packs`. See [`create_world`]'s module docs for the wiring split.
     CreateWorld,
-    /// Vanilla's `ConfirmScreen`: a question, a warning naming what
+    /// Vanilla's confirm screen: a question, a warning naming what
     /// is at risk, and two buttons. Reached from [`Screen::WorldSelect`]'s
     /// **Delete** button; Escape, its own Cancel button and its affirmative
     /// button all return to [`Screen::WorldSelect`].
@@ -404,7 +404,7 @@ pub enum Screen {
     /// [`Self::open_social_from_pause`] this needs no return-fork:
     /// [`UiState::close_confirm`] always goes back to the world list, because
     /// that is the only screen that opens it. A second caller (an
-    /// `EditWorldScreen` reset, a re-create that overwrites) is a
+    /// The edit world screen reset, a re-create that overwrites) is a
     /// [`confirm::ConfirmRequest`] variant plus a return fork, in that order.
     ///
     /// The *content* — which question, which world — lives in
@@ -413,13 +413,13 @@ pub enum Screen {
     Confirm,
     /// A server pushed a resource pack and the player's own
     /// [`crate::menu::servers::ServerPackPolicy`] says to ask —
-    /// `ClientCommonPacketListenerImpl`'s `PackConfirmScreen`. Accept or
+    /// The client common packet listener impl's pack confirm screen. Accept or
     /// decline, with the pack's own prompt message when the server supplied
     /// one, and a distinct pair of buttons when the pack is `required`
     /// (`Proceed`/`Disconnect`) versus optional (`Yes`/`No`) — see
     /// [`net::PendingResourcePackPrompt`](crate::net::PendingResourcePackPrompt).
     ///
-    /// **Not [`Self::Confirm`]**, despite both being vanilla `ConfirmScreen`
+    /// **Not [`Self::Confirm`]**, despite both being vanilla confirm screen
     /// subclasses, and the reason is [`render::owns_frame`]'s: this screen
     /// can open over the loading screen (a push can arrive during
     /// Configuration, before Play) or over a live, still-rendering,
@@ -1041,7 +1041,7 @@ impl UiState {
     ///
     /// This is what the title screen's Singleplayer button does, and it is
     /// vanilla's own wiring — `TitleScreen`'s Singleplayer button opens
-    /// `SelectWorldScreen`; nothing in vanilla starts a world straight off the
+    /// The select world screen; nothing in vanilla starts a world straight off the
     /// title. The launch is one screen further in: **Play Selected World**
     /// produces [`nav::MenuAction::Singleplayer`], which `app.rs` turns into a
     /// real integrated-server session. For a long stretch that action
@@ -1053,7 +1053,7 @@ impl UiState {
     }
 
     /// Back to the title screen from the world list — vanilla's
-    /// own select-world screen's on-close handling, which is `setScreen(this.lastScreen)`
+    /// own select-world screen's on-close handling, which is set screen
     ///, and also what its Back button does
     /// (`:106`).
     pub fn close_world_select(&mut self) {
@@ -1268,8 +1268,8 @@ impl UiState {
     ///
     /// "Either way" for [`close_chat`](Self::close_chat)'s reason: which button
     /// was pressed decides *whether a world was deleted*, not which screen comes
-    /// next. Vanilla is the same shape — `WorldSelectionList.deleteWorld`'s
-    /// callback calls `this.list.returnToScreen()` outside its `if (result)`.
+    /// next. Vanilla is the same shape — the world selection list's delete world's
+    /// callback calls list's return to screen outside its `if (result)`.
     pub fn close_confirm(&mut self) {
         if self.screen == Screen::Confirm {
             self.screen = Screen::WorldSelect;
@@ -1293,7 +1293,7 @@ impl UiState {
     /// (a push can arrive during Configuration, before Play).
     ///
     /// [`Self::settings_in_world`]'s exact shape and for the same reason:
-    /// vanilla's `Screen::extractBackground` forks on `this.minecraft.level
+    /// vanilla's Screen's extract background forks on `this.minecraft.level
     /// == null`, not on which screen is asking, so this prompt needs the
     /// same in-world query every other overlay screen with an out-of-world
     /// case already has. Unlike `settings_in_world` this has more than one
@@ -1416,7 +1416,7 @@ impl UiState {
 
     /// Open the sign-editing screen over the world. Only from
     /// [`Screen::Playing`], matching [`open_command_block`](Self::open_command_block)'s
-    /// own guard — the server's `ClientboundOpenSignEditorPacket` only makes
+    /// own guard — the server's open-sign-editor packet only makes
     /// sense to act on while actually playing.
     ///
     /// This method only moves the screen — the widget state (the four line
@@ -1516,7 +1516,7 @@ impl UiState {
             // above, not `Screen::SignEdit`'s: `MenuNav::key_book_edit`
             // intercepts Escape first in production and sends nothing (see
             // `Screen::BookEdit`'s own doc — Escape discards, matching
-            // vanilla's un-overridden `Screen.onClose` for both screens it
+            // vanilla's un-overridden Screen's on close for both screens it
             // folds), so this bare `close_book_edit()` never sends either.
             Screen::BookEdit => self.close_book_edit(),
             // The reading screen has no send on any path at all (see
@@ -1530,7 +1530,7 @@ impl UiState {
             // As with `Screen::Accounts` below, `MenuNav::key_world_select`
             // normally answers Escape before this is reached (it routes every key
             // through vanilla's `Screen.keyPressed` order, whose Escape branch is
-            // `onClose()`). This arm keeps the match exhaustive and unwinds one
+            // on close). This arm keeps the match exhaustive and unwinds one
             // level, which is the same thing.
             Screen::WorldSelect => self.close_world_select(),
             // In practice `MenuNav::key_accounts` intercepts Escape before
@@ -1584,7 +1584,7 @@ impl UiState {
             // reached, and it must: on the confirmation screen Escape is the
             // *negative answer* (vanilla's own confirm-screen rendering runs
             // `callback.accept(false)` rather than `onClose`, which is why
-            // `shouldCloseOnEsc()` is `false` there), so the callback has to run.
+            // should close on esc is `false` there), so the callback has to run.
             // This arm keeps the match exhaustive and unwinds one level, which for
             // a *cancel* is the same observable thing — no world is deleted either
             // way, because deletion only happens on the affirmative answer.
@@ -1592,7 +1592,7 @@ impl UiState {
             // In practice `MenuNav::key_resource_pack_prompt` intercepts
             // Escape before this is reached, and it must: like `Screen::
             // Confirm` above, this screen's Escape is vanilla's *negative
-            // answer* (`ConfirmScreen`'s own `shouldCloseOnEsc() == false`
+            // answer* (the confirm screen's own `should_close_on_esc() == false`
             // rule), so the callback has to run and send a real Decline
             // rather than silently closing the overlay. This arm keeps the
             // match exhaustive and unwinds one level for a caller that
@@ -1604,7 +1604,7 @@ impl UiState {
     }
 
     /// Force the pause overlay up (e.g. the window lost focus). Vanilla's own
-    /// gate, `Gui.setPauseScreen`: `if (this.screen == null)` —
+    /// gate, Gui's set pause screen: `if (this.screen == null)` —
     /// only when *nothing* is open, matched here by `Screen::Playing` alone.
     /// Chat, an inventory/container, a command block, a sign or a book editor
     /// are all a non-null `screen` in vanilla's terms, so a focus loss while
@@ -1695,7 +1695,7 @@ impl UiState {
     /// The local player died: show the death screen. Valid from
     /// every live gameplay screen — `Playing`, `Chat`, `Container`, `Paused`
     /// — matching vanilla, which replaces whatever screen is open the instant
-    /// the death packet lands (`ClientPacketListener` sets the death screen
+    /// the death packet lands (the client packet listener sets the death screen
     /// unconditionally, not only from `Playing`). `message` is the server's
     /// death message, resolved and flattened to interactive runs — see
     /// `net::NetUpdate::Death` and `Sim::death_message`.

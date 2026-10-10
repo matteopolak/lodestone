@@ -30,13 +30,13 @@ pub enum MenuKind {
 /// bug invisible in any screenshot."
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecialLayout {
-    /// `AnvilMenu`: slots at `(27,47)`, `(76,47)`, `(134,47)`.
+    /// Anvil menu: slots at `(27,47)`, `(76,47)`, `(134,47)`.
     Anvil,
-    /// `GrindstoneMenu`: slots at `(49,19)`, `(49,40)`, `(129,34)`.
+    /// Grindstone menu: slots at `(49,19)`, `(49,40)`, `(129,34)`.
     Grindstone,
-    /// `SmithingMenu`: slots at `(8,48)`, `(26,48)`, `(44,48)`, `(98,48)`.
+    /// Smithing menu: slots at `(8,48)`, `(26,48)`, `(44,48)`, `(98,48)`.
     Smithing,
-    /// `EnchantmentMenu`: slots at `(15,47)`, `(35,47)`.
+    /// Enchantment menu: slots at `(15,47)`, `(35,47)`.
     Enchanting,
     /// Vanilla's own furnace menu (wire `menu_type` `furnace`): ingredient `(56,17)`, fuel
     /// `(56,53)`, result `(116,35)`. A separate variant from
@@ -106,7 +106,7 @@ pub enum SpecialLayout {
     /// player section is not left-aligned. The primary/secondary power
     /// buttons and the confirm/cancel controls are not menu slots at all —
     /// vanilla drives them off `container_data` and its own screen-local
-    /// selection state, not `AbstractContainerMenu` slots; see
+    /// selection state, not container-menu slots; see
     /// `lodestone_shell::container::beacon`.
     Beacon,
     /// Lectern book display. The server-owned book is rendered by the book
@@ -117,7 +117,7 @@ pub enum SpecialLayout {
 /// Where a menu's crafting grid and result live, in **menu-slot** indices.
 ///
 /// Both of vanilla's grid menus put the result first and the grid immediately
-/// after it (`InventoryMenu`: result 0, 2×2 grid 1..=4; `CraftingMenu`: result
+/// after it (inventory menu: result 0, 2×2 grid 1..=4; crafting menu: result
 /// 0, 3×3 grid 1..=9), so one descriptor covers both. It is carried on the
 /// [`Menu`] rather than encoded in [`MenuKind`] deliberately: a crafting table's
 /// *quick-move regions* are the generic-container ones, only its slot **kinds**

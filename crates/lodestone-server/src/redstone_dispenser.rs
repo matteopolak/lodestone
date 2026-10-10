@@ -2,18 +2,18 @@
 //!
 //! # What it is
 //!
-//! `DispenserBlock`/`DropperBlock` differ in **two** methods, not the one a
+//! The dispenser block/dropper block differ in **two** methods, not the one a
 //! surface read of `getDispenseMethod` suggests. A dispenser's
 //! `getDispenseMethod` looks the held item's `Item` up in
-//! `DISPENSER_REGISTRY` (populated once, in `DispenseItemBehavior.bootStrap`)
+//! `DISPENSER_REGISTRY` (populated once, in the dispense item behavior's boot strap)
 //! and falls back to a plain toss only when nothing is registered for it —
 //! that half is modelled here ([`plain_toss`], the fallback). A dropper
 //! hardcodes the plain-toss behaviour for `getDispenseMethod`, **but also
-//! overrides `dispenseFrom` itself** (`DropperBlock.dispenseFrom`, not just the
-//! method-selection hook `DispenserBlock.getDispenseMethod` names) to check the
+//! overrides `dispenseFrom` itself** (the dropper block's dispense from, not just the
+//! method-selection hook dispenser block's get dispense method names) to check the
 //! block directly ahead of it first: if that cell is a real container
-//! (`HopperBlockEntity.getContainerAt`), the randomly-picked item is pushed
-//! into it via `HopperBlockEntity.addItem` and **never becomes an item
+//! (the hopper block entity's get container at), the randomly-picked item is pushed
+//! into it via the hopper block entity's add item and **never becomes an item
 //! entity at all** — only when there is no container ahead does a dropper
 //! fall through to the same plain toss a dispenser's fallback uses. **This
 //! module now models that container-push check** ([`is_pushable_container`],
@@ -30,27 +30,27 @@
 //!
 //! # The behaviour table, derived from the registrations
 //!
-//! Every entry below is a real `DispenserBlock.registerBehavior`/
-//! `registerProjectileBehavior` call inside `DispenseItemBehavior.bootStrap`,
-//! or one of the three implicit defaults `DispenserBlock.getDefaultDispenseMethod`
+//! Every entry below is a real dispenser block's register behavior/
+//! `registerProjectileBehavior` call inside dispense item behavior's boot strap,
+//! or one of the three implicit defaults dispenser block's get default dispense method
 //! falls back to when no explicit registration matches — not a memory-derived
 //! guess:
 //!
 //! | items | behaviour | modelled here |
 //! |---|---|---|
 //! | arrow, tipped/spectral arrow | fires as a projectile entity | **yes** ([`arrow_entity_type`]/[`projectile_dispense_position`]/[`projectile_velocity`], `crate::mobs::MobSim::spawn_projectile`) |
-//! | egg (+2 chicken-colour variants), snowball, experience bottle, splash/lingering potion, firework rocket, fire charge, wind charge | fires as a projectile entity | **no** — each needs its own `ProjectileItem.createDispenseConfig` power/uncertainty (unlike the arrow family, these do not all share `DEFAULT`), and the potion-carrying items additionally need a potion-contents item component `lodestone_model::ItemComponents` does not have |
-//! | armor stand | spawns one, facing the dispenser's own facing | **no** — `MobSim::spawn_species` is built for `Mob`-shaped entities with goals/AI; [`crate::boat`]'s own doc names the exact hazard for a non-`Mob` `LivingEntity` routed through it ("gives a boat a mob's component set, produces a boat that *wanders*") and an armor stand is not a `Mob` either, so this is left unmodelled rather than risking a wandering prop |
+//! | egg (+2 chicken-colour variants), snowball, experience bottle, splash/lingering potion, firework rocket, fire charge, wind charge | fires as a projectile entity | **no** — each needs its own projectile item's create dispense config power/uncertainty (unlike the arrow family, these do not all share `DEFAULT`), and the potion-carrying items additionally need a potion-contents item component `lodestone_model::ItemComponents` does not have |
+//! | armor stand | spawns one, facing the dispenser's own facing | **no** — `MobSim::spawn_species` is built for `Mob`-shaped entities with goals/AI; [`crate::boat`]'s own doc names the exact hazard for a non-`Mob` living entity routed through it ("gives a boat a mob's component set, produces a boat that *wanders*") and an armor stand is not a `Mob` either, so this is left unmodelled rather than risking a wandering prop |
 //! | chest | fills a nearby saddled chest-carrying animal, else plain-tosses | no — entity query |
 //! | every boat/chest-boat/raft (18 items) | places a riding entity just outside the dispenser's own face, on the water surface ahead (or on the ground beneath, if the cell ahead is air over water) | **yes** ([`boat_dispense`]) |
 //! | lava/water bucket | empties into the world ahead | **yes** (`crate::fluid::bucket_empty_item_kind`/`bucket_empty_state`/`is_bucket_emptiable_target`) — only onto an air cell (vanilla additionally empties onto anything `canBeReplaced`, e.g. tall grass; see that module's own doc for why under-emptying rather than over-emptying is the safe direction here) |
 //! | powder-snow/fish/axolotl/sulfur-cube/tadpole bucket | empties into the world ahead | **no** — each needs an entity (a real fish/axolotl) or an extra mechanic (powder snow's freezing) beyond plain fluid placement |
 //! | bucket | picks a fluid up | **yes**, water/lava only (`crate::fluid::bucket_pickup_kind`/`filled_bucket_item`) — a fish/axolotl/powder-snow cell is not a plain fluid source, so picking one up still does nothing here |
-//! | flint and steel | ignites the block ahead (`FlintAndSteelDispenseItemBehavior`) | **partial** ([`flint_and_steel_ignite`]) — the fire-placement arm only; the sulfur-cube-entity-priming arm needs an entity query this crate has none of, and the TNT-block-priming arm needs a primed-TNT entity (see the TNT row) |
-//! | bone meal | grows the crop/water plant ahead (`BoneMealItem.growCrop`) | **yes**, via `crate::bone_meal::apply_bone_meal` — `growWaterPlant` (seagrass/coral) is that module's own pre-existing named gap, not a new one this wiring introduces |
+//! | flint and steel | ignites the block ahead (the flint and steel dispense item behavior) | **partial** ([`flint_and_steel_ignite`]) — the fire-placement arm only; the sulfur-cube-entity-priming arm needs an entity query this crate has none of, and the TNT-block-priming arm needs a primed-TNT entity (see the TNT row) |
+//! | bone meal | grows the crop/water plant ahead (the bone meal item's grow crop) | **yes**, via `crate::bone_meal::apply_bone_meal` — `growWaterPlant` (seagrass/coral) is that module's own pre-existing named gap, not a new one this wiring introduces |
 //! | TNT | spawns a primed-TNT entity | **yes** — `crate::mobs::MobSim::spawn_tnt`, wired into this arm in `tick.rs`'s `TICK_DISPENSER_FIRE` drain |
-//! | wither skeleton skull | places the skull block, then a `BlockPattern` match for the full wither shape | **no** — needs multi-block shape matching this crate has nowhere |
-//! | carved pumpkin | places the block, then a `BlockPattern` match for snow/iron/copper golem shapes | **no** — same missing subsystem |
+//! | wither skeleton skull | places the skull block, then a block pattern match for the full wither shape | **no** — needs multi-block shape matching this crate has nowhere |
+//! | carved pumpkin | places the block, then a block pattern match for snow/iron/copper golem shapes | **no** — same missing subsystem |
 //! | shulker box (+16 colours) | places the block entity | no |
 //! | glass bottle | takes water/honey from ahead | no |
 //! | glowstone | charges a respawn anchor | no — this crate hosts the overworld only |
@@ -59,9 +59,9 @@
 //! | honeycomb | waxes a copper block ahead | no |
 //! | potion (water only, on mud-convertible ground) | places mud | no |
 //! | minecart family (5 items: plain, chest, hopper, furnace, TNT) | places a riding entity with real rail-following physics | **yes** ([`minecart_dispense`]) — `crate::mobs::MobSim::spawn_minecart`, wired into this arm in `tick.rs`'s `TICK_DISPENSER_FIRE` drain, the same shape the boat/TNT arms above already use |
-//! | every armor/trims/saddle/horse-armor/carpet/mob-head-banner item (`getDefaultDispenseMethod`'s `EQUIPPABLE` default, also the fallback when a wither skull or carved pumpkin's spawn check fails) | equips the first eligible `LivingEntity` standing on the cell ahead | **no** — needs an entity spatial query this crate has nowhere, *and* `crate::mobs::SimMob` carries no equipment-slot state to write into even if one were found; equipping a bystanding *player* instead would additionally need a player-position registry, which is not reachable from `tick.rs`'s scheduled-tick drain |
-//! | *(implicit default)* spawn egg (`itemStack.has(DataComponents.ENTITY_DATA)`, true for every real spawn egg) | spawns the named mob just outside the dispenser's own face | **yes** ([`spawn_egg_position`], reusing `crate::spawn_egg::entity_type_for_egg`/`y_offset`) |
-//! | *everything else* | `DefaultDispenseItemBehavior` — plain toss | **yes** ([`plain_toss`]) |
+//! | every armor/trims/saddle/horse-armor/carpet/mob-head-banner item (`getDefaultDispenseMethod`'s `EQUIPPABLE` default, also the fallback when a wither skull or carved pumpkin's spawn check fails) | equips the first eligible living entity standing on the cell ahead | **no** — needs an entity spatial query this crate has nowhere, *and* `crate::mobs::SimMob` carries no equipment-slot state to write into even if one were found; equipping a bystanding *player* instead would additionally need a player-position registry, which is not reachable from `tick.rs`'s scheduled-tick drain |
+//! | *(implicit default)* spawn egg (`itemStack.has(the data components's entity data)`, true for every real spawn egg) | spawns the named mob just outside the dispenser's own face | **yes** ([`spawn_egg_position`], reusing `crate::spawn_egg::entity_type_for_egg`/`y_offset`) |
+//! | *everything else* | the default dispense item behavior — plain toss | **yes** ([`plain_toss`]) |
 //!
 //! So this module now models the shared mechanics (the `TRIGGERED` redstone
 //! state machine, the plain-toss math, and the dropper's container push) plus
@@ -75,8 +75,8 @@
 //!
 //! # What this needs of the execution model
 //!
-//! * **Trigger**: `neighborChanged`, immediate — `hasNeighborSignal(pos) ||
-//!   hasNeighborSignal(pos.above())` (the `pos.above()` half is easy to miss:
+//! * **Trigger**: `neighborChanged`, immediate — `has_neighbor_signal(pos) ||
+//!   has neighbor signal(pos.above())` (the `pos.above()` half is easy to miss:
 //!   a comparator or repeater sitting directly on **top** of a dispenser can
 //!   fire it, not only one beside it). Wired into `react_to_notification`.
 //! * **Scheduled tick**: yes, a fixed 4-tick one-shot on the *rising* edge
@@ -90,7 +90,7 @@
 //!   dropper always either pushes into a container ahead
 //!   ([`is_pushable_container`], `crate::hopper::try_move_item_into`) or
 //!   plain-tosses, **never** consulting the behaviour table below, matching
-//!   `DropperBlock.getDispenseMethod`'s own hardcoded `DefaultDispenseItemBehavior`.
+//!   The dropper block's get dispense method's own hardcoded default dispense item behavior.
 //!   A dispenser instead matches the item against [`spawn_egg_position`],
 //!   [`boat_dispense`], `crate::bone_meal::apply_bone_meal`,
 //!   [`flint_and_steel_ignite`], [`arrow_entity_type`] and
@@ -119,7 +119,7 @@ use crate::redstone::{
 pub const DISPENSER: Block = Block::Dispenser;
 pub const DROPPER: Block = Block::Dropper;
 
-/// `DispenserBlock.TRIGGER_DURATION` (`:56`).
+/// The dispenser block's trigger duration (`:56`).
 pub const TRIGGER_DURATION: u32 = 4;
 
 /// `redstone:dispenser_fire` — the scheduled-tick kind `tick.rs`'s drain
@@ -133,7 +133,7 @@ pub const TICK_DISPENSER_FIRE: &str = "redstone:dispenser_fire";
 /// `crate::explosion_blocks::EXPLOSION_BEHAVIOR_SEED`).
 pub const DISPENSER_BEHAVIOR_SEED: u64 = 0xD15E_5EED;
 
-/// `DispenserBlock.getDispensePosition`'s own default `scale` (`:161-163`,
+/// The dispenser block's get dispense position's own default `scale` (`:161-163`,
 /// the zero-argument overload).
 pub const DISPENSE_SCALE: f64 = 0.7;
 
@@ -151,7 +151,7 @@ pub fn is_dropper(state: StateId) -> bool {
     base_name(state) == DROPPER
 }
 
-/// `DropperBlock.dispenseFrom`'s container check — whether `menu_name` (from
+/// The dropper block's dispense from's container check — whether `menu_name` (from
 /// [`crate::block_entities::BlockEntity::menu_name`], read at the cell
 /// directly ahead of the dropper) names a container this crate can push a
 /// single item into blind, with no face or slot-kind rule.
@@ -160,7 +160,7 @@ pub fn is_dropper(state: StateId) -> bool {
 /// doc comment already accepts for hopper adjacency — this crate has no real
 /// container-kind registry to restrict against yet. A furnace is deliberately
 /// **excluded** even though it has a real menu: vanilla only ever reaches its
-/// three slots through `WorldlyContainer.getSlotsForFace` (fuel through the
+/// three slots through the worldly container's get slots for face (fuel through the
 /// side, nothing through the top or the output), and a blind push would land
 /// an item in whichever of `[input, fuel, output]` happens to be first —
 /// silently wrong rather than merely unmodelled, which is worse than refusing
@@ -198,8 +198,8 @@ pub struct NeighborReaction {
 }
 
 /// Vanilla's own dispenser-block neighbor-changed hook.
-/// `should_trigger` is vanilla's `hasNeighborSignal(pos) ||
-/// hasNeighborSignal(pos.above())` — the caller computes both `best_neighbor_signal`
+/// `should_trigger` is vanilla's `has_neighbor_signal(pos) ||
+/// has neighbor signal(pos.above())` — the caller computes both `best_neighbor_signal`
 /// reads (see this module's own doc comment on why the `above` half matters).
 /// `None` when `state` is not this family, or when `should_trigger` already
 /// matches the stored `TRIGGERED` (nothing to write).
@@ -283,14 +283,14 @@ fn triangle(mean: f64, spread: f64, next_f64: &mut impl FnMut() -> f64) -> f64 {
     mean + spread * (next_f64() - next_f64())
 }
 
-/// `ArrowItem`/`TippedArrowItem`/`SpectralArrowItem`'s entity id — all three
-/// implement `ProjectileItem` and none overrides `createDispenseConfig`, so
+/// The arrow item/tipped arrow item/spectral arrow item's entity id — all three
+/// implement projectile item and none overrides `createDispenseConfig`, so
 /// all three fire with [`ARROW_DISPENSE_POWER`]/[`ARROW_DISPENSE_UNCERTAINTY`]
-/// (`ProjectileItem.DispenseConfig.DEFAULT`). A tipped arrow's potion effect
+/// (the projectile item's dispense config.DEFAULT). A tipped arrow's potion effect
 /// is not modelled — `lodestone_model::ItemComponents` has no
 /// `minecraft:potion_contents` for a projectile to carry, so it dispenses as
 /// a plain, effectless `minecraft:arrow`, same entity type vanilla itself
-/// uses (`TippedArrowItem` still `extends ArrowItem` and does not override
+/// uses (the tipped arrow item still extends arrow item and does not override
 /// `createArrow`/`asProjectile`).
 #[must_use]
 pub const fn arrow_entity_type(item: Item) -> Option<EntityType> {
@@ -301,13 +301,13 @@ pub const fn arrow_entity_type(item: Item) -> Option<EntityType> {
     }
 }
 
-/// `ProjectileItem.DispenseConfig.DEFAULT`'s `power` — every arrow item.
+/// The projectile item's dispense config.DEFAULT's `power` — every arrow item.
 pub const ARROW_DISPENSE_POWER: f64 = 1.1;
-/// `ProjectileItem.DispenseConfig.DEFAULT`'s `uncertainty` — every arrow item.
+/// The projectile item's dispense config.DEFAULT's `uncertainty` — every arrow item.
 pub const ARROW_DISPENSE_UNCERTAINTY: f64 = 6.0;
 
-/// `ProjectileItem.DispenseConfig.DEFAULT`'s `positionFunction`:
-/// `DispenserBlock.getDispensePosition(source, 0.7, Vec3(0, 0.1, 0))` — the
+/// The projectile item's dispense config.DEFAULT's `positionFunction`:
+/// The dispenser block's get dispense position(source, 0.7, Vec3(0, 0.1, 0)) — the
 /// same `0.7`-scaled point [`dispense_position`] already computes, offset
 /// `0.1` higher. A projectile's own spawn point therefore sits above a
 /// plain-tossed item's, which uses the zero-offset overload.
@@ -317,10 +317,10 @@ pub fn projectile_dispense_position(center: (f64, f64, f64), face: Direction) ->
     (px, py + 0.1, pz)
 }
 
-/// Vanilla's own `Projectile.getMovementToShoot(xd, yd, zd, pow, uncertainty)`,
+/// Vanilla's own Projectile's get movement to shoot,
 /// with `(xd, yd, zd)` fixed to the dispenser's
-/// own facing unit vector — `ProjectileDispenseBehavior.execute` passes
-/// `direction.getStepX/Y/Z()`, never a drawn or aimed direction, so
+/// own facing unit vector — the projectile dispense behavior's execute passes
+/// `direction.get_step_x/Y/Z()`, never a drawn or aimed direction, so
 /// `.normalize()` on that input is always a no-op and is skipped here.
 ///
 /// `next_f64` draws three [`triangle`] samples, in axis order (x, y, z) —
@@ -343,13 +343,13 @@ pub fn projectile_velocity(
     )
 }
 
-/// `DefaultDispenseItemBehavior.DEFAULT_ACCURACY` (`:12`) — the deviation
+/// The default dispense item behavior's default accuracy (`:12`) — the deviation
 /// [`plain_toss`]'s three [`triangle`] draws share, before the
 /// `0.0172275` scale `spawnItem` multiplies it by (`:44-46`).
 const DEFAULT_ACCURACY: f64 = 6.0;
 
 /// The world-space feet position and velocity of a plain-tossed item —
-/// `DefaultDispenseItemBehavior.execute` → `spawnItem`,
+/// The default dispense item behavior's execute → `spawnItem`,
 /// vanilla's own default dispense behaviour. Every dropper dispense, and
 /// every dispenser item this module has no special behaviour for (the
 /// `*everything else*` row of this module's own table), uses this.
@@ -357,7 +357,7 @@ const DEFAULT_ACCURACY: f64 = 6.0;
 /// `next_f64` is threaded rather than captured, matching
 /// `crate::block_drops::pop_resource_placement`'s own convention — a test can
 /// pin an exact draw sequence this way. **Not** byte-parity with vanilla's
-/// Xoroshiro stream: vanilla's `ItemEntity` four-argument constructor draws
+/// Xoroshiro stream: vanilla's item entity four-argument constructor draws
 /// two numbers for a default velocity that `spawnItem` immediately
 /// overwrites one line later, so this function skips those two wasted draws
 /// — the same class of divergence `crate::block_drops`'s own module doc
@@ -406,7 +406,7 @@ fn collision_top(state: StateId) -> Option<f64> {
         .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.max(v))))
 }
 
-/// `SpawnEggItemBehavior.execute`'s placement half —
+/// The spawn egg item behavior's execute's placement half —
 /// `EntityType.create`/`getYOffset`, specialised to a dispenser: `tryMoveDown`
 /// is `direction != Direction.UP` and `movedUp` is always `false` (only a
 /// clicked *top face* can set it, and a dispenser has no clicked face at all).
@@ -447,7 +447,7 @@ fn to_y_rot(face: Direction) -> f32 {
 }
 
 /// `true` for a block-state string carrying **water** (not lava) —
-/// [`boat_dispense`]'s own `FluidTags.WATER` check, via
+/// [`boat_dispense`]'s own fluid tags's water check, via
 /// [`crate::fluid::fluid_state_of`].
 fn is_water(state: StateId) -> bool {
     state.block() == Block::Water
@@ -456,7 +456,7 @@ fn is_water(state: StateId) -> bool {
 /// [`boat_dispense`]'s outcome.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BoatDispense {
-    /// `boat.setInitialPos(...)` plus `setYRot` — the caller spawns through
+    /// boat's set initial pos plus `setYRot` — the caller spawns through
     /// `crate::mobs::MobSim::spawn_vehicle`, the same entry point
     /// [`crate::boat::apply_boat_item`] uses for a player-placed one.
     Place { position: Vec3, yaw: f32 },
@@ -466,7 +466,7 @@ pub enum BoatDispense {
     Fallback,
 }
 
-/// `BoatDispenseItemBehavior.execute` — placement is **not**
+/// The boat dispense item behavior's execute — placement is **not**
 /// [`crate::boat`]'s player-raytrace rule at all (that module's own doc
 /// comment is explicit that a boat is placed at the exact hit *point* of the
 /// *player's* view ray). A dispensed boat instead lands just outside the
@@ -478,7 +478,7 @@ pub enum BoatDispense {
 #[must_use]
 pub fn boat_dispense(origin: BlockPos, face: Direction, boat_width: f64, block_state: &dyn Fn(BlockPos) -> WorldState) -> BoatDispense {
     let (sx, sy, sz) = step(face);
-    // `0.5625` here is `AbstractBoat`'s own bounding-box half-thickness
+    // `0.5625` here is the abstract boat's own bounding-box half-thickness
     // constant, numerically identical to `BOAT_HEIGHT` but a *different*
     // vanilla field (`justOutsideDispenser`'s addend, not the box height) —
     // stated because the coincidence is easy to mistake for a typo.
@@ -510,7 +510,7 @@ pub fn boat_dispense(origin: BlockPos, face: Direction, boat_width: f64, block_s
 /// [`minecart_dispense`]'s outcome.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MinecartDispense {
-    /// `AbstractMinecart.createMinecart` — the caller spawns through
+    /// The abstract minecart's create minecart — the caller spawns through
     /// `crate::mobs::MobSim::spawn_minecart`.
     Place { position: Vec3 },
     /// Neither "a rail directly ahead" nor "air ahead over a rail one cell
@@ -519,7 +519,7 @@ pub enum MinecartDispense {
     Fallback,
 }
 
-/// `MinecartDispenseItemBehavior.execute` — placement is a **different**
+/// The minecart dispense item behavior's execute — placement is a **different**
 /// formula from [`boat_dispense`]'s, not a shared one: a minecart lands
 /// directly on a rail immediately ahead of the dispenser (`0.1` above a flat
 /// rail, `0.6` on a slope, both offsets from the *dispenser's own* floored Y
@@ -532,7 +532,7 @@ pub enum MinecartDispense {
 pub fn minecart_dispense(origin: BlockPos, face: Direction, block_state: &dyn Fn(BlockPos) -> WorldState) -> MinecartDispense {
     let (sx, sy, sz) = step(face);
     let spawn_x = f64::from(origin.x) + 0.5 + sx * 1.125;
-    // `Math.floor(center.y) + direction.getStepY()` — `center.y` is
+    // `Math.floor(center.y) + direction.get_step_y()` — `center.y` is
     // `origin.y + 0.5`, whose floor is exactly `origin.y`.
     let spawn_y = f64::from(origin.y) + sy;
     let spawn_z = f64::from(origin.z) + 0.5 + sz * 1.125;
@@ -566,20 +566,20 @@ pub fn minecart_dispense(origin: BlockPos, face: Direction, block_state: &dyn Fn
     }
 }
 
-/// `FlintAndSteelDispenseItemBehavior.execute`'s block-ignition arm only.
+/// The flint and steel dispense item behavior's execute's block-ignition arm only.
 ///
 /// Two of its three arms are deliberately absent, each for a reason this
 /// crate cannot currently close: `tryIgniteExplosiveEntities` needs an entity
 /// query this crate has nowhere (so this behaves exactly as if no such entity
 /// were ever standing ahead — correct whenever one is not, which is every
-/// case this crate could tell apart anyway), and priming a `TntBlock` ahead
+/// case this crate could tell apart anyway), and priming a tnt block ahead
 /// needs a primed-TNT entity this crate has none of at all (`crate::fire`'s
-/// own module doc names the identical gap for `TntBlock::prime`). Campfire and
+/// own module doc names the identical gap for the tnt block's prime). Campfire and
 /// candle re-lighting are absent too — smaller, same shape: this crate has no
 /// modelled `lit` re-toggle path for either family reachable from an item
 /// use. `None` for all four; `Some((target, new_state))` only for the
 /// fire-placement arm this crate can actually do, mirroring
-/// `BaseFireBlock::canBePlacedAt` (target is air, and the *fire's own*
+/// The base fire block's can be placed at (target is air, and the *fire's own*
 /// `canSurvive` — a sturdy floor or a burnable neighbour — holds); the portal
 /// clause inside `canBePlacedAt` is not modelled either, since this crate has
 /// no portal-frame detection.
@@ -853,7 +853,7 @@ mod tests {
         // justOutsideDispenser = 0.5625 + 1.375/2 = 1.25; spawnX = 0.5 + 1.25 = 1.75.
         assert!((position.x - 1.75).abs() < 1e-9, "{position:?}");
         // East's step_y is 0, so the `1.125` vertical term never applies —
-        // spawnY = 63.5 + 0.0 + yOffset(1.0) = 64.5.
+        // spawnY = 63.5 + 0.0 + y offset = 64.5.
         assert!((position.y - 64.5).abs() < 1e-9, "{position:?}");
         assert!((position.z - 4.5).abs() < 1e-9, "{position:?}");
         assert!((yaw - 270.0).abs() < f32::EPSILON, "East's toYRot is 270: {yaw}");
@@ -878,7 +878,7 @@ mod tests {
         let BoatDispense::Place { position, .. } = out else {
             panic!("air over water must place: {out:?}");
         };
-        // spawnY = 63.5 + 0.0 + yOffset(0.0) = 63.5 — one block below the
+        // spawnY = 63.5 + 0.0 + y offset = 63.5 — one block below the
         // water-directly-ahead case's 64.5.
         assert!((position.y - 63.5).abs() < 1e-9, "{position:?}");
     }

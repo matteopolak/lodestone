@@ -17,7 +17,7 @@
 //!
 //! ## 26.x replaced recipe names with per-session ids, and that matters
 //!
-//! A recipe is identified on the wire by `RecipeDisplayId`, **an `i32` index valid
+//! A recipe is identified on the wire by a recipe display id, **an `i32` index valid
 //! only for this connection** — not by an `Identifier`. So
 //! [`crate::recipe::RecipeUnlockState`], which keys on `Identifier`, cannot be fed
 //! from this packet family: it was built against the pre-26 wire shape. This store
@@ -110,7 +110,7 @@ impl RecipeBookSync {
         Self::default()
     }
 
-    /// The unlocked recipes, by `RecipeDisplayId`.
+    /// The unlocked recipes, by recipe display id.
     #[must_use]
     pub fn known(&self) -> &BTreeMap<i32, KnownRecipe> {
         &self.known
@@ -173,7 +173,7 @@ impl RecipeBookSync {
     }
 
     /// Every unlocked recipe whose result includes `item_id` — the join a recipe
-    /// panel needs, given that a `RecipeDisplayId` carries no name.
+    /// panel needs, given that a recipe display id carries no name.
     pub fn unlocked_producing(
         &self,
         item_id: ItemId,

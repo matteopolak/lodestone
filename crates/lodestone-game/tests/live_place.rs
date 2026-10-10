@@ -28,10 +28,10 @@
 //!   the real `ScreenOpened` event and place nothing); sneaking + right-click on
 //!   the same chest places a block against it (server reports stone).
 //!
-//! ## Two server facts this test is built around (26.2 `ServerGamePacketListenerImpl`)
+//! ## Two server facts this test is built around (26.2 server packet listener)
 //!
-//! - **The load gate.** `handleUseItemOn` is dropped until `hasClientLoaded()`
-//!   (:1343), and the real driver never sends `player_loaded`, so the server
+//! - **The load gate.** The use-item-on handler is dropped until the client-loaded flag
+//!   is set, and the real driver never sends `player_loaded`, so the server
 //!   auto-loads us only after ~60 ticks (~3s). Every placement is therefore
 //!   **retried** until the server reflects it, which both clears the gate and
 //!   tolerates the first few dropped attempts.
@@ -501,7 +501,7 @@ async fn block_placement_round_trips_through_client() {
         while Instant::now() < deadline {
             let _ = handle.look_at(block_center(chest));
             // Drive the real crouch input so the *server* records shift-key-down
-            // (ServerGamePacketListenerImpl.handlePlayerInput -> setShiftKeyDown);
+            // (the server's player-input handler -> set shift key down);
             // otherwise the server treats the click as an interaction and re-opens
             // the chest instead of placing.
             let _ = handle.send_action(ClientAction::SetPlayerInput(crouch));

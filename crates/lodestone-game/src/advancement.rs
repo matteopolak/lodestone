@@ -2,7 +2,7 @@
 //!
 //! ## What it is
 //!
-//! The client-side mirror of vanilla's `ClientAdvancements`: the nodes the server
+//! The client-side mirror of vanilla's advancement tracking: the nodes the server
 //! sent (id, parent, display, requirements) plus per-criterion obtained times.
 //! [`AdvancementStore::apply`] folds [`ClientEvent::AdvancementsUpdated`] and
 //! nothing else.
@@ -16,7 +16,7 @@
 //!
 //! Completion is vanilla's AND-of-ORs over the node's own `requirements`: done
 //! when **every** group has at least one obtained criterion. An empty group list
-//! is never done, matching `AdvancementRequirements.test`.
+//! is never done, matching the game's requirements test.
 //!
 //! ## How to change it
 //!

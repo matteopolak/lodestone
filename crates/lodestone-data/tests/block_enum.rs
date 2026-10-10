@@ -13,7 +13,7 @@
 //!
 //! The default-state expectations come from the same dump family — the
 //! `is_default_state` column, which is the server's own
-//! `state == state.getBlock().defaultBlockState()` answer — and are deliberately
+//! `state == state.get_block().default_block_state()` answer — and are deliberately
 //! taken at blocks where the *wrong* hypothesis (the lowest state id of the
 //! block's span) gives a different number.
 

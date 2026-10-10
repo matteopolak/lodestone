@@ -463,7 +463,7 @@ async fn placing_dust_into_a_gap_powers_the_whole_run_in_the_servers_own_world()
 /// The cosmetic half that *used* to remain wrong is now right too, and by a
 /// different mechanism than the one described above: the
 /// fallback is now the block's **jar-marked default state with the caller's named
-/// properties written over it** — vanilla's own `defaultBlockState().setValue`
+/// properties written over it** — vanilla's own default block state's set value
 /// — rather than the lowest id agreeing on them. Dust's four connection
 /// properties therefore come out `none`, its real default, so it renders flat
 /// instead of climbing. `power` — the load-bearing half, and the only thing this

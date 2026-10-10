@@ -7,10 +7,10 @@
 //!
 //! # Light: the brightness override, then the world
 //!
-//! `TextDisplayRenderer.submitInner` sets `.setLight(lightCoords)` on the
+//! The text display renderer's submit inner sets `.set_light(lightCoords)` on the
 //! background quad and passes the same coords to every `submitText` call, and
 //! `lightCoords` for a `Display` is not the plain sampled value:
-//! `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` substitute the
+//! The display renderer's get sky light level/`getBlockLightLevel` substitute the
 //! **brightness override**'s own nibbles whenever it is set, per axis, and
 //! fall back to the sampled world light otherwise. [`display_light`] is that
 //! rule; `DisplayDraw::brightness_override` has been decoded and repacked all
@@ -32,7 +32,7 @@
 //!
 //! Unlike [`super::nametag`] (always camera-facing) and unlike
 //! [`super::sign_text`] (always a fixed world orientation), a `text_display`'s
-//! orientation is **per-entity data** — `Display.BillboardConstraints`, one
+//! orientation is **per-entity data** — the display's billboard constraints, one
 //! of four modes — so the placement matrix is resolved per draw from
 //! [`lodestone_render::display::display_orientation`] rather than baked into
 //! this pass the way the other two bake in their one fixed choice.
@@ -46,18 +46,18 @@
 //! below), and a fourth because a `text_display` can ask for none of it:
 //! `FLAG_SEE_THROUGH` selects `TEXT_SEE_THROUGH` /
 //! `TEXT_BACKGROUND_SEE_THROUGH`, whose depth state is
-//! `withDepthStencilState(Optional.empty())` — no test, no write. Those two
+//! with depth stencil state — no test, no write. Those two
 //! collapse into one pipeline here because their depth state is identical.
 //! Their *shaders* are not identical, and the difference is not cosmetic —
 //! see the light section below, which is why the see-through range is
 //! partitioned by a flag this pass reads rather than merely drawn last.
 //! Vanilla's own text-display renderer's submit-inner routine hands the
 //! background quad to its own text-background render type —
-//! `RenderPipelines.TEXT_BACKGROUND`, whose depth state is the plain
+//! The render pipelines's text background, whose depth state is the plain
 //! `DepthStencilState.DEFAULT` — and every line of text to
-//! `Font.DisplayMode.POLYGON_OFFSET`, which resolves to
-//! `RenderPipelines.TEXT_POLYGON_OFFSET`:
-//! `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`.
+//! The font's display mode's polygon offset, which resolves to
+//! The render pipelines's text polygon offset:
+//! `new DepthStencilState(the compare op's greater than or equal, true, 1.0F, 10.0F)`.
 //! The two numeric constants are the same polygon offset `gpu/sign_text.rs`
 //! already ports, and no sign flip applies — this renderer is reversed-Z like
 //! vanilla — giving [`TEXT_POLYGON_OFFSET`] —
@@ -103,7 +103,7 @@
 //! parallel — which an in-plane offset on an angled billboard is exactly.
 //!
 //! Vanilla separates the two **geometrically**, in the text's own plane:
-//! `BakedSheetGlyph.renderChar` emits the shadow copy at local `z = 0` and
+//! The baked sheet glyph's render char emits the shadow copy at local `z = 0` and
 //! the glyph at `z = 0.03` whenever there is a shadow (and at `0` when there
 //! is not — the offset exists only to clear the shadow). **That port was
 //! written, measured, and deliberately removed.** Two reasons, in order of
@@ -182,8 +182,8 @@
 //!
 //! **This is the one place in this file that deliberately diverges from
 //! vanilla, at the owner's request, and it is not a bug fix.**
-//! `RenderPipelines.TEXT_BACKGROUND` is `DepthStencilState.DEFAULT` —
-//! `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true)` — so
+//! The render pipelines's text background is `DepthStencilState.DEFAULT` —
+//! `new DepthStencilState(the compare op's greater than or equal, true)` — so
 //! vanilla's own panel writes depth. This one does not.
 //!
 //! The consequence in vanilla is visible and the owner checked it in the real
@@ -191,10 +191,10 @@
 //! behind the billboard in the real vanilla client too, but its definitely a
 //! bug"*. A translucent panel that writes depth rejects translucent terrain
 //! drawn after it, and `gpu/frame.rs` draws this pass before translucent
-//! terrain exactly as `LevelRenderer` draws `executeTranslucent`'s
-//! `translucentCustomGeometry` before `renderGroup(TRANSLUCENT)`. Vanilla
+//! terrain exactly as the level renderer draws `executeTranslucent`'s
+//! `translucentCustomGeometry` before render group. Vanilla
 //! escapes it *only* under the transparency post chain (Fabulous graphics),
-//! where translucent terrain goes to `LevelRenderer`'s separate `translucent`
+//! where translucent terrain goes to the level renderer's separate `translucent`
 //! target whose depth was copied from main **before** the translucent features
 //! ran; with the chain off, vanilla's own translucent chunk-section-layer-group's
 //! output-target accessor
@@ -212,7 +212,7 @@
 //!
 //! What the panel keeps: it still **tests** depth, so real geometry in front
 //! of it still occludes it, and it is still drawn before the ink, so
-//! `TextDisplayRenderer.submitInner`'s own
+//! The text display renderer's submit inner's own
 //! `submitNodeCollector.order(backgroundColor != 0 ? 1 : 0)` still decides
 //! which is on top. What it loses is the ability to occlude anything drawn
 //! later in `gpu/frame.rs` — translucent terrain, particles, weather — which
@@ -320,9 +320,9 @@ fn capacity_for_demand(current: usize, demand: usize) -> usize {
 /// `Font` shadows chat and every other piece of text.
 const FLAG_SHADOW: u8 = 1;
 
-/// `RenderPipelines.TEXT_POLYGON_OFFSET`'s own polygon offset, transcribed with
+/// The render pipelines's text polygon offset's own polygon offset, transcribed with
 /// **no** sign flip: vanilla's
-/// `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`
+/// `new DepthStencilState(the compare op's greater than or equal, true, 1.0F, 10.0F)`
 /// pulls *toward* the camera with positive constants under reversed-Z, and this
 /// renderer's projection is reversed-Z too.
 ///
@@ -373,9 +373,9 @@ const FLAG_ALIGN_LEFT: u8 = 8;
 const FLAG_ALIGN_RIGHT: u8 = 16;
 
 /// The alpha `FLAG_USE_DEFAULT_BACKGROUND` resolves to, as a packed ARGB
-/// black — `(int)(getBackgroundOpacity(0.25F) * 255) << 24`.
+/// black — `(int)(get_background_opacity(0.25F) * 255) << 24`.
 ///
-/// `Options.getBackgroundOpacity` returns its *fallback* whenever
+/// Options's get background opacity returns its *fallback* whenever
 /// `backgroundForChatOnly` is set, and vanilla's own default for that option
 /// is on, so `0.25` is what an unconfigured client uses. That accessibility
 /// pair is not modelled here (this crate's `chat_background_opacity` is the
@@ -392,7 +392,7 @@ const FLAG_ALIGN_RIGHT: u8 = 16;
 const DEFAULT_BACKGROUND_ARGB: i32 = 0x3F00_0000_u32 as i32;
 
 /// Which panel colour this display actually draws, honouring
-/// `FLAG_USE_DEFAULT_BACKGROUND` — `TextDisplayRenderer.submitInner`'s own
+/// `FLAG_USE_DEFAULT_BACKGROUND` — the text display renderer's submit inner's own
 /// first branch, which was missing, so a display asking for the client
 /// default drew whatever colour the server happened to have synced.
 fn resolved_background_argb(draw: &DisplayDraw) -> i32 {
@@ -414,13 +414,13 @@ struct DisplayTextStorage {
 /// pass, unlike its two nearest relatives.
 #[derive(Debug)]
 pub(super) struct DisplayTextRenderer {
-    /// `RenderPipelines.TEXT_BACKGROUND`'s depth state — plain
+    /// The render pipelines's text background's depth state — plain
     /// `DepthStencilState.DEFAULT`: test, no polygon offset, and **no depth
     /// write, where vanilla writes**. See the module doc's "The panel does
     /// not write depth, and vanilla's does" — that flag is a deliberate
     /// improvement on vanilla, not a port of it.
     background_pipeline: wgpu::RenderPipeline,
-    /// `RenderPipelines.TEXT_POLYGON_OFFSET` exactly — the same two constants
+    /// The render pipelines's text polygon offset exactly — the same two constants
     /// `gpu/sign_text.rs` ports. Vanilla submits a glyph's drop shadow and
     /// the glyph itself through this one pipeline; here the shadow keeps it
     /// and the ink takes a second step, so that the ink beats its own shadow
@@ -433,10 +433,10 @@ pub(super) struct DisplayTextRenderer {
     /// their own drop shadow, at every viewing angle and every distance. See
     /// the module doc for the measurements that made each of those necessary.
     glyph_pipeline: wgpu::RenderPipeline,
-    /// `RenderPipelines.TEXT_SEE_THROUGH` and `TEXT_BACKGROUND_SEE_THROUGH`,
+    /// The render pipelines's text see through and `TEXT_BACKGROUND_SEE_THROUGH`,
     /// which are one pipeline here because the only thing this pass ports of
     /// either is the depth state and theirs is identical:
-    /// `withDepthStencilState(Optional.empty())` — no test, no write, so the
+    /// with depth stencil state — no test, no write, so the
     /// text is visible through whatever is in front of it.
     ///
     /// A `text_display` picks this with `Display.TextDisplay.FLAG_SEE_THROUGH`,
@@ -567,8 +567,8 @@ fn build_pipelines(
     })];
 
     // One descriptor, two depth biases — the *only* thing that differs
-    // between `RenderPipelines.TEXT_BACKGROUND` and
-    // `RenderPipelines.TEXT_POLYGON_OFFSET` on our side of the port, so
+    // between render pipelines's text background and
+    // The render pipelines's text polygon offset on our side of the port, so
     // building them from one closure keeps that visible rather than
     // burying it in two near-identical literals.
     let build = |label: &str, depth: wgpu::DepthStencilState| {
@@ -861,7 +861,7 @@ struct Partitioned {
 /// One `Display`-family entity's packed light: its **brightness override**
 /// when it carries one, the sampled world light at its position otherwise.
 ///
-/// `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` substitute the
+/// The display renderer's get sky light level/`getBlockLightLevel` substitute the
 /// override's own nibbles for the sampled lightmap whenever it is not `-1`,
 /// which is what makes a server's `brightness:{sky:15,block:15}` hologram
 /// readable in a dark room — the single most common reason a `text_display`
@@ -991,8 +991,8 @@ fn split_spans_into_lines(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
 /// `glyph_out`.
 ///
 /// The three are kept apart because they are drawn through **three different
-/// pipelines** — vanilla's `RenderPipelines.TEXT_BACKGROUND`, its
-/// `RenderPipelines.TEXT_POLYGON_OFFSET`, and that same offset counted twice
+/// pipelines** — vanilla's render pipelines's text background, its
+/// The render pipelines's text polygon offset, and that same offset counted twice
 /// — see the module doc for the measurement behind each split. Neither is
 /// cosmetic.
 #[allow(clippy::too_many_arguments)]
@@ -1065,7 +1065,7 @@ fn push_text_display_quads(
     let base = display_placement_matrix(draw.position, orientation, &draw.transform);
     let matrix = text_glyph_transform(base, total_width, total_height);
 
-    // `Display.TextDisplay.getAlign`: neither bit set is centre, `0x08` is
+    // TextDisplay's get align: neither bit set is centre, `0x08` is
     // left, `0x10` is right — ported directly rather than "simplified" to
     // always-centre, since a left/right-aligned sign board reads visibly
     // wrong against a centred one.
@@ -1090,7 +1090,7 @@ fn push_text_display_quads(
     // channel is read here (see the module doc).
     let alpha = text_glyph_color(draw.text_opacity)[3];
     // `Display.TextDisplay.FLAG_SHADOW`, threaded to
-    // `textCollector.submitText(…, shadow, …)` and from there to
+    // text collector's submit text and from there to
     // vanilla's own font rendering's `drawShadow`. Gated on the flag, unlike a nametag (which
     // vanilla always shadows) — the accessor's own default is `(byte)0`, so
     // a display that never reported style flags draws no shadow, exactly as
@@ -1196,7 +1196,7 @@ fn push_ink_quad(
 }
 
 /// The background panel: local `(-1, -1)` to `(width, height)`, vanilla's
-/// own four corners (`TextDisplayRenderer.submitInner`), split into two
+/// own four corners (the text display renderer's submit inner), split into two
 /// triangles preserving the same winding vanilla's quad walk produces.
 fn push_background_quad(
     matrix: Mat4,
@@ -1856,7 +1856,7 @@ mod tests {
         )
     }
 
-    /// `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` take the
+    /// The display renderer's get sky light level/`getBlockLightLevel` take the
     /// **brightness override**'s own nibbles in place of the sampled lightmap
     /// whenever it is set — which is the whole reason a server sets
     /// `brightness:{sky:15,block:15}` on a hologram it wants readable in a

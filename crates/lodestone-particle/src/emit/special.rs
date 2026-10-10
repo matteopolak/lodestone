@@ -193,7 +193,7 @@ pub fn vault_connection(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd:
 /// Vanilla's own ominous-spawning particle provider (`minecraft:ominous_spawning`)
 /// — a straight-line homing mote (unlike [`fly_towards_position`]'s quartic
 /// dip) whose colour lerps from a fixed light blue to white over its life.
-/// Scale is vanilla's own provider's own `3.0..5.0` random draw, not
+/// Scale is vanilla's provider's `3.0..5.0` random draw, not
 /// wire-driven. See [`Behaviour::FlyStraightTowards`].
 pub fn ominous_spawning(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
     let rng = engine.rng();
@@ -348,7 +348,7 @@ pub fn geyser(
 /// Vanilla's own geyser-base/geyser-poof particle provider
 /// (`minecraft:geyser_base`/`minecraft:geyser_poof`) — one class, two sheets
 /// and two `burst_impulse_base` constants (`1.5` for `geyser_base`, `2.0` for
-/// `geyser_poof` — vanilla's own eruption particle's own two child
+/// `geyser_poof` — vanilla's eruption particle's two child
 /// constructions, never wire-driven).
 ///
 /// Shares [`base_ash_smoke`]'s scatter (`dir` set to the burst impulse on all

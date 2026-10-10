@@ -16,8 +16,8 @@ use super::screens::{
 };
 use super::server_list::SERVER_LIST_FOOTER_H;
 
-/// Builds vanilla's `JoinMultiplayerScreen`: one row per saved server at
-/// `ServerSelectionList`'s geometry, then the seven footer buttons.
+/// Builds vanilla's join multiplayer screen: one row per saved server at
+/// The server selection list's geometry, then the seven footer buttons.
 ///
 /// ## What each row's state resolves to
 ///
@@ -37,7 +37,7 @@ use super::server_list::SERVER_LIST_FOOTER_H;
 ///
 /// ## Selection, and vanilla's null
 ///
-/// `JoinMultiplayerScreen.onSelectedChange` starts with **nothing** selected and
+/// The join multiplayer screen's on selected change starts with **nothing** selected and
 /// three inactive buttons (`:246-257`). This shell has a keyboard row cursor that
 /// always points somewhere, so "has a selection" is modelled as "the list is not
 /// empty" — see [`super::nav::ServerListButton::enabled`], which is where that
@@ -250,13 +250,13 @@ pub fn frame_for<'a>(
             .collect(),
             ..Default::default()
         }),
-        // Vanilla's `JoinMultiplayerScreen`: a `HeaderAndFooterLayout`
-        // title, the `ServerSelectionList`'s 36 px rows, and seven footer buttons
+        // Vanilla's join multiplayer screen: a `HeaderAndFooterLayout`
+        // title, the server selection list's 36 px rows, and seven footer buttons
         // three of which are inactive with nothing selected. Built in its own
         // function because the row content alone is thirty lines of state
         // resolution — see `server_list_frame`.
         Screen::ServerList => Some(server_list_frame(nav, statuses, favicons)),
-        // Vanilla's `ManageServerScreen` (the framework conversion this arm
+        // Vanilla's manage server screen (the framework conversion this arm
         // used to lack entirely: no row here carried a `slot`, so every
         // widget drew through the pre-fix centred stack instead of a real
         // `widget/button*`/`widget/text_field` sprite). See
@@ -301,10 +301,10 @@ pub fn frame_for<'a>(
                         slot: Some(manage_server_slot(ADDRESS_FIELD)),
                         ..Default::default()
                     },
-                    // `ServerData.ServerPackStatus::getName` as the
-                    // `CycleButton`'s own drawn text (vanilla's own manage-server
+                    // The server data's server pack status's get name as the
+                    // The cycle button's own drawn text (vanilla's own manage-server
                     // screen rendering
-                    // draws "Name: Value" through `CommonComponents
+                    // draws "Name: Value" through the common components
                     // .optionNameValue`-shaped labels) — live now that
                     // `EditForm::pack_status` has somewhere real to go. See
                     // `RESOURCE_PACK_ROW`'s doc.
@@ -348,7 +348,7 @@ pub fn frame_for<'a>(
                 ..Default::default()
             })
         }
-        // Vanilla's `SelectWorldScreen` (then that fix's real save
+        // Vanilla's select world screen (then that fix's real save
         // list): the title, the search box, the six footer buttons — three still
         // present and disabled — and **one row per world in `saves/`**. See
         // `super::world_select` for what is disabled and why, `world_select_slot`
@@ -400,7 +400,7 @@ pub fn frame_for<'a>(
                     label: world.display_name.clone(),
                     detail: world.detail_line(),
                     trailing: world.info_line(),
-                    // `LevelSummary.primaryActionActive` — a corrupt world's row is
+                    // The level summary's primary action active — a corrupt world's row is
                     // listed and not openable.
                     enabled: ws.is_active(FIRST_WORLD_ROW + row),
                     world: Some(crate::menu::render::WorldEntryView {
@@ -425,9 +425,9 @@ pub fn frame_for<'a>(
                 ..Default::default()
             })
         }
-        // Vanilla's whole `OptionsScreen` tree. This used to be two
+        // Vanilla's whole options screen tree. This used to be two
         // hand-written rows in a centred stack with a key-hint footer; it is now
-        // nine pages of `OptionsList` geometry built from a table, with the
+        // nine pages of the options list geometry built from a table, with the
         // controls this client does not honour drawn inactive. Every decision —
         // which page, which rows are visible, which are live, where each one
         // sits, and — since the Online page — whether the root's header button
@@ -440,7 +440,7 @@ pub fn frame_for<'a>(
         // returned `Some` and `owns_frame`'s `Clear` pass (`app.rs::draw_menu`)
         // has no idea a world is loaded behind it. The panorama is
         // `Screen::MainMenu`'s background alone (`panorama.rs`'s module docs);
-        // in-world Options is vanilla's `OptionsScreen` opened over the paused
+        // in-world Options is vanilla's options screen opened over the paused
         // level, same shape as `Screen::Paused`/`Screen::Death`. Returning
         // `None` here routes it through the *world* render path in `app.rs`'s
         // `redraw` instead of `draw_menu`'s Clear pass — exactly like Paused
@@ -529,7 +529,7 @@ pub fn frame_for<'a>(
         // The error screen is drawn by this renderer too, even though it is not
         // an `is_menu()` screen: a session that dies mid-game used to leave a
         // frozen world on screen with no explanation. See `error_frame` for the
-        // vanilla `DisconnectedScreen` this now reproduces.
+        // vanilla disconnected screen this now reproduces.
         // Reached only once an account exists — the guard above returns before
         // the switch otherwise — so this arm is the gate *after* it has opened,
         // i.e. a player who removed their last account and has not yet been
@@ -603,7 +603,7 @@ pub fn frame_for<'a>(
         // for why this is one flat hand-placed list rather than vanilla's
         // three tabs.
         Screen::CreateWorld => Some(super::create_world::frame(nav.create_world())),
-        // Vanilla's `ConfirmScreen` — the gate the world list's
+        // Vanilla's confirm screen — the gate the world list's
         // Delete button passes through. See `super::confirm`'s module doc for why
         // it is a screen at all rather than a two-press mode on the list, and
         // `confirm::frame` for the one thing this arm must not do: default

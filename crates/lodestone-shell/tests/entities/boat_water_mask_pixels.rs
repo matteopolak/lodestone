@@ -3,7 +3,7 @@
 //!
 //! # Why this exists
 //!
-//! `92558b73` ported vanilla's `BoatModel.createWaterPatch` — an invisible,
+//! `92558b73` ported vanilla's boat model's create water patch — an invisible,
 //! depth-only mask drawn through `EntityPipeline::water_mask_pipeline`
 //! (colour writes disabled, depth writes on) that fills the boat hull's
 //! hollow interior so the translucent water pass's depth test fails there
@@ -414,7 +414,7 @@ const BOAT_YAW: f32 = 35.0;
 /// composed from the two offsets that put it there:
 ///
 /// * `non_living_vehicle_matrix`'s `0.375` bob (vanilla's
-///   `poseStack.translate(0, 0.375F, 0)` in `AbstractBoatRenderer.submit`), and
+///   `poseStack.translate(0, 0.375F, 0)` in the abstract boat renderer's submit), and
 /// * the plate's own `PartPose::offset(0, -3, 1)` — `3/16 = 0.1875` blocks,
 ///   sign-flipped by the placement's `scale(-1, -1, 1)` — and its `3/16`
 ///   thickness, whose midpoint is therefore `0.375 + 0.1875/2`.
@@ -998,7 +998,7 @@ fn the_boat_water_mask_hides_the_hollow_interior_a_bare_boat_rig_does_not() {
     );
 }
 
-/// The negative control: `RaftRenderer` has no `submitTypeAdditions`
+/// The negative control: the raft renderer has no `submitTypeAdditions`
 /// override, so a raft gets no water mask — `entity_passes.rs`'s
 /// `ends_with("_boat")` never matches `"_raft"`.
 ///

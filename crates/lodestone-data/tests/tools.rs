@@ -1139,7 +1139,7 @@ fn resolve_tag(
 
 /// The item half of the dump, re-derived from a *different* Mojang artifact:
 /// `generated/reports/minecraft/components/item/<item>.json`, the version's own
-/// `RegistryComponentsReport` output. Two independent renderings of the same
+/// components report output. Two independent renderings of the same
 /// game data agreeing is what makes the committed table trustworthy.
 ///
 /// Skipped (not failed) when `.cache/mc/26.2` is absent, since the report is a

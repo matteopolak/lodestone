@@ -7,21 +7,21 @@
 //! ## Why this test exists in this shape
 //!
 //! Everything under crafting was built as an island: 1585 recipes, 224 item tags,
-//! a `CraftingMenu` layout, `Menu::craft_layout`, a container screen that lays out
+//! a crafting menu layout, `Menu::craft_layout`, a container screen that lays out
 //! the grid. None of it had ever been driven against a server, and a hermetic test
 //! of a click machine cannot close that gap — a predictor asserted against its own
 //! prediction agrees with itself by construction.
 //!
 //! The load-bearing design rule is that **the client never matches a recipe to
 //! fill the result slot**. Vanilla computes the result server-side:
-//! `CraftingMenu.slotsChanged` runs `slotChangedCraftingGrid`, which sends a
-//! `container_set_slot` for slot 0 — and a *client's* `CraftingMenu` is built with
+//! the crafting menu's slots-changed hook runs the grid-changed update, which sends a
+//! `container_set_slot` for slot 0 — and a *client's* crafting menu is built with
 //! a null level access, so its `slotsChanged` does nothing at all. Our
 //! `RecipeBook`/`predicted_craft_result` exist for the recipe book, ghost
 //! previews and offline play, and are deliberately not used here. Every
 //! result-slot assertion below therefore reads a value that **originated on the
 //! server**: either a `ClientEvent::ContainerSlot` push we recorded raw, or the
-//! server's own `broadcastFullState()` content packet.
+//! server's own broadcast full state content packet.
 //!
 //! ## What it gates
 //!
@@ -44,14 +44,14 @@
 //!    2×2 and the server pushes `container_set_slot(slot 0) = crafting_table`. The
 //!    same detector reports "no result" and then "result" one click apart, and the
 //!    click that produced it is asserted to carry **no** slot-0 change of our own.
-//! 4. **Taking the result consumes the ingredients** — `ResultSlot.onTake`, and
+//! 4. **Taking the result consumes the ingredients** — the result slot's on-take hook, and
 //!    the reason "slot 0 is take-only" is only half the rule.
 //! 5. **Repeat crafting is the server's, not ours.** With 2 planks per cell one
 //!    shift-click of the result must yield **two** crafting tables. Our prediction
 //!    says one — vanilla's client predicts one too, because its result slot never
 //!    refills — and the divergence is asserted in both directions: the intent we
 //!    sent carries a count of 1, and the server's authoritative state carries 2.
-//!    That is the port of `AbstractContainerMenu.doClick`'s QUICK_MOVE loop
+//!    That is the port of the click handler's QUICK_MOVE loop
 //!    behaving exactly as it does in vanilla on each side of the wire.
 //! 6. **An independent server oracle.** `/clear <player> <item> 0` counts without
 //!    removing, on a completely different channel from the container packets: the
@@ -61,22 +61,22 @@
 //! ## Mechanics worth knowing before editing this
 //!
 //! - **The resync probe is `CLONE`, not `-999 PICKUP`.** The other live container
-//!   tests force `broadcastFullState()` with a stale-`state_id` click on slot
+//!   tests force broadcast full state with a stale-`state_id` click on slot
 //!   `-999`, which is a guaranteed no-op *only with an empty cursor* — with a
 //!   loaded one it **drops the cursor into the world**. Half the checks here run
 //!   with a loaded cursor, so the probe is mode `CLONE`, whose server branch is
 //!   gated on `player.hasInfiniteMaterials()` and therefore a no-op for every slot
 //!   and every cursor in survival.
-//! - **`stillValid` keeps the table in reach.** `CraftingMenu.stillValid` re-checks
-//!   the block is a crafting table *and* `canInteractWithBlock(pos, 4.0)` on every
+//! - **The still-valid check keeps the table in reach.** The crafting menu's check re-checks
+//!   the block is a crafting table *and* within 4.0 reach on every
 //!   click, so the table is placed adjacent to the player and the player never
 //!   moves.
-//! - **`handleUseItemOn` is gated on `hasClientLoaded()`** and the real driver
+//! - **`handleUseItemOn` is gated on has client loaded** and the real driver
 //!   never sends `player_loaded`, so the server auto-loads us only after ~60 ticks.
 //!   Opening the table is retried. `handleContainerClick` has **no** such gate.
 //! - **Clicks carry the server's `state_id`.** If they carried a locally bumped
 //!   one, every click would arrive stale and the server would answer
-//!   `broadcastFullState()` — which would make this whole test vacuous, since the
+//!   broadcast full state — which would make this whole test vacuous, since the
 //!   server's reply would then unconditionally be its own truth rather than a
 //!   correction to a prediction. See `reconcile.rs` and the hermetic guard
 //!   `a_predicted_click_stamps_the_servers_state_id_not_the_bumped_one`.
@@ -114,7 +114,7 @@ const RCON_PASSWORD: &str = "lodestone";
 /// one would otherwise pass silently.
 const EXPECTED_CHECKS: usize = 8;
 
-/// `CraftingMenu`: `0` result, `1..=9` grid, `10..=36` main storage, `37..=45`
+/// Crafting menu: `0` result, `1..=9` grid, `10..=36` main storage, `37..=45`
 /// hotbar. 46 slots total, and **no armour and no off-hand** — a crafting table is
 /// a `Generic { container_size: 10 }`, not a player menu, so its hotbar starts at
 /// 37 and not at 36.
@@ -126,7 +126,7 @@ const CELLS_2X2: [usize; 4] = [1, 2, 4, 5];
 const HOTBAR_0: usize = 37;
 /// Menu index of hotbar slot 7 (`container.7`) — a layout probe.
 const HOTBAR_7: usize = 44;
-/// Menu index of the **last** hotbar slot, where `CraftingMenu.quickMoveStack`
+/// Menu index of the **last** hotbar slot, where the crafting menu's quick move
 /// fills first because it moves into `10..46` *backwards*.
 const HOTBAR_8: usize = 45;
 /// Menu index of main-storage slot 0 (`container.9`) — a layout probe. In a
@@ -142,7 +142,7 @@ const PROBE_MAIN: &str = "minecraft:diamond";
 const PROBE_HOTBAR: &str = "minecraft:emerald";
 
 /// A `state_id` the server can never be holding, so `handleContainerClick` takes
-/// its `broadcastFullState()` branch. Vanilla ids live in `0..=32767`.
+/// its broadcast full state branch. Vanilla ids live in `0..=32767`.
 const STALE_STATE_ID: i32 = 30_000;
 
 /// How long to let a click round-trip before reading state.
@@ -269,11 +269,11 @@ async fn send_click(shared: &Shared, handle: &ClientHandle, click: Click) -> (i3
 /// it.
 ///
 /// The probe is a stale-`state_id` **`CLONE`** click: in survival
-/// `AbstractContainerMenu.doClick`'s clone branch is gated on
-/// `player.hasInfiniteMaterials()`, so no branch matches and nothing mutates —
+/// the click handler's clone branch is gated on
+/// the player having infinite materials, so no branch matches and nothing mutates —
 /// unlike the `-999 PICKUP` probe the other live tests use, which throws a loaded
 /// cursor into the world. The stale id makes `handleContainerClick` take
-/// `broadcastFullState()`.
+/// broadcast full state.
 async fn server_full_state(shared: &Shared, handle: &ClientHandle, window: i32) -> FullState {
     let before = lock(shared).content_generation;
     handle
@@ -529,7 +529,7 @@ async fn run_gate() {
     );
     println!("  player feet block = ({bx}, {by}, {bz})");
 
-    // Adjacent, so `CraftingMenu.stillValid`'s `canInteractWithBlock(pos, 4.0)`
+    // Adjacent, so the crafting menu's still-valid reach check (4.0)
     // keeps holding for every click of the run.
     let table = BlockPos::new(bx + 1, by, bz);
     let _ = rcon
@@ -684,8 +684,8 @@ async fn run_gate() {
     // ---------------------------------------------------------------------
     // Check 3: the result slot refuses a placement, live.
     //
-    // Pick the planks up, then try to dump all 8 into slot 0. `ResultSlot.mayPlace`
-    // is `false`, so `safeInsert` returns the cursor untouched. Its control is
+    // Pick the planks up, then try to dump all 8 into slot 0. The result slot's may-place
+    // is `false`, so a safe insert returns the cursor untouched. Its control is
     // check 4, which places from the *same* cursor into the grid and succeeds — so
     // "nothing happened" is not the detector being blind.
     // ---------------------------------------------------------------------
@@ -822,10 +822,10 @@ async fn run_gate() {
     // Check 6: our shift-click predicts exactly ONE craft, into the LAST hotbar
     // slot.
     //
-    // `CraftingMenu.quickMoveStack` moves the result into `10..46` **backwards**,
+    // The crafting menu's quick move moves the result into `10..46` **backwards**,
     // so the player region fills from the back — slot 45 first. And the prediction
-    // is one craft, not two: `doClick`'s QUICK_MOVE loop repeats only while the
-    // slot still holds the same item, and a client's `CraftingMenu` has
+    // is one craft, not two: the click handler's QUICK_MOVE loop repeats only while the
+    // slot still holds the same item, and a client's crafting menu has
     // a null level access, so nothing refills slot 0 between iterations.
     // Predicting more would mean matching the recipe locally.
     // ---------------------------------------------------------------------
@@ -865,8 +865,8 @@ async fn run_gate() {
     // ---------------------------------------------------------------------
     // Check 7: the SERVER crafted TWICE off that one shift-click.
     //
-    // Same loop, different menu: the server's `CraftingMenu` has a real
-    // `ContainerLevelAccess`, so `slotsChanged` recomputes the recipe and refills
+    // Same loop, different menu: the server's crafting menu has a real
+    // level access, so its slots-changed hook recomputes the recipe and refills
     // slot 0 between iterations, and the loop runs until the grid runs out. The
     // extra craft comes back as `container_set_slot` corrections, which
     // `ClientMenu::reconcile` folds in — the divergence is asserted in both

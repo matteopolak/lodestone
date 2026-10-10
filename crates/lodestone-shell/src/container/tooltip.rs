@@ -1,4 +1,4 @@
-//! The hover tooltip for a container slot — vanilla's `ItemStack.getTooltipLines`
+//! The hover tooltip for a container slot — vanilla's ItemStack's get tooltip lines
 //! plus `Screen.renderTooltip`.
 //!
 //! ## What it is
@@ -22,7 +22,7 @@
 //! Adding a line means adding to [`tooltip_lines`]. Two gotchas:
 //!
 //! * **The background is the pre-1.20.2 gradient form, not 26.2's sprites.**
-//!   `TooltipRenderUtil.extractTooltipBackground` blits `tooltip/background` and
+//!   The tooltip render util's extract tooltip background blits `tooltip/background` and
 //!   `tooltip/frame`, which are nine-slice sprites. Reaching them from here would
 //!   need a nine-slicing atlas above the carried stratum, and the only stream
 //!   above it is the untextured colour one — so this draws the fills-and-gradients
@@ -61,10 +61,10 @@ use crate::hud::{VanillaFont, item_icon};
 
 use super::builder::Builder;
 
-/// `TooltipRenderUtil.MOUSE_OFFSET` — the tooltip's
+/// The tooltip render util's mouse offset — the tooltip's
 /// text origin sits `(+12, -12)` from the cursor.
 const MOUSE_OFFSET: f32 = 12.0;
-/// `TooltipRenderUtil.PADDING` (`:13`), the same `3` on all four sides.
+/// The tooltip render util's padding (`:13`), the same `3` on all four sides.
 const PADDING: f32 = 3.0;
 /// The line pitch between tooltip lines — vanilla's `10` in
 /// `renderTooltipInternal`'s `if (i == 0) tooltipHeight += 2` / `+= 10` walk.
@@ -90,40 +90,40 @@ const BORDER_TOP: [f32; 4] = [80.0 / 255.0, 0.0, 1.0, 80.0 / 255.0];
 const BORDER_BOTTOM: [f32; 4] = [80.0 / 255.0, 0.0, 127.0 / 255.0, 40.0 / 255.0];
 /// White is retained for non-title tooltip labels and fallback overlays.
 const NAME_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-/// `ChatFormatting.DARK_GRAY`, `0x555555` — what the advanced lines use
+/// The chat formatting's dark gray, `0x555555` — what the advanced lines use
 /// (vanilla's own item-stack tooltip rendering).
 const DARK_GRAY: [f32; 4] = [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 1.0];
-/// `ChatFormatting.GRAY`, `0xAAAAAA` — `PotionContents.NO_EFFECT`'s colour
+/// The chat formatting's gray, `0xAAAAAA` — the potion contents's no effect's colour
 /// (vanilla's own "effect.none" translation, styled gray).
 const GRAY: [f32; 4] = [170.0 / 255.0, 170.0 / 255.0, 170.0 / 255.0, 1.0];
-/// `ChatFormatting.BLUE`, `0x5555FF` — `MobEffectCategory::BENEFICIAL`/`NEUTRAL`'s
+/// The chat formatting's blue, `0x5555FF` — the mob effect category's beneficial/`NEUTRAL`'s
 /// tooltip colour, and a positive attribute-modifier line's colour
-/// (`PotionContents.addPotionTooltip`'s `ChatFormatting.BLUE` branch).
+/// (the potion contents's add potion tooltip's chat formatting's blue branch).
 const BLUE: [f32; 4] = [85.0 / 255.0, 85.0 / 255.0, 1.0, 1.0];
-/// `ChatFormatting.RED`, `0xFF5555` — `MobEffectCategory::HARMFUL`'s tooltip
+/// The chat formatting's red, `0xFF5555` — the mob effect category's harmful's tooltip
 /// colour, and a negative attribute-modifier line's colour.
 const RED: [f32; 4] = [1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0];
-/// `ChatFormatting.DARK_PURPLE`, `0xAA00AA` — `potion.whenDrank`'s
+/// The chat formatting's dark purple, `0xAA00AA` — `potion.whenDrank`'s
 /// (`"When Applied:"`) colour.
 const DARK_PURPLE: [f32; 4] = [170.0 / 255.0, 0.0, 170.0 / 255.0, 1.0];
 
-/// `ClientBundleTooltip.GRID_WIDTH`/`getWidth` —
+/// The client bundle tooltip's grid width/`getWidth` —
 /// the bundle image component's own fixed width, centred within a wider box
 /// exactly like [`title_line`]'s text is left-aligned within it.
 const BUNDLE_GRID_W: f32 = 96.0;
-/// `ClientBundleTooltip.SLOT_SIZE`.
+/// The client bundle tooltip's slot size.
 const BUNDLE_SLOT: f32 = 24.0;
-/// `ClientBundleTooltip.SLOT_MARGIN` — the icon's inset within its slot cell.
+/// The client bundle tooltip's slot margin — the icon's inset within its slot cell.
 const BUNDLE_SLOT_MARGIN: f32 = 4.0;
-/// `ClientBundleTooltip.PROGRESSBAR_HEIGHT`/`_WIDTH`.
+/// The client bundle tooltip's progressbar height/`_WIDTH`.
 const BUNDLE_PROGRESSBAR_H: f32 = 13.0;
 const BUNDLE_PROGRESSBAR_W: f32 = 96.0;
-/// `ClientBundleTooltip.PROGRESSBAR_FILL_MAX` — the fill's own inner span,
+/// The client bundle tooltip's progressbar fill max — the fill's own inner span,
 /// one pixel shy of the border on each side.
 const BUNDLE_PROGRESSBAR_FILL_MAX: f32 = 94.0;
 /// The vertical gap [`bundle_image_height`] spends twice — once between the
 /// grid/description and the bar (`PROGRESSBAR_MARGIN_Y`), once below the bar
-/// closing out the component — `backgroundHeight() = itemGridHeight() + 13 +
+/// closing out the component — `background_height() = item_grid_height() + 13 +
 /// 8`, where the trailing `8` is this constant counted twice.
 const BUNDLE_BOTTOM_PAD: f32 = 4.0;
 /// A bundle slot cell's plain (unselected) fill — this module's own flat
@@ -171,11 +171,11 @@ pub(crate) struct TooltipLine {
     pub spans: Option<Vec<TextSpan>>,
 }
 
-/// The lines vanilla would show for `stack` — `ItemStack.getTooltipLines`, in its
+/// The lines vanilla would show for `stack` — ItemStack's get tooltip lines, in its
 /// order, restricted to what this build actually has data for.
 ///
 /// The first line is always the hover name. `advanced` adds
-/// `addDetailsToTooltip`'s `isAdvanced()` block, in
+/// `addDetailsToTooltip`'s is advanced block, in
 /// vanilla's order: durability first (**only when damaged**), then the item id,
 /// then the component count.
 ///
@@ -186,8 +186,8 @@ pub(crate) struct TooltipLine {
 pub(crate) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLine> {
     let mut lines = vec![title_line(stack)];
     lines.extend(lore_lines(stack));
-    // `PotionContents.addToTooltip`/`ItemEnchantments.addToTooltip` both run
-    // unconditionally — neither is gated behind `isAdvanced()` the way
+    // The potion contents's add to tooltip/item enchantments's add to tooltip both run
+    // unconditionally — neither is gated behind is advanced the way
     // durability/id/component-count are, so these lines belong before the
     // `advanced` early-return, not after it. A stack is never both, so at most
     // one of the two `extend`s below is ever non-empty.
@@ -197,7 +197,7 @@ pub(crate) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLin
     if !advanced {
         return lines;
     }
-    // `isDamaged()` is `damage > 0`, and the line needs `getMaxDamage()` too —
+    // is damaged is `damage > 0`, and the line needs get max damage too —
     // read through the component rather than a helper because `ItemStack` exposes
     // `is_damageable`/`is_damaged` as bools and no accessor for the value.
     if let Some(damage) = stack.damage().filter(|d| *d > 0)
@@ -230,7 +230,7 @@ pub(crate) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLin
 
 /// The authored `minecraft:lore` body immediately below the item name.
 ///
-/// `ItemLore` applies dark-purple italics as a parent style. Building a wrapper
+/// The item lore applies dark-purple italics as a parent style. Building a wrapper
 /// node is load-bearing: mutating the authored root would replace rather than
 /// inherit formatting, so an explicit child `italic: false` or RGB colour could
 /// no longer override the default.
@@ -472,13 +472,13 @@ fn potency_numeral(amplifier: u8) -> &'static str {
 /// `WrittenBookContent.addToTooltip` for a signed
 /// `minecraft:written_book` — the author and copy-generation lines. Empty for
 /// every other stack, including a `minecraft:writable_book`
-/// (`WritableBookContent` is not a `TooltipProvider` at all: an unsigned book
+/// (the writable book content is not a tooltip provider at all: an unsigned book
 /// has no author and no generation).
 ///
-/// Two lines, in the method's own order, both `ChatFormatting.GRAY`:
+/// Two lines, in the method's own order, both chat formatting's gray:
 ///
 /// 1. `book.byAuthor` — `"by %1$s"` — **skipped when the author is blank**
-///    (`StringUtil.isBlank`), which is what an unattributed `/give`-built
+///    (the string util's is blank), which is what an unattributed `/give`-built
 ///    book carries.
 /// 2. `book.generation.<n>` — `"Original"` / `"Copy of original"` /
 ///    `"Copy of a copy"` / `"Tattered"`, unconditional. Vanilla's own
@@ -546,7 +546,7 @@ pub(crate) fn book_generation_name(generation: u8) -> &'static str {
 ///    carries `#minecraft:curse`, `GRAY` otherwise
 ///    ([`lodestone_data::enchantment::is_curse`]).
 /// 2. A numeral suffix (`enchantment.level.<n>`), appended **unless**
-///    `level == 1 && getMaxLevel() == 1` — i.e. omitted only for a single-level
+///    `level == 1 && get_max_level() == 1` — i.e. omitted only for a single-level
 ///    enchantment shown at its (only) level `1`. A multi-level enchantment shown
 ///    at level `1` still gets `"I"`; this build's creative table only ever shows
 ///    the *max* level, so in practice this arm distinguishes a max-level-`1`
@@ -608,10 +608,10 @@ fn format_duration_mmss(duration_ticks: u32) -> String {
     }
 }
 
-/// `ItemAttributeModifiers.ATTRIBUTE_MODIFIER_FORMAT`: `new DecimalFormat("#.##")`
+/// The item attribute modifiers's attribute modifier format: `new DecimalFormat("#.##")`
 /// — up to two fraction digits, trailing zeros (and a bare trailing `.`) trimmed.
 /// `raw_amount` is already sign-stripped by the caller; `percent` scales by `100`
-/// first, matching `PotionContents.addPotionTooltip`'s
+/// first, matching potion contents's add potion tooltip's
 /// `modifier.operation() != ADD_MULTIPLIED_BASE/TOTAL ? amount : amount * 100.0`.
 fn format_attribute_amount(raw_amount: f64, percent: bool) -> String {
     let display = if percent { raw_amount * 100.0 } else { raw_amount };
@@ -717,7 +717,7 @@ pub(super) fn emit_tooltip_for_stack(
         return;
     }
 
-    // `ItemStack.getTooltipImage`/`BundleItem.getTooltipImage`: a bundle's own
+    // ItemStack's get tooltip image/bundle item's get tooltip image: a bundle's own
     // tooltip carries an extra "image" component (the item grid), inserted
     // right after the title line — see `bundle_image_height`'s own doc.
     let bundle_image_h =
@@ -734,7 +734,7 @@ pub(super) fn emit_tooltip_for_stack(
         .map(|l| font.width(&l.text, 1.0))
         .fold(0.0f32, f32::max);
     // The image component (currently only a bundle's grid) is centred within
-    // the box rather than left-aligned like every text line — `ClientBundleTooltip
+    // the box rather than left-aligned like every text line — the client bundle tooltip
     // .getWidth` is a fixed `96`, so a box narrower than that (a short title,
     // no advanced lines) must still grow to fit it.
     if bundle_image_h.is_some() {
@@ -758,7 +758,7 @@ pub(super) fn emit_tooltip_for_stack(
         text_h += image_h;
     }
 
-    // `DefaultTooltipPositioner.positionTooltip` (`:13-27`), verbatim: `(+12,
+    // The default tooltip positioner's position tooltip (`:13-27`), verbatim: `(+12,
     // -12)` from the cursor, then flip left of the cursor if it would overflow the
     // right edge (floored at 4, never off the left), then lift it so the *padded*
     // height fits.
@@ -802,7 +802,7 @@ pub(super) fn emit_tooltip_for_stack(
         if i == 0 {
             y += TITLE_GAP;
             // The image component, right after the title — see
-            // `ItemStack.getTooltipImage`'s own insertion point
+            // ItemStack's get tooltip image's own insertion point
             // (`components.add(components.isEmpty() ? 0 : 1, …)`), and
             // `bundle_image_h`'s doc above for why this is the only image
             // kind implemented.
@@ -838,9 +838,9 @@ fn tooltip_content_origin(
     (tx.round(), ty.round())
 }
 
-/// How many rows [`draw_bundle_image`]'s grid needs — `Mth.positiveCeilDiv
+/// How many rows [`draw_bundle_image`]'s grid needs — `Mth.positive_ceil_div
 /// (slotCount, 4)` where `slotCount = min(12, contents.len())`
-/// (`ClientBundleTooltip.gridSizeY`/`slotCount`). Only meaningful for a
+/// (the client bundle tooltip's grid size y/`slotCount`). Only meaningful for a
 /// non-empty bundle; the empty case has its own layout entirely (see
 /// [`bundle_image_height`]).
 fn bundle_grid_rows(len: usize) -> usize {
@@ -848,7 +848,7 @@ fn bundle_grid_rows(len: usize) -> usize {
 }
 
 /// The bundle tooltip's own image-component height —
-/// `ClientBundleTooltip.getHeight`/`backgroundHeight`/
+/// The client bundle tooltip's get height/`backgroundHeight`/
 /// `getEmptyBundleBackgroundHeight`, ported directly: an empty bundle shows
 /// wrapped description text over the (always-empty) progress bar; a
 /// non-empty one shows the item grid over the (weight-filled) bar. Both tack
@@ -864,8 +864,8 @@ fn bundle_image_height(font: &VanillaFont, stack: &ItemStack) -> f32 {
 }
 
 /// A plain greedy word-wrap of [`BUNDLE_EMPTY_DESCRIPTION`] against
-/// [`BUNDLE_GRID_W`] — the same reduction of vanilla's `StringSplitter
-/// ::splitLines` `crate::menu::advancements::wrap` already uses for a single
+/// [`BUNDLE_GRID_W`] — the same reduction of vanilla's string splitter
+/// ::split lines` `crate::menu::advancements::wrap` already uses for a single
 /// unstyled run, kept as a private copy here rather than made `pub(crate)`
 /// there: the two live in unrelated subsystems and a shared helper would be
 /// a coupling with no other caller to justify it.
@@ -894,7 +894,7 @@ fn wrap_bundle_description(font: &VanillaFont) -> Vec<String> {
     lines
 }
 
-/// `BundleContents.getWeight`/`computeContentWeight`/`getWeight`
+/// The bundle contents's get weight/`computeContentWeight`/`getWeight`
 /// as an `f32` rather than an exact `Fraction` — this
 /// build has no rational type, and the progress bar only ever quantises the
 /// result to [`BUNDLE_PROGRESSBAR_FILL_MAX`] steps, so a float loses nothing
@@ -924,7 +924,7 @@ fn bundle_weight(stack: &ItemStack) -> f32 {
         .sum()
 }
 
-/// The progress bar — `ClientBundleTooltip::extractProgressbar`, as a flat
+/// The progress bar — the client bundle tooltip's extract progressbar, as a flat
 /// fill over a flat track rather than the two real sprites (see
 /// [`BUNDLE_PROGRESSBAR_BG`]'s own doc). `weight` is [`bundle_weight`]'s
 /// output, already clamped to `[0, 1]` by the caller for the fill width but
@@ -958,7 +958,7 @@ fn draw_bundle_progressbar(b: &mut Builder<'_>, font: &VanillaFont, x: f32, y: f
 }
 
 /// The bundle tooltip's own image component —
-/// `ClientBundleTooltip::extractImage`/`extractBundleWithItemsTooltip`/
+/// The client bundle tooltip's extract image/`extractBundleWithItemsTooltip`/
 /// `extractEmptyBundleTooltip`, ported directly including the item grid's
 /// bottom-to-top, right-to-left fill order (`extractBundleWithItemsTooltip`'s
 /// own `rowNumber`/`columnNumber` walk) and the `+N` overflow count in the
@@ -1242,7 +1242,7 @@ mod tests {
     }
 
     /// A custom name overrides the composed potion title outright — vanilla's
-    /// own get-hover-name accessor checks `DataComponents.CUSTOM_NAME` before
+    /// own get-hover-name accessor checks the data components's custom name before
     /// its own get-name accessor ever runs, so the potion/tipped-arrow items' override
     /// never gets a chance. Checked as a differential against
     /// [`lodestone_game::item::styled_hover_name`] directly, and as a negative
@@ -1388,7 +1388,7 @@ mod tests {
         (0..count).map(|_| ItemStack::new(id("minecraft:torch"), 1)).collect()
     }
 
-    /// `BundleContents.getWeight` for a flat bundle: each torch (default max
+    /// The bundle contents's get weight for a flat bundle: each torch (default max
     /// stack size 64, since [`ItemStack::new`] carries no
     /// `minecraft:max_stack_size` override) contributes `1/64`.
     #[test]
@@ -1403,7 +1403,7 @@ mod tests {
 
     /// The recursive clause: a bundle nested inside a bundle contributes its
     /// own weight plus [`BUNDLE_IN_BUNDLE_WEIGHT`]'s `1/16` —
-    /// `BundleContents::getWeight`'s `nestedWeight.add(BUNDLE_IN_BUNDLE_WEIGHT)`.
+    /// The bundle contents's get weight's `nestedWeight.add(BUNDLE_IN_BUNDLE_WEIGHT)`.
     /// This is also the discriminating case for own claim that the
     /// recursive bundle-in-bundle decode is complete: a weight that only ever
     /// read the outer stack's own component would silently treat the inner
@@ -1422,7 +1422,7 @@ mod tests {
 
     /// [`bundle_grid_rows`] against the same four worked cases
     /// `ItemStack::bundle_items_to_show`'s own test already establishes for
-    /// `getNumberOfItemsToShow` — `Mth.positiveCeilDiv(min(12, size), 4)`.
+    /// `getNumberOfItemsToShow` — `Mth.positive_ceil_div(min(12, size), 4)`.
     #[test]
     fn bundle_grid_rows_matches_vanillas_worked_cases() {
         let cases = [(4, 1), (6, 2), (16, 3), (13, 3)];
@@ -1582,7 +1582,7 @@ mod tests {
     /// reaches it. The chain here is production's, end to end:
     ///
     /// 1. `CONTAINER_SET_SLOT` bytes, transcribed from
-    ///    `ClientboundContainerSetSlotPacket`'s and
+    ///    Container-set-slot packet's and
     ///    `WrittenBookContent.STREAM_CODEC`'s wire order — **not** produced by
     ///    any encoder in this workspace, so a symmetric misunderstanding in
     ///    our own writer cannot make this pass.
@@ -1727,7 +1727,7 @@ mod tests {
 
     /// The negative half, and the control that the three lines above are the
     /// book's and not something every stack gets: an **unsigned**
-    /// `minecraft:writable_book` is not a `TooltipProvider` in vanilla at all,
+    /// `minecraft:writable_book` is not a tooltip provider in vanilla at all,
     /// so it keeps its plain item name and gains no author or generation line.
     #[test]
     fn an_unsigned_book_gains_no_author_or_generation_line() {

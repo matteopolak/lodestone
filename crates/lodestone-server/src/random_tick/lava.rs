@@ -7,7 +7,7 @@ use super::*;
 
 impl RandomTickScheduler {
 
-/// `LavaFluid::randomTick` — lava setting fire to what is near it, and the
+/// The lava fluid's random tick — lava setting fire to what is near it, and the
 /// only thing in a generated world that starts a fire at all.
 
 ///
@@ -36,7 +36,7 @@ impl RandomTickScheduler {
 ///
 /// # The one reduction
 ///
-/// Vanilla's `!level.isLoaded(testPos)` returns from the whole method. This
+/// Vanilla's `!level.is_loaded(testPos)` returns from the whole method. This
 /// runs inside `tick_chunk`, which holds exactly one column, so a probe that
 /// lands outside it is treated as unloaded and returns — which is the same
 /// branch vanilla takes at a real chunk border, just reached more often. The
@@ -55,7 +55,7 @@ impl RandomTickScheduler {
         current_tick: u64,
     ) -> Vec<RandomTickEvent> {
         let mut events = Vec::new();
-        // `ServerLevel::canSpreadFireAround` is a player-proximity test this
+        // The server level's can spread fire around is a player-proximity test this
         // function has no players for; the tick loop gates the whole random-tick
         // pass on the tick area already being player-centred, so treating it as
         // true here matches the default 128-block radius.
@@ -82,7 +82,7 @@ impl RandomTickScheduler {
                          support: BlockPos,
                          events: &mut Vec<RandomTickEvent>| {
             let Some(from) = read(column, at) else { return };
-            // `BaseFireBlock::getState(level, support)` — soul fire over a soul
+            // The base fire block's get state — soul fire over a soul
             // base, otherwise ordinary fire with its connected faces derived from
             // `support`'s neighbourhood.
             let new_state = fire_state_in_column_id(column, min_x, min_z, min_y, max_y, support);
@@ -146,7 +146,7 @@ impl RandomTickScheduler {
                 let above_is_air = read(column, above).is_some_and(is_air_variant_id);
                 if above_is_air && flammable(column, test) {
                     // Vanilla passes `testPos`, not `testPos.above()`, to
-                    // `BaseFireBlock::getState` here while writing to
+                    // The base fire block's get state here while writing to
                     // `testPos.above()`. Transcribed as written: the support cell
                     // the state is derived from really is one lower than the cell
                     // being lit.

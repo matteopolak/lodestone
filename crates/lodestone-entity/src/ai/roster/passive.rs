@@ -58,7 +58,7 @@
 //! the world immutably, so the mutation takes the `pending_detonations` route
 //! through the tick driver). What remains is wool regrowth — vanilla's own
 //! eaten-block hook's
-//! `setSheared(false)` plus `ageUp(60)`,
+//! set sheared plus `ageUp(60)`,
 //! which is entity metadata on the wire. `docs/mob-block-perception.md` is the
 //! doc.
 //!
@@ -226,7 +226,7 @@ pub static CHICKEN: &[Registration] = &[
 ///   against everyone else's `1.0`, so neither shared builder applies.
 ///
 /// The killer-bunny variant installs a `MeleeStrikeGoal(1.4, true)` and two
-/// target goals from vanilla's own variant setter, **not** from vanilla's own main
+/// target goals from vanilla's variant setter, **not** from vanilla's main
 /// registration.
 /// They are deliberately absent here: this table is the main registration's
 /// transcription that the multiset gate cites, and a conditional runtime

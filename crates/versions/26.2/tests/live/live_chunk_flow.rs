@@ -14,7 +14,7 @@
 //! it never stays alive long enough to exhaust the server's unacknowledged-batch
 //! budget. That makes it structurally blind to a whole *class* of bug: the
 //! server throttles chunk delivery with a credit window
-//! (`PlayerChunkSender`), handing out at most `maxUnacknowledgedBatches`
+//! (the player chunk sender), handing out at most the max-unacknowledged-batches count of
 //! batches before it stops and waits for the client's
 //! `chunk_batch_received` ACK. That limit **starts at 1** and only ramps to 10
 //! after the first ACK is seen. So a client that never ACKs receives *exactly
@@ -234,7 +234,7 @@ async fn drive_flow(ack_enabled: bool, stop_after_batches: Option<usize>) -> Flo
         // position: the server's own collision/on-ground check does not know
         // about our claimed position, and a long enough straight-line walk
         // eventually crosses a ledge or an un-flat spot and trips vanilla's
-        // "floating too long" kick (`vanilla's own server game packet listener impl's own tick player`),
+        // "floating too long" kick (the server's floating-time check),
         // which has nothing to do with the property under test and previously
         // aborted only the (much longer) negative-control run.
         if reached_play && have_pos && Instant::now() >= next_move {
@@ -337,7 +337,7 @@ async fn drive_flow(ack_enabled: bool, stop_after_batches: Option<usize>) -> Flo
 }
 
 /// The credit window the server ramps to after the first ACK
-/// (`vanilla's own player chunk sender's own max unacknowledged batches`). Reaching more finished
+/// (the chunk sender's max unacknowledged batches). Reaching more finished
 /// batches than this is impossible without a continuously-flowing ACK loop.
 const CREDIT_WINDOW: usize = 10;
 

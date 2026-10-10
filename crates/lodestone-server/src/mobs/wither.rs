@@ -42,7 +42,7 @@
 //!   [`MobSim::explode`] with no source exemption** — `explode`'s own doc
 //!   already discloses it exempts no entity from its own blast; a wither
 //!   caught in another wither's skull blast (vanilla: immune, via
-//!   `source.getEntity() instanceof WitherBoss`) is not exempted here. Named
+//!   `source.get_entity() instanceof WitherBoss`) is not exempted here. Named
 //!   rather than silently applied, matching this crate's existing disclosure
 //!   for the creeper self-detonation path.
 //! * **No block destruction.** `destroyBlocksTick`'s post-hurt block-break
@@ -129,7 +129,7 @@ enum WitherTickAction {
     FireSkull,
 }
 
-/// `WitherBoss.createAttributes`'s `Attributes.MAX_HEALTH`.
+/// WitherBoss's create attributes's `Attributes.MAX_HEALTH`.
 pub const MAX_HEALTH: f32 = 300.0;
 
 /// Seed for [`MobSim::wither_rng`] — its own stream, matching
@@ -409,7 +409,7 @@ impl<'w> MobSim<'w> {
             .filter(|(_, d)| *d <= SKULL_TARGET_RANGE_SQ)
             .min_by(|(_, a), (_, b)| a.partial_cmp(b).expect("distances are always finite"));
 
-        // `WitherBoss.performRangedAttack`'s two shapes: an **aimed** shot at
+        // WitherBoss's perform ranged attack's two shapes: an **aimed** shot at
         // a real target (vanilla's main head, real targeting conditions
         // range), or, with nothing in range, an **unaimed** shot toward a
         // random nearby offset (vanilla's idle-head fallback,
@@ -513,7 +513,7 @@ impl<'w> MobSim<'w> {
     /// The wither half of [`MobSim::boss_bars`] — see
     /// Wither's own boss bar construction
     /// (`BossEvent.BossBarColor.PURPLE`, `BossEvent.BossBarOverlay.PROGRESS`,
-    /// `setDarkenScreen(true)`); the darken-screen flag has no carrier in
+    /// set darken screen); the darken-screen flag has no carrier in
     /// [`crate::protocol::BossBarSnapshot`] today (see this crate's own
     /// report).
     pub(super) fn push_wither_boss_bars(&self, out: &mut Vec<crate::protocol::BossBarSnapshot>) {
@@ -988,7 +988,7 @@ mod tests {
     }
 
     /// **The discriminating gate for the skull-impact chain**: a wither
-    /// skull's damage is flat (`WitherSkull.onHitEntity`'s `8.0F`), not
+    /// skull's damage is flat (WitherSkull's on hit entity's `8.0F`), not
     /// speed-scaled the way an arrow's is
     /// (`lodestone_entity::projectile::arrow_impact_damage`) — two shots at
     /// very different speeds must deal the *same* damage, which an

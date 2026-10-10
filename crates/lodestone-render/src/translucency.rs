@@ -28,7 +28,7 @@
 //! # Re-sort trigger
 //!
 //! Sorting every section every frame is unaffordable. Vanilla
-//! (`TranslucencyPointOfView`) quantizes the camera to **section granularity per
+//! (the translucency point of view) quantizes the camera to **section granularity per
 //! axis, clamped to `{-1, 0, 1}`** relative to the section being drawn, and only
 //! re-sorts a section when that triple changes. Moving within the same octant
 //! leaves the back-to-front order unchanged (the relative geometry hasn't
@@ -110,7 +110,7 @@ impl RenderLayer {
 }
 
 /// The camera quantized to a per-section octant, matching vanilla's
-/// `TranslucencyPointOfView`.
+/// translucency point of view.
 ///
 /// Two viewpoints comparing equal require no re-sort of the section's
 /// translucent quads. Construct with [`SortViewpoint::new`].

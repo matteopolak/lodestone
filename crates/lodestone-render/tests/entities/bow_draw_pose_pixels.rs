@@ -15,7 +15,7 @@
 //! merely shifted, scaled, or moved its legs — and a pose applied to the wrong
 //! parts does exactly that. The bow pose's defining property is specific and
 //! local: **both arms swing up to horizontal in front of the chest**
-//! (`HumanoidModel.poseRightArm`'s `case BOW_AND_ARROW` assigns `xRot = -PI/2`).
+//! (the humanoid model's right-arm pose for the bow-and-arrow case assigns an X rotation of `-PI/2`).
 //! So the readings are all *locations*:
 //!
 //! * the **bounding box of the changed pixels**, which must sit inside the mob's

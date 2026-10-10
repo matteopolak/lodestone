@@ -64,7 +64,7 @@ pub(super) fn launch_intent(path: &str) -> Option<LaunchIntent> {
         "egg" => throw("egg"),
         "ender_pearl" => throw("ender_pearl"),
         "experience_bottle" => throw("experience_bottle"),
-        // `ThrowablePotionItem`: slower, and the only one with a pitch offset.
+        // The throwable potion item: slower, and the only one with a pitch offset.
         "splash_potion" => Some(LaunchIntent::InstantThrow {
             projectile: "splash_potion",
             power: POTION_SHOOT_POWER,

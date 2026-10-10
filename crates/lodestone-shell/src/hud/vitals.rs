@@ -13,7 +13,7 @@ use super::{anim, locator};
 /// Vanilla's own client-side can-hurt-player check, the predicate
 /// [`HudFrame::can_hurt_player`] carries.
 ///
-/// Its body is `localPlayerMode.isSurvival()`, and vanilla's own is-survival
+/// Its body is local player mode's is survival, and vanilla's own is-survival
 /// check on its game-type enum is
 /// `this == SURVIVAL || this == ADVENTURE` — so **both** creative and spectator are
 /// false. Naming a mode instead (`mode == Creative`) is the tempting wrong version:
@@ -117,14 +117,14 @@ impl HeartFill {
 /// # The `ceil` is the whole function, and it is why this is a named symbol
 ///
 /// Vanilla never compares the raw float. `extractPlayerHealth` computes
-/// `currentHealth = Mth.ceil(player.getHealth())` **once**, hands that `int` to
+/// `currentHealth = Mth.ceil(player.get_health())` **once**, hands that `int` to
 /// `extractHearts`, and the fill is two integer comparisons against it:
 ///
 /// ```text
 /// int halves = containerIndex * 2;
 /// if (halves < currentHealth) {
 ///    boolean halfHeart = halves + 1 == currentHealth;
-///    extractHeart(type, …, halfHeart);
+///    extract heart;
 /// }
 /// ```
 ///
@@ -343,7 +343,7 @@ pub(super) fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -
         //
         // **The vertical asymmetry is vanilla's, and a report that the bottom edge
         // is "cut off" is a faithful absence rather than a defect.** Both blits
-        // from `Hud.extractItemHotbar`, verbatim: the bar at
+        // from Hud's extract item hotbar, verbatim: the bar at
         // `(centre - 91, guiHeight - 22, 182, 22)` and the selection at
         // `(centre - 91 - 1 + slot * 20, guiHeight - 22 - 1, 24, 23)`. PNG headers
         // read out of the 26.2 jar agree — `hud/hotbar` is 182x22 and
@@ -371,8 +371,8 @@ pub(super) fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -
     // sprite cropped left-to-right to its filled fraction.
     //
     // The gap above the hotbar is vanilla's own arithmetic, not a guess:
-    // `ContextualBar.MARGIN_BOTTOM` (24) is the hotbar's 22px height plus a 2px
-    // gap, and `ContextualBar.top` is `guiScaledHeight - MARGIN_BOTTOM - HEIGHT`
+    // The contextual bar's margin bottom (24) is the hotbar's 22px height plus a 2px
+    // gap, and the contextual bar's top is `guiScaledHeight - MARGIN_BOTTOM - HEIGHT`
     // — i.e. the bar sits *2px* above the
     // hotbar sprite, not 4. `hy` is already this cluster's hotbar-top in the
     // same logical-pixel space vanilla's own GUI-height value is in, so subtracting from
@@ -384,7 +384,7 @@ pub(super) fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -
     let bar_h = 5.0;
     // With [`HOTBAR_MARGIN`] at vanilla's zero this resolves to
     // `guiHeight - 22 - 5 - 2 == guiHeight - 29`, which is exactly
-    // `ContextualBar.top`'s `guiScaledHeight - 24 - 5`. It was 6 px off before,
+    // The contextual bar's top's `guiScaledHeight - 24 - 5`. It was 6 px off before,
     // for the single reason that `hy` was.
     //
     // The bar no longer feeds anything else's placement. It used to raise a
@@ -392,8 +392,8 @@ pub(super) fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -
     // depending on whether the player had XP — vanilla's own vitals-cluster baseline is a
     // constant (see [`VITALS_LINE_BASE_FROM_BOTTOM`]) and takes no such branch.
     //
-    // This is `ContextualBar::top(window)` — `guiScaledHeight - 24 - 5` —
-    // shared by every bar that can occupy this slot (`ContextualBar` is a
+    // This is the contextual bar's top — `guiScaledHeight - 24 - 5` —
+    // shared by every bar that can occupy this slot (the contextual bar is a
     // single mutually-exclusive slot in vanilla: XP, locator, or the
     // jumpable-vehicle bar, never more than one at once). Unconditional now
     // (it used to live behind `frame.xp.map`) because the locator bar needs
@@ -408,7 +408,7 @@ pub(super) fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -
     // immediately.
     if !frame.locator.is_empty() {
         b.sprite("hud/locator_bar_background", hx, bar_top, bar_w, bar_h, white);
-        // `Mth.ceil((graphics.guiWidth() - 9) / 2.0F)` — vanilla's own locator-bar rendering.
+        // `Mth.ceil((graphics.gui_width() - 9) / 2.0F)` — vanilla's own locator-bar rendering.
         // Not `guiWidth/2 - 9/2`: the `ceil` sits around the whole
         // subtraction, and the two only agree when `guiWidth` is even.
         let dot = locator::dot_size() as f32;
@@ -419,7 +419,7 @@ pub(super) fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -
             b.sprite(locator::DEFAULT_DOT_SPRITE, dx, dy, dot, dot, dot_info.color);
         }
     }
-    // `nextContextualInfoState` reaches `ContextualInfo.EXPERIENCE` only when
+    // `nextContextualInfoState` reaches contextual info's experience only when
     // `gameMode.hasExperience()`, so creative and spectator draw neither the bar nor
     // the level number — see [`HudFrame::can_hurt_player`].
     else if let (true, Some((level, progress))) = (frame.can_hurt_player, frame.xp) {
@@ -453,11 +453,11 @@ pub(super) fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -
         //   `sprite_vitals`), the same space the 182px-wide bar itself is laid
         //   out in, so a ×2 on the text alone made it twice vanilla's size
         //   relative to everything around it. Vanilla's own draw
-        //   (`ContextualBar.extractExperienceLevel`, below) never scales the
+        //   (the contextual bar's extract experience level, below) never scales the
         //   font at all.
         // * **Too high** — `by - line_h` used a *font-metrics* gap
         //   (`(GLYPH_H + 2) * scale`, i.e. 20px at the old scale of 2), not
-        //   vanilla's real one. `ContextualBar.extractExperienceLevel`
+        //   vanilla's real one. The contextual bar's extract experience level
         //   places the text at
         //   `y = guiHeight - 24 - 9 - 2`, and the bar itself sits at
         //   `guiHeight - 24 - 5`: the text's top is exactly `6` logical px

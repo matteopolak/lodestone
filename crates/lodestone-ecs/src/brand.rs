@@ -180,7 +180,7 @@ mod tests {
     /// against.
     #[test]
     fn decodes_a_hand_built_vanilla_brand_payload() {
-        // `writeUtf("vanilla")`: VarInt 7, then the seven ASCII bytes.
+        // write utf: VarInt 7, then the seven ASCII bytes.
         let bytes = b"\x07vanilla";
         assert_eq!(
             ServerBrandPayload::decode(bytes),

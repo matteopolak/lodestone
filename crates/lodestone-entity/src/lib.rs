@@ -33,7 +33,7 @@
 //! * [`equipment`] — what an equipped item contributes to combat attributes, the
 //!   feed [`damage`]'s pipeline never had.
 //! * [`spawn_equipment`] — what a mob *spawns holding and wearing*: vanilla's
-//!   `Mob.populateDefaultEquipmentSlots` and its per-species overrides, the
+//!   Mob's populate default equipment slots and its per-species overrides, the
 //!   producer [`equipment`] never had.
 //! * [`explosion`] — ray-sampled blast exposure, damage and knockback power.
 //! * [`vibration`] — the world-event/vibration substrate: a

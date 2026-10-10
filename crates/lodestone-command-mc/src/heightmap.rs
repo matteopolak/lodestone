@@ -30,7 +30,7 @@ pub enum HeightmapKind {
     /// Vanilla's own material-motion-blocking heightmap type — the highest cell that
     /// blocks motion, excluding fluids (unlike `MotionBlocking` below).
     OceanFloor,
-    /// `state.blocksMotion() || !state.getFluidState().isEmpty()` — the
+    /// `state.blocksMotion() || !state.get_fluid_state().isEmpty()` — the
     /// highest solid-or-fluid cell. The one vanilla's own F3 debug screen and
     /// `/execute positioned over motion_blocking` (its most common use) both
     /// read.

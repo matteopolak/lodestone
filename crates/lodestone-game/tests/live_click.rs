@@ -16,9 +16,9 @@
 //! 2. **Capture S0**: force the server to emit its authoritative window-0
 //!    `container_set_content` by sending a click with a *stale* state id — the
 //!    server applies the click regardless and, on a state-id mismatch, replies
-//!    with `broadcastFullState()` (verified in the decompiled
-//!    `ServerGamePacketListenerImpl.handleContainerClick`). The click's predicted
-//!    `changedSlots`/carried are ignored on resync, so we always send an empty
+//!    with a full-state broadcast (verified in the decompiled
+//!    server container-click handler). The click's predicted
+//!    changed-slot and carried predictions are ignored on resync, so we always send an empty
 //!    prediction — the response is the server's own truth.
 //! 3. **Predict** the same click on our version-free [`Menu`] model.
 //! 4. **Apply** the real click on the server (again stale state id) and capture
@@ -35,7 +35,7 @@
 //! ## Item decoding
 //!
 //! We decode the real clientbound `ItemStack` (count + item holder + component
-//! patch) but assert the [`DataComponentPatch`] is EMPTY (0 added, 0 removed) —
+//! patch) but assert the component patch is EMPTY (0 added, 0 removed) —
 //! true for plain `/give` items with no custom components — and represent each
 //! item by a synthetic identifier from its numeric id. That keeps us
 //! version/registry-free while giving exact slot-by-slot equality; we only seed
@@ -349,7 +349,7 @@ impl Session {
                         }
                     }
                     // Stay in Play until the join-game packet arrives, so the
-                    // player's InventoryMenu exists server-side before we click.
+                    // player's inventory menu exists server-side before we click.
                     Phase::Play => {
                         if id == pkt::play_cb::LOGIN {
                             return;

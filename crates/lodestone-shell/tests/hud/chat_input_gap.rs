@@ -11,12 +11,12 @@
 //! the newest scrollback row was drawn flush against the input box, off by
 //! one pixel of rounding. That is not what vanilla does.
 //!
-//! `ChatComponent.extractRenderState`
+//! The chat component's extract render state
 //! (vanilla's decompiled chat-component source, 26.2)
 //! computes `final int chatBottom = Mth.floor((screenHeight - 40) / scale);`
 //! as one expression, **before** it ever branches on `displayMode.foreground`
 //! (open vs. closed) and with no reference anywhere to where the `EditBox`
-//! sits (`this.height - 12`, a wholly separate literal in `ChatScreen.init`,
+//! sits (`this.height - 12`, a wholly separate literal in the chat screen's init,
 //! a different class). Vanilla's scrollback and its input box are two
 //! independently-anchored things that happen to sit near each other, not one
 //! derived from the other — and the un-derived distance between them, at the

@@ -8,7 +8,7 @@
 //! Unlike chest and skull, a bell's block model is **not** entirely empty —
 //! `assets/minecraft/models/block/bell.json` has real geometry for the
 //! attachment frame (the post/mount a bell hangs from). What is missing is
-//! the swinging body and its flared rim (`BellRenderer`/`BellModel`,
+//! the swinging body and its flared rim (the bell renderer/bell model,
 //! `bell_body`/`bell_base` — see `docs/block-entity-renderers.md`'s Bell
 //! section), so before this a bell was a *partial* hole: a frame with
 //! nothing hanging in it, easy to mistake for "looks about right" in a quick

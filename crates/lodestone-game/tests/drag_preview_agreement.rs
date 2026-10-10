@@ -23,7 +23,7 @@
 //! no preview. So every assertion here is an equality against the outcome, across
 //! 2-, 3- and 5-cell drags for both buttons, and the expected values are also
 //! stated as literals hand-derived from
-//! `AbstractContainerMenu.getQuickCraftPlaceCount` (`:733-740`) — because plan and
+//! the container menu's quick-craft place count — because plan and
 //! outcome now share code, agreement alone could in principle be two symmetric
 //! misunderstandings (`CLAUDE.md`'s `decode(encode(x)) == x`). The literals are
 //! what rule that out.
@@ -213,7 +213,7 @@ fn the_previewed_split_agrees_over_occupied_and_clamped_cells() {
 /// The cursor here is genuinely inconsistent *in vanilla*: `doClick`'s end arm
 /// still runs `remaining -= newCount - carry` per cell (`:387`), so a cursor of 3
 /// over five 16-cap cells leaves `remaining = 3 - 80 = -77`, and
-/// `setCount(-77)` is `isEmpty()`. So the preview shows a full stack and the
+/// set count is `isEmpty()`. So the preview shows a full stack and the
 /// release empties the cursor.
 ///
 /// This is `CLAUDE.md`'s "three vanilla quirks are transcribed on purpose because

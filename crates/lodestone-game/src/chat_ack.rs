@@ -5,7 +5,7 @@
 //!
 //! Every *signed* player-chat message the server sends us is pushed onto a
 //! server-side pending list, drained only by our acknowledgement offset. In
-//! 26.2's `ServerGamePacketListenerImpl` (behavioural reference only), once that
+//! 26.2's server packet listener (behavioural reference only), once that
 //! list exceeds **4096** entries the server kicks us with
 //! `multiplayer.disconnect.too_many_pending_chats`. A client that receives chat
 //! but never acknowledges it therefore climbs monotonically to that ceiling — on
@@ -33,8 +33,8 @@
 //! `offset` bookkeeping, the acknowledged bitset and the checksum are identical
 //! across every protocol that has signed chat, so they belong here.
 //!
-//! The semantics below are re-derived from vanilla's `LastSeenMessagesTracker`,
-//! `LastSeenMessages` and `MessageSignatureCache`; the implementation is original.
+//! The semantics below are re-derived from vanilla's last-seen-messages tracker,
+//! last-seen-messages record and message-signature cache; the implementation is original.
 
 /// An opaque message signature. This layer needs only value-equality and a
 /// checksum; the bytes themselves are meaningless to it (a real signature is a
@@ -116,7 +116,7 @@ impl LastSeenUpdate {
     /// Pack [`acknowledged`](Self::acknowledged) into the fixed-width byte form
     /// vanilla puts on the wire: `ceil(capacity / 8)` bytes, **LSB-first** within
     /// each byte (bit *i* → byte `i / 8`, position `i % 8`), matching
-    /// `FriendlyByteBuf.writeFixedBitSet` / `BitSet.toByteArray`.
+    /// the game's fixed bit-set writer and Java's `BitSet.toByteArray`.
     pub fn acknowledged_bytes(&self) -> Vec<u8> {
         let mut bytes = vec![0u8; self.acknowledged.len().div_ceil(8)];
         for (i, &set) in self.acknowledged.iter().enumerate() {

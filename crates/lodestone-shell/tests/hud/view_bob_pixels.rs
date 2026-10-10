@@ -58,7 +58,7 @@
 //! # The arm *does* bob once the shell feeds it one (that fix's hand-side gap)
 //!
 //! Vanilla prefixes `bobHurt` and `bobView` onto `renderItemInHand`'s pose stack
-//! a **second, independent** time (`GameRenderer`'s own decompiled source), separate from
+//! a **second, independent** time (the game renderer's own decompiled source), separate from
 //! the world's own copy (`:534-536`) — not something the hand inherits from the
 //! bobbed world camera. `gpu/first_person.rs`'s `HandBobSource`/`hand_view_proj`
 //! are that second application, and `the_arm_moves_when_a_hand_bob_source_is_installed`
@@ -105,7 +105,7 @@ const CHEST: [i32; 3] = [0, 0, 4];
 // camera is `4.5 - 2.0 = 2.5` blocks.
 //
 // The bob frame is taken at the **dip's bottom** (`walk_phase` a whole number)
-// with the amplitude at its `0.1` ceiling, so `GameRenderer.bobView` gives:
+// with the amplitude at its `0.1` ceiling, so game renderer's bob view gives:
 //
 //     translate = (sin(0)*0.1*0.5, -|cos(0)*0.1|, 0)      = (0, -0.1, 0)
 //     rotate Z  = sin(0)*0.1*3.0                          = 0 degrees
@@ -400,7 +400,7 @@ fn spawns(world: &World, pos: ChunkPos, eye: glam::Vec3) -> Vec<ChestSpawn> {
 ///
 /// `hand_bob` is a **separate** input from `cam` and that is the point: vanilla
 /// applies `bobView`/`bobHurt` to the hand a second, independent time
-/// (`GameRenderer`'s own decompiled source), so this helper models the two real installers
+/// (the game renderer's own decompiled source), so this helper models the two real installers
 /// a live `Sim` drives independently — `Sim::render_camera` (folded into `cam`
 /// by the caller, same as before) and `RenderState::set_hand_bob_source` (which
 /// this helper installs directly). Passing `BobFrame::default()` here is what

@@ -285,7 +285,7 @@ fn air_is_open_and_stone_is_blocked() {
 
 #[test]
 fn fluids_classify_as_water_and_lava() {
-    // These depend on FluidTags, which only bind once the data pack is loaded —
+    // These depend on the fluid tags, which only bind once the data pack is loaded —
     // the exact trap the oracle guards against. Pin them per-block.
     for id in states_named("minecraft:water") {
         assert_eq!(

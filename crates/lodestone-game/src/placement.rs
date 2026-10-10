@@ -9,15 +9,15 @@
 //!    ([`Placement::use_on`]). Right-clicking a chest, door, button, furnace or
 //!    crafting table *opens/actuates* it and places nothing — unless the player
 //!    is **sneaking while holding an item**, which suppresses the block use and
-//!    forces placement. This is vanilla `MultiPlayerGameMode.performUseItemOn`'s
-//!    `suppressUsingBlock = isSecondaryUseActive() && haveSomethingInOurHands`
+//!    forces placement. This is vanilla's use-item-on ordering of
+//!    `suppress_using_block = secondary use active && something in hands`
 //!    ordering (26.2), not a nicety.
 //! 2. **Where does the block go?** ([`resolve_target`]). Right-clicking a face
 //!    places into the *adjacent* position — **unless the clicked block is itself
 //!    replaceable** (air, water, lava, tall grass, a snow layer), in which case
-//!    the block replaces it *in place*. This is `BlockPlaceContext`'s
-//!    `replaceClicked = getBlockState(clickedPos).canBeReplaced(this)` and its
-//!    `getClickedPos() = replaceClicked ? clickedPos : relativePos`. Getting it
+//!    the block replaces it *in place*. This is the block-place context's
+//!    replace-clicked rule (the clicked state can be replaced by this context) and its
+//!    clicked position (replace-clicked ? clicked : relative). Getting it
 //!    backwards is the classic placement bug.
 //! 3. **What block state results?** ([`resolve_state`]). Facing (stairs,
 //!    furnaces), axis (pillars, logs) and half (slabs, stairs) depend on the
@@ -73,7 +73,7 @@ pub enum Axis {
     Z,
 }
 
-/// The vertical half a slab or stair occupies (`Half` / `SlabType` bottom vs
+/// The vertical half a slab or stair occupies (half / slab-type bottom vs
 /// top). Two-cell families reuse `Bottom`/`Top` as their lower/upper marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Half {
@@ -103,7 +103,7 @@ pub fn offset(pos: BlockPos, face: BlockFace) -> BlockPos {
     BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
 }
 
-/// The opposite face (`Direction.getOpposite`).
+/// The opposite face (Direction's get opposite).
 #[must_use]
 pub fn opposite(face: BlockFace) -> BlockFace {
     match face {
@@ -116,7 +116,7 @@ pub fn opposite(face: BlockFace) -> BlockFace {
     }
 }
 
-/// The axis a face lies on (`Direction.getAxis`).
+/// The axis a face lies on (Direction's get axis).
 #[must_use]
 pub fn face_axis(face: BlockFace) -> Axis {
     match face {
@@ -126,11 +126,11 @@ pub fn face_axis(face: BlockFace) -> Axis {
     }
 }
 
-/// The horizontal face a yaw points along (`Direction.fromYRot`).
+/// The horizontal face a yaw points along (Direction's from y rot).
 ///
 /// The 2D-data order is `[SOUTH, WEST, NORTH, EAST]` and the index is
 /// `floor(yaw / 90 + 0.5) & 3`, bit-for-bit vanilla — this is what
-/// `UseOnContext.getHorizontalDirection` (`player.getDirection()`) returns and
+/// UseOnContext's get horizontal direction (player's get direction) returns and
 /// what every horizontal-facing block reads at placement.
 #[must_use]
 pub fn horizontal_from_yaw(yaw: f32) -> BlockFace {
@@ -145,10 +145,10 @@ pub fn horizontal_from_yaw(yaw: f32) -> BlockFace {
 }
 
 /// The six faces ordered nearest-to-farthest from the player's look vector
-/// (`Direction.orderedByNearest`). Index `0` is `getNearestLookingDirection`,
+/// (Direction's ordered by nearest). Index `0` is `getNearestLookingDirection`,
 /// which directional blocks (dispenser, observer, piston) place *opposite* to.
 ///
-/// Re-implemented from the trig in `Direction.orderedByNearest`: the look vector
+/// Re-implemented from the trig in Direction's ordered by nearest: the look vector
 /// is `(-sin(yaw)·cos(pitch), sin(-pitch), cos(yaw)·cos(pitch))` in vanilla's
 /// convention, and the ordering picks the dominant axis, then the next, then the
 /// last, each toward the sign of the look component.
@@ -192,7 +192,7 @@ pub fn ordered_by_nearest(rotation: Rotation) -> [BlockFace; 6] {
     }
 }
 
-/// `Direction.makeDirectionArray`: the three dominant faces followed by their
+/// Direction's make direction array: the three dominant faces followed by their
 /// opposites in reverse, so all six faces appear exactly once.
 fn make_direction_array(a: BlockFace, b: BlockFace, c: BlockFace) -> [BlockFace; 6] {
     [a, b, c, opposite(c), opposite(b), opposite(a)]
@@ -200,7 +200,7 @@ fn make_direction_array(a: BlockFace, b: BlockFace, c: BlockFace) -> [BlockFace;
 
 /// The half a slab/stair occupies given the clicked face and the hit's
 /// block-local Y (`cursor.y` in `0.0..=1.0`), matching the shared expression in
-/// `SlabBlock`/`StairBlock.getStateForPlacement`:
+/// the slab and stair placement state:
 ///
 /// > bottom unless the face is `DOWN`, or the face is a side and the hit is in
 /// > the upper half (`> 0.5`).
@@ -217,7 +217,7 @@ pub fn half_from_hit(face: BlockFace, cursor_y: f32) -> Half {
 /// block table of its own — the same discipline as `CollisionView`.
 pub trait PlacementWorld {
     /// Whether the block at `pos` can be replaced by a placement
-    /// (`BlockState.canBeReplaced`): air, fluids, tall grass, snow layers, etc.
+    /// (BlockState's can be replaced): air, fluids, tall grass, snow layers, etc.
     /// Drives both the place-into-vs-adjacent choice and legality.
     fn is_replaceable(&self, pos: BlockPos) -> bool;
 
@@ -229,7 +229,7 @@ pub trait PlacementWorld {
     fn is_interactable(&self, pos: BlockPos) -> bool;
 
     /// Whether placing at `pos` is blocked by an entity or existing collision
-    /// (`Level.isUnobstructed`). Defaults to unobstructed; override to model the
+    /// (Level's is unobstructed). Defaults to unobstructed; override to model the
     /// "can't place a block where a mob or the player stands" rule.
     fn is_obstructed(&self, _pos: BlockPos) -> bool {
         false
@@ -246,7 +246,7 @@ pub struct Target {
     pub replaced_clicked: bool,
 }
 
-/// Resolves *where* a face-click places, mirroring `BlockPlaceContext`.
+/// Resolves *where* a face-click places, mirroring the block-place context.
 ///
 /// If the clicked block is replaceable the placement replaces it in place;
 /// otherwise it goes to the adjacent cell across `face`. This never consults
@@ -305,23 +305,23 @@ pub fn resolve_target(
 pub enum OrientationKind {
     /// No orientation property (stone, dirt, glass).
     Fixed,
-    /// A pillar whose `axis` is the clicked face's axis (`RotatedPillarBlock`).
+    /// A pillar whose `axis` is the clicked face's axis (a rotated pillar).
     Pillar,
-    /// A slab whose half comes from the face and hit Y (`SlabBlock`). Placing a
+    /// A slab whose half comes from the face and hit Y. Placing a
     /// slab into a matching half to form a double slab is **not** modelled here.
     Slab,
-    /// Faces the player's horizontal look direction (`StairBlock` facing,
-    /// `LadderBlock`, floor banners): `facing = getHorizontalDirection()`.
+    /// Faces the player's horizontal look direction (stair facing,
+    /// ladders, floor banners): facing = the horizontal look direction.
     FacingHorizontal,
-    /// Faces *away* from the player horizontally (`HorizontalDirectionalBlock`:
-    /// furnace, chest, pumpkin, end-portal frame): `getHorizontalDirection()
-    /// .getOpposite()`.
+    /// Faces *away* from the player horizontally (horizontal-directional blocks:
+    /// furnace, chest, pumpkin, end-portal frame): the opposite of the
+    /// horizontal look direction.
     FacingHorizontalOpposite,
     /// Faces away from the player in any of the six directions
-    /// (`DirectionalBlock`: dispenser, dropper, observer, piston):
-    /// `getNearestLookingDirection().getOpposite()`.
+    /// (directional blocks: dispenser, dropper, observer, piston):
+    /// the opposite of the nearest looking direction.
     FacingAll,
-    /// A stair: `facing = getHorizontalDirection()`, `half` from face and hit Y.
+    /// A stair: `facing = get_horizontal_direction()`, `half` from face and hit Y.
     /// Shape (corners) is left at the straight default and corrected by the
     /// server.
     Stairs,
@@ -351,7 +351,7 @@ pub struct PlacedState {
 }
 
 /// Everything a use-on-block needs, in canonical form. Mirrors the fields of
-/// `ServerboundUseItemOnPacket`'s `BlockHitResult` plus the player context the
+/// the block-hit result of the use-item-on packet plus the player context the
 /// interaction ordering reads.
 #[derive(Debug, Clone)]
 pub struct UseOnContext {
@@ -449,7 +449,7 @@ pub fn extra_positions(target: BlockPos, orientation: OrientationKind, facing: O
 }
 
 /// The decision [`Placement::use_on`] reaches for a right-click, mirroring the
-/// branch structure of `MultiPlayerGameMode.performUseItemOn`.
+/// branch structure of the game mode's use-item-on.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UseOnDecision {
     /// The block was actuated (chest/door/etc.); nothing is placed. Vanilla
@@ -540,7 +540,7 @@ impl Placement {
     }
 
     fn take_sequence(&mut self) -> PredictionSequence {
-        // Vanilla's `BlockStatePredictionHandler` pre-increments, so the first
+        // Vanilla's block-state prediction handler pre-increments, so the first
         // prediction is sequence 1.
         self.next_sequence = self.next_sequence.next();
         self.next_sequence

@@ -115,7 +115,7 @@ fn a_real_mcfunction_file_runs_its_lines_through_the_real_dispatcher() {
 }
 
 /// An unknown single function is a hard refusal — vanilla's own
-/// `FunctionArgument.ERROR_UNKNOWN_FUNCTION`.
+/// The function argument's error unknown function.
 #[test]
 fn an_unknown_single_function_is_refused() {
     let world_dir = scratch_world("unknown-single");
@@ -128,7 +128,7 @@ fn an_unknown_single_function_is_refused() {
 
 /// The asymmetric control: an unknown *tag*, unlike an unknown single
 /// function, is not an error at all — matching vanilla's own
-/// `getTag(...).getOrDefault(tag, List.of())`.
+/// )'s get tag.
 #[test]
 fn an_unknown_tag_runs_as_a_no_op_rather_than_refusing() {
     let world_dir = scratch_world("unknown-tag");

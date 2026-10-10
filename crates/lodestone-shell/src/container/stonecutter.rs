@@ -5,7 +5,7 @@
 //!
 //! ## What it is
 //!
-//! `StonecutterScreen`/`StonecutterMenu` (`26.2`): a 4×3 grid of up to twelve
+//! The stonecutter screen/stonecutter menu (`26.2`): a 4×3 grid of up to twelve
 //! visible recipe buttons, scrollable when the server reports more than
 //! twelve stonecutting recipes for the input item. [`server_results_for_menu`]
 //! is the one source used to draw, scroll and pre-validate clicks, so a
@@ -19,9 +19,9 @@
 //! even when this build cannot resolve its icon, preserving the server's
 //! button indices for later rows.
 //!
-//! [`grid_rect`] is `StonecutterScreen`'s own real layout constants
+//! [`grid_rect`] is the stonecutter screen's own real layout constants
 //! (`RECIPES_X = 52`, `RECIPES_Y = 14`, a 16×18 cell, 4 columns) —
-//! [`hit_test_local`] mirrors `StonecutterScreen.mouseClicked`'s exact
+//! [`hit_test_local`] mirrors the stonecutter screen's mouse clicked's exact
 //! arithmetic, `start_index`-relative, and [`button_hit_test`] adds the panel
 //! origin/scale resolution every click surface in this crate goes through.
 //!
@@ -48,16 +48,16 @@ use lodestone_model::{Identifier, ItemId};
 
 use super::layout::Rect;
 
-/// `StonecutterMenu`'s own input slot index (`Menu::stonecutter`'s doc).
+/// The stonecutter menu's own input slot index (`Menu::stonecutter`'s doc).
 pub const INPUT_SLOT: usize = 0;
 
-/// `StonecutterScreen.RECIPES_X`/`RECIPES_Y`/cell size/column count.
+/// The stonecutter screen's recipes x/`RECIPES_Y`/cell size/column count.
 const GRID_X: f32 = 52.0;
 const GRID_Y: f32 = 14.0;
 const CELL_W: f32 = 16.0;
 const CELL_H: f32 = 18.0;
 const COLUMNS: i32 = 4;
-/// `StonecutterScreen`'s three visible rows (twelve visible buttons at once).
+/// The stonecutter screen's three visible rows (twelve visible buttons at once).
 const VISIBLE_ROWS: i32 = 3;
 const VISIBLE_COUNT: i32 = COLUMNS * VISIBLE_ROWS;
 
@@ -121,7 +121,7 @@ pub(super) fn visible_server_results(
 }
 
 /// One recipe button's local-widget-pixel rect, `index`-relative to
-/// `start_index` — `StonecutterScreen.extractButtons`'s `posX`/`posY`
+/// `start_index` — the stonecutter screen's extract buttons's `posX`/`posY`
 /// (`x + posIndex % 4 * 16`, `y + row * 18 + 2`).
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // index/start_index are always small
@@ -145,8 +145,8 @@ fn hit(x: f32, y: f32, r: Rect) -> bool {
 }
 
 /// Resolves a **local widget-pixel** point to the recipe index it hits, if
-/// any — `StonecutterScreen.mouseClicked`'s own loop, `start_index`-relative,
-/// bounded by `recipe_count` (vanilla's `getNumberOfVisibleRecipes()`, not
+/// any — the stonecutter screen's mouse clicked's own loop, `start_index`-relative,
+/// bounded by `recipe_count` (vanilla's get number of visible recipes, not
 /// `endIndex` alone: a partially-filled last row must not accept a click past
 /// the real recipe count even though its cell rect exists).
 #[must_use]
@@ -164,7 +164,7 @@ pub fn hit_test_local(recipe_count: usize, start_index: i32, x: f32, y: f32) -> 
     None
 }
 
-/// `StonecutterScreen.getOffscreenRows`: `ceil(recipe_count / 4) - 3`, floored
+/// The stonecutter screen's get offscreen rows: `ceil(recipe_count / 4) - 3`, floored
 /// at `0` (vanilla lets this go negative internally but only ever multiplies
 /// it by a `0.0..=1.0` `scrollOffs`, so clamping here is behaviourally
 /// identical and avoids a negative `start_index`).
@@ -174,7 +174,7 @@ fn offscreen_rows(recipe_count: usize) -> i32 {
     rows.max(0)
 }
 
-/// `StonecutterScreen.mouseDragged`/`mouseScrolled`'s shared tail:
+/// The stonecutter screen's mouse dragged/`mouseScrolled`'s shared tail:
 /// `startIndex = (scrollOffs * offscreenRows + 0.5) * 4`, `scroll_offset`
 /// clamped to `0.0..=1.0` first exactly as vanilla clamps it before either
 /// call site uses it.
@@ -186,9 +186,9 @@ pub fn start_index_for_scroll(scroll_offset: f32, recipe_count: usize) -> i32 {
     ((clamped * rows + 0.5) as i32) * COLUMNS
 }
 
-/// `StonecutterScreen.mouseScrolled`'s own step: `scrollOffs = clamp(scrollOffs
-/// - scrollY / offscreenRows, 0, 1)`, gated on `isScrollBarActive()` the same
-/// way vanilla's own `if (this.isScrollBarActive())` guards the whole method
+/// The stonecutter screen's mouse scrolled's own step: `scrollOffs = clamp(scrollOffs
+/// - scrollY / offscreenRows, 0, 1)`, gated on is scroll bar active the same
+/// way vanilla's own `if (this.is_scroll_bar_active())` guards the whole method
 /// body — a no-op (returns `current` unchanged, pinned at `0.0`) when there is
 /// nothing offscreen, never dividing by zero. Wired to the mouse wheel by
 /// `WindowApp::scroll_stonecutter` (`app/container_input.rs`), the missing

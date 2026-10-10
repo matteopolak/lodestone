@@ -34,7 +34,7 @@
 //! |---|---|
 //! | bare frame → framed map, source installed, at each of four yaws | the map producer paints, whichever wall the frame is on |
 //! | framed map with **no source installed** | the diff is the *map*, not the wider `item_frame_map` body |
-//! | framed map with an **all-`MapColor.NONE`** grid | a transparent grid draws nothing — the exact shape of "a bigger frame with nothing in it" |
+//! | framed map with an **all-the map color's none** grid | a transparent grid draws nothing — the exact shape of "a bigger frame with nothing in it" |
 //!
 //! The last two are executed negative controls: both must land on the no-source
 //! frame's own pixels exactly, and the painted arm must not.
@@ -64,7 +64,7 @@ fn test_map_id() -> MapId {
     MapId::new(TEST_MAP_ID).expect("the fixture map id is non-negative")
 }
 
-/// Where the frame entity sits. `ItemFrame.createBoundingBox` puts that behind
+/// Where the frame entity sits. ItemFrame's create bounding box puts that behind
 /// the centre of the block it hangs in; the render chain steps `0.46875` forward
 /// along the frame's own `Direction` to recover the frame's plane.
 const SUBJECT_POS: glam::Vec3 = glam::Vec3::new(0.0, 0.25, 0.0);
@@ -78,7 +78,7 @@ fn subject_centre() -> glam::Vec3 {
     SUBJECT_POS.floor() + glam::Vec3::splat(0.5)
 }
 
-/// The four horizontal `ItemFrame.setDirection` yaws — `get2DDataValue() * 90`,
+/// The four horizontal ItemFrame's set direction yaws — `get_2d_data_value() * 90`,
 /// i.e. south, west, north, east. All four, because two of them are the only
 /// inputs that can see a front face pointing the wrong way.
 const YAWS: [f32; 4] = [0.0, 90.0, 180.0, 270.0];
@@ -182,7 +182,7 @@ fn blank_draw(id: i32, type_path: &str, yaw: f32) -> EntityDraw {
 
 /// A 128×128 grid of a single **opaque** palette entry — `GRASS` at `HIGH`
 /// brightness, packed `1 << 2 | 2`. Deliberately not `0`: id `0` is
-/// `MapColor.NONE`, which resolves to alpha `0` and is discarded by the model
+/// The map color's none, which resolves to alpha `0` and is discarded by the model
 /// shader's cutout, so a grid of zeroes could not tell a working draw from a
 /// missing one. That is the transparent arm's job, not this one's.
 fn grass_grid() -> Vec<u8> {
@@ -855,7 +855,7 @@ fn a_framed_map_survives_the_depth_test_against_its_attachment_wall() {
         let frame_draw = |type_path: &str, invisible: bool| {
             let mut draw = blank_draw(SUBJECT_ID, type_path, 0.0);
             // The wire carries a hanging entity's own position, which
-            // `ItemFrame.createBoundingBox` puts `0.46875` back along its
+            // ItemFrame's create bounding box puts `0.46875` back along its
             // facing from the attachment block's centre. Feed the renderer that
             // rather than the block, so the `floor()` in `item_frame_space` is
             // exercised the way production exercises it.

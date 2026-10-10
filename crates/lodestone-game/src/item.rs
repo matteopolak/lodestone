@@ -188,8 +188,8 @@ pub const PLUGIN_ITEM_ID_COMPONENT: &str = "lodestone:item_id";
 
 /// Whether `item` is one of vanilla's 17 bundle variants (`minecraft:bundle`
 /// plus one per dye colour) — real vanilla gates a bundle-only interaction on
-/// `#minecraft:bundles` (`BundleMouseActions.matches`,
-/// `slot.getItem().is(ItemTags.BUNDLES)`), and this crate carries no tag
+/// `#minecraft:bundles` (the bundle mouse-actions matcher on the
+/// bundles item tag), and this crate carries no tag
 /// registry to consult that tag by name.
 ///
 /// **Disclosed simplification, not a guess**: every bundle-family item is a
@@ -514,7 +514,7 @@ impl ItemStack {
 
     /// Returns whether more than one of this item may occupy a stack.
     ///
-    /// Mirrors vanilla `ItemStack.isStackable`: a stack is stackable when its
+    /// Mirrors vanilla ItemStack's is stackable: a stack is stackable when its
     /// max size exceeds one and it is not a damaged tool. Damage is detected via
     /// the `minecraft:damage` / `minecraft:max_damage` components.
     #[must_use]
@@ -834,7 +834,7 @@ impl ItemStack {
     }
 
     /// The stack's `minecraft:bundle_contents`, in slot order (index 0 is the
-    /// most-recently-inserted item — vanilla's `Mutable::tryInsert` always
+    /// most-recently-inserted item — vanilla's Mutable's try insert always
     /// `add(0, …)`), or an empty slice for every non-bundle item and for an
     /// empty bundle.
     #[must_use]
@@ -864,7 +864,7 @@ impl ItemStack {
     /// ```
     ///
     /// `0` for every non-bundle item and for an empty bundle — the same guard
-    /// `BundleMouseActions.onMouseScrolled` uses to make scrolling a no-op.
+    /// bundle mouse-scroll handler uses to make scrolling a no-op.
     #[must_use]
     pub fn bundle_items_to_show(&self) -> usize {
         let size = self.bundle_contents().len();
@@ -1071,7 +1071,7 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Int(i64::from(damage)));
         }
 
-        // 26.2 carries CustomModelData as a float list. This crate's existing
+        // 26.2 carries custom model data as a float list. This crate's existing
         // custom-item API is integral, so preserve integral index-zero selectors
         // through that stable API rather than adding a non-Eq float to
         // ComponentValue. The model still retains every raw numeric value.
@@ -1792,7 +1792,7 @@ mod tests {
     /// `plain_hover_name`'s whole reason to exist: a custom-named item's
     /// forced-italic `§o` reaches `styled_hover_name` (pinned above by
     /// `custom_named_item_is_forced_italic_and_keeps_its_own_text`) but must
-    /// **not** reach the plain sibling — vanilla's `getHoverName().getString()`
+    /// **not** reach the plain sibling — vanilla's get hover name's get hover name
     /// strips styling, it does not encode it. An anvil rename box seeded from
     /// the legacy string would show `§oExcalibur` as literal text the instant
     /// it gained focus; seeded from this, it shows `Excalibur`.

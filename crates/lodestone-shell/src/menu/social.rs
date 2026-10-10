@@ -142,7 +142,7 @@ pub enum SocialPlacement {
 
 /// Row height. The flat row omits the head icon used by the reference client,
 /// so it reuses [`options::WIDGET_H`], the same flat-row convention
-/// [`super::key_binds`] uses for its own non-`OptionsList` rows.
+/// [`super::key_binds`] uses for its own non-the options list rows.
 pub const ROW_H: f32 = options::WIDGET_H;
 /// Column widths, in the shell's existing button-width vocabulary.
 pub const HIDE_BUTTON_W: f32 = 110.0;

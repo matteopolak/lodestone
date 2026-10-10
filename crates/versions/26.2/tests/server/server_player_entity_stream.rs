@@ -474,8 +474,8 @@ async fn two_connections_see_each_other_as_player_entities() {
     // dark, which reads as a server hang. `world_spawn::GENERATOR_SPAWN_HEIGHT` is
     // now vanilla's own chunk-generator get-spawn-height constant
     // (confirmed against the decompiled 26.2 chunk-generator source,
-    // a literal `64` that `NoiseBasedChunkGenerator` does not override), which is
-    // what vanilla's own server's own set-initial-spawn routine pre-seeds the world spawn with. See
+    // a literal `64` that the noise chunk generator does not override), which is
+    // what the server's initial-spawn routine pre-seeds the world spawn with. See
     // DESIGN.md §12.129.
     //
     // The persisted spawn anchor is `(8, 64, 8)`; the player enters at the
@@ -550,7 +550,7 @@ async fn two_connections_see_each_other_as_player_entities() {
         })
         .expect(
             "B must receive a player_info_update carrying A's uuid — without it a real \
-             client discards A's ADD_ENTITY entirely (vanilla's own client packet listener's own java)",
+             client discards A's ADD_ENTITY entirely",
         );
     let first_spawn = b_join
         .iter()

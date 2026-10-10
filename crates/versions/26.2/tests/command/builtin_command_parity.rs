@@ -20,7 +20,7 @@
 //! # Why this is an *outside* expectation
 //!
 //! The expected value originates in Mojang's own dispatcher, serialised by their
-//! own `ArgumentTypeInfo`s, captured off a socket. Nothing in this repo authored
+//! own argument-type serialisers, captured off a socket. Nothing in this repo authored
 //! it. That is the difference between this and `decode(encode(x)) == x`, which two
 //! symmetric misunderstandings satisfy.
 //!
@@ -128,7 +128,7 @@ fn describe(tree: &CommandTree, index: usize) -> String {
 /// Recursively compare two subtrees, reporting the first divergence with the path
 /// to it.
 ///
-/// Children are compared **in order**: vanilla's `ClientboundCommandsPacket`
+/// Children are compared **in order**: the commands packet
 /// writes the dispatcher's own child order, and a tree that agrees as a set but
 /// not as a sequence would autocomplete in a different order than vanilla does.
 fn compare(
@@ -242,9 +242,9 @@ fn the_comparison_fails_when_the_subtrees_differ() {
 /// be discovered. Found by running this gate, not by reading the code.
 ///
 /// **We expose one rule vanilla's tree does not: `max_minecart_speed`.** Not a
-/// version skew — it is `registerInteger("max_minecart_speed", …,
-/// vanilla's own feature flag set's own of(vanilla's own feature flags's own minecart improvements))`
-/// (`vanilla's own game rules's own java`), i.e. gated behind an **experimental feature flag**
+/// version skew — it is `register integer("max_minecart_speed", …,
+/// gated on the minecart-improvements feature flag
+/// (in the game-rules registry), i.e. gated behind an **experimental feature flag**
 /// the oracle world does not enable, so vanilla legitimately omits it from the
 /// tree it sends. Our `GAME_RULES` carries no feature-flag concept and therefore
 /// offers it unconditionally. That is the honest description of the gap and it is
@@ -252,8 +252,8 @@ fn the_comparison_fails_when_the_subtrees_differ() {
 ///
 /// **Vanilla's own two-literals-per-rule shape is now matched.**
 /// `commands::gamerule::register_rule_literal` builds both `keep_inventory`
-/// *and* `minecraft:keep_inventory` (`vanilla's own game rule command's own register`'s own
-/// `unqualified`/`qualified` pair, `.cache/mc/26.2/src`), so the child count
+/// *and* `minecraft:keep_inventory` (the game-rule command registers a qualified and
+/// an unqualified spelling, `.cache/mc/26.2/src`), so the child count
 /// is a plain `theirs == (ours - FEATURE_FLAGGED_RULES) * 2` no longer — it is
 /// `theirs == (ours - FEATURE_FLAGGED_RULES * 2)`, both sides counting **all**
 /// literals (bare and namespaced) now that we register both too.
@@ -272,7 +272,7 @@ fn gamerule_has_every_rule_subtree_right_and_every_literal_too() {
 
     let ours_children = ours.node(our_root).expect("node").children.len();
     let theirs_children = theirs.node(their_root).expect("node").children.len();
-    /// `max_minecart_speed`, behind `vanilla's own feature flags's own minecart improvements` —
+    /// `max_minecart_speed`, behind the minecart-improvements feature flag —
     /// counted once per spelling (bare + namespaced), since both sides now
     /// register both literals for every rule they carry at all.
     const FEATURE_FLAGGED_LITERALS: usize = 2;

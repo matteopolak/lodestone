@@ -18,8 +18,8 @@
 //!
 //! # The fixture, and why it is not all-plain
 //!
-//! Under `NbtOps` a `ListTag` must be homogeneous. `LINES_CODEC` is
-//! `ComponentSerialization.CODEC.listOf()`, so the moment **one** line carries
+//! Under the nbt ops a list tag must be homogeneous. `LINES_CODEC` is
+//! The component serialization's codec.listOf(), so the moment **one** line carries
 //! a style the whole `messages` list becomes a list of compounds — and every
 //! *unstyled* sibling is then wrapped as `{"": "text"}` rather than staying a
 //! bare string. An all-plain fixture is a list of bare strings and cannot see

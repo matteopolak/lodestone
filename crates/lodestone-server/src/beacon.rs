@@ -255,7 +255,7 @@ pub struct BeaconEffect {
 /// beacon at pyramid tier `levels` grants — vanilla's
 /// real apply-effects rule's arithmetic, with no player query: the
 /// caller finds who is within `range` blocks horizontally (and, per
-/// vanilla's own `expandTowards(0, height, 0)`, anywhere from `range` below
+/// vanilla's own expand towards, anywhere from `range` below
 /// to the top of the world) and calls
 /// [`crate::mob_effects::ActiveEffects::apply`] with each returned
 /// [`BeaconEffect`].
@@ -512,7 +512,7 @@ mod tests {
     /// [`lodestone_data::light_props::dampening`] (it is not a full block)
     /// but was never in that family, so the old `is_beam_transparent` would
     /// have refused it — a block a player is entirely likely to floor a
-    /// beacon shaft with. Vanilla's own `getLightDampening() >= 15` gate
+    /// beacon shaft with. Vanilla's own `get_light_dampening() >= 15` gate
     /// agrees this does not block.
     #[test]
     fn a_carpet_shaft_is_unobstructed_even_though_it_was_never_in_the_old_family_list() {
@@ -523,7 +523,7 @@ mod tests {
         assert!(beam_unobstructed(&rig, 0, 64, 0, 20));
     }
 
-    /// Vanilla's own carve-out: `state.getLightDampening() >= 15 &&
+    /// Vanilla's own carve-out: `state.get_light_dampening() >= 15 &&
     /// !state.is(Blocks.BEDROCK)` — bedrock is full dampening but explicitly
     /// exempted, so a beacon shaft that happens to cross a bedrock cell (a
     /// creative-mode build) is still unobstructed.

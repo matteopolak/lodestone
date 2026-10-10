@@ -41,7 +41,7 @@ fn tick_air_among_entities(
 
     // --- jump -----------------------------------------------------------------
     // Vanilla's own jump block is `if (this.jumping &&
-    // this.isAffectedByFluids())` — and the player's fluid-affected check is
+    // this's is affected by fluids)` — and the player's fluid-affected check is
     // `!abilities.flying`. So a **flying player never jumps from the ground
     // at all**; the `else` arm runs and clears its own no-jump-delay flag.
     //
@@ -74,7 +74,7 @@ fn tick_air_among_entities(
     // vanilla.
     //
     // Vanilla's own "on climbable" check is `abilities.flying ? false :
-    // super.onClimbable()`, so flight detaches the player from ladders
+    // super.on_climbable()`, so flight detaches the player from ladders
     // entirely — both this reset and `travel_in_air`'s clamp/steady-climb.
     if on_climbable(state, view) {
         state.fall_distance = 0.0;
@@ -231,7 +231,7 @@ fn fluid_falling_adjusted_movement(
     }
 }
 
-/// Vanilla's own fluid-jump threshold — `getEyeHeight() < 0.4 ? 0.0 : 0.4`.
+/// Vanilla's own fluid-jump threshold — `get_eye_height() < 0.4 ? 0.0 : 0.4`.
 ///
 /// The pose feeds back into movement here: the swimming pose's eye height is
 /// **exactly** `0.4`, and `0.4 < 0.4` is false, so a swimming player keeps
@@ -245,7 +245,7 @@ fn fluid_jump_threshold(eye_height: f32) -> f64 {
 /// Vanilla's own "on climbable" check, reduced to the block test this
 /// engine models: the CLIMBABLE tag on the block at the feet block
 /// position. Vanilla's own player override is `abilities.flying ? false :
-/// super.onClimbable()` — flight detaches the player from ladders and
+/// super.on_climbable()` — flight detaches the player from ladders and
 /// vines.
 fn on_climbable(state: &PlayerState, view: &dyn CollisionView) -> bool {
     !state.flying && on_climbable_here(state, view)
@@ -348,7 +348,7 @@ fn apply_fluid_jump(
         state.no_jump_delay = 0;
         return;
     }
-    // `isInLava() ? getFluidHeight(LAVA) : getFluidHeight(WATER)`.
+    // `isInLava() ? get_fluid_height(LAVA) : get_fluid_height(WATER)`.
     let in_lava = fluid.in_lava();
     let fluid_height = if in_lava {
         fluid.lava_height
@@ -367,7 +367,7 @@ fn apply_fluid_jump(
     // two forms differ on NaN and the source is the specification here.
     #[allow(clippy::neg_cmp_op_on_partial_ord)]
     let not_above_threshold = !(fluid_height > threshold);
-    // `isInShallowFluid(LAVA)`.
+    // is in shallow fluid.
     let shallow_lava = fluid.lava_height <= threshold;
     let jump_in_liquid = |state: &mut PlayerState| {
         state.velocity = state.velocity.add(Vec3d::new(0.0, f64::from(0.04f32), 0.0));

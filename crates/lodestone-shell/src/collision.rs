@@ -169,7 +169,7 @@ trait BlockView {
     /// being distinguishable from a real answer.
     fn blocks_motion_of(&self, state: u32) -> Option<bool>;
 
-    /// `BubbleColumnBlock`'s `DRAG_DOWN` property for a state, or `None` when the
+    /// The bubble column block's `DRAG_DOWN` property for a state, or `None` when the
     /// state is not a bubble column — which is every state but two.
     ///
     /// Keyed by state rather than by name because both bubble-column states share
@@ -410,7 +410,7 @@ fn blocks_motion_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
 /// Vanilla's own flowing-fluid is-solid-face check, horizontal case:
 /// `false` if the cell holds **the same fluid as `kind`** (the fluid asking —
 /// see [`CollisionView::is_solid_face`]'s doc for why that is not the cell's own
-/// fluid), `false` for ice, else `isFaceSturdy(FULL)` = [`shape_face_is_full`].
+/// fluid), `false` for ice, else is face sturdy = [`shape_face_is_full`].
 ///
 /// One narrowing approximation remains: `isFaceSturdy` is the
 /// under-approximating [`shape_face_is_full`]. The "any fluid → false"
@@ -438,8 +438,8 @@ fn is_solid_face_at(
             return false;
         }
     }
-    // `IceBlock` covers ice, frosted ice and blue ice; packed ice is a plain
-    // `Block`, so it is *not* excluded (`IceBlock` subclasses only).
+    // The ice block covers ice, frosted ice and blue ice; packed ice is a plain
+    // `Block`, so it is *not* excluded (the ice block subclasses only).
     if v.state_id_of(state).is_some_and(|state| {
         matches!(state.block(), Block::Ice | Block::FrostedIce | Block::BlueIce)
     }) {
@@ -1062,7 +1062,7 @@ impl LiveCollision {
     /// not available at this layer, so the empty-shape result remains the only
     /// supported case.
     /// `minecraft:barrier` is unaffected: its outline is a real,
-    /// context-free unit cube (`BarrierBlock` sets no shape override), so it
+    /// context-free unit cube (the barrier block sets no shape override), so it
     /// stays targetable exactly as before. Bake failures (a model that failed
     /// to compile geometry) are also unaffected in the live case: the census
     /// answers from the block's *state*, not its baked quads, so a failed
@@ -1127,7 +1127,7 @@ impl LiveCollision {
     /// switched off (no fluid, vanilla's own entity-pick routine). So the
     /// real question is *does the block in this cell have a non-empty outline*:
     ///
-    /// * vanilla's own liquid-block shape getter → vanilla's own empty-shape
+    /// * vanilla's liquid-block shape getter → vanilla's empty-shape
     ///   sentinel, so
     ///   open water and lava are never targeted;
     /// * vanilla's own kelp block's is a 16-wide, 0-to-9-tall column and
@@ -1177,7 +1177,7 @@ impl LiveCollision {
     }
 
     /// The boxes [`crate::raycast::raycast`] clips the view ray against in this
-    /// cell — vanilla's `state.getShape(…).toAabbs()`, block-local, appended.
+    /// cell — vanilla's get shape's to aabbs, block-local, appended.
     ///
     /// # This is what the ray takes instead of a boolean
     ///
@@ -2697,8 +2697,8 @@ mod tests {
     /// Layer `y` holds `minecraft:water[level=y]`. Expected `(amount,
     /// falling)` pairs are vanilla's own liquid-block state-cache rule, read
     /// out of its own constructor — `stateCache.add(fluid.
-    /// getSource(false))` for `level 0`, then `fluid.getFlowing(8 - level,
-    /// false)` for `level` in `1..8`, then `fluid.getFlowing(8, true)` for
+    /// Get source)` for `level 0`, then `fluid.get_flowing(8 - level,
+    /// false)` for `level` in `1..8`, then fluid's get flowing for
     /// `level >= 8` — not derived from this crate's own encoder, per the
     /// task's evidence standard.
     #[test]
@@ -2780,8 +2780,8 @@ mod tests {
     /// moment that landed, this test started asserting a height vanilla never
     /// produces for a *source block with air above*: vanilla's own fluid-state
     /// get-height routine is
-    /// `hasSameAbove ? 1.0 : getOwnHeight()`, and a lone source's own height is
-    /// `getAmount()/9.0 = 8/9`, not `1.0` — `1.0` only applies to a cell that
+    /// `hasSameAbove ? 1.0 : get_own_height()`, and a lone source's own height is
+    /// `get_amount()/9.0 = 8/9`, not `1.0` — `1.0` only applies to a cell that
     /// itself has the *same fluid* directly above it (see [`fluid_at`]'s own
     /// doc). This test's own bottom two cells (`y = 0, 1`) do get the `1.0`
     /// treatment for exactly that reason; only the *top* cell of a body of water

@@ -870,7 +870,7 @@ fn explicit_swing_duration(base: i32, entity_id: i32, effects: Option<&crate::En
 ///
 /// # The packet is absolute, so the fold must clear as well as set
 ///
-/// `ClientboundSetPassengersPacket` carries the vehicle's **complete** rider
+/// The set-passengers packet carries the vehicle's **complete** rider
 /// list, and a dismount is announced as that list going empty rather than as a
 /// separate event. So every fold does three things in order:
 ///
@@ -2472,7 +2472,7 @@ mod tests {
     ///
     /// A metadata packet mentions only the accessors that changed, so an update
     /// nudging one arm must leave the other five parts where they were —
-    /// vanilla's per-accessor `SynchedEntityData` semantics. An arm written with
+    /// the game's per-accessor synched-data semantics. An arm written with
     /// `insert` would pass a single-packet test and silently reset five parts on
     /// the second packet, which is the realistic case (a builder's editor sends
     /// one part at a time).

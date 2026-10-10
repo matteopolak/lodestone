@@ -26,7 +26,7 @@
 //!
 //! # What is not built
 //!
-//! **Macro functions** (`$` lines, `MacroFunction` in vanilla) are read and
+//! **Macro functions** (`$` lines, the macro function in vanilla) are read and
 //! skipped rather than expanded — `/function` here always calls a function
 //! with no `with <storage>`/NBT argument, so there is nowhere for a macro's
 //! substitution source to come from yet. A line beginning with `$` is
@@ -195,7 +195,7 @@ fn scan(datapacks_dir: &Path) -> (HashMap<String, Vec<String>>, HashMap<String, 
 
 /// Recursively collects every `*.mcfunction` file under `dir` into `out`,
 /// keyed `<namespace>:<relative path, '/'-joined, no extension>` — vanilla's
-/// own `FileToIdConverter` restated.
+/// own file to id converter restated.
 #[cfg(not(target_arch = "wasm32"))]
 fn scan_functions(dir: &Path, namespace: &str, out: &mut HashMap<String, Vec<String>>) {
     walk(dir, "mcfunction", &mut |relative, contents| {

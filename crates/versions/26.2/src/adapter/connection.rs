@@ -186,7 +186,7 @@ impl V770Adapter {
 }
 
 /// The `minecraft:block` registry's wire key
-/// (`vanilla's own registries's own block = createRegistryKey("block")`), matching the
+/// (the block registry's key), matching the
 /// `minecraft:worldgen/biome` precedent in `packets/registry.rs`'s
 /// `ClientRegistries::BIOME` — the registry's own resource key, not a name we
 /// invent.
@@ -282,12 +282,12 @@ impl V770Adapter {
 }
 
 /// Decodes a clientbound `custom_payload`: a channel identifier followed by
-/// however many bytes remain in the packet (`ClientboundCustomPayloadPacket`).
+/// however many bytes remain in the packet.
 /// Shared by the Configuration and Play states — Configuration used to have
 /// no arm for this at all; only Play did.
 ///
 /// Only `minecraft:brand` gets a specially-typed codec in vanilla (a single
-/// UTF-8 string); every other channel is `DiscardedPayload`, which just
+/// UTF-8 string); every other channel is a discarded payload, which just
 /// consumes whatever bytes remain in the packet. Carrying the raw bytes for
 /// every channel (rather than special-casing brand) loses nothing and avoids
 /// guessing at channel-specific shapes this adapter cannot verify.
@@ -333,7 +333,7 @@ fn decode_custom_query(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 }
 
 /// Decodes a clientbound `cookie_request`: a single identifier key, no other
-/// fields (`ClientboundCookieRequestPacket`, `ClientCookiePacketListener`).
+/// fields.
 /// Shared by the Login, Configuration and Play states — the same "aren't
 /// handled in `handle_login` at all" gap applied equally to
 /// `handle_configuration`, which also had no arm for this before now, only
@@ -579,7 +579,7 @@ impl V770Adapter {
     }
 }
 
-/// Decodes `ClientboundCustomReportDetailsPacket`: at most 32 `(title,
+/// Decodes the custom-report-details packet: at most 32 `(title,
 /// description)` string pairs, titles capped at 128 chars and descriptions at
 /// 4096.
 fn decode_custom_report_details(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {

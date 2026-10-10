@@ -986,7 +986,7 @@ impl RenderState {
     /// once per frame and may return `None` until the dimension type is known,
     /// so there is nothing to wait for.
     ///
-    /// `f` returns `EnvironmentAttributes.AMBIENT_LIGHT_COLOR` for the
+    /// `f` returns environment attributes's ambient light color for the
     /// dimension the local player is currently in, as `0.0..=1.0` per-channel
     /// floats — `lodestone_render::light::rgb24_to_channels` of
     /// `DimensionType::ambient_light_color`:
@@ -1174,7 +1174,7 @@ impl RenderState {
     /// because the sliders live on a settings page and must move the shimmer
     /// while that page is still up.
     ///
-    /// Both are `UnitDouble`s in `[0, 1]`; clamping lives in
+    /// Both are the unit doubles in `[0, 1]`; clamping lives in
     /// `gpu::glint::glint_uniform`, the one place both the world and hand draws
     /// pass through, so this setter cannot become a second copy of the domain.
     pub fn set_glint_options(&mut self, speed: f64, strength: f32) {
@@ -1615,7 +1615,7 @@ impl RenderState {
     /// half of the work and not an optional extra.
     ///
     /// `f` returns [`ItemUseState`]. Its `using`/`ticks` pair is the live item-use
-    /// state; its `eat` field is vanilla's `getUseItemRemainingTicks() -
+    /// state; its `eat` field is vanilla's `get_use_item_remaining_ticks() -
     /// frameInterp + 1.0F` paired with the item's own consumable-consume-ticks component.
     ///
     /// **Re-install it every frame**, for the same reason
@@ -1836,7 +1836,7 @@ impl RenderState {
     /// Install the source for this frame's campfire cooking items.
     ///
     /// Clock-free like [`set_lectern_source`](Self::set_lectern_source), and for a
-    /// stronger reason: `CampfireRenderer` has no animation whatsoever — the flame
+    /// stronger reason: the campfire renderer has no animation whatsoever — the flame
     /// flicker belongs to the block model's animated texture, and the NBT's
     /// `CookingTimes` drive nothing on the client.
     ///
@@ -1902,11 +1902,11 @@ impl RenderState {
     }
 
     /// Install the source for this frame's moving pistons — vanilla's
-    /// `PistonHeadRenderer`.
+    /// The piston head renderer.
     ///
     /// **Must be re-installed every frame**, and the failure mode is worse than
     /// any other source's here: a whole push lasts *two* ticks
-    /// (`PistonMovingBlockEntity.TICKS_TO_EXTEND`), and a stale closure pins
+    /// (the piston moving block entity's ticks to extend), and a stale closure pins
     /// `progress` at 0, which draws the head one full cell back **inside** the
     /// piston base rather than merely freezing it.
     ///

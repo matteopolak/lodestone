@@ -30,17 +30,17 @@
 //!   original sender signed it.
 //! * **No `chat_ack`/last-seen bookkeeping.** Both are consequences of the
 //!   point above: since this server never sends a signed `player_chat`,
-//!   nothing built with `LastSeenMessages` from other players ever appears
+//!   nothing built with the last seen messages from other players ever appears
 //!   on the wire, so a real client's own outgoing last-seen window stays
 //!   permanently empty (`offset=0`, an all-zero bit set, checksum `0` —
-//!   vanilla's own `LastSeenMessages.Update.EMPTY`/`IGNORE_CHECKSUM`
+//!   vanilla's own last seen messages's update.EMPTY/`IGNORE_CHECKSUM`
 //!   shape). [`decide`] relies on exactly this: it always verifies against an
 //!   empty `last_seen` list rather than reconstructing one from a signature
 //!   cache this crate does not keep.
 //! * **Out-of-order timestamp rejection and the `MISSING_PROFILE_KEY` case
 //!   for a signature with no announced session** are folded into the same
 //!   "reject, do not disconnect" path rather than modelled as separate
-//!   vanilla `DecodeException` variants — see [`ChatDecision`]'s own doc.
+//!   vanilla decode exception variants — see [`ChatDecision`]'s own doc.
 //!
 //! ## How to change it
 //!
@@ -76,10 +76,10 @@
 use uuid::Uuid;
 
 /// One connection's announced chat-signing session
-/// (`ServerboundChatSessionUpdatePacket` → `RemoteChatSession.Data`), plus the
+/// (chat-session-update packet → `RemoteChatSession.Data`), plus the
 /// verification chain position this server tracks against it.
 ///
-/// Mirrors `SignedMessageChain`'s `nextLink` cursor, narrowed to what a
+/// Mirrors the signed message chain's `nextLink` cursor, narrowed to what a
 /// verifier (rather than an encoder) needs: this struct only ever checks a
 /// signature against `next_index`, it never produces one.
 #[derive(Debug, Clone)]
@@ -89,14 +89,14 @@ pub struct ServerChatSession {
     public_key_der: Vec<u8>,
     /// Next expected `SignedMessageLink.index`. `None` once the chain is
     /// broken (an invalid or out-of-order signature), mirroring
-    /// `SignedMessageChain.Decoder::setChainBroken` — a broken chain stays
+    /// The signed message chain's decoder::set_chain_broken — a broken chain stays
     /// broken until a fresh `chat_session_update` replaces this session
     /// wholesale, exactly like vanilla's `resetPlayerChatState` swapping the
     /// whole `signedMessageDecoder` rather than repairing one.
     next_index: Option<i32>,
     /// Timestamp of the most recent signed body this session accepted.
     ///
-    /// Starts at the Unix epoch, matching `SignedMessageChain`'s
+    /// Starts at the Unix epoch, matching signed message chain's
     /// `Instant.EPOCH`; a signed body older than this breaks the chain rather
     /// than being accepted out of order.
     last_timestamp_millis: i64,
@@ -160,7 +160,7 @@ pub fn adopt_announced_session(
 
 /// The outcome of folding one incoming `chat` packet through the sender's
 /// announced session (or lack of one). Narrower than vanilla's
-/// `SignedMessageChain.DecodeException`'s five named cases — everything that
+/// The signed message chain's decode exception's five named cases — everything that
 /// is not a clean accept collapses into [`Reject`](Self::Reject) with a
 /// human-readable reason, since this crate's own `encode_system_chat` takes
 /// plain text rather than a translation key (see `ServerBound::Chat`'s own
@@ -194,12 +194,12 @@ pub enum ChatDecision {
 /// Decides what to do with one incoming `chat` packet, given (and possibly
 /// updating) the sender's announced session.
 ///
-/// Mirrors `ServerGamePacketListenerImpl.handleChat` →
-/// `SignedMessageChain.Decoder.unpack`, narrowed as this module's own doc
+/// Mirrors the server game packet listener impl's handle chat →
+/// The signed message chain's decoder.unpack, narrowed as this module's own doc
 /// describes. The four vanilla branches this reproduces, in the same order
 /// vanilla checks them:
 ///
-/// 1. No session announced yet: `SignedMessageChain.Decoder.unsigned` —
+/// 1. No session announced yet: the signed message chain's decoder.unsigned —
 ///    accept unsigned when `enforce_secure_profile` is off, otherwise reject
 ///    regardless of whether a signature happens to be present (there is
 ///    nothing to check it against).
@@ -287,7 +287,7 @@ fn verify(
         session_id: session.session_id,
     };
     // The signed payload is built over epoch **seconds**
-    // (`SignedMessageBody.updateSignature`); the wire packet's own timestamp
+    // (the signed message body's update signature); the wire packet's own timestamp
     // is epoch milliseconds — see `lodestone_auth::build_signature_payload`'s
     // doc for this exact hazard, already caught once on the client side.
     let timestamp_seconds = timestamp_millis / 1000;

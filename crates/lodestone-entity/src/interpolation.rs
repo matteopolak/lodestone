@@ -27,7 +27,7 @@ pub fn lerp_vec3(a: Vec3, b: Vec3, t: f64) -> Vec3 {
 }
 
 /// Interpolates two rotations along the shortest arc, matching
-/// `Mth.rotLerp`: the delta is wrapped into `[-180, 180)` before blending so a
+/// Mth's rot lerp: the delta is wrapped into `[-180, 180)` before blending so a
 /// yaw crossing the `±180` seam does not spin the long way around.
 #[must_use]
 pub fn lerp_rotation(a: Rotation, b: Rotation, t: f32) -> Rotation {
@@ -37,7 +37,7 @@ pub fn lerp_rotation(a: Rotation, b: Rotation, t: f32) -> Rotation {
     )
 }
 
-/// Wraps an angle in degrees into `[-180, 180)`, matching `Mth.wrapDegrees`.
+/// Wraps an angle in degrees into `[-180, 180)`, matching Mth's wrap degrees.
 #[must_use]
 pub fn wrap_degrees(mut degrees: f32) -> f32 {
     degrees %= 360.0;

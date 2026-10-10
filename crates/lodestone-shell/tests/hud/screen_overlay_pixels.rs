@@ -515,7 +515,7 @@ fn fire_overlay_reaches_its_predicted_extent_through_render_with_effects() {
 }
 
 /// Spectator mode suppresses both overlays even when both flags are set,
-/// matching vanilla's `!this.minecraft.player.isSpectator()` gate in
+/// matching vanilla's `!this.minecraft.player.is_spectator()` gate in
 /// `ScreenEffectRenderer.submit`.
 #[test]
 #[ignore = "requires a GPU adapter"]

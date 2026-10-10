@@ -32,7 +32,7 @@
 //! `oracle-java/BlockEntityTypeOracle.java` for why
 //! vanilla's own block-entity-type "is valid" check is the faithful way to
 //! recover it (it *is*
-//! `validBlocks.contains(state.getBlock())`, the very set the block's
+//! `validBlocks.contains(state.get_block())`, the very set the block's
 //! own "new block entity" owner was registered with) rather than constructing
 //! 32,366 live block-entity objects.
 //!

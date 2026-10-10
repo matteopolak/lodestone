@@ -7,7 +7,7 @@ impl MenuNav {
     /// move the selection to a different one.
     ///
     /// A **disabled** row is still hovered, matching vanilla exactly:
-    /// `AbstractWidget::extractRenderState` sets `isHovered` from geometry alone
+    /// The abstract widget's extract render state sets `isHovered` from geometry alone
     /// and never consults `active`, while
     /// `WidgetSprites::get(active, focused)` returns `button_disabled` whichever
     /// way `focused` went — so a greyed-out button
@@ -84,7 +84,7 @@ impl MenuNav {
             // `render::frame_for` builds its rows from.
             //
             // Key Binds is a sub-page of this same `Screen`, and it
-            // is not an `OptionsList` page — see `SettingsPage::KeyBinds`'s own
+            // is not an options list page — see `SettingsPage::KeyBinds`'s own
             // doc — so its row indices are `KeyBindsNav::visible`'s, a
             // different list from `SettingsNav::visible`. Guarded ahead of the
             // plain arm below rather than inside it, matching how `hover_list`
@@ -185,7 +185,7 @@ impl MenuNav {
     }
 
     /// Set the slider at visible `row` from a track `fraction` — vanilla's
-    /// `AbstractSliderButton.setValueFromMouse`, reached from both the initial
+    /// The abstract slider button's set value from mouse, reached from both the initial
     /// click and every subsequent drag position.
     ///
     /// Returns `true` when it was applied. `false` means "not a draggable
@@ -243,8 +243,8 @@ impl MenuNav {
                 // Enter/Escape so the two paths cannot disagree.
                 DONE_ROW => self.save_entry(ui),
                 CANCEL_ROW => self.cancel_edit(ui),
-                // `ManageServerScreen`'s `manageServer.resourcePack`
-                // `CycleButton` — see `RESOURCE_PACK_ROW`'s doc.
+                // The manage server screen's `manageServer.resourcePack`
+                // The cycle button — see `RESOURCE_PACK_ROW`'s doc.
                 RESOURCE_PACK_ROW => {
                     self.form.cycle_pack_status();
                     MenuAction::None
@@ -335,7 +335,7 @@ impl MenuNav {
             return MenuAction::None;
         }
         // The fourth. A click on a *row* here is
-        // `AbstractSelectionList.mouseClicked` — it selects, and only the favicon's
+        // The abstract selection list's mouse clicked — it selects, and only the favicon's
         // quadrants act — while a click above the rows is one of seven buttons.
         // Routing it as `hover` + `Enter` would join a server on any click on its
         // row, which vanilla reserves for the join icon and the double-click.
@@ -436,7 +436,7 @@ impl MenuNav {
     /// This used to set `self.server`, so the 1 px row outline followed the mouse
     /// and a server could not stay selected while the cursor travelled to Join. A
     /// player reported it immediately. Vanilla reaches
-    /// `AbstractSelectionList.setSelected` only from `setFocused`
+    /// The abstract selection list's set selected only from `setFocused`
     /// and the click paths — never from
     /// hover; vanilla's own server-selection list rendering shows what hover *does* draw,
     /// which is a `fill(…, -1601138544)` scrim over the 32 px favicon plus the
@@ -461,7 +461,7 @@ impl MenuNav {
 
     /// [`Self::click`]'s multiplayer arm.
     ///
-    /// The row half is `OnlineServerEntry.mouseClicked`
+    /// The row half is the online server entry's mouse clicked
     /// in vanilla's own order: the join
     /// quadrant first, then the two move quadrants with their index guards, and
     /// **selection last** — a plain click selects and does not join.
@@ -528,7 +528,7 @@ impl MenuNav {
             return MenuAction::None;
         };
         self.list_button = Some(row - self.list.len());
-        // `AbstractWidget.mouseClicked` returns false for an inactive widget, so
+        // The abstract widget's mouse clicked returns false for an inactive widget, so
         // an inactive button swallows the click — the same rule `key_main` applies
         // to a disabled title-screen button.
         if !button.enabled(!self.list.is_empty()) {
@@ -538,11 +538,11 @@ impl MenuNav {
     }
 
     /// Reorders the list and persists it — vanilla's
-    /// `OnlineServerEntry.swap`, which is `servers.swap` then `servers.save`
+    /// The online server entry's swap, which is `servers.swap` then `servers.save`
     /// (vanilla's own server-selection list rendering, `:434-436`).
     ///
     /// The selection **follows the row**, matching vanilla's
-    /// `scrollToEntry(children.get(newIndex))`: the entry the player grabbed stays
+    /// scroll to entry: the entry the player grabbed stays
     /// the selected one, so a second click on the same arrow keeps moving it.
     pub(super) fn swap_rows(&mut self, from: usize, to: usize) -> MenuAction {
         if !self.list.swap(from, to) {

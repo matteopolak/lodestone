@@ -32,7 +32,7 @@
 //! The expected figure is **bracketed on both sides**, and both bounds are
 //! projected mechanically through the *same* [`Camera::view_projection`] this
 //! test's own render call uses, from the real baked wing quads
-//! ([`ElytraMesh::load`], not a remembered `ElytraModel` box literal) posed by
+//! ([`ElytraMesh::load`], not a remembered elytra model box literal) posed by
 //! the real [`elytra_wing_transform`] on the real resolved `"body"` matrix.
 //! Each wing is a closed convex box, so summing the projected (shoelace) area
 //! of its front-facing quads gives its exact screen silhouette — and summing
@@ -193,8 +193,8 @@ fn a_mob_wearing_an_elytra_draws_wings_the_same_mob_bare_does_not() {
         block_state: None,
         item_frame_rotation: 0,
         id: 1,
-        // A zombie rather than a player: `WingsLayer` sits on
-        // `HumanoidMobRenderer` as well as `AvatarRenderer`, so a mob in an
+        // A zombie rather than a player: the wings layer sits on
+        // The humanoid mob renderer as well as the avatar renderer, so a mob in an
         // elytra really does grow wings in vanilla — and using one keeps this
         // gate off the remote-skin fetch path entirely.
         type_path: std::sync::Arc::from("zombie"),

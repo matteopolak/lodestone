@@ -1,7 +1,7 @@
 //! The book-and-quill editing screen: vanilla's own book-edit screen and
 //! book-sign screen — the
 //! `EditBook` remainder. See `docs/book-editing.md` for the server-side half
-//! (`ServerboundEditBookPacket`'s slot addressing) that already existed
+//! (edit-book packet's slot addressing) that already existed
 //! before this module; this is the client-side producer that packet had none
 //! of.
 //!
@@ -9,8 +9,8 @@
 //!
 //! One [`BookEditState`], covering both of vanilla's two screens with a
 //! `signing` flag rather than two separate [`super::Screen`] variants —
-//! `BookSignScreen` in vanilla is reached from exactly one place
-//! (`BookEditScreen`'s Sign button) and returns to exactly one place (its own
+//! The book sign screen in vanilla is reached from exactly one place
+//! (the book edit screen's Sign button) and returns to exactly one place (its own
 //! Cancel button), so the pair is really one flow with two layouts, and
 //! folding them into one state avoids duplicating the slot/pages/hand fields
 //! every producer of [`lodestone_model::ClientAction::EditBook`] needs
@@ -19,8 +19,8 @@
 //! ## The page editor is [`super::text_area::TextArea`], the title is
 //! [`super::edit_box::EditBox`]
 //!
-//! Vanilla's `BookEditScreen.page` is a `MultiLineEditBox` (word-wrapping,
-//! multi-line); `BookSignScreen.titleBox` is a plain single-line `EditBox`.
+//! Vanilla's book edit screen's page is a multi line edit box (word-wrapping,
+//! multi-line); the book sign screen's title box is a plain single-line `EditBox`.
 //! This module reaches for the matching widget on each side rather than
 //! inventing a book-specific one — see [`super::text_area`]'s own module doc
 //! for why *it* had to be built (nothing multi-line existed anywhere in this
@@ -44,16 +44,16 @@
 //!   exactly as they do in the chat box.
 //! - **No pseudo-3D book mesh.** Same simplification `sign_edit`'s own
 //!   module doc names for signs: the page text draws as plain 2D labels, not
-//!   `BookViewScreen`'s curved-page render.
+//!   The book view screen's curved-page render.
 //! - **Only `minecraft:writable_book` opens this screen.** A signed
-//!   `minecraft:written_book` opens vanilla's **read-only** `BookViewScreen`
+//!   `minecraft:written_book` opens vanilla's **read-only** book view screen
 //!   instead, which sends nothing on the wire at all — out of scope for
 //!   `EditBook` producer, which is specifically about the
 //!   *editable* book.
 //!
 //! ## `saveChanges`'s slot addressing
 //!
-//! `hand == MAIN_HAND ? owner.getInventory().getSelectedSlot() : 40` — the
+//! `hand == MAIN_HAND ? owner.get_inventory().get_selected_slot() : 40` — the
 //! **inventory** index (hotbar `0..=8`, not a container-native `36..=44`),
 //! matching `docs/book-editing.md`'s own note that the server reads this
 //! slot directly off `PlayerInventory`, not off a decoded `ItemStack`.
@@ -71,14 +71,14 @@ use super::edit_box::EditBox;
 use super::focus::KeyEvent;
 use super::text_area::TextArea;
 
-/// `WritableBookContent`'s own cap (`WritableBookContent.PAGE_EDIT_LENGTH`
-/// is per-page; this is the *page count* cap, `BookEditScreen.
+/// The writable book content's own cap (the writable book content's page edit length
+/// is per-page; this is the *page count* cap, the book edit screen.
 /// appendPageToBook`'s bare `100`).
 pub const MAX_PAGES: usize = 100;
-/// `MultilineTextField`'s character-limit argument in `BookEditScreen.init`
-/// (`this.page.setCharacterLimit(1024)`).
+/// The multiline text field's character-limit argument in the book edit screen's init
+/// (page's set character limit).
 pub const PAGE_CHAR_LIMIT: usize = 1024;
-/// `BookEditScreen.init`'s `this.page.setLineLimit(126 / 9)` — vanilla's
+/// The book edit screen's init's page's set line limit — vanilla's
 /// `TEXT_HEIGHT / lineHeight`.
 pub const PAGE_LINE_LIMIT: usize = 126 / 9;
 /// The page text area's word-wrap width, in `char`s — see
@@ -87,18 +87,18 @@ pub const PAGE_LINE_LIMIT: usize = 126 / 9;
 /// `[`super::edit_box::MENU_TEXT_ADVANCE`]`` so a wrap at this shell's own
 /// fixed advance lands close to where vanilla's real font would.
 pub const PAGE_WRAP_CHARS: usize = 19;
-/// `BookSignScreen.titleBox`'s `setMaxLength(15)`.
+/// The book sign screen's title box's `setMaxLength(15)`.
 pub const TITLE_MAX_LENGTH: usize = 15;
 
 /// What opening this screen needs: which inventory slot to save back to
 /// (already in `saveChanges`'s shape — see the module doc), the book's
-/// current draft pages (`WritableBookContent.getPages`, or a single empty
-/// page for a freshly crafted book — `BookEditScreen`'s own
+/// current draft pages (the writable book content's get pages, or a single empty
+/// page for a freshly crafted book — the book edit screen's own
 /// `if (this.pages.isEmpty()) { this.pages.add(""); }`), and the signing
 /// player's plain-text name for the "by `<name>`" line signing shows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BookEditOpen {
-    /// `ServerboundEditBookPacket.slot` — see the module doc.
+    /// Edit-book packet.slot — see the module doc.
     pub slot: i32,
     /// The book's current pages, in order. Never empty by the time this
     /// reaches [`BookEditState::new`] — see [`BookEditState::new`]'s own
@@ -120,20 +120,20 @@ pub struct BookEditState {
     pages: Vec<String>,
     /// Index into [`Self::pages`] the player is currently viewing/editing.
     current_page: usize,
-    /// The current page's live text-area widget — `BookEditScreen.page`.
+    /// The current page's live text-area widget — the book edit screen's page.
     pub page: TextArea,
     /// `true` while [`Screen::BookSign`]'s layout (title entry) is showing
     /// instead of the page editor — see the module doc on why this is a flag
     /// rather than a second screen.
     pub signing: bool,
-    /// `BookSignScreen.titleBox`. Built once, up front, rather than only on
-    /// first entering signing mode: vanilla's own `BookSignScreen` instance
+    /// The book sign screen's title box. Built once, up front, rather than only on
+    /// first entering signing mode: vanilla's own book sign screen instance
     /// (and therefore its `titleBox`'s contents) is constructed once in
-    /// `BookEditScreen`'s constructor and persists across Sign/Cancel
+    /// The book edit screen's constructor and persists across Sign/Cancel
     /// round-trips within one edit session, which this mirrors by simply
     /// never resetting the field.
     pub title: EditBox,
-    /// `BookSignScreen`'s own translatable-component construction for
+    /// The book sign screen's own translatable-component construction for
     /// "book.byAuthor" over the owner's name — kept as the plain player name rather than the
     /// pre-formatted string, so [`Self::author_line`] can format it once
     /// where every consumer already expects a plain string (`MenuLabel`,
@@ -151,7 +151,7 @@ impl BookEditState {
     /// `open.pages` is used verbatim if non-empty; an empty list (a freshly
     /// crafted, never-edited `minecraft:writable_book`, which carries no
     /// `writable_book_content` component at all) becomes a single empty
-    /// page — `BookEditScreen`'s own fallback, quoted in the module doc.
+    /// page — the book edit screen's own fallback, quoted in the module doc.
     #[must_use]
     pub fn new(open: BookEditOpen) -> Self {
         let pages = if open.pages.is_empty() {
@@ -189,15 +189,15 @@ impl BookEditState {
         (self.current_page + 1, self.pages.len())
     }
 
-    /// `BookSignScreen`'s `"book.byAuthor"` line, pre-formatted.
+    /// The book sign screen's `"book.byAuthor"` line, pre-formatted.
     #[must_use]
     pub fn author_line(&self) -> String {
         format!("by {}", self.author)
     }
 
     /// Writes [`Self::page`]'s live value back into [`Self::pages`] at
-    /// [`Self::current_page`] — `MultilineTextField`'s
-    /// `setValueListener(value -> this.pages.set(this.currentPage, value))`,
+    /// [`Self::current_page`] — the multiline text field's
+    /// set value listener,
     /// called explicitly here (this shell has no value-changed callback
     /// hook) rather than on every keystroke.
     fn sync_current_page(&mut self) {
@@ -211,7 +211,7 @@ impl BookEditState {
         self.page.set_value(&text, true);
     }
 
-    /// `pageBack()`.
+    /// page back.
     pub fn page_back(&mut self) {
         if self.current_page > 0 {
             self.sync_current_page();
@@ -235,7 +235,7 @@ impl BookEditState {
         self.reload_page();
     }
 
-    /// The Sign button: `this.minecraft.gui.setScreen(this.signScreen)`.
+    /// The Sign button: gui's set screen.
     /// Syncs the current page first, the same way [`Self::to_save_action`]
     /// does, so a page mid-edit is not lost switching layouts.
     pub fn begin_sign(&mut self) {
@@ -249,7 +249,7 @@ impl BookEditState {
         self.signing = false;
     }
 
-    /// Whether the Finalize button is active — `titleBox.setResponder(value
+    /// Whether the Finalize button is active — `titleBox.set_responder(value
     /// -> finalizeButton.active = !isBlank)`, where `isBlank` is vanilla's own
     /// string-util is-blank check applied to `value`.
     #[must_use]
@@ -257,7 +257,7 @@ impl BookEditState {
         !self.title.value().trim().is_empty()
     }
 
-    /// `eraseEmptyTrailingPages()`: pop every empty page off the end.
+    /// erase empty trailing pages: pop every empty page off the end.
     /// Vanilla's own `ListIterator`-based loop can empty the list to zero
     /// pages if every page is blank; this is reproduced rather than
     /// guarded, since the server is authoritative over the result either way.
@@ -267,9 +267,9 @@ impl BookEditState {
         }
     }
 
-    /// `saveChanges()` with no title — the page editor's Done button.
+    /// save changes with no title — the page editor's Done button.
     /// Syncs the current page and trims trailing empty pages first, matching
-    /// `saveChanges`'s own order (`eraseEmptyTrailingPages()` before
+    /// `saveChanges`'s own order (erase empty trailing pages before
     /// building the packet).
     ///
     /// Returns a [`BookEditSubmit`] rather than a

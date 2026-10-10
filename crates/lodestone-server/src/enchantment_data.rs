@@ -61,9 +61,9 @@ use lodestone_model::ItemStack;
 pub struct EnchantmentDef {
     /// Full key, e.g. `"minecraft:sharpness"`.
     pub key: &'static str,
-    /// `Enchantment.EnchantmentDefinition.weight` — the table's weighted-random pick weight.
+    /// The enchantment's enchantment definition's weight — the table's weighted-random pick weight.
     pub weight: u32,
-    /// `Enchantment.getMaxLevel()`. `getMinLevel()` is always `1` in 26.2.
+    /// Enchantment's get max level. get min level is always `1` in 26.2.
     pub max_level: u32,
     /// `Enchantment.Cost.calculate` for `min_cost`: `base + per_level * (level - 1)`.
     pub min_cost_base: i32,
@@ -71,7 +71,7 @@ pub struct EnchantmentDef {
     /// Same shape for `max_cost`.
     pub max_cost_base: i32,
     pub max_cost_per: i32,
-    /// `Enchantment.getAnvilCost()` — the anvil's per-level XP fee multiplier.
+    /// Enchantment's get anvil cost — the anvil's per-level XP fee multiplier.
     pub anvil_cost: u32,
     /// `#minecraft:curse` membership (`binding_curse`, `vanishing_curse`).
     pub curse: bool,
@@ -79,7 +79,7 @@ pub struct EnchantmentDef {
     /// weighted pool (`#minecraft:in_enchanting_table` is `#minecraft:non_treasure`)
     /// but still applicable via an anvil + enchanted book.
     pub treasure: bool,
-    /// `Enchantment.EnchantmentDefinition.supportedItems` (`canEnchant`/`isSupportedItem`).
+    /// The enchantment's enchantment definition's supported items (`canEnchant`/`isSupportedItem`).
     pub supported: SupportedItems,
 }
 
@@ -206,7 +206,7 @@ fn is_durability(item: &str) -> bool {
 }
 
 impl SupportedItems {
-    /// `Enchantment.canEnchant`/`isSupportedItem` — is `item` in this tag.
+    /// Enchantment's can enchant/`isSupportedItem` — is `item` in this tag.
     #[must_use]
     pub fn matches(self, item: &str) -> bool {
         match self {
@@ -314,7 +314,7 @@ pub static ENCHANTMENTS: &[EnchantmentDef] = &[
 ];
 
 /// The seven `#minecraft:enchantment/exclusive_set/*` tags — enchantments that
-/// cannot coexist on the same item (`Enchantment.areCompatible`).
+/// cannot coexist on the same item (Enchantment's are compatible).
 static EXCLUSIVE_SETS: &[&[&str]] = &[
     &[
         "minecraft:protection",
@@ -344,19 +344,19 @@ pub fn by_key(key: &str) -> Option<&'static EnchantmentDef> {
     ENCHANTMENTS.iter().find(|e| e.key == key)
 }
 
-/// `Enchantment.getMinCost(level)`.
+/// Enchantment's get min cost.
 #[must_use]
 pub fn min_cost(e: &EnchantmentDef, level: u32) -> i32 {
     e.min_cost_base + e.min_cost_per * (level as i32 - 1)
 }
 
-/// `Enchantment.getMaxCost(level)`.
+/// Enchantment's get max cost.
 #[must_use]
 pub fn max_cost(e: &EnchantmentDef, level: u32) -> i32 {
     e.max_cost_base + e.max_cost_per * (level as i32 - 1)
 }
 
-/// `Enchantment.areCompatible(a, b)`: same enchantment is never "compatible"
+/// Enchantment's are compatible: same enchantment is never "compatible"
 /// with itself, and two different enchantments are incompatible exactly when
 /// either names the other in its exclusive set.
 #[must_use]
@@ -495,7 +495,7 @@ pub fn enchantable_value(item: &str) -> Option<u32> {
     }
 }
 
-/// `ItemStack.isEnchantable()`: the item has a `minecraft:enchantable`
+/// ItemStack's is enchantable: the item has a `minecraft:enchantable`
 /// prototype value **and** carries no enchantment yet — `input.components.enchantments`
 /// must be empty (an already-enchanted item is never a valid table/anvil-book
 /// target for a *fresh* enchant; the anvil's separate combine path handles
@@ -505,7 +505,7 @@ pub fn is_enchantable(item: &ItemStack) -> bool {
     enchantable_value(&item.item.to_string()).is_some() && item.components.enchantments.is_empty()
 }
 
-/// `EnchantmentHelper.canStoreEnchantments` — an item that can carry the
+/// The enchantment helper's can store enchantments — an item that can carry the
 /// `minecraft:enchantments` (or `minecraft:stored_enchantments` for a book)
 /// component at all. In 26.2 this is "is enchantable, or is already an
 /// enchanted book" — the anvil's `input` slot accepts either.
@@ -552,7 +552,7 @@ mod tests {
         }
     }
 
-    /// `AnvilMenu`'s exclusive-set gate: sharpness and smite must conflict,
+    /// The anvil menu's exclusive-set gate: sharpness and smite must conflict,
     /// but sharpness and unbreaking (unrelated sets) must not — a fixture
     /// where the "always incompatible" and "always compatible" hypotheses
     /// give the same answer would not test the exclusive-set lookup at all.

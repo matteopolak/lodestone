@@ -487,8 +487,8 @@ fn a_zombie_holds_its_arms_out_in_front() {
         );
     };
     let flat = flat_sheet();
-    // `from_named_model` picks the `AbstractZombieModel` rig; `from_model` is the
-    // plain `HumanoidModel` one, i.e. exactly the arms-down build being fixed.
+    // `from_named_model` picks the zombie-family rig; `from_model` is the
+    // plain humanoid one, i.e. exactly the arms-down build being fixed.
     let arms_out = EntityMesh::from_named_model("zombie", &zombie_model());
     let arms_down = EntityMesh::from_model(&zombie_model());
 

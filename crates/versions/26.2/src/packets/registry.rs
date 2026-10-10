@@ -411,7 +411,7 @@ pub struct ClientRegistries {
     /// unresolvable dimension.
     dimension_types: Vec<(String, Option<DimensionType>)>,
     /// `minecraft:world_clock` names, in registry order. The values are unit
-    /// compounds (`WorldClock` is `record WorldClock()`), so the name *is* the
+    /// compounds (a world clock is an empty record), so the name *is* the
     /// whole content.
     world_clocks: Vec<String>,
     /// `minecraft:worldgen/biome` sky colours, in registry order: index `i` is
@@ -745,7 +745,7 @@ fn field<'a>(fields: &'a [(String, Nbt)], name: &str) -> Option<&'a Nbt> {
 }
 
 /// Reads a required NBT boolean. Booleans are `Byte` tags; any nonzero byte is
-/// `true`, matching `vanilla's own codec's own bool` over `NbtOps`.
+/// `true`, matching the game's bool codec over NBT.
 fn required_bool(fields: &[(String, Nbt)], name: &str) -> Result<bool> {
     optional_bool(fields, name)?.ok_or_else(|| missing(name))
 }
@@ -759,7 +759,7 @@ fn optional_bool(fields: &[(String, Nbt)], name: &str) -> Result<Option<bool>> {
 }
 
 /// Reads a required integral field. `Byte`/`Short`/`Int` are all accepted
-/// because `NbtOps::getNumberValue` is width-agnostic — a server (or a data
+/// because the NBT number getter is width-agnostic — a server (or a data
 /// pack) writing `min_y` as a short is legal input, not a protocol error.
 fn required_i32(fields: &[(String, Nbt)], name: &str) -> Result<i32> {
     match field(fields, name).ok_or_else(|| missing(name))? {

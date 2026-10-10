@@ -54,7 +54,7 @@ const SIGN: [i32; 3] = [0, 0, 2];
 /// colour". Matches the other block-entity pixel gates.
 const NON_SKY: i32 = 60;
 
-/// Vanilla's `SignBlockEntity.MAX_TEXT_LINE_WIDTH` — the real constant that
+/// Vanilla's sign block entity's max text line width — the real constant that
 /// bounds how wide one line's local-space glyphs can be, used here only to
 /// size a generous expected rect, not to wrap anything.
 /// (Kept for the plain-sign rect; the hanging gate reads
@@ -181,7 +181,7 @@ fn project(view_proj: glam::Mat4, world: glam::Vec3) -> (f32, f32) {
 /// The generous screen rect one text side's local plane can possibly occupy —
 /// see the module doc for why this bounds the whole plane rather than one
 /// line's actual ink. `x` in `±MAX_TEXT_LINE_WIDTH / 2`, `y` in
-/// `±2 * TEXT_LINE_HEIGHT` (four lines, `AbstractSignRenderer`'s own
+/// `±2 * TEXT_LINE_HEIGHT` (four lines, the abstract sign renderer's own
 /// `signMidpoint` split evenly above and below centre — the same expression
 /// `gpu/sign_text.rs::push_side_quads` computes it with, transcribed here
 /// rather than imported because that function is private to the shell
@@ -224,7 +224,7 @@ fn expected_text_rect(
     }
 }
 
-/// A sign facing the camera (rotation segment 0 is north, `RotationSegment`'s
+/// A sign facing the camera (rotation segment 0 is north, the rotation segment's
 /// own convention — see `lodestone_render::sign`'s module doc); the camera
 /// sits south of it and looks north (`+Z` is the block's own... actually the
 /// camera looks toward `+Z`, matching every other block-entity gate's own

@@ -130,9 +130,8 @@ impl BossBarOverlay {
 
     /// The GUI atlas sprite id for this overlay's **background** notch art, or
     /// `None` for [`BossBarOverlay::Progress`] — vanilla's
-    /// `BossHealthOverlay.extractBar` only blits an overlay sprite when
-    /// `event.getOverlay() != BossEvent.BossBarOverlay.PROGRESS`
-    /// (`.cache/mc/26.2/client-src`), so the plain progress style draws no
+    /// boss-bar renderer only blits an overlay sprite for a notched overlay,
+    /// so the plain progress style draws no
     /// notch layer at all. Drawn on top of the background colour plate, at the
     /// bar's **full** native width (unlike the progress-side twin, which is
     /// clipped to the health fraction).
@@ -421,9 +420,8 @@ mod sprite_id_tests {
     }
 
     /// The `Progress` overlay style is vanilla's "no notch art" case —
-    /// `BossHealthOverlay.extractBar` only blits an overlay sprite when
-    /// `event.getOverlay() != BossEvent.BossBarOverlay.PROGRESS`
-    /// (`.cache/mc/26.2/client-src`) — and every notched style must resolve to
+    /// the boss-bar renderer only blits an overlay sprite for a notched overlay —
+    /// and every notched style must resolve to
     /// a distinct pair, one per `OVERLAY_BACKGROUND_SPRITES`/
     /// `OVERLAY_PROGRESS_SPRITES` entry.
     #[test]

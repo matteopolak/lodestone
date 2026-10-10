@@ -11,7 +11,7 @@
 //! `tests/fixtures/command_tree_creative.hex` is 30,248 bytes of real
 //! `minecraft:commands` payload captured from a vanilla 26.2 server by
 //! `tests/live_command_tree.rs` — 2,017 nodes, authored by Mojang's own
-//! `ClientboundCommandsPacket::write` through their own `ArgumentTypeInfo`s.
+//! the commands packet's writer through their own argument-type serialisers.
 //!
 //! [`vanilla_bytes_reencode_byte_identically`] decodes that payload and encodes it
 //! again, and requires the result to be **byte-identical to the capture**. The
@@ -209,10 +209,10 @@ fn a_corrupted_tree_does_not_reencode_to_vanillas_bytes() {
 #[test]
 fn the_two_parsers_the_capture_never_uses_still_carry_their_registry_ids() {
     for (parser, id, payload_len) in [
-        // `LongArgumentInfo`: a flags byte then only the present bounds, so a
+        // Long argument info: a flags byte then only the present bounds, so a
         // both-bounds template is 1 + 8 + 8 bytes.
         (ArgumentParser::Long { min: -5, max: 9 }, 4u8, 17usize),
-        // `SingletonArgumentInfo`: no payload at all.
+        // Singleton argument info: no payload at all.
         (ArgumentParser::Angle, 28u8, 0usize),
     ] {
         let tree = CommandTree::new(
@@ -254,7 +254,7 @@ fn the_two_parsers_the_capture_never_uses_still_carry_their_registry_ids() {
     }
 }
 
-/// The one field order in `ArgumentNodeStub::write` that cannot be guessed from
+/// The one field order in the argument-node writer that cannot be guessed from
 /// field names: the custom-suggestions identifier is written **after** the
 /// parser's payload, not before it.
 ///
@@ -291,14 +291,14 @@ fn an_argument_nodes_suggestions_id_is_written_after_its_parser_payload() {
         0x03,                                     // writeVarInt(3) — three entries
         // entry 0: TYPE_ARGUMENT(2) | EXECUTABLE(4) | REDIRECT(8) | CUSTOM_SUGGESTIONS(16) | RESTRICTED(32)
         0x3e,
-        0x01, 0x02,                               // writeVarIntArray([2])
+        0x01, 0x02,                               // write var int array
         0x01,                                     // writeVarInt(redirect = 1), present only under FLAG_REDIRECT
-        0x07, b't', b'a', b'r', b'g', b'e', b't', b's', // writeUtf("targets")
+        0x07, b't', b'a', b'r', b'g', b'e', b't', b's', // write utf
         0x06,                                     // parser id 6 = minecraft:entity
-        0x03,                                     // vanilla's own entity argument's own info: single | playersOnly << 1
+        0x03,                                     // entity argument info: single | players-only << 1
         0x14, b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':',
               b'a', b's', b'k', b'_', b's', b'e', b'r', b'v', b'e', b'r', // writeIdentifier, AFTER the payload
-        // entries 1 and 2: TYPE_LITERAL, no children, no redirect, writeUtf("x")
+        // entries 1 and 2: TYPE_LITERAL, no children, no redirect, write utf
         0x01, 0x00, 0x01, b'x',
         0x01, 0x00, 0x01, b'x',
         0x00,                                     // writeVarInt(rootIndex = 0)
@@ -367,7 +367,7 @@ fn an_unmodeled_parser_id_degrades_only_its_own_node() {
 
 /// Most built-in roots are level-gated, but three are deliberately ungated —
 /// `help.rs`'s `HELP_LEVEL` and `chat_commands.rs`'s `ME_LEVEL`/`MSG_LEVEL` are
-/// all `0`, matching vanilla's `HelpCommand`/`EmoteCommand`/`MessageCommand`
+/// all `0`, matching the help, emote and message commands'
 /// permission levels — so a level-0 player's tree is the root plus those three
 /// subtrees, and the counts are predicted, not compared.
 ///
@@ -419,13 +419,13 @@ fn permission_pruning_predicts_both_ends_exactly() {
     assert_eq!(round_tripped, nobody);
 }
 
-/// Pruning is by **subtree**, matching `vanilla's own commands's own fill usable commands`' recursion
-/// sitting inside the `canUse` branch — and the surviving indices are renumbered
+/// Pruning is by **subtree**, matching the usable-commands fill' recursion
+/// sitting inside the can-use branch — and the surviving indices are renumbered
 /// against the pruned list rather than left pointing into the unfiltered arena.
 ///
 /// # Why the shipped tree cannot measure this
 ///
-/// All four built-ins are `vanilla's own commands's own level gamemasters` (2), so the real tree is
+/// All four built-ins are gamemaster-level commands (2), so the real tree is
 /// all-or-nothing across every level: 1 node at levels 0–1 and the whole thing at
 /// 2–4. An input where the right and the wrong hypothesis coincide is not a test,
 /// so this uses `ServerCommands::from_registrar` — the seam

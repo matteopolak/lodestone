@@ -989,7 +989,7 @@ fn a_frame_takes_many_short_world_guards_and_no_long_one() {
     );
 }
 
-/// The other half of `ClientLevel.doAddParticle`'s filter: `options.particles`.
+/// The other half of the client level's do add particle's filter: `options.particles`.
 ///
 /// The pair is chosen so both arms are **deterministic**.
 /// `Particles::particle_level_permits` transcribes
@@ -1059,13 +1059,13 @@ fn the_particles_option_gates_the_spawn_and_all_is_not_a_no_op() {
     );
 }
 
-/// `alwaysShow` — the second bool on `ClientboundLevelParticlesPacket`, which
+/// `alwaysShow` — the second bool on level-particles packet, which
 /// was decoded and then dropped: `ClientEvent::Particles` did not carry it, so
 /// `net_apply.rs` passed a literal `false` and the **Minimal** setting deleted
 /// every packet particle that did not also set `overrideLimiter`.
 ///
 /// The rule is a *reprieve*, not an exemption, which is what makes this gate's
-/// shape unusual. `ClientLevel.calculateParticleLevel` lifts `MINIMAL` to
+/// shape unusual. The client level's calculate particle level lifts `MINIMAL` to
 /// `DECREASED` one time in ten, and `DECREASED` folds back down one time in
 /// three, so an always-show burst on `Minimal` survives with probability
 /// `1/10 x 2/3 = 1/15`. A single send therefore proves nothing in either
@@ -1172,7 +1172,7 @@ fn always_show_gives_a_minimal_setting_particle_a_reprieve_and_not_an_exemption(
     );
 }
 
-/// Vanilla's render cutoff (`ClientLevel.doAddParticle`): a particle
+/// Vanilla's render cutoff (the client level's do add particle): a particle
 /// farther than 32 blocks from the viewer is dropped unless the packet
 /// sets `long_distance`. Two events at the same far-away position, one
 /// with the flag and one without, must differ in whether anything

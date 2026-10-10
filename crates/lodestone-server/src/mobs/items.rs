@@ -162,7 +162,7 @@ impl<'w> MobSim<'w> {
     /// per-tick merge-with-neighbours call, the other consumer
     /// [`ItemEntityRegistry::merge`] was missing.
     ///
-    /// Vanilla's search box is `getBoundingBox().inflate(0.5, 0.0, 0.5)`, and the
+    /// Vanilla's search box is get bounding box's get bounding box, and the
     /// **`0.0` vertical inflation is the load-bearing part**: two stacks side by
     /// side merge, two stacks a block apart vertically never do, however close
     /// they are horizontally. Since both boxes are the item's own 0.25 cube that
@@ -230,7 +230,7 @@ impl<'w> MobSim<'w> {
     ///
     /// Two filters, and both are vanilla:
     ///
-    /// * [`crate::block_drops::is_within_pickup_range`] is `Player.aiStep`'s
+    /// * [`crate::block_drops::is_within_pickup_range`] is Player's ai step's
     ///   inflated-AABB intersection, not a radius (see its own doc comment).
     /// * [`ItemLifecycle::can_be_picked_up`] checks `pickup_delay == 0`. A
     ///   freshly popped block drop carries

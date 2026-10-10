@@ -79,7 +79,7 @@ fn decorated_pot_side_part(pose: PartPose) -> EntityModelDef {
     }
 }
 
-/// The pot's front side — `offsetAndRotation(1, 16, 15, PI, 0, 0)`.
+/// The pot's front side — offset and rotation.
 #[must_use]
 pub fn decorated_pot_side_front_model() -> EntityModelDef {
     decorated_pot_side_part(PartPose::offset_and_rotation(
@@ -92,7 +92,7 @@ pub fn decorated_pot_side_front_model() -> EntityModelDef {
     ))
 }
 
-/// The pot's back side — `offsetAndRotation(15, 16, 1, 0, 0, PI)`.
+/// The pot's back side — offset and rotation.
 #[must_use]
 pub fn decorated_pot_side_back_model() -> EntityModelDef {
     decorated_pot_side_part(PartPose::offset_and_rotation(
@@ -105,7 +105,7 @@ pub fn decorated_pot_side_back_model() -> EntityModelDef {
     ))
 }
 
-/// The pot's left side — `offsetAndRotation(1, 16, 1, 0, -PI/2, PI)`.
+/// The pot's left side — offset and rotation.
 #[must_use]
 pub fn decorated_pot_side_left_model() -> EntityModelDef {
     decorated_pot_side_part(PartPose::offset_and_rotation(
@@ -118,7 +118,7 @@ pub fn decorated_pot_side_left_model() -> EntityModelDef {
     ))
 }
 
-/// The pot's right side — `offsetAndRotation(15, 16, 15, 0, PI/2, PI)`.
+/// The pot's right side — offset and rotation.
 #[must_use]
 pub fn decorated_pot_side_right_model() -> EntityModelDef {
     decorated_pot_side_part(PartPose::offset_and_rotation(

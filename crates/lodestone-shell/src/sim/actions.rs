@@ -31,11 +31,11 @@ use lodestone_ecs::player::{FireworkBoost, ItemUseTicks};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 use lodestone_physics::UseEffects;
 
-/// `TridentItem.THROW_THRESHOLD_TIME` — how long the use
+/// The trident item's throw threshold time — how long the use
 /// button must be held before a release does anything at all. That fix.
 const RIPTIDE_MIN_HELD_TICKS: u32 = 10;
 
-/// The deterministic part of `FireworkRocketEntity`'s lifetime for a standard
+/// The deterministic part of the firework rocket entity's lifetime for a standard
 /// 1-gunpowder rocket: `10 * flightCount` with `flightCount = 1 +
 /// flightDuration = 2`. See
 /// [`Sim::start_firework_boost_if_gliding`] for the two random terms this
@@ -56,7 +56,7 @@ const RIPTIDE_ENCHANTMENT_ID: i32 = 32;
 
 /// Whether `id`'s vanilla use-animation is anything other than "none" — i.e.
 /// whether right-clicking with it would actually enter vanilla's
-/// `isUsingItem()` state at all, the gate [`Sim::use_item_live`] applies
+/// is using item state at all, the gate [`Sim::use_item_live`] applies
 /// before arming [`UsingItem`]/[`ItemUseEffects`].
 ///
 /// Vanilla's own item base resolves this from three
@@ -92,7 +92,7 @@ fn item_has_use_animation(id: &str) -> bool {
 
 /// Whether vanilla's `Item.use` can actually enter an item-use state for the
 /// held item and current player state. Food is the one use-animation family
-/// whose `use()` can return `FAIL`: `Player.canEat` refuses ordinary food when
+/// whose `use()` can return `FAIL`: Player's can eat refuses ordinary food when
 /// the hunger bar is full. Keep this gate beside `item_has_use_animation`, but
 /// feed it the same server-reported vitals used by the consume animation so
 /// the press edge cannot arm movement slowdown for a use the server will reject.
@@ -455,7 +455,7 @@ impl Sim {
     }
 
     /// Whether the main-hand stack carries `minecraft:piercing_weapon`
-    /// (`DataComponents.PIERCING_WEAPON`) — `Minecraft.startAttack`'s gate,
+    /// (the data components's piercing weapon) — `Minecraft.startAttack`'s gate,
     /// checked before the normal ENTITY/BLOCK/MISS switch. See
     /// [`lodestone_game::item::is_piercing_weapon`]'s own doc for why this
     /// checks item identity (the seven real spear items) rather than an
@@ -830,10 +830,10 @@ impl Sim {
     /// by all four protocol adapters already
     /// (`crates/protocol/{v47,v340,v735,v770}/src/adapter.rs`) but with no
     /// producer anywhere in this shell before this method. Bow, crossbow and
-    /// shield are all `useOnRelease() == true`
+    /// shield are all `use_on_release() == true`
     /// and structurally cannot
     /// complete a use without this packet — food and potions are
-    /// `useOnRelease() == false` and auto-complete on the server's own tick
+    /// `use_on_release() == false` and auto-complete on the server's own tick
     /// count, which is exactly why this gap went unnoticed: eating and
     /// drinking still worked.
     ///
@@ -977,12 +977,12 @@ impl Sim {
     /// # Duration, and the one part of it that cannot be predicted
     ///
     /// Vanilla's rocket lives `10 * flightCount + random.nextInt(6) +
-    /// random.nextInt(7)` ticks, `flightCount = 1 + fireworks.flightDuration()`
+    /// random.nextInt(7)` ticks, `flightCount = 1 + fireworks.flight_duration()`
     ///, and boosts on every one of them while
     /// the holder is fall-flying. The two `nextInt` terms are rolled on the
     /// **server's** RNG, and the vanilla *client* never computes them at all: its
-    /// copy of the rocket comes from `ClientboundAddEntityPacket` with
-    /// `lifetime = 0`, and `if (life > lifetime && level instanceof ServerLevel)`
+    /// copy of the rocket comes from add-entity packet with
+    /// `lifetime = 0`, and `if (life > lifetime && level instanceof server level)`
     /// means the client's rocket simply keeps boosting until the server removes
     /// the entity.
     ///
@@ -1012,7 +1012,7 @@ impl Sim {
         self.write(|w| w.resource_mut::<FireworkBoost>().0 = FIREWORK_BOOST_TICKS);
     }
 
-    /// `TridentItem.releaseUsing`'s riptide branch,
+    /// The trident item's release using's riptide branch,
     /// That fix — the driver `lodestone_physics::apply_riptide` was written
     /// for and never had.
     ///
@@ -1022,8 +1022,8 @@ impl Sim {
     /// | vanilla | here |
     /// |---|---|
     /// | `timeHeld >= 10` | `held_ticks`, counted by `tick_item_use` |
-    /// | `getTridentSpinAttackStrength(stack, player) > 0` | [`Self::riptide_level`] × [`lodestone_physics::riptide_spin_attack_strength`] |
-    /// | `isInWaterOrRain() && !isPassenger()` | [`Self::is_in_water_or_rain`], and the passenger component |
+    /// | `get_trident_spin_attack_strength(stack, player) > 0` | [`Self::riptide_level`] × [`lodestone_physics::riptide_spin_attack_strength`] |
+    /// | `is_in_water_or_rain() && !is_passenger()` | [`Self::is_in_water_or_rain`], and the passenger component |
     ///
     /// A dry-land release with a Riptide trident therefore does nothing at all
     /// here, exactly as in vanilla — the wet gate is a real gate, not a
@@ -1181,8 +1181,8 @@ impl Sim {
     ///:
     ///
     /// ```text
-    /// this.send(new ClientboundBlockUpdatePacket(level, pos));
-    /// this.send(new ClientboundBlockUpdatePacket(level, pos.relative(direction)));
+    /// this.send(new block-update packet(level, pos));
+    /// this.send(new block-update packet(level, pos.relative(direction)));
     /// ```
     ///
     /// `pos` is `clicked` and `pos.relative(direction)` is the adjacent cell, and a
@@ -1243,7 +1243,7 @@ impl Sim {
         // this gate, [`UsingItem`]/[`ItemUseEffects`] were armed for *every*
         // right click, so aiming at open air with an empty hand (or any item
         // with no use at all, a sword included) applied the same
-        // `UseEffects::DEFAULT` movement slowdown as eating: `isUsingItem()`
+        // `UseEffects::DEFAULT` movement slowdown as eating: is using item
         // in vanilla only becomes true when the item's own `use()` starts the
         // item-use state, and the base item's `use()` — which is what a
         // sword, a block or an empty hand all fall back to — never does.
@@ -1268,10 +1268,10 @@ impl Sim {
             // Marks [`UsingItem`] so a later [`Self::end_use`] knows the
             // button was actually pressed — see that resource's own docs for
             // why this is an input-state mirror rather than vanilla's real
-            // `isUsingItem()`.
+            // is using item.
             self.write(|w| w.resource_mut::<UsingItem>().0 = true);
             // Arm vanilla's `timeHeld`, which is what
-            // `TridentItem.releaseUsing` compares against its 10-tick threshold on
+            // The trident item's release using compares against its 10-tick threshold on
             // the release edge. Zero here and advanced by
             // `lodestone_ecs::player::tick_item_use`, so the count is in 20 Hz ticks
             // and not in frames — a 200 fps client must not reach the threshold ten
@@ -1316,9 +1316,9 @@ impl Sim {
         // entity-local hit position, and [`Self::update_entity_target`] keeps only
         // the winning entity's id, not the ray's hit point on its box. A fabricated
         // local offset would be a wrong number where the server accepts a missing
-        // one — `ServerGamePacketListenerImpl` dispatches mounting off the plain
-        // `Interact` (it is `Entity.interact` that returns `InteractionResult` and
-        // calls `player.startRiding`), and `InteractAt` only matters for the
+        // one — the server game packet listener impl dispatches mounting off the plain
+        // `Interact` (it is `Entity.interact` that returns interaction result and
+        // calls player's start riding), and `InteractAt` only matters for the
         // per-part hit an armour stand or a horse's saddle slot resolves. So the
         // honest subset is sent, and refining it needs the ray to start reporting
         // its hit position, not a guess here.
@@ -1326,7 +1326,7 @@ impl Sim {
         // **`case ENTITY` only returns here on a *successful* interact.**
         // Vanilla's own switch returns
         // immediately only when `gameMode.interact(...) instanceof
-        // InteractionResult.Success`; anything else hits an explicit `break;`
+        // The interaction result's success; anything else hits an explicit `break;`
         // at `:1708` and falls through to the unconditional generic-use call
         // at `:1730` (`gameMode.useItem`) — which is what actually raises a
         // shield or starts drawing a bow when the crosshair happens to be
@@ -1338,7 +1338,7 @@ impl Sim {
         //
         // This client has no local classification of an interact's result to
         // match vanilla's `instanceof Success` test against: there is no
-        // `player.interactOn` equivalent here, only the wire send (the same
+        // player's interact on equivalent here, only the wire send (the same
         // gap `Self::interact_entity`'s own docs cover for why `InteractAt`
         // is not fabricated). So every entity interact is treated as
         // non-consuming for this decision and always falls through to
@@ -1360,7 +1360,7 @@ impl Sim {
         }
         let Some(hit) = block_target else {
             // Vanilla's own MISS/no-target path: a `null` `hitResult` skips
-            // the whole `if (this.hitResult != null)` switch in
+            // the whole `if (this.hit_result != null)` switch in
             // `startUseItem` and still reaches
             // the unconditional fallback at `:1730`. This used to `return`
             // here with **nothing sent at all** — aiming at open air, or at a
@@ -1376,7 +1376,7 @@ impl Sim {
         // `lodestone_controller::ecs::send_player_input` derived the wire's shift
         // bit from, so the local decision and the server's cannot disagree. This
         // used to re-read the keyboard, which was frame-granular; vanilla is
-        // tick-granular here too (`Minecraft.handleKeybinds` runs in the tick).
+        // tick-granular here too (Minecraft's handle keybinds runs in the tick).
         let sneaking = self.movement_intent().sneak;
 
         let menu = self.player_menu();
@@ -1435,17 +1435,17 @@ impl Sim {
         | UseOnDecision::Place { action, .. }
         | UseOnDecision::Nothing { action }) = &decision;
         // **The swing is the block result's, not the click's.**
-        // `Minecraft.startUseItem`'s `case BLOCK` calls `player.swing(hand)`
+        // Minecraft's start use item's `case BLOCK` calls `player.swing(hand)`
         // only when `gameMode.useItemOn(...)` returned an
-        // `InteractionResult.Success` whose `swingSource()` is `CLIENT`, and
-        // `MultiPlayerGameMode.performUseItemOn` computes that result
+        // The interaction result's success whose swing source is `CLIENT`, and
+        // The multi player game mode's perform use item on computes that result
         // *locally* — which is exactly what [`Placement::use_on`] is, so
         // unlike the entity path this decision is one we hold:
         //
         // * `Interact` — the block actuated. A door, a lever, a chest, a
-        //   crafting table, a note block all return `InteractionResult.SUCCESS`
+        //   crafting table, a note block all return interaction result's success
         //   from `useWithoutItem`/`useItemOn`. Swing.
-        // * `Place` — `BlockItem.place` returns `SUCCESS`. Swing.
+        // * `Place` — the block item's place returns `SUCCESS`. Swing.
         // * `Nothing` — `use_on` could not name an interaction, which covers
         //   both the base `Item.useOn`'s `PASS` and the overrides that return
         //   `SUCCESS`. [`use_on_block_swings`] separates them by item id; see
@@ -1512,7 +1512,7 @@ impl Sim {
 
         // **`case BLOCK`'s fall-through — the only route by which any `use`-based
         // item works while the crosshair is on a block.** The server's
-        // `ServerPlayerGameMode.useItemOn` never reaches `Item.use`, so a boat,
+        // The server player game mode's use item on never reaches `Item.use`, so a boat,
         // food, a drink, an equip-on-use helmet and a bow draw are
         // all reachable *only* through `USE_ITEM`. Until this branch existed the
         // block path `return`ed after its two sends, so every one of those worked
@@ -1522,15 +1522,15 @@ impl Sim {
         //
         // **It is not unconditional, and vanilla's `case BLOCK` is not a `break`.**
         // Unlike `case ENTITY` (which has an explicit `break` and always falls
-        // through), `Minecraft.startUseItem`'s `case BLOCK` `return`s on
-        // `InteractionResult.Success` *and* on `InteractionResult.Fail`, and reaches
+        // through), Minecraft's start use item's `case BLOCK` `return`s on
+        // The interaction result's success *and* on the interaction result's fail, and reaches
         // the generic use only for a non-consuming result. So the condition here is
-        // "what would `MultiPlayerGameMode.performUseItemOn` have returned":
+        // "what would multi player game mode's perform use item on have returned":
         //
         // * [`UseOnDecision::Interact`] / [`UseOnDecision::Place`] — vanilla's
-        //   `Success` (the block actuated, or `BlockItem.useOn` placed). Return.
+        //   `Success` (the block actuated, or the block item's use on placed). Return.
         // * [`UseOnDecision::Nothing`] with a placeable item — vanilla's `Fail`
-        //   (`BlockItem.place` refused: obstructed, or a non-replaceable target).
+        //   (the block item's place refused: obstructed, or a non-replaceable target).
         //   Return. Falling through here is what would make a **carved pumpkin**
         //   aimed at an illegal face equip itself onto the player's head instead of
         //   doing nothing — it is both a placeable block and an `equippable`.
@@ -1542,7 +1542,7 @@ impl Sim {
         // `is_interactable_state` makes for blocks, and it
         // errs the same safe way: an item our block census cannot name is treated as
         // non-placeable, so at worst a `USE_ITEM` follows a placement the server
-        // accepted, where `Item.use` is `PASS` for a plain `BlockItem` anyway.
+        // accepted, where `Item.use` is `PASS` for a plain block item anyway.
         //
         // **`!swings` is the third clause, and it is the same `return` vanilla
         // takes.** `Nothing` with a non-placeable item is only vanilla's `PASS`
@@ -1716,7 +1716,7 @@ impl Sim {
     /// answered from the item id alone because it depends on what the armour
     /// slot already holds. `false` for every early return below, including
     /// the `already the same item` case vanilla `FAIL`s on — vanilla's test
-    /// there is `ItemStack.isSameItemSameComponents`, which ignores count;
+    /// there is ItemStack's is same item same components, which ignores count;
     /// this compares whole stacks, and the two agree because both sides of a
     /// same-item comparison are a count-1 armour piece.
     fn predict_equip_swap(&mut self, held: &lodestone_game::item::ItemStack) -> bool {

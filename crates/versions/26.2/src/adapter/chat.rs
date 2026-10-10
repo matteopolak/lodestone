@@ -202,7 +202,7 @@ impl V770Adapter {
     }
 }
 
-/// Consumes a packed `LastSeenMessages` collection: a VarInt count (capped at
+/// Consumes a packed last-seen-messages collection: a VarInt count (capped at
 /// 20 by vanilla) then that many packed message signatures. Each packed
 /// signature is a VarInt: `0` is followed by a full 256-byte signature (a
 /// newly-seen message), and any positive value references a cached signature by
@@ -287,7 +287,7 @@ fn read_filter_mask(reader: &mut Reader<'_>, wire: BitSetWire) -> Result<bool, A
     }
 }
 
-/// Consumes a `vanilla's own chat type's own bound`: a `Holder<ChatType>`, a trusted NBT name
+/// Consumes a bound chat type: a chat-type holder, a trusted NBT name
 /// component, and an optional trusted NBT target-name component.
 ///
 /// The holder is a VarInt: `0` would introduce an inline chat-type definition
@@ -351,7 +351,7 @@ fn command_count(reader: &mut Reader<'_>, payload_len: usize, what: &str) -> Res
 /// Reads one `minecraft:command_argument_type` payload into an
 /// [`ArgumentParser`], given the registry id already read off the wire.
 ///
-/// Every branch mirrors that parser's own `ArgumentTypeInfo::deserializeFromNetwork`
+/// Every branch mirrors that parser's own argument-type-info network deserialiser
 /// — see `lodestone_model::command_tree`'s module doc for the file list. Ids
 /// with no branch here use vanilla's single-instance argument-info kind,
 /// whose network deserializer consumes nothing, so falling through to
@@ -439,7 +439,7 @@ fn read_argument_parser(
                 },
             }
         }
-        // `StringArgumentSerializer`: `writeEnum` is a VarInt ordinal into
+        // The string argument serialiser writes a VarInt ordinal into
         // Brigadier's `StringType`.
         5 => {
             let ordinal = reader.var_i32().map_err(dec_err)?;
@@ -455,7 +455,7 @@ fn read_argument_parser(
             };
             ArgumentParser::String(kind)
         }
-        // `vanilla's own entity argument's own info`: bit 0 `single`, bit 1 `playersOnly`.
+        // Entity argument info: bit 0 `single`, bit 1 `playersOnly`.
         6 => {
             let flags = reader.u8().map_err(dec_err)?;
             ArgumentParser::Entity {
@@ -463,7 +463,7 @@ fn read_argument_parser(
                 players_only: flags & 2 != 0,
             }
         }
-        // `vanilla's own score holder argument's own info`: bit 0 `multiple`.
+        // Score-holder argument info: bit 0 `multiple`.
         31 => {
             let flags = reader.u8().map_err(dec_err)?;
             ArgumentParser::ScoreHolder {
@@ -496,7 +496,7 @@ fn read_argument_parser(
     Ok(Some(parser))
 }
 
-/// Reads one `vanilla's own clientbound commands packet's own entry`: `readNode`'s exact order —
+/// Reads one commands-packet node entry in the node reader's exact order —
 /// flags byte, VarInt child-index array, the redirect index when
 /// `FLAG_REDIRECT` is set, then the type-dependent stub.
 fn read_command_node(
@@ -579,8 +579,8 @@ fn read_command_node(
 /// Decodes a whole `minecraft:commands` payload (clientbound id 16) into a
 /// [`CommandTree`].
 ///
-/// `ClientboundCommandsPacket`'s private constructor is
-/// `readList(::readNode)` then `readVarInt()` for the root index — the node
+/// The commands packet's private constructor is
+/// a list read of nodes then a VarInt for the root index — the node
 /// list comes **first**, the root index last.
 fn decode_command_tree(payload: &[u8]) -> Result<CommandTree, AdapterError> {
     let mut reader = Reader::new(payload);
@@ -599,7 +599,7 @@ fn decode_command_tree(payload: &[u8]) -> Result<CommandTree, AdapterError> {
 /// Decodes a `minecraft:command_suggestions` payload (clientbound id 15) into a
 /// [`CommandSuggestionsResponse`].
 ///
-/// `vanilla's own clientbound command suggestions packet's own stream codec`: three VarInts (`id`,
+/// The clientbound command suggestions packet stream codec: three VarInts (`id`,
 /// `start`, `length`) then a list of `Entry(String text, Optional<Component>
 /// tooltip)`. The tooltip uses `TRUSTED_OPTIONAL_STREAM_CODEC` — a `bool`
 /// presence byte followed by a network-NBT component when set — and is kept

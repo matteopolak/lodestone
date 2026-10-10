@@ -317,8 +317,8 @@ impl JigsawBlockInfo {
     /// `JigsawBlockInfo.of(info)` — reads the whole configuration out of the
     /// block's retained `nbt`.
     ///
-    /// This is the method the whole of S4 was blocked on: S2 dropped `nbt`, so
-    /// every field below was unreachable and `JigsawPlacement` had nothing to read.
+    /// Keeps the template's `nbt`, without which
+    /// every field below would be unreachable and jigsaw placement would have nothing to read.
     #[must_use]
     pub fn of(info: TemplateBlockInfo) -> Self {
         let (front, top) = info
@@ -359,7 +359,7 @@ impl JigsawBlockInfo {
     }
 
     /// Vanilla's own feature-pool-element's shuffled-jigsaw-blocks accessor's single synthetic block:
-    /// `fromFrontAndTop(DOWN, SOUTH)`, pool and target `minecraft:empty`, name
+    /// from front and top, pool and target `minecraft:empty`, name
     /// `minecraft:bottom`, joint `rollable`, both priorities 0.
     #[must_use]
     pub fn feature_default(position: [i32; 3]) -> Self {
@@ -571,7 +571,7 @@ impl HeightProvider {
     }
 }
 
-/// One `PoolAliasBinding` — a per-structure-instance redirection of one pool id
+/// One pool-alias binding — a per-structure-instance redirection of one pool id
 /// to another.
 ///
 /// **This is what makes two trial chambers different.** A chamber's templates all
@@ -639,7 +639,7 @@ impl PoolAlias {
         }
     }
 
-    /// `forEachResolved(random, consumer)` — the draws, in vanilla's order.
+    /// for each resolved — the draws, in vanilla's order.
     fn for_each_resolved<R: RandomSource>(
         &self,
         random: &mut R,
@@ -666,7 +666,7 @@ impl PoolAlias {
         }
     }
 
-    /// `allTargets()` — every pool id any resolution of this binding can name.
+    /// all targets — every pool id any resolution of this binding can name.
     ///
     /// [`super::StructureRegistry`] loads all of them, because only one is chosen
     /// per structure instance and which one is not known until start time.
@@ -853,7 +853,7 @@ impl JigsawConfig {
             Some("OCEAN_FLOOR_WG") => Some(HeightmapKind::OceanFloorWg),
             Some(other) => return Err(format!("jigsaw `project_start_to_heightmap` '{other}'")),
         };
-        // `MaxDistance`'s codec is `either(FULL, HORIZONTAL)`, and the bare-int
+        // The max-distance codec is `either(FULL, HORIZONTAL)`, and the bare-int
         // branch sets vertical **equal to** horizontal rather than to the
         // dimension height — the full-object branch is the one that defaults
         // vertical to `Y_SIZE`.
@@ -929,8 +929,8 @@ struct PlacedPiece {
 }
 
 /// The centre piece and the RNG stream that produced it — vanilla's
-/// `GenerationStub`, split so the biome filter can run between the two halves
-/// exactly as `findValidGenerationPoint` does.
+/// generation stub, split so the biome filter can run between the two halves
+/// exactly as the game's valid-generation-point search does.
 ///
 /// Holding the *random* is the point: the centre draws come out of the structure's
 /// per-chunk stream before the biome check, and the whole BFS continues from the
@@ -1098,7 +1098,7 @@ pub fn finish<R: RandomSource>(
 }
 
 /// The `referencePos` every piece of a start is processed against:
-/// vanilla's own structure-start place-in-chunk step's own
+/// vanilla's structure-start place-in-chunk step's
 /// `new BlockPos(centre.getX(), pieces[0].boundingBox.minY(), centre.getZ())`,
 /// where `centre` is the **first** piece's box centre.
 ///
@@ -1133,7 +1133,7 @@ struct Placer<'a> {
     max_depth: i32,
     expansion_hack: bool,
     pieces: Vec<PlacedPiece>,
-    /// The `MutableObject<VoxelShape>`s, as an arena: a `PieceState` refers to one
+    /// The mutable voxel-shape cells, as an arena: a `PieceState` refers to one
     /// by index because vanilla's shapes are **shared and mutated** between sibling
     /// states, and cloning one per state would let two siblings overlap.
     frees: Vec<FreeSpace>,
@@ -1160,7 +1160,7 @@ impl Placer<'_> {
         let source_rigid = source_element.projection().is_rigid();
         let source_box = self.pieces[source].box_;
         let source_box_y = source_box.min[1];
-        // `MutableObject<VoxelShape> sourceFree = new MutableObject()` — one per
+        // The source-free shape cell — one per
         // call, created empty and filled on the first *inner* attachment.
         let mut source_free: Option<usize> = None;
 
@@ -1410,8 +1410,8 @@ impl Placer<'_> {
             out.push(StructurePiece {
                 id: "minecraft:jigsaw".to_string(),
                 bounding_box: piece.box_,
-                // `PoolElementStructurePiece` extends `StructurePiece` directly and
-                // never calls `setOrientation`, so vanilla persists `O = -1`.
+                // A jigsaw pool-element piece extends the base structure piece directly and
+                // never calls its set-orientation, so vanilla persists `O = -1`.
                 orientation: None,
                 gen_depth: 0,
                 template: first.as_ref().map(|(id, _)| id.clone()),
@@ -1742,7 +1742,7 @@ mod tests {
     }
 
     /// The queue is highest-priority-first and FIFO within a priority — the two
-    /// halves of `SequencedPriorityIterator`, and the reason a village's streets
+    /// halves of the sequenced priority iterator, and the reason a village's streets
     /// (priority 0) expand before its houses when the data says so.
     #[test]
     fn priority_queue_is_highest_first_then_fifo() {
@@ -1763,7 +1763,7 @@ mod tests {
         assert_eq!(order, vec!["e9", "b5", "f7", "d5", "a0", "c0"]);
     }
 
-    /// `MaxDistance`'s bare-int spelling sets vertical **equal to** horizontal.
+    /// The max-distance bare-int spelling sets vertical **equal to** horizontal.
     /// Reading it as "horizontal only, vertical unbounded" would let a village
     /// stack 300 blocks high.
     #[test]
@@ -1996,7 +1996,7 @@ mod tests {
         use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom};
         let fresh = || WorldgenRandom::new(LegacyRandomSource::new(99));
 
-        // Vanilla's own constant-height sample returns `value.resolveY(context)` — no draw.
+        // Vanilla's own constant-height sample returns value's resolve y — no draw.
         let mut constant_arm = fresh();
         assert_eq!(
             HeightProvider::Constant(VerticalAnchor::Absolute(0)).sample(&mut constant_arm, -64, 384),

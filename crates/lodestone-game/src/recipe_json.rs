@@ -994,7 +994,7 @@ impl CorpusBuilder {
 /// `minecraft:enchantable/weapon`), so a flat `read_dir` silently drops 33 of
 /// the 224 tags. The id is the path relative to `recipe/` or `tags/item/` with
 /// the `.json` suffix removed, so subdirectories become part of the path — the
-/// same rule vanilla's `FileToIdConverter` uses.
+/// same rule vanilla's file-to-id converter uses.
 ///
 /// # Errors
 ///

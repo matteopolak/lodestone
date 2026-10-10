@@ -4,7 +4,7 @@
 //!
 //! # What it is
 //!
-//! A port of `SubtitleOverlay`. One [`SubtitleQueue`]
+//! A port of the subtitle overlay. One [`SubtitleQueue`]
 //! lives on [`crate::audio::ShellAudio`] — the single choke point every sound in
 //! the client passes through — so a caption can never disagree with what is
 //! actually audible. `views` turns the queue plus a listener transform into the
@@ -35,7 +35,7 @@
 
 use glam::Vec3;
 
-/// `SubtitleOverlay.DISPLAY_TIME`, in milliseconds.
+/// The subtitle overlay's display time, in milliseconds.
 /// Vanilla multiplies this by the `notificationDisplayTime` option, which this
 /// client does not model; at its default of `1.0` the product is this constant.
 pub(crate) const DISPLAY_MS: u64 = 3000;

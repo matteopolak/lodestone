@@ -1,5 +1,5 @@
-//! Vanilla's **whole options tree** — `OptionsScreen`, `OptionsSubScreen`,
-//! `OptionsList` and the `OptionInstance` model — as data plus arithmetic, with
+//! Vanilla's **whole options tree** — the options screen, the options sub screen,
+//! The options list and the option instance model — as data plus arithmetic, with
 //! every control present and the ones this client does not honour rendered
 //! **inactive**.
 //!
@@ -11,9 +11,9 @@
 //!
 //! ## Why this is one mechanism and not thirteen screens
 //!
-//! vanilla's own options class declares 94 `OptionInstance` fields with 93 accessors, and
+//! Vanilla's own options class declares 94 option instance fields with 93 accessors, and
 //! every settings sub-screen is the same three lines:
-//! `HeaderAndFooterLayout` + an `OptionsList` + `addOptions()`. `OptionsList`
+//! `HeaderAndFooterLayout` + an options list + add options. The options list
 //! offers exactly three shapes — `addBig` (one 310 px control),
 //! `addSmall` (two 150 px controls, 160 px apart) and `addHeader` — so a
 //! settings screen is a **list of options**, not bespoke geometry. That is why
@@ -52,14 +52,14 @@
 //! Four departures, each measured rather than guessed:
 //!
 //! 1. **An inactive option shows its caption alone**, where vanilla shows
-//!    `genericValueLabel(caption, value)` — `"%s: %s"`
+//!    generic value label — `"%s: %s"`
 //!   . We hold no value for an option we do not
 //!    honour, and printing one would be exactly the fabricated persistence this
 //!    issue exists to avoid: a row reading `Entity Shadows: ON` next to a client
 //!    that draws no shadows is a lie a screenshot cannot distinguish from a
 //!    working feature. The two live options *do* use `genericValueLabel`.
 //! 2. **An inactive slider draws its track and no handle.** The handle's
-//!    position *is* the value (`AbstractSliderButton.extractWidgetRenderState`),
+//!    position *is* the value (the abstract slider button's extract widget render state),
 //!    so drawing one at 0 is the same fabrication as (1) in pixels instead of
 //!    text. This is the one place where the absence of a component is the honest
 //!    render; it is not "disabled art", which
@@ -83,7 +83,7 @@
 //!    had to be added: `with_clip` reached the three screens whose rows are list
 //!    *entries* and not the settings tree, whose rows are slotted widgets.
 //! 4. **Up/Down move the cursor over *every* control, including inactive
-//!    ones** — where `AbstractWidget.nextFocusPath` skips them
+//!    ones** — where the abstract widget's next focus path skips them
 //!   , as [`super::nav`]'s `step_enabled` does
 //!    on the title and pause screens. On a screen whose *content* is the
 //!    inactive majority, skipping them would leave most rows unreachable
@@ -99,7 +99,7 @@
 //! - [`super::layout`] — `HeaderAndFooterLayout` is this module's **first
 //!   production consumer**. It supplies the header/footer bands and their
 //!   arithmetic gates; `GridLayout` and `LinearLayout` build
-//!   `OptionsScreen.init`'s own tree.
+//!   The options screen's init's own tree.
 //! - [`super::widget`] — `Widget`, `WidgetSprites`, the grey label.
 //! - [`super::render`] — [`Origin::Settings`] resolves a [`Placement`] to a
 //!   rect; `draw_widget` draws the row.
@@ -116,34 +116,34 @@ use super::widget::{self, LayoutElement, Widget};
 // file and line named, in logical GUI pixels. Nothing here is measured off our
 // own output.
 
-/// `OptionsList.BIG_BUTTON_WIDTH` — an `addBig` row, and
-/// also the row width `getRowWidth()` returns (`:64-66`).
+/// The options list's big button width — an `addBig` row, and
+/// also the row width get row width returns (`:64-66`).
 pub const BIG_BUTTON_WIDTH: f32 = 310.0;
 /// The width vanilla's own option-instance type's create-button call defaults to
 ///, i.e. every `addSmall` control.
 /// `Button.DEFAULT_WIDTH` is the same 150.
 pub const SMALL_BUTTON_WIDTH: f32 = widget::DEFAULT_WIDTH;
-/// `OptionsList.DEFAULT_ITEM_HEIGHT`, passed as the
+/// The options list's default item height, passed as the
 /// list's `itemHeight` (`:24`).
 pub const DEFAULT_ITEM_HEIGHT: f32 = 25.0;
-/// `OptionsList.Entry.X_OFFSET`: the pitch between the
+/// The options list's entry.X_OFFSET: the pitch between the
 /// two columns of an `addSmall` row. Note it is **not** `SMALL_BUTTON_WIDTH`
 /// plus a gap that anything else in the file names — 160 is written down.
 pub const COLUMN_PITCH: f32 = 160.0;
-/// `OptionsList.Entry.extractContent`'s `this.screen.width / 2 - 155`
+/// The options list's entry.extract_content's `this.screen.width / 2 - 155`
 ///. Kept as the inset rather than `BIG_BUTTON_WIDTH /
 /// 2` because that is how the jar spells it, and because the two would silently
-/// stop agreeing if `getRowWidth()` ever changed alone.
+/// stop agreeing if get row width ever changed alone.
 pub const ROW_LEFT_INSET: f32 = 155.0;
 /// Vanilla's own abstract selection-list base's get-first-entry-y accessor's `getY() + 2`.
 pub const LIST_TOP_INSET: f32 = 2.0;
 /// Vanilla's own abstract selection-list base's entry's get-content-y accessor's `getY() + 2` (`:481-483`) —
 /// where a row's widget is placed inside its 25 px entry.
 pub const ENTRY_CONTENT_INSET: f32 = 2.0;
-/// The `int lineHeight = 9` in `OptionsList.addHeader`,
-/// which is also `StringWidget`'s own height.
+/// The `int lineHeight = 9` in the options list's add header,
+/// which is also the string widget's own height.
 pub const HEADER_LINE_HEIGHT: f32 = 9.0;
-/// `OptionsList.addHeader`'s `paddingTop` for every header **after** the first:
+/// The options list's add header's `paddingTop` for every header **after** the first:
 /// `lineHeight * 2`. The first header in a list gets
 /// `0`, which is the whole reason this is a function of position rather than a
 /// constant height.
@@ -152,7 +152,7 @@ pub const HEADER_PADDING_TOP: f32 = HEADER_LINE_HEIGHT * 2.0;
 pub const HEADER_PADDING_BOTTOM: f32 = 4.0;
 
 /// `HeaderAndFooterLayout.DEFAULT_HEADER_AND_FOOTER_HEIGHT` — every
-/// `OptionsSubScreen`'s header band, and *every* page's footer band
+/// The options sub screen's header band, and *every* page's footer band
 /// (vanilla's own options-sub-screen base takes the 1-argument constructor).
 pub const SUB_HEADER_HEIGHT: f32 = layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT;
 /// The footer band, on every page including the root.
@@ -162,14 +162,14 @@ pub const FOOTER_HEIGHT: f32 = layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT;
 /// the FOV slider and the Online button under the title.
 pub const ROOT_HEADER_HEIGHT: f32 = 61.0;
 /// `LinearLayout.vertical().spacing(8)` and `LinearLayout.horizontal()…
-/// spacing(8)` in `OptionsScreen.init` (`:52,55`), and the accessibility
+/// spacing(8)` in the options screen's init (`:52,55`), and the accessibility
 /// footer's `spacing(8)`.
 pub const ROOT_SPACING: i32 = 8;
-/// `gridLayout.defaultCellSetting().paddingHorizontal(4)`.
+/// default cell setting's padding horizontal.
 pub const GRID_PADDING_H: i32 = 4;
-/// `…paddingBottom(4)` on the same line.
+/// `…padding_bottom(4)` on the same line.
 pub const GRID_PADDING_BOTTOM: i32 = 4;
-/// `OptionsScreen.COLUMNS`.
+/// The options screen's columns.
 pub const GRID_COLUMNS: usize = 2;
 /// `Button.builder(GUI_DONE, …).width(200)` (vanilla's own options-sub-screen base,
 /// vanilla's own options-screen rendering).
@@ -191,23 +191,23 @@ pub const LIST_WINDOW_PX: f32 =
 
 // -- the option model -------------------------------------------------------
 
-/// Which widget vanilla's `OptionInstance.createButton` builds for an option.
+/// Which widget vanilla's option instance's create button builds for an option.
 ///
-/// The dispatch is on the `ValueSet`: a `CycleableValueSet` gets a
-/// `CycleButton` (`:232-249`) and a `SliderableValueSet` an
-/// `OptionInstanceSliderButton` (`:368`). `SliderableOrCyclableValueSet` asks
-/// `createCycleButton()` (`:525-541`), and the one implementor —
-/// `ClampingLazyMaxIntRange`, which is `guiScale`'s — answers **`true`**
+/// The dispatch is on the value set: a cycleable value set gets a
+/// The cycle button (`:232-249`) and a sliderable value set an
+/// The option instance slider button (`:368`). The sliderable or cyclable value set asks
+/// create cycle button (`:525-541`), and the one implementor —
+/// The clamping lazy max int range, which is `guiScale`'s — answers **`true`**
 /// (`:213-216`). So GUI Scale is a cycle button, not a slider, which is why
 /// this client's Enter-cycles binding was already the faithful one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionWidget {
-    /// A `CycleButton`: booleans, `Enum`, `AltEnum`, `LazyEnum` and
-    /// `ClampingLazyMaxIntRange`. Extends `AbstractButton`, so it uses
+    /// A cycle button: booleans, `Enum`, the alt enum, the lazy enum and
+    /// The clamping lazy max int range. Extends abstract button, so it uses
     /// [`widget::BUTTON_SPRITES`] and has real disabled art.
     Cycle,
-    /// An `OptionInstance.OptionInstanceSliderButton`: `IntRange`,
-    /// `UnitDouble`, `SliderableEnum`. Extends `AbstractSliderButton`, which
+    /// An option instance's option instance slider button: `IntRange`,
+    /// The unit double, the sliderable enum. Extends abstract slider button, which
     /// **bypasses `WidgetSprites`** and has no disabled sprite —
     /// [`widget::SLIDER_SPRITES`] is the two-state collapse of what it picks
     /// between by hand.
@@ -217,7 +217,7 @@ pub enum OptionWidget {
 /// A persisted option this client genuinely honours.
 ///
 /// See [`crate::config::Options`], whose fields (besides `keybinds`, not a
-/// vanilla `OptionInstance`) this enum enumerates one-for-one except the
+/// vanilla option instance) this enum enumerates one-for-one except the
 /// Lodestone-specific distant-horizon control. **`render_distance`
 /// and `sensitivity` are not here**; both live outside this persisted option table.
 /// `docs/ui-framework.md` is wrong to list them: both live on
@@ -264,7 +264,7 @@ pub enum LiveOption {
     /// [`crate::config::Options::discrete_mouse_scroll`].
     ///
     /// The first row in the Controls/Mouse group, and the one that needed no new subsystem:
-    /// `MouseHandler.onScroll` applies it at the input boundary
+    /// The mouse handler's on scroll applies it at the input boundary
     ///, which is `app/lifecycle.rs` here — so it
     /// affects **both** wheel consumers, the hotbar and every menu list, from one
     /// place. The other four are now live too (`toggleAttack`/`toggleUse`/
@@ -307,7 +307,7 @@ pub enum LiveOption {
     /// `options.chatColors` → [`crate::config::Options::chat_colors`].
     ChatColors,
     /// `options.sensitivity` → [`crate::config::Options::sensitivity`]. A
-    /// `UnitDouble`.
+    /// The unit double.
     ///
     /// This option is persisted in [`crate::config::Options`] rather than the
     /// argv-only [`crate::config::Config`], so its row retains the value across
@@ -326,7 +326,7 @@ pub enum LiveOption {
     /// allocation and query work.
     DistantHorizon,
     /// `options.damageTiltStrength` →
-    /// [`crate::config::Options::damage_tilt_strength`]. A `UnitDouble`
+    /// [`crate::config::Options::damage_tilt_strength`]. A unit double
     /// defaulting to `1.0`, labelled with `Options::percentValueOrOffLabel`
     /// (vanilla's own options class's `damageTiltStrength` field) — so a stored `0.0` prints
     /// **OFF**, not `0%`, unlike every other percent slider here.
@@ -340,7 +340,7 @@ pub enum LiveOption {
     /// links 2–4 missing.
     DamageTiltStrength,
     /// `options.accessibility.panorama_speed` →
-    /// [`crate::config::Options::panorama_speed`]. A `UnitDouble` defaulting to
+    /// [`crate::config::Options::panorama_speed`]. A unit double defaulting to
     /// `1.0` with the plain `Options::percentValueLabel` (so `0.0` prints `0%`,
     /// **not** OFF — a stationary panorama is a legitimate value, not an
     /// off state).
@@ -358,7 +358,7 @@ pub enum LiveOption {
     /// **One variant with an index rather than eleven variants**, because the
     /// eleven differ in exactly one number: the payload is the index into
     /// [`crate::config::SOUND_CATEGORY_NAMES`], which is *also* the
-    /// `SoundSource` ordinal, the `sound_volume_<name>` file key and the mixer
+    /// The sound source ordinal, the `sound_volume_<name>` file key and the mixer
     /// bus. Eleven variants would be eleven chances for the row's accessor and
     /// the array slot to disagree — a **transposed pair**, which is the failure
     /// an eleven-wide array invites and which a uniform default hides
@@ -379,7 +379,7 @@ pub enum LiveOption {
     /// [`SliderRange`] like [`Self::RenderDistance`]'s and
     /// [`Self::unit_double`] answers `None` for it. The `Codec.DOUBLE.xmap`
     /// between those two lines in vanilla's own options class is a *persistence* codec on the
-    /// seven-argument `OptionInstance` overload, not a `ValueSet::xmap`; reading
+    /// seven-argument option instance overload, not a value set's xmap; reading
     /// it as one puts the value at `70 * 40 + 70`.
     ///
     /// Its consumer (`camera_rig::build_camera` → the projection matrix) was
@@ -389,12 +389,12 @@ pub enum LiveOption {
     /// the live handle and the frozen one are placed by one table.
     Fov,
     /// `options.glintSpeed` → [`crate::config::Options::glint_speed`]. A
-    /// `UnitDouble` defaulting to `0.5`, labelled with
+    /// The unit double defaulting to `0.5`, labelled with
     /// `Options::percentValueOrOffLabel` — so a stored `0.0` reads **OFF**, and
     /// a frozen glint is a legitimate choice rather than the option being unset.
     GlintSpeed,
     /// `options.glintStrength` → [`crate::config::Options::glint_strength`]. A
-    /// `UnitDouble` defaulting to `0.75`, same `percentValueOrOffLabel`.
+    /// The unit double defaulting to `0.75`, same `percentValueOrOffLabel`.
     ///
     /// The pair reaches **three** glint sites, not two — the world pass, the
     /// first-person hand, and the 2-D GUI icon pass, which is a separate
@@ -424,7 +424,7 @@ pub enum LiveOption {
     /// `Minimized`/`Afk`.
     InactivityFpsLimit,
     /// `options.graphics.preset` → [`crate::config::Options::graphics_preset`].
-    /// A `SliderableEnum` over four values (`Fast, Fancy, Fabulous, Custom`),
+    /// A sliderable enum over four values (`Fast, Fancy, Fabulous, Custom`),
     /// placed and dragged by index rather than through [`SliderRange`] — see
     /// [`graphics_preset_slider_fraction`]/[`graphics_preset_from_fraction`]
     /// for why this is a third shape alongside [`Self::unit_double`] and
@@ -491,7 +491,7 @@ pub enum LiveOption {
     ///
     /// **`0` is a real value, not an unset one**: vanilla's stringifier here is
     /// `genericValueOrOffLabel`, so zero reads OFF, and
-    /// `Screen.extractBlurredBackground` runs the pass only at `>= 1.0`.
+    /// Screen's extract blurred background runs the pass only at `>= 1.0`.
     MenuBackgroundBlurriness,
     /// `options.attackIndicator` →
     /// [`crate::config::Options::attack_indicator`].
@@ -516,7 +516,7 @@ pub enum LiveOption {
     ///
     /// **The stored value is the window radius and the label is the window
     /// width.** Vanilla's stringifier is
-    /// `genericValueLabel(caption, translatable("options.biomeBlendRadius." +
+    /// `generic value label(caption, translatable("options.biomeBlendRadius." +
     /// (value * 2 + 1)))`, so a stored `2` reads "5x5 (Normal)" and a stored
     /// `0` reads "OFF (Fastest)". Transcribing the radius into the label
     /// directly would name a different setting at every value but the endpoints
@@ -536,10 +536,10 @@ pub enum LiveOption {
 
 impl LiveOption {
     /// The `[0, 1]` value of this option, for the live options that are built
-    /// on `OptionInstance.UnitDouble.INSTANCE`, or `None` for the ones that are
+    /// on the option instance's unit double.INSTANCE, or `None` for the ones that are
     /// not.
     ///
-    /// `UnitDouble.toSliderValue` is the **identity**, so for these options the stored value
+    /// The unit double's to slider value is the **identity**, so for these options the stored value
     /// *is* the slider fraction and [`Cell::slider_fraction`] can return it
     /// directly. No range conversion is needed for this set; integer-range
     /// sliders use [`SliderRange`] below.
@@ -565,7 +565,7 @@ impl LiveOption {
             LiveOption::SoundVolume(index) => {
                 options.sound_volumes.get(index as usize).copied()
             }
-            // `RenderDistance` is an `IntRange`, **not** a `UnitDouble`: its
+            // `RenderDistance` is an `IntRange`, **not** a unit double: its
             // stored value is a chunk count, so returning it here would put the
             // handle at `min(8, 1) = 1.0`, pinned to the far end of the track for
             // every value above 1. It goes through `SliderRange` instead.
@@ -597,7 +597,7 @@ impl LiveOption {
             | LiveOption::EnableVsync
             // A two-state cycle, `CloudStatus`'s shape.
             | LiveOption::InactivityFpsLimit
-            // A four-value `SliderableEnum`, placed by index — see
+            // A four-value sliderable enum, placed by index — see
             // `graphics_preset_slider_fraction`, not this table.
             | LiveOption::GraphicsPreset
             | LiveOption::CutoutLeaves
@@ -727,14 +727,14 @@ impl LiveOption {
     }
 }
 
-/// `ChatComponent.getWidth`:
+/// The chat component's get width:
 /// `Mth.floor(pct * 280.0 + 40.0)`, i.e. 40px at `0.0` and 320px at `1.0`.
 #[must_use]
 fn chat_width_px(pct: f32) -> i32 {
     (pct as f64 * 280.0 + 40.0).floor() as i32
 }
 
-/// `ChatComponent.getHeight`:
+/// The chat component's get height:
 /// `Mth.floor(pct * 160.0 + 20.0)`, i.e. 20px at `0.0` and 180px at `1.0`.
 #[must_use]
 fn chat_height_px(pct: f32) -> i32 {
@@ -759,14 +759,14 @@ fn percent_value(value: f32) -> String {
     format!("{}%", (value as f64 * 100.0) as i32)
 }
 
-/// The value half of `Options.pixelValueLabel`,
+/// The value half of Options's pixel value label,
 /// pattern `"%s: %spx"`. See [`percent_value`] for why the caption is absent.
 #[must_use]
 fn pixel_value(value: i32) -> String {
     format!("{value}px")
 }
 
-/// One vanilla `OptionInstance`, reduced to what a row needs.
+/// One vanilla option instance, reduced to what a row needs.
 ///
 /// `accessor` is the census key — vanilla's own options accessor method name — so a row on
 /// screen can be traced back to the field it stands for without guessing from
@@ -801,7 +801,7 @@ pub enum Action {
 /// One focusable widget on a settings page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cell {
-    /// An `OptionInstance` widget.
+    /// An option instance widget.
     Option(OptionSpec),
     /// A `Button` that opens another screen. `None` names a vanilla screen this
     /// client does not have, and the row is inactive — [`SettingsPage`]'s docs
@@ -836,14 +836,14 @@ impl Cell {
         }
     }
 
-    /// This control's hover tooltip, or `None` — `AbstractWidget.setTooltip`.
+    /// This control's hover tooltip, or `None` — the abstract widget's set tooltip.
     ///
     /// Only an option carries one on this tree, and only 33 of them do; see
     /// [`OPTION_TOOLTIPS`] for the census and for the two vanilla tooltips that land
     /// on rows this tree does not have. A nav or action button gets none, which is
     /// vanilla's shape too — the tooltips vanilla sets on *buttons* in this tree are
-    /// all conditional "this is disabled because …" text (`OptionsScreen`'s telemetry
-    /// button, `AccessibilityOptionsScreen`'s high-contrast error), and reproducing
+    /// all conditional "this is disabled because …" text (the options screen's telemetry
+    /// button, the accessibility options screen's high-contrast error), and reproducing
     /// them would mean fabricating the condition that triggers them.
     ///
     /// **Independent of [`Self::is_live`] on purpose.** Vanilla's `setTooltip` is not
@@ -858,7 +858,7 @@ impl Cell {
         }
     }
 
-    /// Whether this control can be activated, i.e. `AbstractWidget.active`.
+    /// Whether this control can be activated, i.e. The abstract widget's active.
     ///
     /// An option is live only if it drives something in
     /// [`crate::config::Options`]; a nav button is live only if its destination
@@ -874,7 +874,7 @@ impl Cell {
         }
     }
 
-    /// Whether this control draws as `AbstractSliderButton` rather than a
+    /// Whether this control draws as the abstract slider button rather than a
     /// `Button`.
     #[must_use]
     pub fn is_slider(self) -> bool {
@@ -888,7 +888,7 @@ impl Cell {
     }
 
     /// The `[0, 1]` fraction along the track where
-    /// `AbstractSliderButton.extractWidgetRenderState` blits the handle
+    /// The abstract slider button's extract widget render state blits the handle
     ///, or `None` for a non-slider `Cell`
     /// **or** a slider this client holds no value for at all.
     ///
@@ -898,10 +898,10 @@ impl Cell {
     ///   tree, so its fraction comes from the real, persisted config value
     ///   via [`mouse_wheel_slider_fraction`].
     /// - Every other slider is inactive — this client wires no behaviour to
-    ///   it — but vanilla's own `OptionInstance` still boots with a concrete
+    ///   it — but vanilla's own option instance still boots with a concrete
     ///   default double, and for an option built on
-    ///   `OptionInstance.UnitDouble.INSTANCE` that default *is* the slider
-    ///   fraction, because `UnitDouble.toSliderValue` is the identity
+    ///   The option instance's unit double.INSTANCE that default *is* the slider
+    ///   fraction, because unit double's to slider value is the identity
     ///  . [`UNIT_DOUBLE_DEFAULTS`] is that
     ///   set, one entry per accessor, each cited to the source line in
     ///   vanilla's own options class it boots from.
@@ -940,7 +940,7 @@ impl Cell {
         if spec.live == Some(LiveOption::FramerateLimit) {
             return Some(framerate_limit_slider_fraction(options.framerate_limit));
         }
-        // `graphicsPreset`'s `SliderableEnum`, placed by index rather than
+        // `graphicsPreset`'s sliderable enum, placed by index rather than
         // through `SliderRange` — see `graphics_preset_slider_fraction`.
         if spec.live == Some(LiveOption::GraphicsPreset) {
             return Some(graphics_preset_slider_fraction(options.graphics_preset));
@@ -985,7 +985,7 @@ impl Cell {
                 options.biome_blend_radius,
             ));
         }
-        // A **live** `UnitDouble` option reads its handle position from the
+        // A **live** unit double option reads its handle position from the
         // real, persisted value; only an inactive one falls through to the
         // frozen default below. Without this arm the chat sliders would move
         // the chat and leave their own handles parked at vanilla's boot value —
@@ -1002,19 +1002,19 @@ impl Cell {
     }
 }
 
-/// Every settings-tree slider built on `OptionInstance.UnitDouble.INSTANCE`,
+/// Every settings-tree slider built on the option instance's unit double.INSTANCE,
 /// paired with the literal default double each one constructs with — see
 /// [`Cell::slider_fraction`]'s doc for why the default *is* the fraction.
 ///
 /// `fovEffectScale`/`darknessEffectScale` additionally `.xmap(Mth::square,
-/// Math::sqrt)`, i.e. `toSliderValue(v) =
+/// Math::sqrt)`, i.e. `to_slider_value(v) =
 /// sqrt(v)`; both default to `1.0`, and `sqrt(1.0) == 1.0`, so the xmap does
 /// not change the number recorded here.
 ///
-/// Exhaustive over a grep of `"UnitDouble.INSTANCE"` in vanilla's own persisted-options declarations — every
+/// Exhaustive over a grep of `"unit double's instance"` in vanilla's own persisted-options declarations — every
 /// accessor that string touches is listed, so a slider added later that is
 /// *not* here is provably not one of these, rather than merely uncounted.
-/// Every `OptionInstance` on this tree that carries a tooltip, keyed by
+/// Every option instance on this tree that carries a tooltip, keyed by
 /// [`OptionSpec::accessor`], with the text verbatim from
 /// `assets/minecraft/lang/en_us.json` — with one deliberate exception:
 /// `darkMojangStudiosBackground`'s tooltip is Lodestone's own functional
@@ -1027,7 +1027,7 @@ impl Cell {
 /// Because the tooltip belongs to the **option**, not to the row, and three options
 /// are placed on two pages each (`textBackgroundOpacity`, `chatOpacity`,
 /// `chatLineSpacing`). A field would have to be repeated per placement and could
-/// drift between them; keying by accessor makes "one `OptionInstance`, one tooltip"
+/// drift between them; keying by accessor makes "one option instance, one tooltip"
 /// structural, which is vanilla's own shape. It also keeps 144 table rows untouched,
 /// exactly as [`UNIT_DOUBLE_DEFAULTS`] and [`INT_RANGE_SLIDERS`] already do.
 ///
@@ -1046,11 +1046,11 @@ impl Cell {
 /// Two option tooltips do not land on this tree and are not omissions:
 ///
 /// - `japaneseGlyphVariants` — the row itself is absent from our Video table.
-/// - `telemetryOptInExtra` — it lives on `TelemetryInfoScreen`, which is
-///   [`super::telemetry`]'s frame, not an `OptionsList` page.
+/// - `telemetryOptInExtra` — it lives on the telemetry info screen, which is
+///   [`super::telemetry`]'s frame, not an options list page.
 ///
 /// `narratorHotkey`'s text is the **non-Mac** variant. Vanilla forks on
-/// `InputQuirks.REPLACE_CTRL_KEY_WITH_CMD_KEY` between
+/// The input quirks's replace ctrl key with cmd key between
 /// `options.accessibility.narrator_hotkey.tooltip` ("Ctrl + B") and its `.mac`
 /// sibling ("Cmd + B"); this client has no such quirk table, and the row is inactive
 /// anyway, so naming the platform fork here is more honest than guessing the host.
@@ -1089,7 +1089,7 @@ const OPTION_TOOLTIPS: &[(&str, &str)] = &[
     ("weatherRadius", "Radius of the area where rain and snow effects are visible. Very low performance impact."),
 ];
 
-/// `Tooltip.MAX_WIDTH`: the pixel width `Tooltip.splitTooltip` wraps to.
+/// `Tooltip.MAX_WIDTH`: the pixel width Tooltip's split tooltip wraps to.
 pub const TOOLTIP_MAX_WIDTH: f32 = 170.0;
 
 /// Every accessor [`OPTION_TOOLTIPS`] holds text for.
@@ -1114,7 +1114,7 @@ pub fn option_tooltip(accessor: &str) -> Option<&'static str> {
 
 const UNIT_DOUBLE_DEFAULTS: &[(&str, f32)] = &[
     // vanilla's own options class, `createSoundSliderOptionInstance`'s fifth
-    // argument — shared by all eleven `SoundSource` categories.
+    // argument — shared by all eleven sound source categories.
     ("soundSource.master", 1.0),
     ("soundSource.music", 1.0),
     ("soundSource.record", 1.0),
@@ -1141,9 +1141,9 @@ const UNIT_DOUBLE_DEFAULTS: &[(&str, f32)] = &[
     ("chatScale", 1.0),
     // vanilla's own options class.
     ("chatWidth", 1.0),
-    // vanilla's own options class, default vanilla's own chat-component
+    // vanilla's options class, default vanilla's chat-component
     // rendering's default-unfocused-pct accessor
-    // = `70.0 / (getHeight(1.0) - 20)` = `70.0 / 160.0`
+    // = `70.0 / (get_height(1.0) - 20)` = `70.0 / 160.0`
     //.
     ("chatHeightUnfocused", 70.0 / 160.0),
     // vanilla's own options class.
@@ -1175,7 +1175,7 @@ fn unit_double_default_fraction(accessor: &str) -> Option<f32> {
         .map(|(_, v)| *v)
 }
 
-/// One vanilla `OptionInstance.IntRange`'s bounds — the `(minInclusive,
+/// One vanilla option instance's int range's bounds — the `(minInclusive,
 /// maxInclusive)` pair a slider needs before it can place a handle at all.
 ///
 /// `IntRange` is a record of exactly those two ints plus an
@@ -1183,15 +1183,15 @@ fn unit_double_default_fraction(accessor: &str) -> Option<f32> {
 /// changes *when* vanilla commits a drag, never where the handle draws, so it
 /// is deliberately absent here.
 ///
-/// The arithmetic lives in the `IntRangeBase` interface `IntRange` implements,
+/// The arithmetic lives in the int range base interface `IntRange` implements,
 /// and [`Self::to_slider_value`] is that method transcribed — not a
 /// re-derivation. See [`INT_RANGE_SLIDERS`] for the per-accessor bounds and
 /// why each one is a citation rather than a plausible number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliderRange {
-    /// `IntRange.minInclusive`.
+    /// IntRange's min inclusive.
     pub min: i32,
-    /// `IntRange.maxInclusive` (`:267`).
+    /// IntRange's max inclusive (`:267`).
     pub max: i32,
 }
 
@@ -1282,7 +1282,7 @@ pub const LARGE_DISTANCES_MAX: i32 = 32;
 /// Three columns, and the third is the subtle one. An `IntRange` slider may be
 /// `.xmap`'d to a non-integer displayed value,
 /// and `xmap`'s `toSliderValue` calls `from.applyAsInt(value)` *first* and then
-/// defers to the underlying `IntRangeBase` — so the fraction is always a
+/// defers to the underlying int range base — so the fraction is always a
 /// function of the **int**, never of the displayed double. Each `.xmap`'d row
 /// below therefore records `from(default)` with the conversion spelled out, not
 /// the default a player sees.
@@ -1345,8 +1345,8 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
     ("sprintWindow", SliderRange { min: 0, max: 10 }, 7),
     // vanilla's own options class: `IntRange(30, 110)`, default `70`. The
     // `Codec.DOUBLE.xmap` on the line between them is a **persistence** codec
-    // (the 7-arg `OptionInstance` overload, vanilla's own option-instance type), not
-    // a `ValueSet::xmap`, so it does not touch the slider at all — reading it
+    // (the 7-arg option instance overload, vanilla's own option-instance type), not
+    // a value set's xmap, so it does not touch the slider at all — reading it
     // as one would put the handle at `(int)(70 * 40 + 70)`, far off the track.
     ("fov", SliderRange { min: 30, max: 110 }, 70),
     // This client's render-distance range is intentionally wider than the
@@ -1363,7 +1363,7 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
     ),
     // vanilla's own options class: `IntRange(DEBUG_ALLOW_LOW_SIM_DISTANCE ? 2 : 5,
     // largeDistances ? 32 : 16, false)`, default `12`. The min is `5`: the `2`
-    // is behind `SharedConstants.DEBUG_ALLOW_LOW_SIM_DISTANCE`, a dev flag off
+    // is behind shared constants's debug allow low sim distance, a dev flag off
     // in a shipped client, and taking the debug branch would shift every
     // handle on this row.
     (
@@ -1396,7 +1396,7 @@ fn graphics_preset_default_fraction() -> f32 {
 }
 
 /// Looks up [`INT_RANGE_SLIDERS`] by accessor and maps its default through
-/// [`SliderRange::to_slider_value`], plus the one `SliderableEnum` row.
+/// [`SliderRange::to_slider_value`], plus the one sliderable enum row.
 ///
 /// Returns `None` for an accessor in neither table. Two settings-tree sliders
 /// land there **deliberately**, and both are absences with a reason rather than
@@ -1566,7 +1566,7 @@ pub fn framerate_limit_slider_fraction(fps: u32) -> f32 {
 }
 
 /// `graphicsPreset`'s slider fraction from the real, persisted preset —
-/// `SliderableEnum.toSliderValue`'s `values.indexOf(value) / (size - 1)`
+/// The sliderable enum's to slider value's `values.indexOf(value) / (size - 1)`
 ///, endpoints pinned exactly like
 /// [`graphics_preset_default_fraction`] already does for the inactive row.
 #[must_use]
@@ -1579,8 +1579,8 @@ pub fn graphics_preset_slider_fraction(preset: crate::config::GraphicsPreset) ->
 }
 
 /// The inverse of [`graphics_preset_slider_fraction`] — the **drag** write
-/// side. Vanilla's `SliderableValueSet` default `fromSliderValue`
-/// (vanilla's own option-instance type, `IntRangeBase`'s, which `SliderableEnum`
+/// side. Vanilla's sliderable value set default `fromSliderValue`
+/// (vanilla's own option-instance type, the int range base's, which the sliderable enum
 /// inherits): `floor(map(slider, 0, 1, 0, size))`, clamping a `slider >= 1.0`
 /// down first so the top of the track cannot floor *past* the last index.
 #[must_use]
@@ -1596,16 +1596,16 @@ pub fn graphics_preset_from_fraction(fraction: f32) -> crate::config::GraphicsPr
 /// value — the one place this module inverts vanilla's own stringifier
 /// rather than restating a table.
 ///
-/// Vanilla stores the option as `logMouse(intValue) = 10^(intValue / 100)`
+/// Vanilla stores the option as `log_mouse(intValue) = 10^(intValue / 100)`
 /// over `IntRange(-200, 100)`, and
-/// `IntRangeBase.toSliderValue` maps that int **linearly, except at the two
+/// The int range base's to slider value maps that int **linearly, except at the two
 /// endpoints**:
 /// `map(intValue + 0.5, min, max + 1, 0, 1)`. This inverts the stored double
 /// back to vanilla's int via `unlogMouse` (vanilla's own options class,
 /// `Mth.floor` is a plain `floor`) and then applies the same map, so the
 /// shipped config default of `1.0`
 /// ([`crate::config::Options::default`]) lands on the same fraction a fresh
-/// vanilla install shows: `unlogMouse(1.0) == 0`, `map(0.5, -200, 101, 0, 1)
+/// vanilla install shows: `unlog_mouse(1.0) == 0`, `map(0.5, -200, 101, 0, 1)
 /// == 200.5 / 301 ≈ 0.6661`.
 ///
 /// Clamps to the endpoint fractions for a value outside vanilla's
@@ -1630,7 +1630,7 @@ pub fn mouse_wheel_slider_fraction(value: f32) -> f32 {
     fraction as f32
 }
 
-/// `Options.genericValueLabel`:
+/// Options's generic value label:
 /// vanilla's own translatable-component construction for "options.generic_value", caption, value, whose
 /// `en_us.json` pattern is `"%s: %s"`.
 #[must_use]
@@ -1642,8 +1642,8 @@ pub fn generic_value_label(caption: &str, value: &str) -> String {
 ///
 /// `guiScale`'s stringifier is `value == 0 ? "options.guiScale.auto" :
 /// literal(value)` — note it returns the value **without**
-/// the caption, which is why `CycleButton` composes them and this does not.
-/// `bobView` is a plain boolean, so `CycleButton.onOffBuilder`'s
+/// the caption, which is why cycle button composes them and this does not.
+/// `bobView` is a plain boolean, so cycle button's on off builder's
 /// `options.on`/`options.off` apply: `"ON"`/`"OFF"`, upper case in `en_us.json`.
 #[must_use]
 pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String {
@@ -1661,8 +1661,8 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::ShowSubtitles => {
             if options.show_subtitles { "ON" } else { "OFF" }.to_string()
         }
-        // `ToggleKeyMapping`'s own stringifier is `value ? KEY_TOGGLE :
-        // KEY_HOLD` (`ToggleKeyMapping`'s caller in vanilla's own options class),
+        // The toggle key mapping's own stringifier is `value ? KEY_TOGGLE :
+        // KEY_HOLD` (the toggle key mapping's caller in vanilla's own options class),
         // i.e. "Toggle"/"Hold" — **not** ON/OFF, unlike every other boolean
         // option on this page. `en_us.json`'s `options.key.toggle`/
         // `options.key.hold`.
@@ -1678,15 +1678,15 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::ToggleUse => {
             if options.toggle_use { "Toggle" } else { "Hold" }.to_string()
         }
-        // `createBoolean("options.autoJump", false)` —
+        // create boolean —
         // the plain boolean stringifier, `OPTIONS_ON`/`OPTIONS_OFF`, not the
-        // `ToggleKeyMapping` "Toggle"/"Hold".
+        // The toggle key mapping "Toggle"/"Hold".
         LiveOption::AutoJump => {
             if options.auto_jump { "ON" } else { "OFF" }.to_string()
         }
         // `IntRange(0, 10)`, stringifier
-        // `value == 0 ? genericValueLabel(caption, OPTION_OFF) :
-        // genericValueLabel(caption, OPTION_VALUE, value)` — "OFF" at 0,
+        // `value == 0 ? generic_value_label(caption, OPTION_OFF) :
+        // generic_value_label(caption, OPTION_VALUE, value)` — "OFF" at 0,
         // else the tick count.
         LiveOption::SprintWindow => {
             if options.sprint_window_ticks == 0 {
@@ -1712,7 +1712,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // applied to `(caption, false)` `:
         // percentValueLabel(caption, value)` — the one
         // chat slider with an OFF caption, and `optionStatus(caption, false)`
-        // is itself `genericValueLabel(caption, OPTION_OFF)`, so composing
+        // is itself generic value label, so composing
         // `"OFF"` through [`Cell::label`] reproduces it exactly.
         LiveOption::ChatScale => {
             if options.chat_scale == 0.0 {
@@ -1721,11 +1721,11 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
                 percent_value(options.chat_scale)
             }
         }
-        // `pixelValueLabel(caption,` vanilla's own chat-component rendering's
+        // `pixel_value_label(caption,` vanilla's own chat-component rendering's
         // get-width accessor applied to `value)`
         //.
         LiveOption::ChatWidth => pixel_value(chat_width_px(options.chat_width)),
-        // `pixelValueLabel(caption,` vanilla's own chat-component rendering's
+        // `pixel_value_label(caption,` vanilla's own chat-component rendering's
         // get-height accessor applied to `value)`
         //.
         LiveOption::ChatHeightFocused => pixel_value(chat_height_px(options.chat_height_focused)),
@@ -1771,7 +1771,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
                 percent_value(options.sensitivity * 2.0)
             }
         }
-        // `genericValueLabel(caption, translatable("options.chunks", value))`
+        // generic value label
         //. `en_us.json`'s pattern is `"%s Chunks"` — a
         // **capital** C, which is the sort of thing that only a look at the
         // language file gets right.
@@ -1784,7 +1784,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             }
         }
         // `Options::percentValueOrOffLabel`: `value == 0.0 ?
-        // genericValueLabel(caption, OPTION_OFF) : percentValueLabel(caption,
+        // Generic value label : percentValueLabel(caption,
         // value)`. So this is **not** the plain percent transcription its
         // neighbours use — a stored `0.0` prints "OFF", and only `0.0` does,
         // because `percentValueLabel`'s `(int)(value * 100.0)` would print `0%`
@@ -1863,8 +1863,8 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             lodestone_render::CloudStatus::Fast => "Fast".to_string(),
             lodestone_render::CloudStatus::Fancy => "Fancy".to_string(),
         },
-        // `value == 260 ? genericValueLabel(caption, "Unlimited") :
-        // genericValueLabel(caption, "%s fps" % value)` (vanilla's own options class,
+        // `value == 260 ? generic_value_label(caption, "Unlimited") :
+        // generic_value_label(caption, "%s fps" % value)` (vanilla's own options class,
         // `en_us.json`'s `options.framerate`/`options.framerateLimit.max`).
         LiveOption::FramerateLimit => {
             if options.framerate_limit >= crate::config::UNLIMITED_FRAMERATE_CUTOFF {
@@ -1898,14 +1898,14 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::EntityShadows => {
             if options.entity_shadows { "ON" } else { "OFF" }.to_string()
         }
-        // `genericValueLabel(caption, translatable("options.blocks", value))`
+        // generic value label
         //. `en_us.json`'s pattern is `"%s Blocks"` — a
         // **capital** B, and **Blocks** rather than `RenderDistance`'s Chunks:
         // this slider is denominated in blocks and its Video-page neighbour
         // `cloudRange` is the chunk-denominated one.
         LiveOption::WeatherRadius => format!("{} Blocks", options.weather_radius),
-        // `Options::genericValueOrOffLabel`: `value == 0 ?
-        // genericValueLabel(caption, OPTION_OFF) : genericValueLabel(caption,
+        // Options's generic value or off label: `value == 0 ?
+        // Generic value label : generic value label(caption,
         // value)` — the **integer** sibling of the
         // `percentValueOrOffLabel` the glint and volume sliders use, so a zero
         // reads OFF and every other value is the bare number with no unit.
@@ -1927,7 +1927,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             crate::config::ParticleLevel::Decreased => "Decreased".to_string(),
             crate::config::ParticleLevel::Minimal => "Minimal".to_string(),
         },
-        // `genericValueLabel(caption, translatable("options.biomeBlendRadius."
+        // `generic value label(caption, translatable("options.biomeBlendRadius."
         // + (value * 2 + 1)))` — the key is the window
         // **width**, not the stored radius, and `en_us.json` gives each width
         // its own hand-written name rather than a format pattern.
@@ -1972,18 +1972,18 @@ fn biome_blend_caption(radius: i32) -> String {
     }
 }
 
-/// One row of an `OptionsList`, i.e. one `addBig` / `addSmall` / `addHeader`
+/// One row of an options list, i.e. one `addBig` / `addSmall` / `addHeader`
 /// call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entry {
-    /// `addHeader(text)`: a `StringWidget`, not a control. Its height is
+    /// add header: a string widget, not a control. Its height is
     /// `paddingTop + 9 + 4` and its `paddingTop` is `0` for the first entry in
     /// the list and `18` otherwise — which is why
     /// [`entry_height`] takes the index.
     Header(&'static str),
-    /// `addBig(option)`: one 310 px control on its own row.
+    /// add big: one 310 px control on its own row.
     Big(Cell),
-    /// `addSmall(a, b)`: two 150 px controls 160 px apart, or one when the
+    /// add small: two 150 px controls 160 px apart, or one when the
     /// option count is odd.
     Small(Cell, Option<Cell>),
 }
@@ -2065,7 +2065,7 @@ const fn friends_settings(label: &'static str) -> Cell {
 
 /// The root's second header button — vanilla's `inWorld` fork
 ///. Outside a world it is a live link to
-/// [`SettingsPage::Online`]; inside one it is `WorldOptionsScreen`, which this
+/// [`SettingsPage::Online`]; inside one it is the world options screen, which this
 /// client does not build, so it stays the same `no_screen` placeholder shape
 /// every other unbuilt screen uses.
 ///
@@ -2099,7 +2099,7 @@ const fn lone(a: Cell) -> Entry {
 
 // -- the census -------------------------------------------------------------
 
-/// `VideoSettingsScreen.addOptions` (`:142-150`), in its own order: the three
+/// The video settings screen's add options (`:142-150`), in its own order: the three
 /// headers, the inline `fullscreenOption` built at `:108-141`, then
 /// `displayOptions` (`:66-77`), `graphicsPreset`, `qualityOptions` (`:45-64`)
 /// and `preferenceOptions` (`:79-81`).
@@ -2218,7 +2218,7 @@ static VIDEO: &[Entry] = &[
     )),
 ];
 
-/// `ControlsScreen.addOptions` (vanilla's own controls-screen rendering's own source file).
+/// The controls screen's add options (vanilla's controls-screen rendering's source file).
 ///
 /// The four `toggle*` options are the only ones in the tree whose caption is a
 /// **keybind** name rather than an `options.*` key — `key.sneak`, `key.sprint`,
@@ -2253,7 +2253,7 @@ static CONTROLS: &[Entry] = &[
     lone(cycle("operatorItemsTab", "Operator Items Tab")),
 ];
 
-/// `MouseSettingsScreen.addOptions` (`:23-29`).
+/// The mouse settings screen's add options (`:23-29`).
 ///
 /// `rawMouseInput` is included: vanilla appends it only when
 /// vanilla's own input-constants raw-mouse-input-supported check, which is true on every desktop
@@ -2296,14 +2296,14 @@ static MOUSE: &[Entry] = &[
     lone(cycle("rawMouseInput", "Raw Input")),
 ];
 
-/// `SoundOptionsScreen.addOptions` (`:18-24`).
+/// The sound options screen's add options (`:18-24`).
 ///
-/// The eleven volume sliders are vanilla's own sound-category enum's own values in declaration order
+/// The eleven volume sliders are vanilla's sound-category enum's values in declaration order
 /// (vanilla's own sound-source declarations' own source file) with `MASTER` pulled out into the `addBig`
 /// row; their captions are `soundCategory.<name>`.
 ///
 /// **All eleven are live.** Each carries its own
-/// [`LiveOption::SoundVolume`] index, and that index is the `SoundSource`
+/// [`LiveOption::SoundVolume`] index, and that index is the sound source
 /// ordinal — so it is simultaneously the slot in
 /// [`crate::config::Options::sound_volumes`], the `sound_volume_<name>` key in
 /// `options.json` and the mixer bus `lodestone_audio::CategoryVolumes::set_user`
@@ -2368,7 +2368,7 @@ static SOUND: &[Entry] = &[
     ),
 ];
 
-/// `ChatOptionsScreen.options` (`:11-32`), paired two at a time.
+/// The chat options screen's options (`:11-32`), paired two at a time.
 static CHAT: &[Entry] = &[
     pair(
         cycle("chatVisibility", "Chat"),
@@ -2420,7 +2420,7 @@ static CHAT: &[Entry] = &[
     ),
 ];
 
-/// `AccessibilityOptionsScreen.addOptions` (`:66-71`).
+/// The accessibility options screen's add options (`:66-71`).
 ///
 /// The shape is unusual and reproduced rather than tidied: the **narrator** is
 /// pulled out of the option array and paired with a link to the Controls screen
@@ -2440,7 +2440,7 @@ static ACCESSIBILITY: &[Entry] = &[
         cycle("highContrast", "High Contrast"),
     ),
     pair(
-        // The Video page's own row for the same `OptionInstance` — vanilla
+        // The Video page's own row for the same option instance — vanilla
         // places this option on both screens, like the three chat sliders
         // below. Editing either moves the other's label.
         live_slider(
@@ -2504,15 +2504,15 @@ static ACCESSIBILITY: &[Entry] = &[
     )),
 ];
 
-/// `SkinCustomizationScreen.addOptions` (`:20-31`): the seven
-/// `PlayerModelPart`s in declaration order
+/// The skin customization screen's add options (`:20-31`): the seven
+/// The player model parts in declaration order
 /// (vanilla's own player-model-part declarations' own source file) as `onOffBuilder` cycle
 /// buttons, then `mainHand`.
 ///
 /// These seven are the only controls in the tree that are **not**
-/// `OptionInstance`s at all — they are built inline from
-/// `options.isModelPartEnabled(part)` — so the `accessor` names below are
-/// vanilla's `PlayerModelPart` ids rather than vanilla's own options class methods.
+/// The option instances at all — they are built inline from
+/// options's is model part enabled — so the `accessor` names below are
+/// vanilla's player model part ids rather than vanilla's own options class methods.
 static SKIN: &[Entry] = &[
     pair(
         cycle("modelPart.cape", "Cape"),
@@ -2529,20 +2529,20 @@ static SKIN: &[Entry] = &[
     pair(cycle("modelPart.hat", "Hat"), cycle("mainHand", "Main Hand")),
 ];
 
-/// `OnlineOptionsScreen.addOptions`, in its
+/// The online options screen's add options, in its
 /// own call order. The Friends List and request-permission rows open the
 /// account-scoped Friends settings surface; the remaining online controls are
 /// decorative — see [`SettingsPage::Online`]'s doc for why — so their
 /// accessors use [`cycle`].
 ///
-/// `friendsList`/`allowFriendRequests` are not vanilla's own options class `OptionInstance`s
-/// at all — vanilla backs them with `PlayerSocialManager` state instead
+/// `friendsList`/`allowFriendRequests` are not vanilla's own options class option instances
+/// at all — vanilla backs them with the player social manager state instead
 /// (`:89-104`) — so their `accessor` strings are synthetic, the same
-/// convention [`SKIN`] already uses for `PlayerModelPart` ids that are not
+/// convention [`SKIN`] already uses for the player model part ids that are not
 /// vanilla's own options class methods either.
 ///
 /// `realmsNotifications`' caption is **not** `options.realmsNotifications`
-/// ("Realms News & Invites"): the `OptionInstance` is constructed with the
+/// ("Realms News & Invites"): the option instance is constructed with the
 /// `.button` key, whose `en_us.json` string is
 /// "News & Invites". Easy to get backwards by reading the accessor name alone.
 static ONLINE: &[Entry] = &[
@@ -2566,8 +2566,8 @@ static ONLINE: &[Entry] = &[
     big(cycle("realmsNotifications", "News & Invites")), // options.realmsNotifications.button
 ];
 
-/// The root screen's ten nav buttons, in `OptionsScreen.init`'s own
-/// `helper.addChild` order (`:70-95`) — which is what fills the 2×5 grid
+/// The root screen's ten nav buttons, in the options screen's init's own
+/// helper's add child order (`:70-95`) — which is what fills the 2×5 grid
 /// row-major.
 static ROOT_GRID: &[Cell] = &[
     nav("Skin Customization...", SettingsPage::Skin),
@@ -2607,26 +2607,26 @@ static ROOT_GRID: &[Cell] = &[
 /// | `ResourcePacks` | Two filesystem-backed lists with transfer, reorder, metadata and thumbnail support, backed by [`super::packs`]. |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
-    /// `OptionsScreen` — the root, and the only page that is **not** an
-    /// `OptionsSubScreen`: a taller header carrying the FOV slider, a 2×5
+    /// The options screen — the root, and the only page that is **not** an
+    /// The options sub screen: a taller header carrying the FOV slider, a 2×5
     /// `GridLayout` of nav buttons, and no list at all.
     Root,
-    /// `VideoSettingsScreen` — 31 controls, the most of any screen.
+    /// The video settings screen — 31 controls, the most of any screen.
     Video,
-    /// `controls/ControlsScreen`.
+    /// controls/controls screen.
     Controls,
-    /// `MouseSettingsScreen`.
+    /// The mouse settings screen.
     Mouse,
-    /// `SoundOptionsScreen`.
+    /// The sound options screen.
     Sound,
-    /// `ChatOptionsScreen`.
+    /// The chat options screen.
     Chat,
-    /// `AccessibilityOptionsScreen` — where `bobView` lives in 26.2, and the
+    /// The accessibility options screen — where `bobView` lives in 26.2, and the
     /// one page with two footer buttons.
     Accessibility,
-    /// `SkinCustomizationScreen`.
+    /// The skin customization screen.
     Skin,
-    /// `OnlineOptionsScreen` — friends list,
+    /// The online options screen — friends list,
     /// requests, in-game notifications, presence visibility, an external Xbox
     /// Settings link, server-listing opt-out and Realms news/invites. The
     /// Friends List and request-permission rows are live as routes to the
@@ -2637,13 +2637,13 @@ pub enum SettingsPage {
     ///
     /// Reached from the root's second header button when
     /// [`super::UiState::settings_in_world`] is `false` — vanilla's own fork
-    ///: `in_world` picks `WorldOptionsScreen`
+    ///: `in_world` picks world options screen
     /// instead, which this client does not build, so that branch stays a
     /// `no_screen` placeholder and the button reads "World Options..." and
     /// stays inactive, exactly as it always has. See [`controls`]'s
     /// `Placement::Root(2)` branch and [`SettingsNav::in_world`].
     Online,
-    /// `controls/KeyBindsScreen` — **not** an `OptionsList` page.
+    /// controls/key binds screen — **not** an options list page.
     /// [`SettingsNav`] delegates every query and every input to
     /// [`super::key_binds::KeyBindsNav`] whenever `page == SettingsPage::KeyBinds`,
     /// the same way it special-cases [`SettingsPage::Root`] for a tree with no
@@ -2654,7 +2654,7 @@ pub enum SettingsPage {
     /// Reached from the Controls page's own "Key Binds..." button — vanilla's
     /// own wiring, not the root grid.
     KeyBinds,
-    /// `LanguageSelectScreen` — **not** an `OptionsList` page,
+    /// The language select screen — **not** an options list page,
     /// same reason as [`SettingsPage::KeyBinds`]: [`SettingsNav`] delegates to
     /// [`super::language::LanguageNav`] whenever `page ==
     /// SettingsPage::Language`, so [`Self::entries`]/[`Self::footer`] never
@@ -2662,11 +2662,11 @@ pub enum SettingsPage {
     /// the whole screen.
     ///
     /// Reached from the **root grid**, unlike `KeyBinds` — vanilla's own
-    /// wiring (vanilla's own options-screen rendering, `helper.addChild(this.openScreenButton(
-    /// LANGUAGE, ...))`, the same `helper.addChild` sequence [`ROOT_GRID`]
+    /// wiring (vanilla's own options-screen rendering, `helper.add_child(this.open_screen_button(
+    /// LANGUAGE, ...))`, the same helper's add child sequence [`ROOT_GRID`]
     /// mirrors).
     Language,
-    /// `TelemetryInfoScreen` — **not** an `OptionsList` page
+    /// The telemetry info screen — **not** an options list page
     /// either, for the same structural reason as [`SettingsPage::Language`]
     /// and [`SettingsPage::KeyBinds`]: [`SettingsNav`] delegates to
     /// [`super::telemetry::TelemetryNav`] whenever `page ==
@@ -2678,11 +2678,11 @@ pub enum SettingsPage {
     /// cover.
     ///
     /// Reached from the **root grid**, vanilla's own wiring
-    /// (vanilla's own options-screen rendering, `helper.addChild(this.openScreenButton(
+    /// (vanilla's own options-screen rendering, `helper.add_child(this.open_screen_button(
     /// TELEMETRY, ...))`).
     ///
     /// **Considered departure**: vanilla itself disables this exact button
-    /// (with a `TELEMETRY_DISABLED_TOOLTIP`) when `!minecraft.allowsTelemetry()`
+    /// (with a `TELEMETRY_DISABLED_TOOLTIP`) when `!minecraft.allows_telemetry()`
     /// (`:89-91`) — the precedent this whole tree's disabled path already
     /// follows. This client is permanently in that state and could have kept
     /// the button inactive for that reason alone. It is live instead because
@@ -2690,7 +2690,7 @@ pub enum SettingsPage {
     /// two working external links — where vanilla's own binary choice assumes
     /// a telemetry-less screen has nothing worth reaching.
     Telemetry,
-    /// `PackSelectionScreen` — **not** an `OptionsList` page,
+    /// The pack selection screen — **not** an options list page,
     /// for the same structural reason as [`SettingsPage::Language`]/
     /// [`SettingsPage::Telemetry`]: two transferable columns over a real pack
     /// repository. Landed first as a reduced one-entry list and now built for
@@ -2700,8 +2700,8 @@ pub enum SettingsPage {
     /// (pack-format validation).
     ///
     /// Reached from the **root grid**, vanilla's own wiring
-    /// (vanilla's own options-screen rendering, `helper.addChild(this.openScreenButton(
-    /// RESOURCEPACK, () -> new PackSelectionScreen(...)))`).
+    /// (vanilla's own options-screen rendering, `helper.add_child(this.open_screen_button(
+    /// RESOURCEPACK, () -> new pack selection screen(...)))`).
     ResourcePacks,
 }
 
@@ -2750,7 +2750,7 @@ impl SettingsPage {
         }
     }
 
-    /// The `OptionsList` entries, or `&[]` for the root, which has no list.
+    /// The options list entries, or `&[]` for the root, which has no list.
     #[must_use]
     pub fn entries(self) -> &'static [Entry] {
         match self {
@@ -2776,7 +2776,7 @@ impl SettingsPage {
 
     /// The footer buttons, left to right.
     ///
-    /// Every page but one is `OptionsSubScreen.addFooter`'s single 200 px Done
+    /// Every page but one is the options sub screen's add footer's single 200 px Done
     /// (`:51-53`); Accessibility overrides it with a `LinearLayout.horizontal()
     /// .spacing(8)` of two default-width buttons — the external accessibility
     /// guide, then Done.
@@ -2808,11 +2808,11 @@ impl SettingsPage {
 /// `assert_eq!` needs, so nothing that compared two `Placement`s loses anything.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Placement {
-    /// One widget of `OptionsScreen`'s own arranged layout, by `visitWidgets`
-    /// index: `0` the title `StringWidget`, `1` the FOV slider, `2` the
+    /// One widget of the options screen's own arranged layout, by `visitWidgets`
+    /// index: `0` the title string widget, `1` the FOV slider, `2` the
     /// Online/World Options button, `3..=12` the nav grid row-major, `13` Done.
     Root(u8),
-    /// One footer button of an `OptionsSubScreen`, `index` within a block of
+    /// One footer button of an options sub screen, `index` within a block of
     /// `count` (see [`SettingsPage::footer`]).
     Footer {
         /// Position in the block, left to right.
@@ -2820,7 +2820,7 @@ pub enum Placement {
         /// How many buttons the block holds — 1 or 2.
         count: u8,
     },
-    /// A control cell of an `OptionsList`.
+    /// A control cell of an options list.
     ListCell {
         /// Which page's entry heights to walk.
         page: SettingsPage,
@@ -2832,7 +2832,7 @@ pub enum Placement {
         /// `0` or `1` — the `addSmall` column.
         column: u8,
     },
-    /// A header entry's `StringWidget`.
+    /// A header entry's string widget.
     ListHeader {
         /// Which page's entry heights to walk.
         page: SettingsPage,
@@ -2879,7 +2879,7 @@ impl Control {
 /// entry `first` is at the top of the window.
 ///
 /// List cells first (top to bottom, left to right), then the footer — which is
-/// `HeaderAndFooterLayout.visitChildren`'s own order, header then contents then
+/// HeaderAndFooterLayout's visit children's own order, header then contents then
 /// footer.
 ///
 /// `in_world` is only consulted on [`SettingsPage::Root`] — see
@@ -2890,7 +2890,7 @@ pub fn controls(page: SettingsPage, scroll: f32, in_world: bool) -> Vec<Control>
     let mut out = Vec::new();
     if page == SettingsPage::Root {
         // 1 = the FOV slider, 2 = the Online / World Options button; the title
-        // at index 0 is a `StringWidget` and not focusable.
+        // at index 0 is a string widget and not focusable.
         out.push(Control {
             // Live: an `IntRange(30, 110)` reaching `Sim::set_fov_y_degrees` and
             // the projection matrix. The only live option **not** in a page's
@@ -3029,12 +3029,12 @@ pub fn entry_of_control(page: SettingsPage, control: usize) -> Option<usize> {
     None
 }
 
-// -- `OptionsList` geometry -------------------------------------------------
+// -- the options list geometry -------------------------------------------------
 
 /// One entry's height.
 ///
-/// `addEntry(entry)` uses the list's `defaultEntryHeight` of 25
-/// (vanilla's own abstract selection-list base, vanilla's own options-list type); `addHeader`
+/// Add entry uses the list's `defaultEntryHeight` of 25
+/// (vanilla's abstract selection-list base, vanilla's options-list type); `addHeader`
 /// passes `paddingTop + lineHeight + 4` explicitly,
 /// where `paddingTop` is `0` for the first entry in the list and `18`
 /// otherwise (`:58`). That first-header case is the reason this takes an index
@@ -3050,7 +3050,7 @@ pub fn entry_height(entries: &[Entry], index: usize) -> f32 {
     }
 }
 
-/// `OptionsList.addHeader`'s `paddingTop`: `0` when the list is still empty,
+/// The options list's add header's `paddingTop`: `0` when the list is still empty,
 /// `lineHeight * 2` otherwise.
 ///
 /// "The list is still empty" is `index == 0`, because `addHeader` is called in
@@ -3067,7 +3067,7 @@ pub fn header_padding_top(index: usize) -> f32 {
 /// The y of entry `index`, relative to `getFirstEntryY()`, with entry `first` at
 /// the top of the window.
 ///
-/// `repositionEntries` accumulates `child.getHeight()` from
+/// `repositionEntries` accumulates child's get height from
 /// `getFirstEntryY() - scrollAmount`;
 /// snapping the scroll to an entry boundary makes that sum start at `first`.
 #[must_use]
@@ -3148,7 +3148,7 @@ pub fn visible_entries(entries: &[Entry], first: usize) -> std::ops::Range<usize
     first..end
 }
 
-/// `OptionsList.Entry.extractContent`'s x for column `column`:
+/// The options list's entry.extract_content's x for column `column`:
 /// `this.screen.width / 2 - 155 + column * 160`.
 ///
 /// The division is Java integer division on `screen.width`, hence [`layout::ipx`].
@@ -3159,11 +3159,11 @@ pub fn row_left(width: f32, column: u8) -> f32 {
 
 /// The top-left of the widget in `entry`, column `column`, on `page`.
 ///
-/// `list.updateSize(width, layout)` puts the list at
-/// `(0, layout.getHeaderHeight())` sized `(width, layout.getContentHeight())`
-/// (vanilla's own options-sub-screen base, vanilla's own abstract selection-list base), so the
+/// List's update size puts the list at
+/// `(0, layout.get_header_height())` sized `(width, layout.get_content_height())`
+/// (vanilla's options-sub-screen base, vanilla's abstract selection-list base), so the
 /// list's own `getY()` is the header height and everything below is
-/// `getFirstEntryY()` + the entry walk + `getContentY()`'s inset.
+/// `getFirstEntryY()` + the entry walk + get content y's inset.
 #[must_use]
 pub fn list_cell_origin(
     page: SettingsPage,
@@ -3221,8 +3221,8 @@ pub fn drawn_scroll(page: SettingsPage, scroll: f32, height: f32) -> f32 {
         .map_or(scroll, |list| list.scroll())
 }
 
-/// The top-left of a header entry's `StringWidget`:
-/// `(screen.width / 2 - 155, getContentY() + paddingTop)`.
+/// The top-left of a header entry's string widget:
+/// `(screen.width / 2 - 155, get_content_y() + paddingTop)`.
 #[must_use]
 pub fn list_header_origin(
     page: SettingsPage,
@@ -3237,7 +3237,7 @@ pub fn list_header_origin(
 
 // -- the arranged layouts --------------------------------------------------
 
-/// A zero-width, 9 px `StringWidget` stand-in.
+/// A zero-width, 9 px string widget stand-in.
 ///
 /// The real one is `font.width(text)` wide, which is
 /// not known in a layout pass with no font. Zero is safe for **placement** —
@@ -3254,7 +3254,7 @@ fn button(w: f32) -> Box<dyn LayoutElement> {
     Box::new(Widget::button(0.0, 0.0, w, WIDGET_H, ""))
 }
 
-/// `OptionsScreen.init` (`:50-99`) as a real [`HeaderAndFooterLayout`],
+/// The options screen's init (`:50-99`) as a real [`HeaderAndFooterLayout`],
 /// arranged for one canvas.
 ///
 /// Returns `visitWidgets` order: title, FOV, Online/World Options, the ten grid
@@ -3274,7 +3274,7 @@ pub fn root_widget_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
     let mut layout_root =
         HeaderAndFooterLayout::with_heights(width, height, ROOT_HEADER_HEIGHT, FOOTER_HEIGHT);
 
-    // `LinearLayout header = layout.addToHeader(LinearLayout.vertical().spacing(8))`
+    // `LinearLayout header = layout.add_to_header(LinearLayout.vertical().spacing(8))`
     // with the title centred, then a horizontal sub-row of the FOV slider and
     // the Online (or World Options) button, also spacing 8 (`:52-65`).
     let mut header = LinearLayout::vertical().spacing(ROOT_SPACING);
@@ -3288,8 +3288,8 @@ pub fn root_widget_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
     header.add_child(Box::new(sub_header));
     layout_root.add_to_header(Box::new(header));
 
-    // `gridLayout.defaultCellSetting().paddingHorizontal(4).paddingBottom(4)
-    // .alignHorizontallyCenter()` then ten `helper.addChild` (`:67-95`).
+    // `gridLayout.default cell setting's padding horizontal(4).padding_bottom(4)
+    // .align_horizontally_center()` then ten helper's add child (`:67-95`).
     let mut grid = layout::GridLayout::new();
     {
         let baseline = grid.default_cell_setting();
@@ -3311,10 +3311,10 @@ pub fn root_widget_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
     layout::widget_rects(&layout_root)
 }
 
-/// An `OptionsSubScreen`'s footer buttons, arranged for one canvas.
+/// An options sub screen's footer buttons, arranged for one canvas.
 ///
-/// `count == 1` is `OptionsSubScreen.addFooter`'s single 200 px Done (`:51-53`);
-/// `count == 2` is `AccessibilityOptionsScreen.addFooter`'s
+/// `count == 1` is the options sub screen's add footer's single 200 px Done (`:51-53`);
+/// `count == 2` is the accessibility options screen's add footer's
 /// `LinearLayout.horizontal().spacing(8)` of two 150 px buttons (`:77-83`).
 /// Both go through the same real `HeaderAndFooterLayout` so the band's own
 /// centring is asked for rather than restated.
@@ -3375,10 +3375,10 @@ pub fn placement_anchor(placement: Placement, width: f32, height: f32) -> (f32, 
 /// The y of a page title's line, inside its header band.
 ///
 /// The band's `FrameLayout` inherits `align(0.5, 0.5)`
-///, so a 9 px `StringWidget` in a 33 px
+///, so a 9 px string widget in a 33 px
 /// band sits at `Math.round(lerp(0.5, 0, 33 - 9)) = 12`. Asked of a real
 /// arranged layout rather than written down, because
-/// `AbstractChildWrapper::setY` **rounds** where `setX` truncates and the
+/// The abstract child wrapper's set y **rounds** where `setX` truncates and the
 /// asymmetry is worth a pixel (see `docs/menu-layout.md`).
 #[must_use]
 pub fn title_y(page: SettingsPage) -> f32 {
@@ -3599,9 +3599,9 @@ impl SettingsNav {
     /// page stack, instead of [`SettingsPage::Root`].
     ///
     /// This is vanilla's title-screen icon buttons:
-    /// the Language/Accessibility icons construct `LanguageSelectScreen`/
-    /// `AccessibilityOptionsScreen` directly with `lastScreen = this` (the
-    /// title), never routing through `OptionsScreen`. An empty stack is what
+    /// the Language/Accessibility icons construct language select screen/
+    /// The accessibility options screen directly with `lastScreen = this` (the
+    /// title), never routing through the options screen. An empty stack is what
     /// makes that faithful rather than approximate: [`Self::back`] pops the
     /// stack and falls through to [`SettingsOutcome::Close`] when it is
     /// empty, so Escape/Done from a page opened this way leaves the settings
@@ -3697,7 +3697,7 @@ impl SettingsNav {
         self.scroll_to_cursor();
     }
 
-    /// `AbstractSelectionList.scrollToEntry`, through
+    /// The abstract selection list's scroll to entry, through
     /// [`super::widget::ScrollList::scroll_to_entry`] — bring the
     /// cursor's entry into the band, moving the **minimum number of pixels**.
     ///
@@ -3773,8 +3773,8 @@ impl SettingsNav {
 
     /// Escape: unwind one page, or ask to leave the tree from the root.
     ///
-    /// `Screen.shouldCloseOnEsc` is true for every options screen, and
-    /// `OptionsSubScreen.onClose` returns to `lastScreen`
+    /// Screen's should close on esc is true for every options screen, and
+    /// The options sub screen's on close returns to `lastScreen`
     /// — which is the page stack here.
     pub fn escape(&mut self) -> SettingsOutcome {
         self.back()
@@ -3795,7 +3795,7 @@ impl SettingsNav {
     /// The live slider option at visible row `row`, if that row is one.
     ///
     /// The mouse-**drag** half of a slider (vanilla's
-    /// `AbstractSliderButton.onDrag` → `setValueFromMouse`), which this screen
+    /// The abstract slider button's on drag → `setValueFromMouse`), which this screen
     /// had no equivalent of at all: `click_row` routed every slider through
     /// `activate` → `SettingsOutcome::Cycle`, i.e. one wrapping step per click.
     /// That is why a slider "moved a tiny bit on click" instead of following the
@@ -3822,7 +3822,7 @@ impl SettingsNav {
     /// The one place a control's activation is interpreted.
     ///
     /// An **inactive** control does nothing at all, which is
-    /// `AbstractWidget.mouseClicked`'s `isActive()` guard
+    /// The abstract widget's mouse clicked's `isActive()` guard
     /// and the same shape as
     /// [`super::nav::MenuNav`]'s `key_main` refusing Enter on a disabled title
     /// button.
@@ -3841,7 +3841,7 @@ impl SettingsNav {
                 self.cursor = 0;
                 self.scroll = 0.0;
                 // A fresh `KeyBindsNav` on every entry, matching vanilla
-                // building a new `KeyBindsScreen` each time — the same rule
+                // building a new key binds screen each time — the same rule
                 // `reset` already applies to the outer cursor, one page
                 // deeper. Harmless to run when `page` is not `KeyBinds`: the
                 // field just sits at its default until it is.
@@ -3877,7 +3877,7 @@ impl SettingsNav {
 
 // -- the frame ------------------------------------------------------------
 
-/// Vanilla's inactive label grey, for a `StringWidget`-shaped header.
+/// Vanilla's inactive label grey, for a string widget-shaped header.
 ///
 /// A header is not a widget with an `active` flag; vanilla draws it in the
 /// component's own default white. Read from [`widget::ACTIVE_LABEL`] rather
@@ -3905,7 +3905,7 @@ pub fn settings_frame(
     options: &crate::config::Options,
     save_error: Option<&str>,
 ) -> MenuFrame<'static> {
-    // `SettingsPage::KeyBinds` is not an `OptionsList` page — see
+    // `SettingsPage::KeyBinds` is not an options list page — see
     // that variant's own doc — so it builds its frame in a different module
     // entirely rather than falling through the `Cell`/`Control` path below.
     // The error label is appended here rather than in `key_binds::frame`
@@ -3926,7 +3926,7 @@ pub fn settings_frame(
         }
         return frame;
     }
-    // `SettingsPage::Language` is not an `OptionsList` page
+    // `SettingsPage::Language` is not an options list page
     // either — same reason and same shape as the `KeyBinds` branch above.
     if nav.page() == SettingsPage::Language {
         let mut frame = super::language::frame(nav.language());
@@ -3966,8 +3966,8 @@ pub fn settings_frame(
             slider: control.cell.is_slider(),
             slider_value: control.cell.slider_fraction(options),
             slot: Some(control.slot()),
-            // `AbstractWidget.setTooltip`, from the option's own
-            // `TooltipSupplier` — see `Cell::tooltip`. Stamped on every row
+            // The abstract widget's set tooltip, from the option's own
+            // The tooltip supplier — see `Cell::tooltip`. Stamped on every row
             // uniformly, so which rows have text is the table's answer and not the
             // frame builder's: a renderer wired for only some rows is the failure
             // mode worth naming, and this is the line that prevents it.
@@ -4026,7 +4026,7 @@ pub fn settings_frame(
         colour: HEADER_COLOUR,
         scale: 1.0,
     }];
-    // `OptionsList.HeaderEntry`'s `StringWidget`s.
+    // The options list's header entry's string widgets.
     let entries = page.entries();
     let mut list_labels = Vec::new();
     // Every header, clipped to the band by `render::draw`. These go in
@@ -4165,8 +4165,8 @@ mod tests {
         //
         // **Three appear twice**, and that is vanilla's own shape rather than a
         // duplicate row: `textBackgroundOpacity`, `chatOpacity` and
-        // `chatLineSpacing` are one `OptionInstance` each, placed on *both*
-        // `ChatOptionsScreen` and `AccessibilityOptionsScreen`
+        // `chatLineSpacing` are one option instance each, placed on *both*
+        // The chat options screen and the accessibility options screen
         // (vanilla's own options class, and the two screens' own option arrays). Both
         // rows drive the same `config::Options` field, so editing either moves
         // the other's label too — which is why `LiveOption` is keyed by the
@@ -4256,7 +4256,7 @@ mod tests {
                 LiveOption::DiscreteMouseScroll,
                 LiveOption::InvertMouseX,
                 LiveOption::InvertMouseY,
-                // Sound page: the eleven volume buses in `SoundSource` declaration
+                // Sound page: the eleven volume buses in the sound source declaration
                 // order, MASTER first because the page pulls it into its own
                 // `addBig` row. The index *is* the ordinal — see
                 // `sound_rows_index_the_category_they_name`, which is what stops a
@@ -4276,7 +4276,7 @@ mod tests {
                 // `showSubtitles` on *both* the Sound and Accessibility screens,
                 // so it appears twice below, like the three chat options do.
                 LiveOption::ShowSubtitles,
-                // Chat page, in `ChatOptionsScreen.options` order.
+                // Chat page, in the chat options screen's options order.
                 LiveOption::ChatColors,
                 LiveOption::ChatOpacity,
                 LiveOption::TextBackgroundOpacity,
@@ -4289,7 +4289,7 @@ mod tests {
                 // with Chat, then View Bobbing.
                 LiveOption::ShowSubtitles,
                 // The Accessibility page's own copy of the Video row above —
-                // one `OptionInstance`, two placements, like the three chat
+                // one option instance, two placements, like the three chat
                 // sliders that follow it here.
                 LiveOption::MenuBackgroundBlurriness,
                 LiveOption::TextBackgroundOpacity,
@@ -4533,7 +4533,7 @@ mod tests {
     /// asserted as an exact string.
     ///
     /// Each expectation originates outside this client: the pixel figures are
-    /// `ChatComponent.getWidth`/`getHeight`, the
+    /// The chat component's get width/`getHeight`, the
     /// percentages are `Options.percentValueLabel`'s `(int)(value * 100.0)`
     /// truncation, and `chatScale`'s OFF branch is
     /// vanilla's own common-components option-status helper applied to `(caption, false)`.
@@ -4623,7 +4623,7 @@ mod tests {
         assert_eq!(colors.label(&o), "Colors: OFF");
     }
 
-    /// A live `UnitDouble` slider's handle must sit at the **persisted** value,
+    /// A live unit double slider's handle must sit at the **persisted** value,
     /// not at the frozen boot default in [`UNIT_DOUBLE_DEFAULTS`].
     ///
     /// This is the assertion that separates a wired slider from a decorative
@@ -4637,7 +4637,7 @@ mod tests {
         let mut o = crate::config::Options::default();
         let width = live_slider("chatWidth", "Width", LiveOption::ChatWidth);
 
-        // `UnitDouble.toSliderValue` is the identity, so the fraction *is* the
+        // The unit double's to slider value is the identity, so the fraction *is* the
         // value — no range is needed for a unit-double option.
         assert_eq!(width.slider_fraction(&o), Some(1.0), "the default, 1.0");
         o.chat_width = 0.3;
@@ -4648,7 +4648,7 @@ mod tests {
              is the wrong-hypothesis value this distinguishes from"
         );
 
-        // The control: an **inactive** UnitDouble slider still falls through to
+        // The control: an **inactive** unit double slider still falls through to
         // the default table, so the mechanism above is a live-value lookup and
         // not "slider_fraction now returns whatever it is handed".
         let master = slider("soundSource.master", "Master Volume");
@@ -4715,7 +4715,7 @@ mod tests {
         assert_eq!(rd.slider_fraction(&o), Some(1.0));
 
         // The other wrong hypothesis, and the reason `unit_double` says `None`
-        // for this option: reading a chunk count as a `UnitDouble` would clamp
+        // for this option: reading a chunk count as a unit double would clamp
         // every value above 1 to the far end of the track.
         o.render_distance = 8;
         assert_eq!(
@@ -4724,7 +4724,7 @@ mod tests {
             "a chunk count must not be readable as a 0..1 fraction"
         );
 
-        // -- sensitivity: a UnitDouble, so the value *is* the fraction.
+        // -- sensitivity: a unit double, so the value *is* the fraction.
         let sens = live_slider("sensitivity", "Sensitivity", LiveOption::Sensitivity);
         o.sensitivity = 0.25;
         assert_eq!(sens.slider_fraction(&o), Some(0.25));
@@ -4800,7 +4800,7 @@ mod tests {
         // storage is `f32` where vanilla's is `double` — so a value like 0.35,
         // which is representable in neither, lands at 69.999... here and prints
         // **69%** where vanilla prints 70%. That divergence is a property of the
-        // `f32` field shared by every `UnitDouble` option in
+        // `f32` field shared by every unit double option in
         // `crate::config::Options`, not of this row, and asserting it here would
         // pin an unrelated decision. 0.25/0.5/0.75 are exact in both.
         o.sensitivity = 0.25;
@@ -5047,7 +5047,7 @@ mod tests {
     }
 
     /// The ported ranges put each slider's handle where vanilla's
-    /// `IntRangeBase.toSliderValue` puts it.
+    /// The int range base's to slider value puts it.
     ///
     /// Each expectation is written as the **explicit ratio** the jar's formula
     /// yields for that row's own `(min, max, default)` — `(v + 0.5 - min) /
@@ -5113,7 +5113,7 @@ mod tests {
         expect("weatherRadius", 1.0, "IntRange(3,10), default 10 == max");
         expect("chatDelay", 0.0, "IntRange(0,60), default 0.0 -> int 0 == min");
 
-        // The one `SliderableEnum`, whose divisor is `size - 1`.
+        // The one sliderable enum, whose divisor is `size - 1`.
         expect(
             "graphicsPreset",
             1.0 / 3.0,
@@ -5278,7 +5278,7 @@ mod tests {
         );
     }
 
-    /// The read and write sides of a `UnitDouble` slider must agree about which
+    /// The read and write sides of a unit double slider must agree about which
     /// options they cover.
     ///
     /// The compiler enforces that both `match`es are exhaustive over the enum,
@@ -5532,7 +5532,7 @@ mod tests {
     /// other's bus while both labels read correctly and every round-trip test
     /// still passes. The expected mapping originates outside this file — it is
     /// [`crate::config::SOUND_CATEGORY_NAMES`], which is
-    /// vanilla's own sound-category name lookup in `SoundSource` declaration order, the same list
+    /// vanilla's own sound-category name lookup in the sound source declaration order, the same list
     /// the file keys and the mixer buses are derived from.
     #[test]
     fn sound_rows_index_the_category_they_name() {
@@ -5597,7 +5597,7 @@ mod tests {
 
     #[test]
     fn only_slider_backed_options_are_sliders() {
-        // `OptionInstance.createButton` dispatches on the `ValueSet`, and
+        // The option instance's create button dispatches on the value set, and
         // vanilla's own clamping-lazy-max-int-range's create-cycle-button call is `true`
         // — so GUI Scale, an int range, is a
         // **cycle** button. Getting this backwards would draw a slider track
@@ -5612,7 +5612,7 @@ mod tests {
 
     #[test]
     fn header_heights_follow_the_first_entry_rule() {
-        // `OptionsList.addHeader`: `paddingTop` is `0` when the list is empty
+        // The options list's add header: `paddingTop` is `0` when the list is empty
         // and `18` after, and the entry's height is `paddingTop + 9 + 4`
         //. Video opens with a header and has two
         // more, so it exercises both branches.
@@ -5632,9 +5632,9 @@ mod tests {
     #[test]
     fn a_list_rows_geometry_is_vanillas_own_arithmetic() {
         // Hand-derived from the jar, not from this file: on a 480-wide canvas
-        // `getRowLeft()` is `480 / 2 - 155 = 85` and the second column is
+        // get row left is `480 / 2 - 155 = 85` and the second column is
         // `+160`. The first entry's widget is at
-        // `headerHeight(33) + getFirstEntryY()'s 2 + getContentY()'s 2 = 37`.
+        // `headerHeight(33) + getFirstEntryY()'s 2 + get_content_y()'s 2 = 37`.
         let page = SettingsPage::Mouse;
         assert_eq!(list_cell_origin(page, 0, 0.0, 0, 480.0, 480.0), (85.0, 37.0));
         assert_eq!(list_cell_origin(page, 0, 0.0, 1, 480.0, 480.0), (245.0, 37.0));
@@ -5670,7 +5670,7 @@ mod tests {
         // Java integer division on an odd width: `481 / 2 == 240`, not 240.5.
         assert_eq!(row_left(481.0, 0), 85.0);
         assert_eq!(row_left(480.0, 0), 85.0);
-        // A header's `StringWidget` is at `getContentY() + paddingTop`, and the
+        // A header's string widget is at `get_content_y() + paddingTop`, and the
         // 18 px padding is what separates a mid-list header from its neighbour.
         let video = SettingsPage::Video;
         assert_eq!(list_header_origin(video, 0, 0.0, 480.0, 480.0), (85.0, 37.0));
@@ -5879,7 +5879,7 @@ mod tests {
                 // ENTRY_CONTENT_INSET` while the band, the scrollbar and the clip
                 // walk `ScrollList::row_top` (`first_entry_y + row_offset`). Every
                 // other list in this tree derives both from one expression; this
-                // page cannot, because its `entry_height` table is `OptionsList`'s
+                // page cannot, because its `entry_height` table is the options list's
                 // and not the primitive's. They agree today — `LIST_TOP_INSET` and
                 // `LIST_CONTENT_PADDING` are both 2 px, and `entry_offset` is the
                 // same sum `with_heights` was handed — and this is what keeps them
@@ -6134,7 +6134,7 @@ mod tests {
         // unbuilt `Cell::Nav` left at all. The one that remains is the
         // root's own header button *inside* a world, where it is the
         // inactive World Options placeholder rather than a link to Online
-        // (`WorldOptionsScreen` is out of scope — see `online_cell`'s doc).
+        // (the world options screen is out of scope — see `online_cell`'s doc).
         let mut nav = SettingsNav::new();
         nav.reset(true); // inside a world
         let world_options = all_controls(SettingsPage::Root, true)
@@ -6292,7 +6292,7 @@ mod tests {
         // `HeaderAndFooterLayout`'s first production consumer. The expected
         // values are hand-derived from the Java, outside the code under test:
         //
-        //   header: a vertical LinearLayout spacing 8 of a 9 px StringWidget
+        //   header: a vertical LinearLayout spacing 8 of a 9 px string widget
         //           and a 308 px (150+8+150) row, so 308x37, centred in a
         //           480x61 band -> x = (480-308)/2 = 86, y = round((61-37)/2) = 12.
         //           The pair row is 8+9 = 17 below the title, i.e. y = 29.
@@ -6319,7 +6319,7 @@ mod tests {
         // `string_widget`'s zero width is a stand-in, and this is the assertion
         // that makes it harmless: the title's arranged x must be the centre of
         // the 308 px header row, so drawing it with `Align::Centre` about that
-        // x lands where a real `font.width`-wide `StringWidget` centred in the
+        // x lands where a real `font.width`-wide string widget centred in the
         // same column would.
         for width in [320.0f32, 427.0, 480.0, 854.0] {
             let rects = root_widget_rects(width, 320.0);
@@ -6327,7 +6327,7 @@ mod tests {
             let (fov_x, _, _, _) = rects[1];
             let (online_x, _, online_w, _) = rects[2];
             // The row spans the FOV button's left edge to the Online button's
-            // right edge; its centre is where a real StringWidget would be
+            // right edge; its centre is where a real string widget would be
             // centred, and an odd canvas width must not make the two disagree.
             assert_eq!(
                 title_x,
@@ -6388,7 +6388,7 @@ mod tests {
             for first in 0..page.entries().len().max(1) {
                 let first_px = entry_offset(page.entries(), first);
                 // `SettingsPage::Root` is an arranged widget grid, not an
-                // `OptionsList` — its `entries()` is empty, so it has no band and
+                // The options list — its `entries()` is empty, so it has no band and
                 // `MenuNav::active_list` reports no list for it. Its controls are
                 // `Placement::Root`/`Footer`, which do not scroll, so the x bound
                 // below still covers them and only the band bound is skipped.
@@ -6435,7 +6435,7 @@ mod tests {
     /// **One notch is `floor(DEFAULT_ITEM_HEIGHT / 2)` = `floor(25 / 2)` = 12 px**
     ///, and the offset must coincide with no entry top.
     ///
-    /// 25, not 20: [`DEFAULT_ITEM_HEIGHT`] is `AbstractSelectionList`'s
+    /// 25, not 20: [`DEFAULT_ITEM_HEIGHT`] is the abstract selection list's
     /// `defaultEntryHeight` and [`WIDGET_H`] is the 20 px widget drawn *inside*
     /// it. `floor(20 / 2)` is 10, so a mix-up reports 10 here — named as an
     /// excluded hypothesis rather than left to chance, because 10 is exactly what
@@ -6561,7 +6561,7 @@ mod tests {
 
     #[test]
     fn the_frame_carries_a_header_label_for_every_visible_header() {
-        // `OptionsList.HeaderEntry` is a `StringWidget`, not a control, so it
+        // The options list's header entry is a string widget, not a control, so it
         // reaches the frame as a `MenuLabel`. If it did not, the three Video
         // headers would be missing and the rows below them would still be at
         // their (correct) header-padded positions — a gap with no caption,
@@ -6620,7 +6620,7 @@ mod tests {
 
     #[test]
     fn the_root_header_button_follows_vanillas_in_world_fork() {
-        // `OptionsScreen.init`'s `if (this.inWorld)` (`:56-66`). Outside a
+        // The options screen's init's `if (this.inWorld)` (`:56-66`). Outside a
         // world the button is now a **live** link to `SettingsPage::Online`;
         // inside one it stays the inactive placeholder it always was. Both the
         // label and the liveness come from `SettingsNav::in_world`, set by
@@ -6710,7 +6710,7 @@ mod tests {
         // this is the gate that would have caught it, because it walks
         // `settings_frame`'s **own output**, the same `MenuLabel`/`Slot`s
         // `build` draws from, rather than a hand-derived y. Covers every
-        // `OptionsList`-shaped page, both `in_world` states (the root's header
+        // The options list-shaped page, both `in_world` states (the root's header
         // button changes, nothing else does — see `controls`'s doc), two
         // canvases standing in for two GUI scales, and — since this client
         // carries no second locale to source a real long title from — a

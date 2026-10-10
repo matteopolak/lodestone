@@ -333,7 +333,7 @@ static ACTIVE_WORLD_SEED: std::sync::atomic::AtomicI64 = std::sync::atomic::Atom
 /// The world seed of the most recently built bundled generator.
 ///
 /// **This exists because the world seed does not reach the tick loop by any other
-/// route, and one thing in there needs it**: `WorldgenRandom.seedSlimeChunk`, so
+/// route, and one thing in there needs it**: WorldgenRandom's seed slime chunk, so
 /// [`crate::natural_spawn::NaturalSpawner`] can tell a slime chunk from an
 /// ordinary one. `crate::tick::run_tick_loop` is handed an `Arc<W: ChunkSource>`,
 /// and [`ChunkSource`](crate::chunk::ChunkSource) has no `world_seed()` — the
@@ -1791,7 +1791,7 @@ mod generation_spawn_reaches_a_real_chunk {
                 .expect("a fixed-biome generator was stored on disk");
 
         // Every column must report the chosen biome — `single_biome_chunk_source`'s
-        // own documented contract (`FixedBiomeSource`), re-checked here through
+        // own documented contract (the fixed biome source), re-checked here through
         // the disk-driven entry point rather than assumed to carry over.
         assert_eq!(source.biome_state_at(0, 80, 0), "minecraft:jungle");
         assert_eq!(source.biome_state_at(512, 80, -512), "minecraft:jungle");

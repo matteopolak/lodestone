@@ -3,7 +3,7 @@
 //! ## What it is
 //!
 //! The client-side set of waypoints the server is tracking for us, folded from
-//! `ClientboundTrackedWaypointPacket`. Vanilla draws these on the locator bar at
+//! the tracked-waypoint packet. Vanilla draws these on the locator bar at
 //! the top of the HUD.
 //!
 //! ## How it works

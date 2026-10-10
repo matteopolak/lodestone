@@ -84,7 +84,7 @@ impl RenderState {
     /// malformed id) is silently skipped, the same miss every other
     /// `resolve*` call in this codebase makes — a spawner drawing no mob
     /// reads as "empty cage" rather than a crash, matching vanilla's own
-    /// `getEntityToSpawn().getString("id").isEmpty()` early-out.
+    /// get string's get entity to spawn early-out.
     pub(super) fn prepare_spawner_mobs(
         &self,
         _device: &wgpu::Device,

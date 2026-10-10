@@ -1,7 +1,7 @@
 //! Chunk-batch flow control for protocol 776.
 //!
 //! The server streams chunks in batches and gates further delivery on the client
-//! acknowledging each one: `PlayerChunkSender` stops sending once ten batches go
+//! acknowledging each one: the chunk sender stops sending once ten batches go
 //! unacknowledged and only ever decrements that counter when the client replies
 //! with `chunk_batch_received`. A client that never acknowledges therefore loads
 //! the spawn area and then stalls permanently — walking produces void — so the

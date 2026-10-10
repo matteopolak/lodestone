@@ -494,7 +494,7 @@ fn the_who_is_online_tooltip_lists_the_sample_and_tracks_the_status_text() {
     let mut f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
 
     // The frame resolves the lines once per status, exactly as
-    // `ServerStatusPinger` builds `data.playerList` (`:90-110`): the two named
+    // The server status pinger builds `data.playerList` (`:90-110`): the two named
     // players, then the and-more line for the unnamed three.
     let a = f.rows[0].entry.as_ref().expect("row 0 is an entry");
     assert_eq!(
@@ -511,7 +511,7 @@ fn the_who_is_online_tooltip_lists_the_sample_and_tracks_the_status_text() {
 
     // The status text is right-aligned to its status icon
     // (`status_x = icon_x - width - spacing`), and the box lands by
-    // `DefaultTooltipPositioner` — content at the cursor + (12, -12), here with
+    // The default tooltip positioner — content at the cursor + (12, -12), here with
     // no edge to clamp — so the fill is `(rx - 3, ry - 3, w + 6, h + 6)`.
     let (icon_x, ..) = server_status_icon_rect(0, V_W, 0.0);
     let (_, cy, ..) = server_row_content_rect(0, V_W, 0.0);

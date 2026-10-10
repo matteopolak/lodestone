@@ -304,7 +304,7 @@ impl Particles {
 
 /// Builds the built-in-item-id → UV rect table [`Particles::new`] installs, by
 /// walking [`Item`]s in registry order and asking `models` for each
-/// item's `BreakingItemParticle` sprite.
+/// item's breaking item particle sprite.
 ///
 /// Keyed by the built-in registry id, which the validated
 /// [`SpriteSource::Item`](lodestone_particle::SpriteSource::Item) exposes only at

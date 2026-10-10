@@ -871,8 +871,8 @@ fn entity_models_whole_corpus_coverage() {
         let quads = bake_entity(&model);
         assert!(!quads.is_empty(), "{} baked no quads", e.name);
         // UVs are normalised against the model's declared sheet. Vanilla is
-        // emphatically not strictly in-bounds: SalmonModel/CodModel use negative
-        // texOffs, and PufferfishBigModel's fins run ~7 texels off the right edge
+        // emphatically not strictly in-bounds: the salmon and cod models use negative
+        // tex offsets, and the big pufferfish model's fins run ~7 texels off the right edge
         // of their 32x32 sheet. So we only assert UVs are finite and within a
         // gross 2x envelope (catches a NaN or a halved/doubled sheet); the real
         // gate is the integer-multiple sheet-size check above plus box counts.

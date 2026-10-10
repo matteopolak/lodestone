@@ -724,7 +724,7 @@ impl MeshScheduler {
     /// stamp onto their jobs. Does **not** itself re-mesh anything already
     /// queued or uploaded — see `Sim::set_cutout_leaves` for the caller that
     /// forces a remesh of every loaded column, vanilla's own
-    /// `operateOnLevelExtractor(LevelExtractor::allChanged)`.
+    /// operate on level extractor.
     pub fn set_cutout_leaves(&mut self, value: bool) {
         self.cutout_leaves = value;
     }
@@ -2127,7 +2127,7 @@ impl TerrainMesh {
 
     /// Sets `options.cutoutLeaves` and, only on a real change, re-meshes
     /// every currently-loaded column with the new value — vanilla's own
-    /// `operateOnLevelExtractor(LevelExtractor::allChanged)` for this option.
+    /// operate on level extractor for this option.
     ///
     /// **The equality guard is load-bearing, not an optimisation.** Called
     /// every frame ([`crate::sim::Sim::set_cutout_leaves`]'s own doc), so
@@ -2150,7 +2150,7 @@ impl TerrainMesh {
 
     /// Sets `options.biomeBlendRadius` and, only on a real change, re-meshes
     /// every currently-loaded column — vanilla's own
-    /// `operateOnLevelExtractor(LevelExtractor::allChanged)` for this option
+    /// operate on level extractor for this option
     /// too, and the same equality-guard reasoning as
     /// [`Self::set_cutout_leaves`]: this is polled every frame, so without the
     /// guard every frame would re-mesh the world.
@@ -2611,7 +2611,7 @@ impl TerrainMesh {
     ///
     /// This is the same eight columns vanilla's
     /// own enable-chunk-light routine dirties on chunk arrival
-    /// (`setSectionRangeDirty(x-1, minSectionY, z-1, x+1, maxSectionY, z+1)` —
+    /// (set section range dirty —
     /// the 3×3 column footprint over the whole vertical range), and it is *also*
     /// the mechanism that un-defers: a section held back by
     /// [`SnapshotOutcome::Deferred`] is re-snapshotted here the moment the column

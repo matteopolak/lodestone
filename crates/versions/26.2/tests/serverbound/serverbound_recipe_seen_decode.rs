@@ -1,6 +1,6 @@
 //! Independent raw-wire fixtures for the recipe-book seen acknowledgement.
 //!
-//! `RecipeDisplayId` is a plain VarInt. These bytes are written directly from
+//! A recipe display id is a plain VarInt. These bytes are written directly from
 //! that shape rather than through the client encoder, so the decoder's length
 //! guard cannot pass because both halves share a mistake.
 

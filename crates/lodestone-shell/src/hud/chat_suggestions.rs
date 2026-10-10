@@ -44,7 +44,7 @@ pub(super) const SUGGESTION_LAYERS: [SuggestionLayer; 4] = [
 /// | above the popup | why |
 /// |---|---|
 /// | this widget's own tooltip | [`SuggestionLayer::Tooltip`], last in [`SUGGESTION_LAYERS`] |
-/// | the F3 debug overlay | vanilla draws `DebugScreenOverlay` after every screen |
+/// | the F3 debug overlay | vanilla draws debug screen overlay after every screen |
 /// | a container screen's cursor stack and item tooltip | separate pass, separate geometry type — see `container.rs` |
 ///
 /// Only the first is this function's business; the other two composite in later
@@ -127,7 +127,7 @@ pub(super) fn draw_command_suggestions(
                     );
                 }
             }
-            // `graphics.setTooltipForNextFrame(font, fromMessage(tooltip),
+            // `graphics.set_tooltip_for_next_frame(font, from_message(tooltip),
             // mouseX, mouseY)`, gated on `hovered` — so it is the *pointer*
             // that reveals a tooltip, never the keyboard selection, and it
             // shows the **selected** row's message rather than the hovered
@@ -135,7 +135,7 @@ pub(super) fn draw_command_suggestions(
             // the only way `hovered` becomes true with a stale selection).
             //
             // Only the placement and the text are ported. Vanilla's
-            // `TooltipRenderUtil` border gradient is not modelled; this is a
+            // The tooltip render util border gradient is not modelled; this is a
             // flat panel, and that is a cosmetic narrowing rather than a
             // behavioural one.
             SuggestionLayer::Tooltip => {

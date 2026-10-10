@@ -476,7 +476,7 @@ fn pick_block_only_clones_with_infinite_materials() {
 }
 
 // ---------------------------------------------------------------------
-// The keyboard verbs: `AbstractContainerScreen.keyPressed` (`:495-501`).
+// The keyboard verbs: the abstract container screen's key pressed (`:495-501`).
 //
 // These close an island rather than adding a branch — see
 // `MenuInput::key_pressed`'s doc comment. Before it, `Click::drop_one` and
@@ -498,7 +498,7 @@ fn menu_with_a_stack(slot: usize, count: i32) -> Menu {
 }
 
 /// `Q` and `Ctrl+Q` differ **only** in the wire button number (`0` vs `1`,
-/// vanilla's own abstract container-screen base's `event.hasControlDown() ? 1 : 0`),
+/// vanilla's own abstract container-screen base's `event.has_control_down() ? 1 : 0`),
 /// which is what `do_throw` reads to pick drop-one from drop-stack.
 #[test]
 fn the_drop_key_throws_from_the_hovered_slot_and_control_makes_it_a_stack() {
@@ -521,7 +521,7 @@ fn the_drop_key_throws_from_the_hovered_slot_and_control_makes_it_a_stack() {
 /// here, because each one alone would pass against a wrong guard: an empty
 /// slot must send nothing (so the guard exists at all), and a **loaded
 /// cursor** must still send (so the guard is not `checkHotbarKeyPressed`'s
-/// `getCarried().isEmpty()`, copied one method too far). Vanilla leaves the
+/// get carried's get carried, copied one method too far). Vanilla leaves the
 /// carried check to vanilla's own abstract container-menu base, so suppressing it here
 /// would withhold a packet the server expects.
 #[test]
@@ -748,8 +748,8 @@ fn dragging_across_a_crafting_result_sends_a_pickup_not_a_dead_drag() {
 ///
 /// Expected value hand-derived from vanilla's own abstract container-menu base,
 /// which on `!slot.mayPlace(carried) && isSameItemSameComponents` does
-/// `tryRemove(clicked.getCount(), carried.getMaxStackSize() - carried.getCount())`
-/// then `carried.grow(taken)` — 4 + 1 = 5 — plus `ResultSlot.onTake`
+/// try remove
+/// then `carried.grow(taken)` — 4 + 1 = 5 — plus result slot's on take
 /// consuming one plank from the loaded cell (8 → 7).
 #[test]
 fn the_resulting_pickup_merges_the_result_onto_the_matching_cursor() {
@@ -1193,7 +1193,7 @@ fn beacon_slot_lands_at_vanillas_real_position_on_a_wider_taller_panel() {
 /// inventory when its the only thing open)". `generic_layout` — the
 /// `GENERIC_9x1`..`GENERIC_9x6` shape every chest, barrel, shulker box and
 /// trapped/ender chest uses — computed the player-inventory row origin as
-/// `18 + rows*18 + 14`, one off from `ChestMenu`'s own constructor:
+/// `18 + rows*18 + 14`, one off from the chest menu's own constructor:
 /// `int inventoryTop = 18 + this.containerRows * 18 + 13;`.
 /// A row-count-independent constant, not a scaled term, so the drift is
 /// identical at every chest size — checked here at both ends of the real
@@ -1262,7 +1262,7 @@ fn anvil_slots_land_at_vanillas_real_positions_not_a_generic_row() {
     assert_eq!(at(1), Some((76.0, 47.0)));
     assert_eq!(at(2), Some((134.0, 47.0)));
     // The player's main storage starts at vanilla's fixed `(8, 84)`, same
-    // as every other `addStandardInventorySlots(inventory, 8, 84)` screen.
+    // as every other add standard inventory slots screen.
     assert_eq!(at(3), Some((8.0, 84.0)));
 
     // Control: an *ordinary* 3-slot generic container (no `special_layout`)
@@ -1294,7 +1294,7 @@ fn ink_near(verts: &[f32], want: [f32; 3], tol: f32) -> usize {
 
 /// The anvil's XP cost (`docs/container-cost-screens.md`'s "What is not
 /// yet wired" gap): reaches real ink, in the colour vanilla's own
-/// `AnvilMenu.mayPickup`/`AnvilScreen.extractLabels` predicts — and, per
+/// The anvil menu's may pickup/anvil screen's extract labels predicts — and, per
 /// CLAUDE.md's *magnitude* evidence rule, this checks the actual colour
 /// drawn, not merely "something changed".
 #[test]
@@ -1718,7 +1718,7 @@ fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> Contai
             // `12 x 15` (`:753`).
             (12, 15)
         } else if id.starts_with("advancements/tab_") {
-            // `28 x 32` for `AdvancementTabType.ABOVE`.
+            // `28 x 32` for the advancement tab type's above.
             (28, 32)
         } else if id.ends_with("_frame_obtained") || id.ends_with("_frame_unobtained") {
             // `26 x 26`.
@@ -2140,7 +2140,7 @@ fn control_an_idle_brewing_stand_with_no_container_data_draws_no_bars() {
 }
 
 /// vanilla's own abstract container-screen base/`:161` —
-/// `blitSprite(SLOT_HIGHLIGHT_{BACK,FRONT}, slot.x - 4, slot.y - 4, 24, 24)`.
+/// blit sprite.
 /// Both sprites, at the same rect, on opposite sides of the marker.
 ///
 /// The *two-sided* part is what makes this worth a test rather than an
@@ -2347,7 +2347,7 @@ fn nothing_hovered_in_a_chest_blits_no_highlight_at_all() {
 }
 
 /// `extractSlot`'s `if (itemStack.isEmpty() && slot.isActive())` arm
-/// (`:224-230`), blitting `slot.getNoItemIcon()` at the cell origin, 16x16.
+/// (`:224-230`), blitting slot's get no item icon at the cell origin, 16x16.
 ///
 /// The ids come off `Slot::no_item_icon`, so this asserts *five* placeholders
 /// in a player inventory — the four armour slots and the off-hand.
@@ -2528,7 +2528,7 @@ fn id(name: &str) -> lodestone_model::Identifier {
 /// engaging", with the *unclamped* `mx - 147 - 8 ≈ -29.667` as the
 /// rejected hypothesis. Both hypotheses were wrong, because both placed
 /// the book relative to the **container panel**. Vanilla's
-/// `getXOrigin()` is `(width - 147) / 2 - xOffset`
+/// get x origin is `(width - 147) / 2 - xOffset`
 /// — screen-centred — and the
 /// *panel* is what moves (`updateScreenPosition`).
 ///
@@ -2569,7 +2569,7 @@ fn recipe_panel_layout_matches_predicted_vanilla_derived_rects_at_1280x720() {
         "the old panel-relative formula must not be the answer either"
     );
 
-    // `CraftingScreen.getRecipeBookButtonPosition`: local (5, 34) off the
+    // The crafting screen's get recipe book button position: local (5, 34) off the
     // *main* panel's own origin, not the book panel's. `recipe_book_panel_layout`
     // reports the **closed**-book layout (its `book_open` is `false`), so the
     // panel is unshifted and the toggle sits at the plain centred `mx`.
@@ -2882,7 +2882,7 @@ fn recipe_panel_contents_narrows_by_tab_and_paginates() {
     assert_eq!(narrowed.all_ids, vec![&id("minecraft:aa_dropper")]);
 }
 
-/// A page count of `1` even for **zero** matches (`RecipeBookPage`'s own
+/// A page count of `1` even for **zero** matches (the recipe book page's own
 /// `ceil` never returns `0`) — the rejected hypothesis is `total_pages ==
 /// 0`, which would make `page` clamp against an empty range and panic
 /// on the `.min(total_pages - 1)` subtraction.
@@ -2912,7 +2912,7 @@ fn recipe_panel_contents_reports_one_page_for_zero_matches_not_zero() {
 /// constant — the point being that a test which asserts `y == 61.0` against a
 /// draw that also says `61.0` measures nothing but a copy-paste.
 ///
-/// `abs_y` is the screen's own `getRecipeBookButtonPosition().y()` as a
+/// `abs_y` is the screen's own get recipe book button position's get recipe book button position as a
 /// function of the logical canvas height, and `topPos` is
 /// vanilla's own abstract container-screen base's `(height - imageHeight) / 2`. Both use
 /// **integer** division, as Java does; `imageHeight` is the `176x166` default
@@ -3299,7 +3299,7 @@ fn synthetic_recipe_gui_atlas() -> lodestone_render::GuiAtlas {
 /// `(1, 1)` of the `256x256` sheet, byte-exact.
 ///
 /// vanilla's own recipe-book component is
-/// `blit(RenderPipelines.GUI_TEXTURED, RECIPE_BOOK_LOCATION, xo, yo, 1.0F,
+/// `blit(the render pipelines's gui textured, RECIPE_BOOK_LOCATION, xo, yo, 1.0F,
 /// 1.0F, 147, 166, 256, 256)` — a fixed window, `u = v = 1`. The one-pixel
 /// inset is real: decoding the PNG shows its opaque region is exactly
 /// `x 1..147, y 1..166`.
@@ -3465,7 +3465,7 @@ fn recipe_panel_emits_vanillas_art_in_an_order_that_cannot_bury_a_control() {
     }
 
     // Slot frames for populated cells only -- vanilla hides an unused
-    // `RecipeButton`, and the sheet's grid region is uniform white with no
+    // The recipe button, and the sheet's grid region is uniform white with no
     // frames baked in, so emitting all 20 would draw a grid vanilla lacks.
     let slots = find(RECIPE_SPRITE_SLOT);
     assert_eq!(
@@ -3633,7 +3633,7 @@ fn slot_point_book_open(menu: &Menu, menu_index: usize) -> [f32; 2] {
 }
 
 /// The two highlight quads for slot `menu_index` at its **drawn** origin —
-/// `blitSprite(SLOT_HIGHLIGHT_{BACK,FRONT}, slot.x - 4, slot.y - 4, 24, 24)`,
+/// blit sprite,
 /// where `slot.x` already carries the book shift.
 fn highlight_hits(geo: &ContainerGeometry, want: [f32; 4]) -> usize {
     bg_rects(geo, crate::config::AUTO_GUI_SCALE)
@@ -3896,7 +3896,7 @@ fn hover_blocked_suppresses_the_tooltip_too() {
 /// `Some`/`None` here is the island question: `PlayerPreview` can be attached,
 /// its matrices correct and its pass ready, and reach zero pixels because
 /// `build_inner` never produces a placement. Vanilla calls
-/// `extractEntityInInventoryFollowsMouse` from `InventoryScreen.extractBackground`
+/// `extractEntityInInventoryFollowsMouse` from the inventory screen's extract background
 /// and from nowhere else, so a chest drawing one would be a divergence.
 #[test]
 fn only_the_player_inventory_carries_an_avatar() {
@@ -4072,7 +4072,7 @@ fn the_avatars_cursor_is_divided_down_to_the_logical_canvas() {
 }
 
 // ---------------------------------------------------------------------------
-// The recipe button's hover tooltip (`RecipeBookPage.extractTooltip`)
+// The recipe button's hover tooltip (the recipe book page's extract tooltip)
 // ---------------------------------------------------------------------------
 
 /// The tooltip must resolve **per recipe cell**, not "the pointer is somewhere

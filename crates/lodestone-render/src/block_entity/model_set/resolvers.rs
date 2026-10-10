@@ -506,7 +506,7 @@ impl BlockEntityModelSet {
         out.extend(make(CONDUIT_WIND, wind_texture, wind2_placement));
 
         // Eye: `translate(0.5, 0.3+hh*0.2, 0.5)`, `scale(0.5)`,
-        // `mulPose(camera.orientation)`, `mulPose(rotationZ(PI).rotateY(PI))`,
+        // mul pose, mul pose's mul pose,
         // `scale(1.3333334)` — net linear scale `0.5 * 1.3333334 ≈ 0.6667`, not
         // a single `scale(1.3333334)`; the two calls are not redundant, they
         // straddle the billboard rotation. `rotationZ(PI).rotateY(PI)` is

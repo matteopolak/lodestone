@@ -276,9 +276,9 @@ fn player_sample(entry: &PlayerSampleDocument) -> Option<PlayerSample> {
 /// **`to_spans`, not `to_interactive_spans`, and that is the right call.** A
 /// `description` is an ordinary component and could in principle carry a
 /// `clickEvent`/`hoverEvent`, but the decompiled server-list row this crate's
-/// `motd_spans` field feeds (`ServerSelectionList`'s online-server entry) draws
+/// `motd_spans` field feeds (the online-server list entry) draws
 /// the MOTD with a plain component-aware text blit and nothing else — no
-/// `mouseClicked` override consults it, and no tooltip call is wired to it
+/// click handler consults it, and no tooltip call is wired to it
 /// either (the row's own tooltips are the ping icon and the "who's online"
 /// list, both keyed off unrelated rects). Style is the whole of what a real
 /// server's MOTD gets to say to this screen.

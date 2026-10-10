@@ -282,25 +282,25 @@ fn font_trace_codepoints() -> &'static HashSet<u32> {
     })
 }
 
-/// Number of bitmap rows in every unihex glyph (`UnihexProvider.GLYPH_HEIGHT`).
+/// Number of bitmap rows in every unihex glyph.
 /// Fixed: the HEX line's digit count varies the *width*, never the height.
 pub const UNIHEX_GLYPH_HEIGHT: u32 = 16;
 
 /// Source-texels-per-logical-pixel for a unihex glyph
-/// (`GlyphBitmap.getOversample` on `UnihexProvider.Glyph`'s bitmap). A unihex
+/// (the glyph bitmap's oversample on the unihex glyph). A unihex
 /// glyph is 16 rows tall and draws 8 logical pixels tall, which is what puts it
 /// on the same baseline as the 8 px ascii sheet.
 pub const UNIHEX_OVERSAMPLE: f32 = 2.0;
 
-/// A unihex glyph's bearing-top, which `GlyphBitmap.getBearingTop`'s default
-/// supplies (`UnihexProvider.Glyph`'s bitmap overrides neither bearing). With
+/// A unihex glyph's bearing-top, which the glyph bitmap's default
+/// supplies (the unihex glyph's bitmap overrides neither bearing). With
 /// [`metrics::BEARING_TOP_BASE`] also 7.0 this puts the glyph box's top edge
 /// flush with the line's top, exactly like the ascii sheet's `ascent: 7`.
 const UNIHEX_ASCENT: i32 = 7;
 
 /// One unihex glyph's 16 rows of bits, as read from a GNU Unifont HEX line.
 ///
-/// # The line format, from `UnihexProvider.readFromStream`
+/// # The line format, from the unihex reader
 ///
 /// ```text
 /// 2713:00000000010102024444282810100000
@@ -314,16 +314,16 @@ const UNIHEX_ASCENT: i32 = 7;
 ///
 /// | digits | bit width | reader |
 /// |---|---|---|
-/// | 32 | 8 (half-width) | `ByteContents.read` |
-/// | 64 | 16 (full-width) | `ShortContents.read` |
-/// | 96 | 24 | `IntContents.read24` |
-/// | 128 | 32 | `IntContents.read32` |
+/// | 32 | 8 (half-width) | byte contents |
+/// | 64 | 16 (full-width) | short contents |
+/// | 96 | 24 | 24-bit int contents |
+/// | 128 | 32 | 32-bit int contents |
 ///
 /// Every one of the four is 16 rows; `digits / 16` hex digits per row, most
 /// significant digit first, so the row's leftmost pixel is its most significant
 /// bit. Vanilla normalises all four to a 32-bit row **left-aligned in the
-/// word** — `ByteContents.line` returns `contents[i] << 24`,
-/// `ShortContents.line` `<< 16`, `read24` stores `v << 8`, `read32` stores `v` —
+/// word** — the byte contents shift left 24,
+/// short contents 16, the 24-bit form stores `v << 8`, the 32-bit form stores `v` —
 /// and [`rows`](Self::rows) holds exactly that, so bit 31 is always column 0
 /// regardless of width. Keeping the alignment rather than the raw width is what
 /// lets one trimming rule serve all four.
@@ -344,13 +344,13 @@ impl UnihexBitmap {
         &self.rows
     }
 
-    /// The declared bit width: 8, 16, 24 or 32 (`LineData::bitWidth`).
+    /// The declared bit width: 8, 16, 24 or 32.
     #[must_use]
     pub fn bit_width(&self) -> u32 {
         self.bit_width
     }
 
-    /// The OR of all 16 rows (`LineData::mask`) — every column that is ink
+    /// The OR of all 16 rows — every column that is ink
     /// anywhere in the glyph.
     #[must_use]
     pub fn mask(&self) -> u32 {
@@ -358,7 +358,7 @@ impl UnihexBitmap {
     }
 
     /// `(left, right)` column bounds derived from the ink, per
-    /// `LineData::calculateWidth`.
+    /// the line data's width calculation.
     ///
     /// Both are **bit indices from the left**, not from the LSB: `left =
     /// numberOfLeadingZeros(mask)` and `right = 32 -
@@ -387,7 +387,7 @@ impl UnihexBitmap {
 
 /// Reads a GNU Unifont `.hex` payload, calling `out` once per entry.
 ///
-/// A faithful port of `UnihexProvider.readFromStream`, with two deliberate
+/// A faithful port of the unihex stream reader, with two deliberate
 /// relaxations: a `\r` before the newline is dropped (vanilla would count it as
 /// a digit and throw), and a wholly blank line is skipped (vanilla would fold
 /// its newline into the next entry's codepoint field and throw). Both make a
@@ -717,7 +717,7 @@ pub struct BitmapGlyph {
 
 /// A baked unihex glyph: its 16 rows plus the column bounds that trim it.
 ///
-/// # The trimming rule, from `UnihexProvider.Glyph`
+/// # The trimming rule, from the unihex glyph
 ///
 /// `left`/`right` are inclusive column bounds and come from **one of two
 /// places**, never both:
@@ -748,14 +748,14 @@ pub struct UnihexGlyph {
 }
 
 impl UnihexGlyph {
-    /// Column count, `right - left + 1` (`UnihexProvider.Glyph.width`).
+    /// Column count, `right - left + 1`.
     #[must_use]
     pub fn width(&self) -> i32 {
         self.right - self.left + 1
     }
 
-    /// Advance in logical pixels, `width / 2 + 1` — the anonymous
-    /// `GlyphInfo.getAdvance` in `UnihexProvider.Glyph.info`. Half-integral for
+    /// Advance in logical pixels, `width / 2 + 1`, as the unihex glyph's
+    /// info reports it. Half-integral for
     /// an odd width, which is why [`Glyph::advance`] is `f32` and not `i32`.
     #[must_use]
     pub fn advance(&self) -> f32 {
@@ -788,12 +788,12 @@ impl UnihexGlyph {
 /// A baked `ttf` glyph: enough to place it and re-rasterise its bitmap on
 /// demand from its face.
 ///
-/// Faithful to `com.mojang.blaze3d.font.TrueTypeGlyphProvider`: FreeType (here,
+/// Faithful to the game's TrueType glyph provider: FreeType (here,
 /// [`fontdue`]) renders every glyph at `pixelsPerEm = round(size * oversample)`,
 /// and every logical-pixel field below has already been divided by
 /// `oversample` — and had `shift` folded in — the way
-/// `TrueTypeGlyphProvider.Glyph`'s constructor computes `bearingX`/`bearingY`
-/// from FreeType's `left`/`top` (`bearingX = left / oversample`, `bearingY =
+/// the TrueType glyph's constructor computes the bearings
+/// from FreeType's `left`/`top` (bearing X = left / oversample, bearing Y =
 /// top / oversample`, with the shift already baked into `left`/`top` by
 /// FreeType's own `FT_Set_Transform`). This port applies the shift itself
 /// instead, since [`fontdue`] has no transform hook: `bearing_left = xmin /
@@ -837,7 +837,7 @@ pub enum Glyph {
     Ttf(TtfGlyph),
     /// A whitespace-only glyph carrying only an advance: either an explicit
     /// `space` provider entry, or a `ttf` glyph whose rasterised bitmap came
-    /// back zero-area (`TrueTypeGlyphProvider.loadGlyph`'s `EmptyGlyph` case —
+    /// back zero-area (the TrueType provider's empty-glyph case —
     /// vanilla still gives it a real advance, just no bitmap to bake).
     Space {
         /// Advance width.
@@ -857,10 +857,10 @@ impl Glyph {
     }
 
     /// The extra advance this glyph gains when bold, and the distance its bold
-    /// second pass is offset by (`GlyphInfo.getBoldOffset`).
+    /// second pass is offset by (the glyph info's bold offset).
     ///
     /// **1 px for everything except a unihex glyph, which is 0.5.** Vanilla puts
-    /// this on `GlyphInfo` per glyph, not on the font: a unihex glyph is drawn at
+    /// this on the glyph info per glyph, not on the font: a unihex glyph is drawn at
     /// oversample 2, so its bold pass shifts half a logical pixel — one source
     /// texel — where a sheet glyph's shifts a whole one. Reading
     /// [`metrics::BOLD_OFFSET`] for every codepoint instead would make bold CJK
@@ -872,7 +872,7 @@ impl Glyph {
         }
     }
 
-    /// How far this glyph's drop shadow is offset (`GlyphInfo.getShadowOffset`):
+    /// How far this glyph's drop shadow is offset (the glyph info's shadow offset):
     /// 1 px, or 0.5 for a unihex glyph, for the same oversample reason as
     /// [`bold_offset`](Self::bold_offset).
     pub fn shadow_offset(&self) -> f32 {
@@ -1308,7 +1308,7 @@ impl<'a> FontLoader<'a> {
         traced: &HashSet<u32>,
         font_id: &ResourceLocation,
     ) -> Result<usize, FontError> {
-        // `TrueTypeGlyphProviderDefinition.load`: `resourceManager.open(this.location.withPrefix("font/"))`.
+        // The TrueType provider definition opens the font file under the `font/` prefix.
         let path = format!("assets/{}/font/{}", file.namespace(), file.path());
         let Some(bytes) = self.manager.read(&path) else {
             // Soft skip, deliberately (see this method's own doc) -- but
@@ -1355,7 +1355,7 @@ impl<'a> FontLoader<'a> {
             }
             let metrics = face.metrics_indexed(glyph_id.get(), pixels_per_em);
             let glyph = if metrics.width == 0 || metrics.height == 0 {
-                // `TrueTypeGlyphProvider.loadGlyph`'s `EmptyGlyph` case: still a
+                // The TrueType provider's empty-glyph case: still a
                 // real advance, no bitmap to bake.
                 Glyph::Space {
                     advance: metrics.advance_width / oversample,
@@ -1393,9 +1393,9 @@ impl<'a> FontLoader<'a> {
         }
         // Vanilla stacks every active pack's own copy of a font definition
         // file for this id -- it is not a single-winner override the way an
-        // ordinary texture reference is. `FontManager.prepare` reads via
-        // `FONT_DEFINITIONS.listMatchingResourceStacks`, one entry per pack
-        // that carries the path, and `loadResourceStack` (reverse per file)
+        // ordinary texture reference is. The font manager's prepare step reads via
+        // a listing of matching resource stacks, one entry per pack
+        // that carries the path, and its per-file stack loader (reverse per file)
         // plus `apply`'s final `Lists.reverse` combine to lay the merged
         // list out **highest-priority pack first, each pack's own JSON
         // order preserved** -- the exact shape `ResourceManager::read_stack`
@@ -1494,7 +1494,7 @@ impl<'a> FontLoader<'a> {
         // Codepoints this *provider's own* grid has already placed, tracked
         // separately from `glyphs` (which also carries every earlier
         // provider's winners). The two duplicate cases are opposite:
-        // `BitmapProvider.Definition.load`'s `charMap.put` is a plain
+        // The bitmap provider's load inserts into its char map with a plain
         // overwrite within one provider's grid (the *last* declaration wins,
         // with a logged warning), but a codepoint an earlier provider in the
         // font's own priority list already won must never be reclaimed by a
@@ -1642,7 +1642,7 @@ impl RasterFont {
     ///
     /// A unihex glyph needs no sheet — it carries its own bits — so it resolves
     /// here whether or not any PNG decoded. A `ttf` glyph is rasterised here,
-    /// on demand, from its resident face (`TrueTypeGlyphProvider.bake`'s
+    /// on demand, from its resident face (the TrueType provider's bake
     /// equivalent — vanilla also bakes lazily, on first draw, rather than
     /// eagerly for every codepoint the face's `cmap` supplies).
     pub fn raster(&self, codepoint: u32) -> Option<GlyphRaster<'_>> {
@@ -1781,10 +1781,10 @@ impl GlyphRaster<'_> {
     }
 
     /// The glyph box's top edge relative to the line's top, in logical pixels:
-    /// `7 - bearingTop`, per `GlyphBitmap.getTop`. Negative for tall sheets,
+    /// `7 - bearingTop`, per the glyph bitmap's top. Negative for tall sheets,
     /// which is how accented capitals hang above the ascii line. A unihex
     /// glyph overrides no bearing, so its bearing-top is
-    /// `GlyphBitmap.getBearingTop`'s 7.0 default and this is 0. A `ttf`
+    /// the glyph bitmap's 7.0 default and this is 0. A `ttf`
     /// glyph's own [`TtfGlyph::bearing_top`] is the FreeType-equivalent
     /// bearing this same formula was always meant to consume.
     pub fn top(&self) -> f32 {
@@ -1858,7 +1858,7 @@ impl GlyphRaster<'_> {
     /// Whether the texel at `(tx, ty)` within the cell is ink.
     ///
     /// For a sheet glyph, vanilla's `getActualGlyphWidth` tests
-    /// `getLuminanceOrAlpha() != 0` on an image read as RGBA, i.e. the alpha
+    /// `get_luminance_or_alpha() != 0` on an image read as RGBA, i.e. the alpha
     /// channel — the same test used here, so coverage and advance agree by
     /// construction rather than by coincidence. For a unihex glyph it is
     /// [`UnihexGlyph::is_ink`], the bit `unpackBitsToBytes` would have written.
@@ -1945,7 +1945,7 @@ impl FontLoader<'_> {
 
 /// Returns the width, in physical pixels, of the rightmost non-transparent
 /// column of the glyph cell at `(slot_x, slot_y)` plus one (0 for a blank cell),
-/// matching `BitmapProvider.getActualGlyphWidth`.
+/// matching the bitmap provider's actual-glyph-width rule.
 fn actual_glyph_width(
     img: &Image,
     glyph_width: u32,

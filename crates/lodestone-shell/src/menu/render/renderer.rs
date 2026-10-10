@@ -475,7 +475,7 @@ impl MenuRenderer {
         // reading of `!frame.overlay`. That inference was wrong for two screens:
         // the connect and level-loading screens want the panorama *and* a
         // translucent wash, and the old boolean could only offer one or the other.
-        // `LevelLoadingScreen.extractBackground` is the record — its `OTHER` arm
+        // The level loading screen's extract background is the record — its `OTHER` arm
         // calls `extractPanorama` with no `level == null` gate at all. See
         // `docs/menu-panorama.md`.
         // `frame.logo` is set for the title screen and nothing else, which is the

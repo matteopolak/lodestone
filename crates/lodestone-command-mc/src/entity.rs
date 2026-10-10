@@ -557,7 +557,7 @@ fn parse_option(
         }
         "limit" => {
             let position = reader.cursor();
-            // `@s` refuses `limit` outright (`!s.isCurrentEntity()`), rather
+            // `@s` refuses `limit` outright (`!s.is_current_entity()`), rather
             // than accepting a redundant `limit=1`.
             if selector.current_entity {
                 return Err(refuse(position, "limit is not applicable to @s"));
@@ -830,7 +830,7 @@ mod tests {
         assert!(parse(EntityArg::entity(), "@a").is_err());
         assert!(parse(EntityArg::entities(), "@a").is_ok());
 
-        // `@s` is exempt from `players_only` — `!isSelfSelector()` in vanilla's
+        // `@s` is exempt from `players_only` — `!is_self_selector()` in vanilla's
         // own condition. Without it `/gamemode creative @s` is refused, which is
         // the single most-used form of the command.
         assert!(

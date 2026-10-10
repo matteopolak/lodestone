@@ -46,7 +46,7 @@ impl WitherCell {
 /// three skulls over three base blocks over `[air, base, air]`. One aisle
 /// (depth 1), rows top-to-bottom exactly as `golem::IRON_GOLEM_PATTERN`
 /// already establishes the convention for (`down = 0` is the row nearest
-/// vanilla's own aisle-string order, `down = 2` is `match.getBlock(1, 2, 0)`
+/// vanilla's own aisle-string order, `down = 2` is match's get block
 /// — the base block vanilla's own `checkSpawn` reads as the spawn anchor).
 pub(super) const WITHER_PATTERN: &[&[WitherCell]] = &[
     &[WitherCell::Skull, WitherCell::Skull, WitherCell::Skull],
@@ -102,7 +102,7 @@ impl WitherPatternMatch {
         out
     }
 
-    /// `match.getBlock(1, 2, 0)` — the bottom-centre base block's cell, the
+    /// match's get block — the bottom-centre base block's cell, the
     /// spawn anchor wither skull block reads.
     pub(super) fn spawn_anchor(&self) -> (i32, i32, i32) {
         self.translate(1, 2, 0)
@@ -166,7 +166,7 @@ pub(super) fn wither_anchor_to_spawn_pos((x, y, z): (i32, i32, i32)) -> Vec3 {
     Vec3::new(f64::from(x) + 0.5, f64::from(y) + 0.55, f64::from(z) + 0.5)
 }
 
-/// `match.getForwards().getAxis() == Direction.Axis.X ? 0.0F : 90.0F` — the
+/// `match.get_forwards().get_axis() == Direction.Axis.X ? 0.0F : 90.0F` — the
 /// wither's spawn yaw, from the matched orientation's forward axis.
 pub(super) fn wither_spawn_yaw(forwards: (i32, i32, i32)) -> f32 {
     if forwards.0 != 0 { 0.0 } else { 90.0 }

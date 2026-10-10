@@ -2,10 +2,10 @@
 //! of the ice (from the top) shows no opacity at all."
 //!
 //! Traced to `ModelPipeline::for_layer`'s prior `cull_mode: None` for
-//! `RenderLayer::Translucent`. Real vanilla diverges: `RenderPipelines.
-//! TRANSLUCENT_TERRAIN`/`TRANSLUCENT_BLOCK` both build on `TERRAIN_SNIPPET`/
-//! `BLOCK_SNIPPET`, and neither those nor their translucent variants ever call
-//! `.withCull(false)` — `RenderPipeline.Builder`'s own default is
+//! `RenderLayer::Translucent`. Real vanilla diverges: its translucent terrain and
+//! translucent block pipelines both build on the terrain and block snippets,
+//! and neither those nor their translucent variants ever call
+//! `.with_cull(false)` — `RenderPipeline.Builder`'s own default is
 //! `this.cull.orElse(true)`. So real translucent terrain (ice included)
 //! renders **single-sided**, exactly like opaque terrain: only the
 //! camera-facing side of a quad draws, the other is culled by the GPU.

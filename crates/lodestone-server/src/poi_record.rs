@@ -126,7 +126,7 @@ impl PoiRecord {
 /// One section's worth of POI records — `PoiSection`.
 #[derive(Debug, Clone, Default)]
 pub struct PoiSection {
-    /// `PoiSection.isValid` — whether this section's records are believed to
+    /// PoiSection's is valid — whether this section's records are believed to
     /// match the blocks currently there. Nothing in this codebase re-derives
     /// POI from a block scan yet (see the module doc's scope note), so a
     /// Sections built here are valid at construction; the field preserves the

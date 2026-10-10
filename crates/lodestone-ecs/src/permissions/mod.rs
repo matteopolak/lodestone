@@ -32,7 +32,7 @@
 //!   "always passes" or "requires holding a given permission".
 //!   [`PermissionLevel`] and [`Permission`] here are
 //!   that model, transliterated in name and numbering so a future
-//!   `ops.json`/`ClientboundCommandsPacket` consumer needs no mapping table.
+//!   `ops.json`/command-tree packet consumer needs no mapping table.
 //!
 //! - **Bukkit/Paper** is what a *plugin author* expects, and it is a different
 //!   shape: dotted string nodes, four-valued defaults, and attachments. Its
@@ -174,7 +174,7 @@
 //!   protocol family in this workspace (verified: `AbilitiesChanged` carries
 //!   six fields, none of them a level), so [`PermissionStore::set_level`] is
 //!   the only way a level is ever set today. A future `ops.json` loader or
-//!   `ClientboundCommandsPacket` consumer is its caller.
+//!   command-tree packet consumer is its caller.
 //!
 //! ## Configuration
 //!

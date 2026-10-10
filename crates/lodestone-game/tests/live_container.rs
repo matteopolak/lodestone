@@ -5,7 +5,7 @@
 //! the **player inventory** menu (window 0) and only with **64-stacking**
 //! diamonds. Two branches of vanilla's click logic were therefore untested live:
 //!
-//! 1. **Per-menu-type quick-move.** `AbstractContainerMenu.quickMoveStack` is
+//! 1. **Per-menu-type quick-move.** The container menu's quick-move is
 //!    overridden per menu; a chest's rule (container <-> player inventory) is a
 //!    different code path from the player menu's (hotbar/main/armour). This test
 //!    opens a *real chest* by interacting with a placed block and drives
@@ -21,15 +21,15 @@
 //! ## The oracle contract (same as `live_click.rs`)
 //!
 //! The server applies `menu.clicked()` unconditionally and, on a **stale**
-//! `state_id`, replies with `broadcastFullState()` (the authoritative post-click
+//! `state_id`, replies with broadcast full state (the authoritative post-click
 //! content), ignoring our predicted changes. So each click carries an empty
 //! prediction, and we assert our version-free [`Menu`] equals the server's own
 //! packet, slot by slot and cursor. A divergence localises to a slot + click.
 //!
 //! The S0 capture and the tick-trap poll use a `-999` (outside) `PICKUP` click
-//! with an empty cursor, which `doClick` treats as a **guaranteed no-op** (unlike
+//! with an empty cursor, which the click handler treats as a **guaranteed no-op** (unlike
 //! `live_click.rs`'s slot-9 resync, which mutates and only survives by oscillating
-//! across retries — verified in the decompiled `AbstractContainerMenu.doClick`).
+//! across retries — verified in the decompiled container-menu click handler).
 //!
 //! ## Run it
 //!
@@ -295,7 +295,7 @@ impl Session {
         let mut session = Self { conn };
         session.drive_to_play().await;
         // The server gates block interaction (`handleUseItemOn`) on
-        // `hasClientLoaded()`, so announce we've loaded before opening a chest.
+        // has client loaded, so announce we've loaded before opening a chest.
         session
             .conn
             .write_packet(pkt::play_sb::PLAYER_LOADED, &[])

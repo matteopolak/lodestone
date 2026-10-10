@@ -78,9 +78,9 @@ struct RawType {
     message_id: String,
     scaling: String,
     exhaustion: f32,
-    /// `optionalFieldOf("effects", HURT)` — `None` means the key is absent.
+    /// optional field of — `None` means the key is absent.
     effects: Option<String>,
-    /// `optionalFieldOf("death_message_type", DEFAULT)`.
+    /// optional field of.
     death_message_type: Option<String>,
 }
 
@@ -236,7 +236,7 @@ fn scaling_index(name: &str) -> u8 {
 }
 
 fn effects_index(name: Option<&str>) -> u8 {
-    // Vanilla's own damage-type direct codec: optionalFieldOf("effects", DamageEffects.HURT).
+    // Vanilla's own damage-type direct codec: optional field of.
     match name.unwrap_or("hurt") {
         "hurt" => 0,
         "thorns" => 1,
@@ -249,7 +249,7 @@ fn effects_index(name: Option<&str>) -> u8 {
 }
 
 fn death_message_index(name: Option<&str>) -> u8 {
-    // Vanilla's own damage-type direct codec: optionalFieldOf("death_message_type", DEFAULT).
+    // Vanilla's own damage-type direct codec: optional field of.
     match name.unwrap_or("default") {
         "default" => 0,
         "fall_variants" => 1,

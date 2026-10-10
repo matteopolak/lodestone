@@ -35,7 +35,7 @@
 //!   `"DataVersion"` (an 11-character UTF-8 name, tag byte `0x03` = `Int`)
 //!   with value **4903** — this oracle's world was created with the 26.2
 //!   server (`.cache/mc/creative/server.jar`), so 4903 is that build's real
-//!   `SharedConstants` data version, not a guess.
+//!   game data version, not a guess.
 //!
 //! # What a real 26.2 `level.dat` actually contains
 //!
@@ -101,7 +101,7 @@ const LAST_PLAYED_FIELD: &str = "LastPlayed";
 const SPAWN_FIELD: &str = "spawn";
 const DIFFICULTY_SETTINGS_FIELD: &str = "difficulty_settings";
 
-/// 26.2's own `SharedConstants` data version, as read out of every real
+/// 26.2's own game data version, as read out of every real
 /// oracle world's `level.dat` with an independent parser.
 pub const DATA_VERSION_26_2: i32 = 4903;
 /// The Anvil *storage* format version carried in the lowercase `version`
@@ -207,7 +207,7 @@ impl LevelDat {
     }
 
     /// Wraps `data` as the `"Data"` field of a fresh root compound —
-    /// matching the structure `LevelStorageSource` writes, so a caller only
+    /// matching the structure the game writes, so a caller only
     /// has to build the inner compound.
     #[must_use]
     pub fn from_data(data: Nbt) -> Self {

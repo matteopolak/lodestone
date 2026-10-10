@@ -1,5 +1,5 @@
 //! `CommandTree::suggest` — a restatement of
-//! `CommandDispatcher::getCompletionSuggestions` + `Suggestions::merge`
+//! CommandDispatcher's get completion suggestions + `Suggestions::merge`
 //! (brigadier 1.3.10): walk to the node whose children are candidates for the
 //! token currently being typed, collect every child's suggestions, filter by
 //! the partial token (case-insensitively), then sort case-insensitively.

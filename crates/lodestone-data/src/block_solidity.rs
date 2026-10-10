@@ -6,7 +6,7 @@
 //! # Why this table has to exist
 //!
 //! Vanilla's own "blocks motion" accessor is
-//! `block != COBWEB && block != BAMBOO_SAPLING && isSolid()`, and its own
+//! `block != COBWEB && block != BAMBOO_SAPLING && is_solid()`, and its own
 //! "is solid" accessor is a plain read of a cached "legacy solid" field
 //! computed once per state by a "calculate solid" step:
 //!
@@ -15,7 +15,7 @@
 //! if (properties.forceSolidOff) return false;
 //! if (cache == null)            return false;          // dynamic-shape blocks
 //! if (collisionShape.isEmpty()) return false;
-//! return bounds.getSize() >= 0.7291666666666666 || bounds.getYsize() >= 1.0;
+//! return bounds.getSize() >= 0.7291666666666666 || bounds's get ysize >= 1.0;
 //! ```
 //!
 //! Only the last line is geometry. The first two branches read vanilla's own

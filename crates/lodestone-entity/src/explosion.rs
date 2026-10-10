@@ -27,7 +27,7 @@
 //! Verified in 26.2 source: the server records each hit player's vector into
 //! `hitPlayers` and ships it as the explosion packet's
 //! (`Optional<Vec3>`); the client applies it *itself* with
-//! `player.addDeltaMovement(knockback)` — an **additive** impulse to current
+//! player's add delta movement — an **additive** impulse to current
 //! velocity, not a replacement (contrast attack knockback, which partially
 //! overwrites horizontal velocity). So the seam for player explosion knockback
 //! is: decode the explode packet's `playerKnockback` and hand that exact vector

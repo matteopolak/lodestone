@@ -687,7 +687,7 @@ pub struct TemplateBlock {
 /// retained NBT after resolving the selected palette and transform.
 #[derive(Debug, Clone)]
 pub struct TemplateBlockInfo {
-    /// The world position, i.e. `calculateRelativePosition(...).offset(position)`.
+    /// The world position, i.e. )'s calculate relative position.
     pub pos: [i32; 3],
     /// The **rotated** state (`blockInfo.state.rotate(rotation)`).
     pub state: CanonicalStateId,
@@ -1030,7 +1030,7 @@ impl StructureTemplate {
                 && p[2] < min_z + size_z
         };
         // `processOnlyInCurrentChunk`: false as soon as **any** processor
-        // `evaluatesEntirePieceState()`. Only `capped` does, and for it the whole
+        // evaluates entire piece state. Only `capped` does, and for it the whole
         // piece must be processed even though only this chunk's share is written:
         // its shuffled walk indexes the processed list, so a list clipped to the
         // chunk would give the piece a different number of suspicious blocks on
@@ -1042,7 +1042,7 @@ impl StructureTemplate {
         let mut processed: Vec<ProcessedBlock> = Vec::new();
         // The `originalBlockInfoList` half — template-local position and `nbt` per
         // *surviving* block, kept index-parallel with `processed` because that is
-        // exactly the invariant `CappedProcessor` checks before doing anything.
+        // exactly the invariant the capped processor checks before doing anything.
         let mut originals: Vec<(
             [i32; 3],
             Option<Arc<BlockNbt>>,

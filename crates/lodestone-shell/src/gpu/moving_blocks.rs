@@ -153,9 +153,9 @@ fn falling_block_pose(feet: glam::Vec3) -> glam::Mat4 {
 /// ```text
 /// translate(0, 0.5, 0)
 /// scale(s, s, s) — swell in the last 10 ticks
-/// mulPose(YP.rotationDegrees(-90))
+/// mul pose(YP's rotation degrees)
 /// translate(-0.5, -0.5, 0.5)
-/// mulPose(YP.rotationDegrees(90))
+/// mul pose(YP's rotation degrees)
 /// ```
 ///
 /// on top of the entity's own `translate(x, y, z)`. Composed in the same
@@ -259,7 +259,7 @@ fn piston_extended_progress(progress: f32, extending: bool) -> f32 {
 /// slide every piston head half a cell diagonally.
 ///
 /// `direction` is the raw piston-moving-block-entity's own direction step, **not** the
-/// movement direction: `getXOff` multiplies `direction.getStepX()` by
+/// movement direction: `getXOff` multiplies direction's get step x by
 /// [`piston_extended_progress`], whose sign already encodes retraction.
 #[must_use]
 fn piston_head_pose(cell: [i32; 3], direction: [i32; 3], progress: f32, extending: bool) -> glam::Mat4 {
@@ -276,11 +276,11 @@ fn piston_head_pose(cell: [i32; 3], direction: [i32; 3], progress: f32, extendin
 /// Vanilla's own abstract-minecart get-default-display-block-state/get-default-display-offset routines
 /// for the four `MinecartKind` variants whose default cart contents are
 /// non-air, keyed by [`EntityDraw::type_path`]. `minecraft:minecart` itself
-/// (vanilla's own abstract-minecart's own default, air) carries no entry, which is
+/// (vanilla's abstract-minecart's default, air) carries no entry, which is
 /// exactly "the plain cart draws nothing inside" — the caller's `None` arm
 /// skips [`merge_moving_block`] rather than needing an air special case.
 ///
-/// **Only the default state, never `getCustomDisplayBlockState()`.** That field
+/// **Only the default state, never get custom display block state.** That field
 /// is entity data set by `/data merge` on a placed minecart NBT, and nothing on
 /// this side of the wire decodes it (`crates/protocol/v770/src/packets/
 /// metadata.rs` has no abstract-minecart arm) — every survival-obtained cart
@@ -330,7 +330,7 @@ fn default_minecart_contents(type_path: &str) -> Option<(StateId, i32)> {
 /// Transcribed from `submit` in composition order: the same bob+yaw term the
 /// cart frame itself gets via `non_living_vehicle_matrix` — see that
 /// function's own doc for why this port substitutes `180 - yaw` for vanilla's
-/// bare `rotationDegrees(state.yRot)` throughout, a substitution applied
+/// bare rotation degrees throughout, a substitution applied
 /// consistently here so the content sits aligned with the frame this engine
 /// actually draws, not with vanilla's — followed by vanilla's own
 /// `scale(0.75) → translate(-0.5, (displayOffset-8)/16, 0.5) →
@@ -365,7 +365,7 @@ fn minecart_content_pose(feet: glam::Vec3, yaw_deg: f32, display_offset: i32) ->
 ///
 /// The whole vocabulary of this seam. A producer that can fill this in gets block
 /// geometry on screen with no further plumbing — which is the point, and the test
-/// of whether the seam is general: `PistonHeadRenderer` needs a state (the head, or
+/// of whether the seam is general: the piston head renderer needs a state (the head, or
 /// the pushed block), a transform (a translation along the push axis, interpolated
 /// by `progress`) and a light sample, and nothing else.
 #[derive(Debug, Clone, Copy)]
@@ -378,7 +378,7 @@ pub(super) struct MovingBlock {
     /// translation; for a piston head it will also carry the push offset.
     pub transform: glam::Mat4,
     /// The packed sky/block light byte for the whole mesh — vanilla samples
-    /// `MovingBlockRenderState`'s single `blockPos` once, not per corner.
+    /// The moving block render state's single `blockPos` once, not per corner.
     pub light: u8,
 }
 
@@ -441,7 +441,7 @@ impl RenderState {
         })
     }
 
-    /// Merge every falling block on screen — vanilla's `FallingBlockRenderer`,
+    /// Merge every falling block on screen — vanilla's falling block renderer,
     /// which is the whole of that renderer.
     ///
     /// # The transform, and the `-0.5` that is not a centring fudge
@@ -457,11 +457,11 @@ impl RenderState {
     /// cell it left. Getting either half wrong produces a block offset by half a
     /// cell, which reads as a plausible model-origin bug rather than an obvious one.
     ///
-    /// # Two named deviations from `FallingBlockRenderer`
+    /// # Two named deviations from the falling block renderer
     ///
     /// * **`shouldRender`'s double-draw guard is not ported.** Vanilla refuses to
-    ///   draw the entity when `entity.getBlockState() ==
-    ///   level.getBlockState(entity.blockPosition())` — i.e. when the real world
+    ///   draw the entity when `entity.get_block_state() ==
+    ///   level's get block state(entity's block position)` — i.e. when the real world
     ///   block at the entity's cell is already the same block. That is what hides
     ///   the packet race at both ends of a fall: if `ADD_ENTITY` arrives before the
     ///   block update that cleared the origin cell, the guard suppresses the entity
@@ -475,7 +475,7 @@ impl RenderState {
     ///   `lodestone_server::gravity_tick`'s module doc, which records the same
     ///   ordering from the other side.
     /// * **`randomSeedPos` is the current cell, not the start cell.** Vanilla passes
-    ///   `entity.getStartPos()` so a model with a random per-position offset does
+    ///   entity's get start pos so a model with a random per-position offset does
     ///   not shimmer as it falls. Nothing here applies a random model offset at all,
     ///   so there is no observable difference for the three states that fall today —
     ///   but a producer that adds one (a moving *grass block* would want it) has to
@@ -544,8 +544,8 @@ impl RenderState {
     /// Primed TNT physics (the 80-tick fuse, the launch impulse, gravity, drag,
     /// bounce) is server/physics work and lands correct regardless of this
     /// function; this is only the last hop, placing the already-correct entity
-    /// on screen. `TntRenderer` has no `bakeLayer` call and poses an existing
-    /// block model, exactly like `FallingBlockRenderer` — it is not a cuboid
+    /// on screen. The tnt renderer has no `bakeLayer` call and poses an existing
+    /// block model, exactly like the falling block renderer — it is not a cuboid
     /// rig, so it cannot go through the entity pipeline's `resolve_animated`
     /// (which silently skips any `type_path` with no baked model, `"tnt"`
     /// included) and belongs beside [`merge_falling_blocks`] instead.
@@ -554,7 +554,7 @@ impl RenderState {
     ///
     /// Unlike a falling block, whose block state is genuinely variable (sand,
     /// gravel, concrete powder, …) and arrives in the spawn packet's Object
-    /// Data field, vanilla's own primed-TNT block-state field is always vanilla's own default TNT block state
+    /// Data field, vanilla's primed-TNT block-state field is always vanilla's default TNT block state
     /// in practice and nothing on our wire carries it — so this looks the
     /// default state up directly with [`lodestone_data::block_states::state_id`]
     /// rather than routing through [`EntityDraw::block_state`], which exists
@@ -663,7 +663,7 @@ impl RenderState {
         }
     }
 
-    /// Merge every moving piston in range — vanilla's `PistonHeadRenderer`.
+    /// Merge every moving piston in range — vanilla's piston head renderer.
     ///
     /// # Two requests per piston, and only one of them is offset
     ///
@@ -775,9 +775,9 @@ impl RenderState {
     /// It is the same shape as the falling block and the primed TNT above, and
     /// for a reason that is written down in the asset corpus: `entity_models.rs`
     /// deliberately has **no** `item_frame` entry, because vanilla resolves the
-    /// frame through `BlockModelResolver`/`BlockStateDefinitions
-    /// .getItemFrameFakeState` — a *block model*, not a `ModelPart`
-    /// `LayerDefinition`. So `model_for_type(EntityType::ItemFrame)` answers
+    /// frame through the block model resolver/block state definitions
+    /// .getItemFrameFakeState` — a *block model*, not a model part
+    /// The layer definition. So `model_for_type(EntityType::ItemFrame)` answers
     /// `None`, `resolve_animated` skips it silently, and until this function
     /// existed nothing anywhere drew a frame at all: `prepare_framed_maps` drew
     /// the picture in one and `special_item_instances` drew a chest in one, both
@@ -795,7 +795,7 @@ impl RenderState {
     /// # Named deviations
     ///
     /// * **The `map=true` variant is selected from the held item's id, not from a
-    ///   resolved `MapId`.** Vanilla asks `entity.getFramedMapId(itemStack)` and
+    ///   resolved `MapId`.** Vanilla asks entity's get framed map id and
     ///   falls back to the plain frame when the map data has not loaded; this
     ///   client has no map-id decode (see `Sim::map_source`), so any
     ///   `minecraft:filled_map` selects the wider border. The two disagree only
@@ -819,7 +819,7 @@ impl RenderState {
             if !super::maps::ITEM_FRAME_TYPES.contains(&type_path) {
                 continue;
             }
-            // `state.isInvisible` — vanilla clears `frameModel` outright for an
+            // state's is invisible — vanilla clears `frameModel` outright for an
             // invisible frame, so the border and back plate genuinely do not
             // draw. Its *contents* still do, one lift further out; that half is
             // `world_items.rs`'s and `entity_passes.rs`'s.
@@ -884,7 +884,7 @@ impl RenderState {
     /// # A sixth producer of the same shape, and the only one whose pose is
     /// arbitrary
     ///
-    /// `BlockDisplayRenderer` bakes no layer and owns no cuboid rig: its
+    /// The block display renderer bakes no layer and owns no cuboid rig: its
     /// `submitInner` is one `blockModel.submit` at whatever pose the base
     /// vanilla's own display-renderer submit routine composed, so it belongs on this seam beside the
     /// falling block and the piston head rather than in the entity pass. What
@@ -896,7 +896,7 @@ impl RenderState {
     /// # No `-0.5` shift, unlike a falling block
     ///
     /// vanilla's own falling-block entity's fall routine spawns its entity at the block's *centre*, so
-    /// `FallingBlockRenderer` undoes that with `translate(-0.5, 0, -0.5)`. A
+    /// The falling block renderer undoes that with `translate(-0.5, 0, -0.5)`. A
     /// `block_display`'s position is its model's own local origin —
     /// vanilla's own block-display render-substate update routine applies no offset of any kind and
     /// neither does `submitInner` — so block-local `(0,0,0)` lands exactly on
@@ -911,7 +911,7 @@ impl RenderState {
     /// that matters: a large one would be culled while still on screen. The box
     /// is therefore [`placement_bounds`] of this draw's own matrix.
     ///
-    /// # Named deviations from `BlockDisplayRenderer`
+    /// # Named deviations from the block display renderer
     ///
     /// * **No interpolation.** vanilla's own display render-state's interpolated getters are
     ///   read at `interpolationProgress`; this seam has no interpolation clock
@@ -942,7 +942,7 @@ impl RenderState {
             // `block_display` whose index-23 metadata has not arrived yet draws
             // nothing rather than a stand-in. Vanilla reaches the same place by
             // a different route — its accessor default is air, whose
-            // `RenderShape` is `INVISIBLE`.
+            // The render shape is `INVISIBLE`.
             let Some(state) = draw.block_state else {
                 continue;
             };
@@ -1169,7 +1169,7 @@ mod tests {
     ///
     /// The predicted value is `0.98` above the feet — vanilla's own falling-block entity type's
     /// own height, which vanilla's own falling-block renderer's render-state extract routine reads as
-    /// `getBoundingBox().maxY`. Not `1.0` (the plausible round number for a block)
+    /// get bounding box's get bounding box. Not `1.0` (the plausible round number for a block)
     /// and not `0.0` (the feet), and the distinction matters at the moment of
     /// landing: a probe at the feet is inside the cell the block is about to
     /// occupy.
@@ -1188,7 +1188,7 @@ mod tests {
     ///
     /// The wrong hypothesis is "the offset is `direction * progress`, with the
     /// retraction handled by using the movement direction instead" — which is what
-    /// you get by reading `getXOff` as `step * getProgress(a)` and forgetting
+    /// you get by reading `getXOff` as `step * get_progress(a)` and forgetting
     /// `getExtendedProgress` entirely. Evaluated here rather than described:
     ///
     /// | progress | extending | correct | wrong hypothesis |
@@ -1468,16 +1468,16 @@ mod tests {
     /// applied", but the exact vanilla arithmetic.
     ///
     /// **The term is scaled by `0.75`, not added raw**, and that is not a
-    /// rounding artefact — it falls straight out of `AbstractMinecartRenderer.
+    /// rounding artefact — it falls straight out of the abstract minecart renderer.
     /// submit`'s own call order:
     ///
     /// ```text
     /// poseStack.scale(0.75F, 0.75F, 0.75F);                    // call 1
     /// poseStack.translate(-0.5F, (displayOffset - 8) / 16.0F, 0.5F); // call 2
-    /// poseStack.mulPose(Axis.YP.rotationDegrees(90.0F));        // call 3
+    /// pose stack's mul pose(YP's rotation degrees);        // call 3
     /// ```
     ///
-    /// `PoseStack.Pose.scale`/`translate`/`mulPose` all **post-multiply** the
+    /// The pose stack's pose.scale/`translate`/`mulPose` all **post-multiply** the
     /// running pose matrix by the new transform (`this.pose.scale(...)`,
     /// `this.pose.mul(matrix)` in vanilla's own pose-stack class), so the composed matrix is
     /// `Scale ∘ Translate ∘ Rotate` in call order — the *first*-called

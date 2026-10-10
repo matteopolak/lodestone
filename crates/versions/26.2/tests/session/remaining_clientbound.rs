@@ -7,7 +7,7 @@
 //! There is no *encoder* for any of these in this crate — they are clientbound
 //! and `V770ServerProtocol` does not send them — so `decode(encode(x)) == x` is
 //! not available even as weak evidence. Each `payload` below was written out from
-//! the Java `write` method or `StreamCodec` composition, field by field.
+//! the Java write method or stream-codec composition, field by field.
 //!
 //! # The five shapes worth a named test
 //!
@@ -294,7 +294,7 @@ fn game_test_highlight_pos_is_two_packed_positions() {
 
 // ---- the zero-byte packets -------------------------------------------------
 
-/// Both of these are `vanilla's own stream codec's own unit`, and a non-empty body means the id table
+/// Both of these are unit stream codecs, and a non-empty body means the id table
 /// is wrong rather than that the packet grew a field — so the emptiness check is
 /// load-bearing and gets a control.
 #[test]
@@ -490,7 +490,7 @@ fn a_waypoint_decodes_all_four_position_precisions() {
     assert_eq!(
         waypoint.position,
         WaypointPosition::Exact(BlockPos { x: 1, y: 2, z: 3 }),
-        "vanilla's own vec3i's own stream codec is three plain vanilla's own byte buf codecs's own var in ts -- *not* zigzag, \
+        "the Vec3i stream codec is three plain VarInts -- *not* zigzag, \
          which an earlier draft of this test assumed and the decoder correctly did not"
     );
 
@@ -537,7 +537,7 @@ fn a_waypoint_can_be_identified_by_uuid() {
 
 // ---- dialogs ---------------------------------------------------------------
 
-/// **Trap.** `vanilla's own byte buf codecs's own holder` is off by one: `0` means an inline value
+/// **Trap.** The plain holder codec is off by one: `0` means an inline value
 /// follows, `n > 0` means registry id `n - 1`. Reading the raw VarInt as the id
 /// would reference the wrong dialog every time — and, worse, would read `0` as
 /// "dialog 0" and then leave the inline blob as trailing bytes.
@@ -597,9 +597,9 @@ fn test_instance_block_status_has_an_optional_size() {
 // there is no way to skip one without decoding it. That is why none of them could
 // land before the walker existed.
 //
-// `SlotDisplay` ids used below (`vanilla's own slot displays's own java` registration order):
+// Slot display ids used below (registration order):
 //   0 empty, 1 any_fuel, 4 item, 6 tag, 9 with_remainder, 10 composite.
-// `RecipeDisplay` ids (`vanilla's own recipe displays's own java`): 0 shapeless, 1 shaped, 3 stonecutter.
+// `RecipeDisplay` ids: 0 shapeless, 1 shaped, 3 stonecutter.
 
 /// A `SlotDisplay` of kind `item` holding item registry id `id`.
 fn item_display(id: u8) -> Vec<u8> {
@@ -922,7 +922,7 @@ fn merchant_offers_reads_five_plain_i32s_and_reaches_the_trailing_scalars() {
     assert!(can_restock);
 }
 
-/// A non-empty `DataComponentExactPredicate` is unmodeled and must abandon the
+/// A non-empty exact component predicate is unmodeled and must abandon the
 /// packet. Every vanilla trade sends `EMPTY`, so this is the datapack case.
 #[test]
 fn a_merchant_offer_with_a_component_predicate_drops_the_packet() {

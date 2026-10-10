@@ -5,9 +5,9 @@
 //! Expected payloads are built from the wire specification with an
 //! independent VarInt encoder (never the adapter's own codec), so a symmetric
 //! bug cannot pass. Layouts are verified against 26.2's
-//! `ServerboundClientInformationPacket`, `ServerboundCustomPayloadPacket` /
-//! `BrandPayload`, `ServerboundPongPacket`, `ServerboundResourcePackPacket`,
-//! and `ServerboundClientTickEndPacket`. These four actions are valid in both
+//! Client-information packet, custom-payload packet /
+//! `BrandPayload`, pong packet, resource-pack packet,
+//! and client-tick-end packet. These four actions are valid in both
 //! the configuration and play states, except `client_tick_end`, which is
 //! play-only.
 
@@ -155,7 +155,7 @@ fn resource_pack_response_is_byte_exact() {
         .expect("encode resource pack response");
     let mut want = Vec::new();
     want.extend_from_slice(id.as_bytes());
-    want.extend_from_slice(&varint(3)); // vanilla's own action's own accepted
+    want.extend_from_slice(&varint(3)); // action ACCEPTED
     assert_eq!(encoded, Some((play::serverbound::RESOURCE_PACK, want)));
 }
 

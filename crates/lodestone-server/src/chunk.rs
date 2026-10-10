@@ -1185,7 +1185,7 @@ impl ChunkColumn {
         let old = self.blocks.get(x, y_local, z);
         self.blocks.set(x, y_local, z, id);
 
-        // Vanilla's `LevelChunkSection.setBlockState` (`:58-102`) maintains
+        // Vanilla's level chunk section's set block state (`:58-102`) maintains
         // `tickingBlockCount` exactly here: decrement for the state leaving the
         // cell, increment for the one arriving. Both classifications are
         // already cached per palette id, so this is two array reads and at most
@@ -1358,7 +1358,7 @@ impl ChunkColumn {
     /// entity ([`lodestone_data::block_entity_types::block_entity_type`]) but
     /// is not among `existing`.
     ///
-    /// Vanilla's `LevelChunk.setBlockState` creates a block entity from the
+    /// Vanilla's LevelChunk's set block state creates a block entity from the
     /// *state* alone, for every block-entity type — not only the dozen this
     /// crate simulates real behaviour for
     /// ([`crate::block_entities::block_entity_for_item`]'s own scope note

@@ -63,10 +63,10 @@
 //! provenance: the 151-tick figure is server-confirmed over RCON; the 6-tick
 //! diamond figure is hermetic only.**
 //!
-//! ## Two server facts this test is built around (26.2 `ServerPlayerGameMode`)
+//! ## Two server facts this test is built around (26.2 server game mode)
 //!
-//! - **The load gate.** `handlePlayerAction` is dropped until `hasClientLoaded()`
-//!   (`ServerGamePacketListenerImpl:1273`). The real driver never sends
+//! - **The load gate.** The player-action handler is dropped until the client-loaded flag
+//!   is set. The real driver never sends
 //!   `player_loaded`, so the server auto-loads us only after ~60 ticks (~3s). The
 //!   *instant-break* step doubles as the load-clear: it retries START until the
 //!   slime block vanishes, and only then are the timed digs attempted. (This is
@@ -384,7 +384,7 @@ async fn block_breaking_round_trips_through_client() {
     // `slime_block` has destroy time 0 (hardness 0), so the machine's `start()`
     // takes the instant-break branch: START only, no STOP. The server insta-mines
     // it on START once loaded, so retrying START until it vanishes both proves the
-    // instant-break path AND clears the ~3s `hasClientLoaded()` gate for the timed
+    // instant-break path AND clears the ~3s has client loaded gate for the timed
     // digs below.
     let mut instant_time = None;
     let mut instant_saw_stop = false;

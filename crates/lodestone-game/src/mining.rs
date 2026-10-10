@@ -11,8 +11,8 @@
 //!   table (which is per-version *data* and exactly the "mint your own fixtures"
 //!   trap). Whoever drives this feeds real values from the world/registry.
 //! * [`Mining`] is the **dig state machine**: start → accumulate progress per
-//!   tick → finish (or abort), mirroring 26.2's client `MultiPlayerGameMode`
-//!   (`startDestroyBlock`/`continueDestroyBlock`/`stopDestroyBlock`). It emits the
+//!   tick → finish (or abort), mirroring 26.2's client game-mode dig sequence
+//!   (start, continue, stop destroy). It emits the
 //!   [`ClientAction`]s a real client sends — `BlockAction` (start/abort/stop)
 //!   plus the arm [`ClientAction::SwingArm`] — and predicts completion with
 //!   vanilla's `>= 1.0` accumulator rule, including the single-tick instant-break
@@ -48,7 +48,7 @@ use crate::item::ItemStack;
 /// so a test or caller only has to set the fields that differ from that.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BreakInputs {
-    /// The block's hardness (`BlockState.getDestroySpeed`). `-1.0` marks an
+    /// The block's hardness (BlockState's get destroy speed). `-1.0` marks an
     /// unbreakable block (bedrock, barrier); `0.0` is an instant-break block.
     pub hardness: f32,
     /// Whether the target is air. Air is never broken and never accumulates
@@ -59,7 +59,7 @@ pub struct BreakInputs {
     /// speed divider.
     pub correct_tool: bool,
     /// The selected item's mining speed *for this block*
-    /// (`ItemStack.getDestroySpeed`; the `minecraft:tool` component's matching
+    /// (ItemStack's get destroy speed; the `minecraft:tool` component's matching
     /// rule speed, or `1.0` bare-handed / for a non-matching material).
     pub tool_speed: f32,
     /// The `minecraft:mining_efficiency` attribute contribution (Efficiency
@@ -68,7 +68,7 @@ pub struct BreakInputs {
     /// vanilla. Zero when unenchanted.
     pub mining_efficiency: f32,
     /// Effective dig-speed amplifier from Haste / Conduit Power
-    /// (`MobEffectUtil.getDigSpeedAmplification`), or `None` when neither is
+    /// (the dig-speed amplification rule), or `None` when neither is
     /// active. `Some(0)` is Haste I.
     pub haste_amplifier: Option<u32>,
     /// Mining Fatigue amplifier, or `None` when the effect is absent.
@@ -76,7 +76,7 @@ pub struct BreakInputs {
     pub mining_fatigue: Option<u32>,
     /// The `minecraft:block_break_speed` attribute (default `1.0`).
     pub block_break_speed: f32,
-    /// Whether the player's eyes are in water (`isEyeInFluid(WATER)`).
+    /// Whether the player's eyes are in water (is eye in fluid).
     pub submerged: bool,
     /// The `minecraft:submerged_mining_speed` attribute, applied only when
     /// [`submerged`](Self::submerged). Vanilla default is `0.2` (the classic
@@ -90,7 +90,7 @@ pub struct BreakInputs {
     /// `getDestroyProgress`/`progress_per_tick` never consult it. It bypasses
     /// the formula entirely, at the [`Mining`] state-machine level: both
     /// `startDestroyBlock` and `continueDestroyBlock` check
-    /// `player.getAbilities().instabuild` *before* ever reading hardness or
+    /// get abilities's get abilities *before* ever reading hardness or
     /// dig speed, and when it is set they call `destroyBlock(pos)`
     /// immediately — no accumulation, no hardness check, not even an
     /// unbreakable-block check (a creative player breaks bedrock in one
@@ -132,7 +132,7 @@ pub fn efficiency_bonus(level: u32) -> f32 {
 
 impl BreakInputs {
     /// The player's effective dig speed for this block
-    /// (`Player.getDestroySpeed`), before the hardness/divider step. Kept as a
+    /// (Player's get destroy speed), before the hardness/divider step. Kept as a
     /// separate step so it can be asserted independently.
     ///
     /// The operation order is load-bearing and matches vanilla exactly: the
@@ -157,7 +157,7 @@ impl BreakInputs {
     }
 
     /// Progress accumulated per tick while mining this block
-    /// (`BlockBehaviour.getDestroyProgress`): `dig_speed / hardness / divider`,
+    /// (the block's destroy-progress rule): `dig_speed / hardness / divider`,
     /// where the divider is `30` with the correct tool and `100` without.
     ///
     /// An unbreakable block (`hardness == -1.0`) yields `0.0`. A zero-hardness
@@ -269,11 +269,11 @@ pub struct Mining {
     /// instant-break branch inside `startDestroyBlock`, and the
     /// progress-reached-`1.0` branch inside `continueDestroyBlock`. Everything
     /// keyed on a block actually breaking hangs off that funnel, not off any
-    /// one of the four: `destroyBlock` calls
-    /// `Block.playerWillDestroy` → `Block.spawnDestroyParticles` →
-    /// `level.levelEvent(player, 2001, pos, id)`, which on `ClientLevel`
-    /// dispatches **locally** into `LevelEventHandler`'s `case 2001` →
-    /// `addDestroyBlockEffect` and the break sound.
+    /// one of the four: the client's block break runs the block's will-destroy
+    /// hook, then its destroy-particle spawn, then level event 2001 for the
+    /// breaking player, which on the client level
+    /// dispatches **locally** into the level-event handler's 2001 case:
+    /// the destroy-block effect and the break sound.
     ///
     /// The serverbound packets do **not** identify that moment. A progressive
     /// break concludes with `STOP_DESTROY_BLOCK`; an instant break concludes with
@@ -311,7 +311,7 @@ impl Mining {
     }
 
     /// The crack-overlay stage of the player's own dig
-    /// (`MultiPlayerGameMode.getDestroyStage`): `(progress * 10)` truncated while
+    /// (the game mode's destroy stage): `(progress * 10)` truncated while
     /// mining, or `-1` when idle.
     #[must_use]
     pub fn destroy_stage(&self) -> i32 {
@@ -322,12 +322,12 @@ impl Mining {
     /// The block destroyed by the call just made, consumed by the read.
     ///
     /// This is the port's stand-in for vanilla's
-    /// `MultiPlayerGameMode.destroyBlock` funnel — the one moment a block goes
+    /// client destroy-block funnel — the one moment a block goes
     /// away because *this* player broke it, covering both the progressive finish
     /// and the single-tick instant break. Drive it right after
     /// [`start`](Self::start) / [`continue_`](Self::continue_) and treat a `Some`
     /// as "spawn the destroy effect for this position", the way
-    /// `Block.spawnDestroyParticles` does off that funnel.
+    /// Block's spawn destroy particles does off that funnel.
     ///
     /// Consuming rather than peeking, so a caller cannot double-emit by reading
     /// twice, and so a caller that skips a tick's read does not see a stale
@@ -403,7 +403,7 @@ impl Mining {
                 // live dig is retained and no STOP is ever sent.
                 //
                 // Vanilla's equivalent branch (its own start-destroy-block
-                // step's `getDestroyProgress(..) >= 1.0F` arm, or its `instabuild`
+                // step's `get_destroy_progress(..) >= 1.0F` arm, or its `instabuild`
                 // arm) calls `this.destroyBlock(pos)` here, which is the
                 // *same* funnel the progressive finish in `continue_`
                 // reaches. Latching it is what makes the effect keyed on
@@ -595,8 +595,8 @@ impl BlockDestructionOverlays {
     fn set(&mut self, entity_id: i32, pos: BlockPos, stage: u8) {
         // Each entity breaks one block at a time; drop any prior block for it.
         self.entries.retain(|o| o.entity_id != entity_id);
-        // A stage outside 0..=9 clears the overlay (vanilla
-        // `LevelRenderer.setBlockBreakProgress`).
+        // A stage outside 0..=9 clears the overlay (vanilla's
+        // block-break-progress setter).
         if stage < 10 {
             self.entries.push(Overlay {
                 entity_id,
@@ -795,7 +795,7 @@ mod tests {
         // Note the deliberate 151, not the "textbook" 150: `1.0 / per` is
         // 149.9999996, so 150 f32 accumulation steps sum to 0.99999… and stay
         // *below* 1.0 — the block needs a 151st tick. Vanilla accumulates
-        // `destroyProgress += getDestroyProgress()` in f32 and breaks on `>= 1.0`,
+        // `destroyProgress += get_destroy_progress()` in f32 and breaks on `>= 1.0`,
         // so it undershoots the same way; the closed-form `ceil(1/per)` is an
         // approximation. `ticks_to_break` replays the real accumulator, which is
         // exactly why it is a loop and not a division.

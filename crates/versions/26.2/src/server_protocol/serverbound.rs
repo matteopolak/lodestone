@@ -17,7 +17,7 @@ pub(super) fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     Some(value)
 }
 
-/// Decodes a `ServerboundCustomPayloadPacket`: a length-prefixed
+/// Decodes a serverbound custom-payload packet: a length-prefixed
 /// channel identifier (`string(32767)`, the same bound the clientbound
 /// direction encodes under in `adapter/connection.rs`), then the channel-specific payload
 /// as the remaining bytes verbatim.
@@ -26,7 +26,7 @@ pub(super) fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
 /// this crate used to model only `minecraft:brand` and drop everything else.
 /// The channel registry and the register/unregister interpretation now live in
 /// the version-free server (`lodestone-server`'s `plugin_channels` module); an
-/// unregistered channel is dropped there, exactly vanilla's `DiscardedPayload`
+/// unregistered channel is dropped there, exactly vanilla's discarded-payload
 /// fallback. `None` on a channel that fails to parse as a [`ResourceKey`] — a
 /// malformed packet drops that packet, not the connection (the same convention
 /// as [`decode_full`]).
@@ -41,7 +41,7 @@ pub(super) fn decode_custom_payload(payload: &[u8]) -> Option<ServerBound> {
 }
 
 /// Decodes one serverbound container-click item written as a `HashedStack`
-/// (vanilla's own codec library's own optional(vanilla's own hashed-stack shape's own actual item.STREAM_CODEC)`), the
+/// (an optional hashed-stack stream codec), the
 /// inverse of the client-side encoder of the same name
 /// (`crate::adapter::write_hashed_stack`): a bool presence flag, then, only
 /// if present, the item registry id (VarInt), the count (VarInt), and two
@@ -80,7 +80,7 @@ pub(super) fn read_hashed_stack(wire: Wire, r: &mut Reader) -> Option<Option<Ite
 /// Decodes the serverbound `container_click` packet body into
 /// [`ServerBound::ContainerClicked`].
 ///
-/// Wire layout (`ServerboundContainerClickPacket`, mirrors the client-side
+/// Wire layout (the serverbound container-click packet, mirrors the client-side
 /// encoder `crate::adapter::encode_container_click` exactly): VarInt
 /// container id, VarInt state id, big-endian `short` slot, big-endian `byte`
 /// button, `ContainerInput` ordinal (VarInt), a changed-slots map (VarInt
@@ -127,10 +127,10 @@ pub(super) fn decode_container_click(wire: Wire, payload: &[u8]) -> Option<Serve
 }
 
 /// Reads a serverbound `set_creative_mode_slot` item
-/// (vanilla's own item-stack type's own optional-untrusted-stream-codec accessor, the inverse of the
+/// (the optional untrusted item-stack stream codec, the inverse of the
 /// client-side encoder `crate::adapter::write_optional_item_stack`): a VarInt
 /// count where `<= 0` means empty, otherwise the item registry id as a
-/// VarInt, then an empty `DataComponentPatch` (two VarInt `0`s, added then
+/// VarInt, then an empty data-component patch (two VarInt `0`s, added then
 /// removed).
 ///
 /// Deliberately **not** the same shape as [`read_hashed_stack`]: that one has
@@ -165,7 +165,7 @@ pub(super) fn read_optional_item_stack(wire: Wire, r: &mut Reader) -> Option<Opt
 }
 
 /// Reads one serverbound `set_beacon` mob-effect slot
-/// (vanilla's own codec library's own optional(vanilla's own mob-effect type's own stream codec)`, the inverse of
+/// (an optional mob-effect-type stream codec), the inverse of
 /// `crate::adapter::write_optional_mob_effect`): a bool presence flag, then,
 /// only if present, the effect's `minecraft:mob_effect` registry id as a
 /// direct VarInt.
@@ -181,7 +181,7 @@ pub(super) fn read_optional_mob_effect(r: &mut Reader) -> Option<Option<&'static
     Some(Some(mob_effect_name_for(id)))
 }
 
-/// Packs a block position into vanilla's vanilla's own block-position type's own as long form: `x` in the
+/// Packs a block position into the packed long form: `x` in the
 /// high 26 bits, `z` in the middle 26 bits, `y` in the low 12 bits.
 pub(super) fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
     ((i64::from(x) & 0x3FF_FFFF) << 38)

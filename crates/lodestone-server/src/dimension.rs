@@ -250,7 +250,7 @@ impl Dimension {
     }
 
     /// Where a nether portal in this dimension leads — vanilla's
-    /// `NetherPortalBlock.getPortalDestination`, whose whole rule is
+    /// The nether portal block's get portal destination, whose whole rule is
     /// `currentLevel.dimension() == Level.NETHER ? OVERWORLD : NETHER`. **Not a
     /// general "next dimension"**: it is specifically the nether portal's pairing,
     /// a two-cycle that does not extend to the End.
@@ -272,10 +272,10 @@ impl Dimension {
     }
 
     /// The fixed arrival point for an End portal trip *into* the End —
-    /// `ServerLevel.END_SPAWN_POINT`. Not scaled, not searched: every arrival at
+    /// The server level's end spawn point. Not scaled, not searched: every arrival at
     /// the End lands here (or, for the return trip, at the overworld's own respawn
     /// point — a different mechanism entirely, see
-    /// `EndPortalBlock.getPortalDestination`'s `fromEnd` branch).
+    /// The end portal block's get portal destination's `fromEnd` branch).
     #[must_use]
     pub fn end_spawn_point() -> (i32, i32, i32) {
         (100, 50, 0)
@@ -283,7 +283,7 @@ impl Dimension {
 
     /// The highest `y` `crate::portal`'s destination builder may place a block at
     /// — `min(maxY, minY + logicalHeight - 1)`, vanilla's
-    /// `PortalForcer.createPortal`'s `maxPlaceableY`.
+    /// The portal forcer's create portal's `maxPlaceableY`.
     ///
     /// 127 in the Nether and 319 in the overworld.
     #[must_use]
@@ -292,7 +292,7 @@ impl Dimension {
     }
 
     /// Clamps a carried `y` into the band a *fresh* portal may be built in —
-    /// `PortalForcer.createPortal`'s `Mth.clamp(origin.getY(), minStartY,
+    /// The portal forcer's create portal's `Mth.clamp(origin.getY(), minStartY,
     /// maxStartY)` fallback, where `minStartY = max(minY + 1, 70)` and `maxStartY
     /// = maxPlaceableY - 9`.
     ///
@@ -309,7 +309,7 @@ impl Dimension {
     }
 }
 
-/// Vanilla's `DimensionType.getTeleportationScale`: `from / to`.
+/// Vanilla's DimensionType's get teleportation scale: `from / to`.
 ///
 /// **One expression for both directions.** Overworld→Nether is `1.0 / 8.0`, and
 /// Nether→overworld is `8.0 / 1.0` — the same code, so an implementation cannot
@@ -321,7 +321,7 @@ pub fn teleport_scale(from: Dimension, to: Dimension) -> f64 {
 
 /// The approximate arrival point for an entity at `(x, y, z)` travelling `from`
 /// one dimension `to` another — vanilla's
-/// `NetherPortalBlock.getPortalDestination`'s `approximateExitPos`.
+/// The nether portal block's get portal destination's `approximateExitPos`.
 ///
 /// Horizontal only, then `y` clamped into the destination's placeable band.
 /// Returns block coordinates because vanilla does: the scaled position is
@@ -922,7 +922,7 @@ mod tests {
     }
 
     /// The fixed arrival point is a record constant
-    /// (`ServerLevel.END_SPAWN_POINT`), not derived from anything — so this test
+    /// (the server level's end spawn point), not derived from anything — so this test
     /// is a transcription check, not an invariant.
     #[test]
     fn the_end_spawn_point_is_the_vanilla_constant() {

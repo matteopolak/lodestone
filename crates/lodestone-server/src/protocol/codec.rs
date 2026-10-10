@@ -193,7 +193,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Emits the online-mode encryption request, mirroring
-    /// `ClientboundHelloPacket`: an empty server-id string, the DER-encoded
+    /// Hello packet: an empty server-id string, the DER-encoded
     /// RSA public key, the verify-token challenge, and a fixed
     /// `should_authenticate = true` (vanilla only ever constructs this packet
     /// with `true` — there is no wire concept of "encrypt without also
@@ -244,7 +244,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the server-list status reply to a [`ServerBound::StatusRequest`]
-    /// (vanilla `ClientboundStatusResponsePacket`, whose whole body is one
+    /// (vanilla status-response packet, whose whole body is one
     /// length-prefixed JSON document — vanilla's own lenient-JSON byte-buf codec, capped at 32767).
     ///
     /// The parameters are deliberately scalars rather than a struct: everything
@@ -296,9 +296,9 @@ pub trait ServerProtocol: Send + Sync {
     ///
     /// | phase | vanilla packet | reason encoded as |
     /// |---|---|---|
-    /// | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (vanilla's own lenient-JSON byte-buf codec, capped at 262144) |
-    /// | Configuration | `ClientboundDisconnectPacket` | **NBT** (vanilla's own `TRUSTED_CONTEXT_FREE_STREAM_CODEC`) |
-    /// | Play | `ClientboundDisconnectPacket` | **NBT**, same codec |
+    /// | Login | login-disconnect packet | **JSON string** (vanilla's own lenient-JSON byte-buf codec, capped at 262144) |
+    /// | Configuration | disconnect packet | **NBT** (vanilla's own `TRUSTED_CONTEXT_FREE_STREAM_CODEC`) |
+    /// | Play | disconnect packet | **NBT**, same codec |
     ///
     /// Login is the odd one out for historical reasons — the login phase predates
     /// NBT components on the wire — and an implementor that writes NBT there
@@ -320,7 +320,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the reply to a [`ServerBound::PingRequest`] (vanilla
-    /// `ClientboundPongResponsePacket`: the same single big-endian `long`,
+    /// Pong-response packet: the same single big-endian `long`,
     /// echoed unchanged).
     ///
     /// The default emits nothing.
@@ -330,7 +330,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes one line of server-originated chat to the calling client
-    /// (vanilla `ClientboundSystemChatPacket`: a text component plus an
+    /// (vanilla system-chat packet: a text component plus an
     /// `overlay` flag, where `false` selects the normal chat history and
     /// `true` the action bar).
     ///
@@ -353,7 +353,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a server→client plugin-message payload (vanilla
-    /// `ClientboundCustomPayloadPacket`, wire id `custom_payload`).
+    /// Custom-payload packet, wire id `custom_payload`).
     /// `channel` is the namespaced channel identifier; `data` is the
     /// channel-specific raw bytes, written verbatim — the same two-field shape
     /// [`ServerBound::CustomPayload`] lifts on the inbound side.
@@ -414,7 +414,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a game-mode change for the local player (vanilla
-    /// `ClientboundGameEventPacket` with `CHANGE_GAME_MODE`, whose float
+    /// Game-event packet with `CHANGE_GAME_MODE`, whose float
     /// parameter is the `GameType` id).
     ///
     /// This is *only* the mode; the abilities it implies travel in
@@ -427,7 +427,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the local player's movement abilities (vanilla
-    /// `ClientboundPlayerAbilitiesPacket`) — what actually grants creative
+    /// Player-abilities packet) — what actually grants creative
     /// flight and instant build on the client.
     ///
     /// Sent at join and on every game-mode change. Without it a client told it
@@ -560,7 +560,7 @@ pub trait ServerProtocol: Send + Sync {
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective;
 
     /// Encodes a **light-only** update for one column (vanilla's
-    /// `ClientboundLightUpdatePacket`, wire id `light_update`) — the packet that
+    /// Light-update packet, wire id `light_update`) — the packet that
     /// makes a placed torch light its column without re-sending the terrain.
     ///
     /// This is the ninth of nine links in the "torches emit no light" chain, and
@@ -577,7 +577,7 @@ pub trait ServerProtocol: Send + Sync {
     /// in (it interleaves each layer's mask with its empty mask), and an
     /// implementor that follows the constructor instead produces a packet a real
     /// client mis-merges silently. `ColumnLight::encode` is already the exact
-    /// `ClientboundLightUpdatePacketData` shape, so an implementor should call it
+    /// The clientbound light update packet data shape, so an implementor should call it
     /// rather than reimplement the four bitsets.
     ///
     /// The default emits nothing, so a family without light support falls back to
@@ -757,7 +757,7 @@ pub trait ServerProtocol: Send + Sync {
     ///
     /// `amount` is the item entity's stack count **before** the inventory took any
     /// of it — vanilla passes `orgCount`, captured ahead of
-    /// `player.getInventory().add(itemStack)`, which shrinks the stack in place. It
+    /// get inventory's get inventory, which shrinks the stack in place. It
     /// is *not* the amount that actually fitted, and the two differ exactly when a
     /// pickup is partial. It drives the client's pickup sound pitch, so a hardcoded
     /// `1` is audible rather than merely wrong.
@@ -771,7 +771,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes the Brigadier command tree (vanilla `ClientboundCommandsPacket`,
+    /// Encodes the Brigadier command tree (vanilla commands packet,
     /// wire id `commands`) — the packet that makes tab completion and command
     /// syntax highlighting possible at all.
     ///
@@ -790,18 +790,18 @@ pub trait ServerProtocol: Send + Sync {
     /// existed. The failure mode of the alternative (a required method) would be
     /// a legacy family forced to grow an encoder for a packet whose id it may
     /// number differently.
-    /// Encodes vanilla's `ClientboundHurtAnimationPacket` — **the camera damage
+    /// Encodes vanilla's hurt-animation packet — **the camera damage
     /// tilt**, and the red hurt flash on a remote entity.
     ///
     /// # Where vanilla sends it
     ///
-    /// vanilla's own deal-default-knockback routine calls `indicateDamage(xd, zd)` with the
+    /// Vanilla's own deal-default-knockback routine calls indicate damage with the
     /// horizontal offset from the damage source to the victim, and only
-    /// `ServerPlayer` overrides it — the base entity's own indicate-damage routine is empty, and
+    /// The server player overrides it — the base entity's own indicate-damage routine is empty, and
     /// its own get-hurt-dir routine is a constant `0.0F`. So in vanilla this packet
     /// goes to **one** connection, the hurt player's own, and never for a mob.
     ///
-    /// `yaw` is vanilla's own per-player indicate-damage routine's own expression,
+    /// `yaw` is vanilla's per-player indicate-damage routine's expression,
     /// `atan2(zd, xd) * 180 / PI - yRot` — degrees, in the victim's frame, so a hit
     /// from straight ahead is `0`. See [`crate::vitals::hurt_dir_degrees`], which
     /// is that formula and the one place it should be computed.
@@ -812,7 +812,7 @@ pub trait ServerProtocol: Send + Sync {
     /// `#minecraft:damage_type/no_knockback`, and that tag holds `fall`, `drown`,
     /// `starve`, `lava`, `in_fire`, `cactus`, `freeze`, `magic` — i.e. very nearly
     /// every way a singleplayer world currently hurts anyone. Vanilla still tilts
-    /// the camera for those, because `ClientboundDamageEventPacket` also sets
+    /// the camera for those, because damage-event packet also sets
     /// `hurtTime`, and this crate encodes no `damage_event`. This crate therefore
     /// sends `hurt_animation` for a directionless hit too, with `yaw` **exactly
     /// `0.0`** — the pure-roll case, which is what a vanilla client shows for a
@@ -828,7 +828,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes vanilla's `ClientboundEntityEventPacket` — one raw per-entity-type
+    /// Encodes vanilla's entity-event packet — one raw per-entity-type
     /// status byte, vanilla's own level broadcast-entity-event routine's whole payload.
     ///
     /// `event` is vanilla's own `EntityEvent` constant, and the
@@ -862,8 +862,8 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes vanilla's `ClientboundCommandSuggestionsPacket` (id 15) — the
-    /// answer to a `ServerboundCommandSuggestionPacket` (`ServerBound::CommandSuggestion`),
+    /// Encodes vanilla's command-suggestions packet (id 15) — the
+    /// answer to a command-suggestion packet (`ServerBound::CommandSuggestion`),
     /// vanilla's own custom-command-suggestions handler's reply.
     ///
     /// `response.id` echoes the request's transaction id verbatim; `start`/`length`
@@ -880,7 +880,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes vanilla's `ClientboundSetPassengersPacket` — the packet that makes
+    /// Encodes vanilla's set-passengers packet — the packet that makes
     /// a player *be* in a boat.
     ///
     /// vanilla's own server-entity send-pairing-data routine sends it on spawn and
@@ -910,12 +910,12 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes `SET_ENTITY_LINK` — vanilla `ClientboundSetEntityLinkPacket`,
+    /// Encodes `SET_ENTITY_LINK` — vanilla set-entity-link packet,
     /// which draws the rope between a leashed mob and its holder.
     /// `source_id` is the leashed entity; `target_id` is `None` for a detach
     /// (vanilla's own sentinel: `write` sends the holder's id or `0` when there
     /// is none, vanilla's own leashable drop-leash/remove-leash routines'
-    /// `new ClientboundSetEntityLinkPacket(entity, null)`) and `Some` for an
+    /// `new set-entity-link packet(entity, null)`) and `Some` for an
     /// attach, carrying the holder's own wire entity id (a player or another
     /// leashed mob — see [`EntitySnapshot::leash_link`] for how each resolves).
     ///
@@ -923,9 +923,9 @@ pub trait ServerProtocol: Send + Sync {
     /// exactly like [`encode_set_entity_data`](Self::encode_set_entity_data):
     /// once on spawn when [`EntitySnapshot::leash_link`] is `Some` — which is
     /// what puts a rope on a mob a client only just entered view range of,
-    /// mirroring `ServerEntity`'s own pairing-time
-    /// `sendToTrackingPlayers(entity, new ClientboundSetEntityLinkPacket(entity,
-    /// leashable.getLeashHolder()))` — and again on any update where the field
+    /// mirroring server entity's own pairing-time
+    /// `send to tracking players(entity, new set-entity-link packet(entity,
+    /// leashable's get leash holder))` — and again on any update where the field
     /// changed, covering both a fresh attach and a detach.
     ///
     /// The default emits nothing, so a protocol family with no leash support
@@ -998,7 +998,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the tab-list additions for players this connection has not been
-    /// told about yet (vanilla `ClientboundPlayerInfoUpdatePacket`
+    /// told about yet (vanilla player-info-update packet
     /// with the `ADD_PLAYER` action, wire id `player_info_update`).
     ///
     /// **This is not cosmetic, and it is not optional for player entities.** A
@@ -1022,7 +1022,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the tab-list removals for players that have left (vanilla
-    /// vanilla `ClientboundPlayerInfoRemovePacket`, wire id
+    /// vanilla player-info-remove packet, wire id
     /// `player_info_remove`) — the counterpart to
     /// [`encode_player_info_add`](Self::encode_player_info_add), emitted by the
     /// same [`crate::players::PlayerListStreamer`] pass. Without it a departed
@@ -1035,7 +1035,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Updates existing tab-list entries' game modes (vanilla's
-    /// `ClientboundPlayerInfoUpdatePacket` carrying **only** the
+    /// Player-info-update packet carrying **only** the
     /// `UPDATE_GAME_MODE` action, ordinal 2).
     ///
     /// Needed by `/gamemode`. `encode_player_info_add` sends a game mode too, but
@@ -1056,7 +1056,7 @@ pub trait ServerProtocol: Send + Sync {
         Vec::new()
     }
 
-    /// Encodes a detonation (vanilla `ClientboundExplodePacket`,
+    /// Encodes a detonation (vanilla explode packet,
     /// wire id `explode`), fed from [`crate::mobs::MobSim::take_detonations`]
     /// via [`crate::tick::ExplosionFeed`] — the handoff that finally gives
     /// [`crate::mobs::MobSim::explode`] (the exposure/damage
@@ -1079,7 +1079,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a positioned sound (vanilla
-    /// `ClientboundSoundPacket`, wire id `sound`).
+    /// Sound packet, wire id `sound`).
     ///
     /// `sound` is a `minecraft:sound_event` registry id
     /// ([`crate::effects`] validates every name it derives against the real
@@ -1105,7 +1105,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes one of vanilla's numbered composite effects (vanilla
-    /// `ClientboundLevelEventPacket`, wire id `level_event`) — see
+    /// Level-event packet, wire id `level_event`) — see
     /// [`crate::effects::PARTICLES_DESTROY_BLOCK`], which is a sound *and* a
     /// particle burst in one packet. The default emits nothing.
     fn encode_level_event(&self, event: i32, pos: BlockPos, data: i32, global: bool) -> ServerDirective {
@@ -1113,11 +1113,11 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a particle burst (`ClientboundLevelParticlesPacket`,
+    /// Encodes a particle burst (level-particles packet,
     /// wire id `level_particles`).
     ///
     /// `particle` is a `minecraft:particle_type` registry id. Only
-    /// argument-less (`SimpleParticleType`) particles are expressible: the
+    /// argument-less (the simple particle type) particles are expressible: the
     /// per-type option payload — dust colour, block state, item stack — has no
     /// representation here, the same scope
     /// [`crate::effects::WorldEffect::Particles`] carries and the same one the
@@ -1136,7 +1136,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes one block entity's update tag (vanilla
-    /// `ClientboundBlockEntityDataPacket`, wire id `block_entity_data`).
+    /// Block-entity-data packet, wire id `block_entity_data`).
     ///
     /// `block_entity_type` is a `minecraft:block_entity_type` registry **key**, not
     /// a numeric id — resolving it is version-specific, so the implementor does it.
@@ -1210,7 +1210,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a server-initiated keep-alive challenge (vanilla
-    /// `ClientboundKeepAlivePacket`, wire id `keep_alive`). `id` is the
+    /// Keep-alive packet, wire id `keep_alive`). `id` is the
     /// challenge value the loop expects echoed back as
     /// [`ServerBound::KeepAlive`]. The default emits nothing, so a protocol
     /// without keep-alive support need not override it.
@@ -1219,16 +1219,16 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a time-of-day update (vanilla `ClientboundSetTimePacket`, wire
+    /// Encodes a time-of-day update (vanilla set-time packet, wire
     /// id `set_time`).
     ///
     /// `game_time` is the monotonic world age in ticks. `day_time`, when
     /// `Some`, anchors the day/night clock to that many elapsed ticks at the
     /// normal 1:1 rate — sent once at join, mirroring vanilla's full clock
-    /// sync (`ServerClockManager::createFullSyncPacket`, sent from
+    /// sync (the server clock manager's create full sync packet, sent from
     /// vanilla's own send-level-info routine). `None` sends only the monotonic
     /// game-time broadcast vanilla repeats every 20 ticks
-    /// (`MinecraftServer::forceGameTimeSynchronization`) without touching the
+    /// (the minecraft server's force game time synchronization) without touching the
     /// client's already-held day/night anchor. The default emits nothing.
     fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
         let _ = (game_time, day_time);
@@ -1236,9 +1236,9 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a chunk-cache-center update (vanilla
-    /// `ClientboundSetChunkCacheCenterPacket`, wire id
+    /// Set-chunk-cache-center packet, wire id
     /// `set_chunk_cache_center`), sent whenever the player's tracked chunk
-    /// column changes (`ChunkMap::applyChunkTrackingView`). The default emits
+    /// column changes (the chunk map's apply chunk tracking view). The default emits
     /// nothing.
     fn encode_chunk_cache_center(&self, cx: i32, cz: i32) -> ServerDirective {
         let _ = (cx, cz);
@@ -1246,8 +1246,8 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a forget/unload signal for one chunk column leaving view
-    /// (vanilla `ClientboundForgetLevelChunkPacket`, wire id
-    /// `forget_level_chunk`; `ChunkMap::dropChunk`). The default emits
+    /// (vanilla forget-level-chunk packet, wire id
+    /// `forget_level_chunk`; the chunk map's drop chunk). The default emits
     /// nothing.
     fn encode_forget_chunk(&self, cx: i32, cz: i32) -> ServerDirective {
         let _ = (cx, cz);
@@ -1255,9 +1255,9 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a single block-state change (vanilla
-    /// `ClientboundBlockUpdatePacket`, wire id `block_update`), confirming a
+    /// Block-update packet, wire id `block_update`), confirming a
     /// break or placement back to the acting client — mirroring vanilla's
-    /// own `ServerPlayerGameMode`/`ServerGamePacketListenerImpl`, which
+    /// own server player game mode/server game packet listener impl, which
     /// answer every dig/place with this same packet whether or not the edit
     /// actually took effect (see `crate::server`'s `UseItemOn` handling for
     /// why it sends two of these per placement).
@@ -1294,7 +1294,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the local player's experience bar (vanilla
-    /// `ClientboundSetExperiencePacket`).
+    /// Set-experience packet).
     ///
     /// **The client half already existed**: `V770Adapter::handle_play` decodes
     /// `SET_EXPERIENCE` into `ClientEvent::ExperienceChanged`, complete with the
@@ -1311,7 +1311,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a health update for the local player (vanilla's
-    /// `ClientboundSetHealthPacket`, the same packet
+    /// Set-health packet, the same packet
     /// [`begin_play`](Self::begin_play) sends once at join with the
     /// fresh-spawn default). Sent whenever
     /// [`PlayerVitals::tick`](crate::PlayerVitals::tick) reports damage —
@@ -1326,7 +1326,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes an attribute update for the local player (vanilla
-    /// `ClientboundUpdateAttributesPacket`).
+    /// Update-attributes packet).
     ///
     /// **The client half already existed and the server never fed it**: the
     /// HUD's armour row (`lodestone_shell::hud`), `Session::armour_value` and
@@ -1347,7 +1347,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes the death notification (vanilla `ClientboundPlayerCombatKillPacket`,
+    /// Encodes the death notification (vanilla player-combat-kill packet,
     /// wire id `player_combat_kill`) — **the packet that raises the death screen**.
     ///
     /// # Why this exists, and why nothing else does the job
@@ -1379,7 +1379,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a post-death respawn (vanilla `ClientboundRespawnPacket` plus the
+    /// Encodes a post-death respawn (vanilla respawn packet plus the
     /// placement teleport `PlayerList::respawn` sends after it), moving the client
     /// off the death screen and to `spawn`.
     ///
@@ -1404,7 +1404,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a generic post-join teleport/position-sync
-    /// (`ClientboundPlayerPositionPacket`) — `/tp`'s producer, and any future
+    /// (player-position packet) — `/tp`'s producer, and any future
     /// caller that needs to move an already-joined player without a dimension
     /// change or a respawn.
     ///
@@ -1472,7 +1472,7 @@ pub trait ServerProtocol: Send + Sync {
         self.encode_dimension_change(dimension, spawn, mode)
     }
 
-    /// Encodes `ClientboundAnimatePacket` — the arm-swing animation, the
+    /// Encodes animate packet — the arm-swing animation, the
     /// [`ServerBound::Swing`] consumer's whole output. `action` is vanilla's
     /// own byte constant (`0` main-hand swing, `3` off-hand swing); this
     /// method carries it verbatim rather than a `hand` field, so a future
@@ -1487,7 +1487,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes `ClientboundSetCameraPacket` — attaches the receiving client's
+    /// Encodes set-camera packet — attaches the receiving client's
     /// rendered viewpoint to `entity_id`, the whole of
     /// [`ServerBound::SpectatorAction`]'s consumer output. See that variant's
     /// own doc comment for why there is no corresponding "reset to self"
@@ -1499,7 +1499,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a **dimension change** — the same `ClientboundRespawnPacket` pair
+    /// Encodes a **dimension change** — the same respawn packet pair
     /// [`encode_respawn`](Self::encode_respawn) sends, aimed at another level.
     ///
     /// # Why this is not `encode_respawn` with an argument
@@ -1549,7 +1549,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a difficulty confirmation (vanilla
-    /// `ClientboundChangeDifficultyPacket`, wire id `change_difficulty`),
+    /// Change-difficulty packet, wire id `change_difficulty`),
     /// sent back to the requesting connection after
     /// [`ServerBound::DifficultyChanged`]/[`DifficultyLockChanged`](ServerBound::DifficultyLockChanged).
     /// `locked` is always the connection's *current* lock
@@ -1563,7 +1563,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a game-rule confirmation (vanilla
-    /// `ClientboundGameRuleValuesPacket`, wire id `game_rule_values`) for
+    /// Game-rule-values packet, wire id `game_rule_values`) for
     /// exactly the entries a [`ServerBound::GameRuleChanged`] request just
     /// set — not vanilla's full current-rule-table broadcast,
     /// since this crate models no default rule set to broadcast the rest of;
@@ -1574,13 +1574,13 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a weather transition (vanilla `ClientboundGameEventPacket`,
+    /// Encodes a weather transition (vanilla game-event packet,
     /// wire id `game_event` — the same packet the client's adapter decodes
     /// into `ClientEvent::WeatherChanged`).
     /// `kind` is the vanilla event id: 1 = `START_RAINING`, 2 = `STOP_RAINING`,
     /// 7 = `RAIN_LEVEL_CHANGE`, 8 = `THUNDER_LEVEL_CHANGE`. `value` is the
     /// float parameter — 0.0 for the start/stop pair, the level for the
-    /// level-change pair — matching `ClientboundGameEventPacket`'s own
+    /// level-change pair — matching game-event packet's own
     /// `writeByte(event) + writeFloat(param)` layout. The default emits
     /// nothing, so a protocol without weather support simply never rains.
     fn encode_game_event(&self, kind: u8, value: f32) -> ServerDirective {
@@ -1589,7 +1589,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Opens a container's screen on the client (vanilla
-    /// `ClientboundOpenScreenPacket`, sent by `ServerPlayer::openMenu`).
+    /// Open-screen packet, sent by the server player's open menu).
     /// `window_id` is the container id every subsequent `container_click`/
     /// `container_close` for this window will carry (vanilla's
     /// `nextContainerCounter`: `1..=100`, wrapping — see `crate::server`'s
@@ -1607,7 +1607,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `merchant_offers` packet (vanilla
-    /// `ClientboundMerchantOffersPacket`) that a villager or wandering trader
+    /// Merchant-offers packet) that a villager or wandering trader
     /// interaction sends right after [`encode_open_screen`](Self::encode_open_screen).
     /// `level`/`xp` are the villager's own
     /// [`crate::mobs::SimMob::villager_level`]/[`villager_xp`](crate::mobs::SimMob::villager_xp);
@@ -1651,7 +1651,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `container_set_slot` packet for exactly one
-    /// changed slot (vanilla `ClientboundContainerSetSlotPacket`), in the
+    /// changed slot (vanilla container-set-slot packet), in the
     /// same menu-slot numbering [`encode_container_content`](Self::encode_container_content)
     /// uses. The default emits nothing.
     fn encode_container_slot(
@@ -1666,9 +1666,9 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `set_held_slot` packet (vanilla
-    /// `ClientboundSetHeldSlotPacket`) — a single VarInt hotbar index. Vanilla
+    /// Set-held-slot packet) — a single VarInt hotbar index. Vanilla
     /// sends this as the unconditional first half of
-    /// `ServerGamePacketListenerImpl::tryPickItem` (the pick-block action),
+    /// The server game packet listener impl's try pick item (the pick-block action),
     /// whether or not the pick actually moved anything, so the client's
     /// selection is always resynchronised to the server's own
     /// selected-slot value after a middle-click. The default emits nothing.
@@ -1682,7 +1682,7 @@ pub trait ServerProtocol: Send + Sync {
     /// burn/cook timers — see `crate::furnace::Furnace::container_data`'s own
     /// doc comment for the index table this feeds). Unlike a slot change,
     /// vanilla does not bump the container's `stateId` for a data change
-    /// (`AbstractContainerMenu::broadcastChanges` calls `setData` directly,
+    /// (the abstract container menu's broadcast changes calls `setData` directly,
     /// never `incrementStateId`), so this carries no `state_id` parameter at
     /// all. The default emits nothing.
     fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
@@ -1691,13 +1691,13 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `update_mob_effect` packet
-    /// (`ClientboundUpdateMobEffectPacket`) — a status effect newly applied
+    /// (update-mob-effect packet) — a status effect newly applied
     /// or refreshed on the entity at `entity_id`, `effect` a canonical
     /// `minecraft:*` key. `ambient`/`visible`/`show_icon` are vanilla's own
     /// three independent flags (a beacon/conduit application sets `ambient`
     /// and both display flags; `/effect give … true` sets neither display
     /// flag). `blend` is **not** an effect-type hint (nausea/darkness have no
-    /// special case in `ClientboundUpdateMobEffectPacket` itself) — it is the
+    /// special case in update-mob-effect packet itself) — it is the
     /// call site: vanilla's own on-effect-added routine (a genuinely new instance)
     /// passes `true`, `onEffectUpdated` (an existing instance refreshed —
     /// same or higher amplifier, longer duration) passes `false`. The
@@ -1719,7 +1719,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `remove_mob_effect` packet
-    /// (`ClientboundRemoveMobEffectPacket`) — `effect` cleared entirely from
+    /// (remove-mob-effect packet) — `effect` cleared entirely from
     /// the entity at `entity_id` (an expired duration, or an explicit
     /// `/effect clear`). The default emits nothing.
     fn encode_remove_mob_effect(&self, entity_id: i32, effect: &str) -> ServerDirective {
@@ -1728,7 +1728,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `initialize_border` packet (vanilla
-    /// `ClientboundInitializeBorderPacket`, wire id 43 in 26.2) — the border
+    /// Initialize-border packet, wire id 43 in 26.2) — the border
     /// state a player is told about on join, sent by vanilla's own
     /// per-player level-info send routine
     /// **before** the time sync and spawn-position packets. The default emits nothing.
@@ -1744,7 +1744,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `set_border_center` packet (vanilla
-    /// `ClientboundSetBorderCenterPacket`, wire id 88 in 26.2). The default
+    /// Set-border-center packet, wire id 88 in 26.2). The default
     /// emits nothing.
     fn encode_set_border_center(&self, x: f64, z: f64) -> ServerDirective {
         let _ = (x, z);
@@ -1752,10 +1752,10 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `set_border_lerp_size` packet (vanilla
-    /// `ClientboundSetBorderLerpSizePacket`, wire id 89 in 26.2) — the *live*
+    /// Set-border-lerp-size packet, wire id 89 in 26.2) — the *live*
     /// resize delta a border shrink/grow broadcasts, carrying `old_size`,
     /// `new_size` and the lerp time in **milliseconds**. Vanilla writes
-    /// `border.getLerpTime()` — remaining server **ticks** — directly
+    /// border's get lerp time — remaining server **ticks** — directly
     /// (no ×50), but this crate's
     /// client decodes the field as `lerp_time_ms` and interpolates on wall-clock
     /// (`lodestone-game::worldborder`'s `BorderExtent::Moving`), so the caller
@@ -1775,7 +1775,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `set_border_size` packet (vanilla
-    /// `ClientboundSetBorderSizePacket`, wire id 90 in 26.2) — the instant
+    /// Set-border-size packet, wire id 90 in 26.2) — the instant
     /// snap a `set_size` broadcasts. The default emits nothing.
     fn encode_set_border_size(&self, size: f64) -> ServerDirective {
         let _ = size;
@@ -1783,7 +1783,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `set_border_warning_delay` packet (vanilla
-    /// `ClientboundSetBorderWarningDelayPacket`, wire id 91 in 26.2).
+    /// Set-border-warning-delay packet, wire id 91 in 26.2).
     /// The default emits nothing.
     fn encode_set_border_warning_delay(&self, warning_time: i32) -> ServerDirective {
         let _ = warning_time;
@@ -1791,7 +1791,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `set_border_warning_distance` packet (vanilla
-    /// `ClientboundSetBorderWarningDistancePacket`, wire id 92 in 26.2).
+    /// Set-border-warning-distance packet, wire id 92 in 26.2).
     /// The default emits nothing.
     fn encode_set_border_warning_distance(&self, warning_blocks: i32) -> ServerDirective {
         let _ = warning_blocks;
@@ -1799,7 +1799,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the clientbound `resource_pack_push` packet (vanilla
-    /// `ClientboundResourcePackPushPacket`) — the server-initiated half of the
+    /// Resource-pack-push packet) — the server-initiated half of the
     /// resource-pack lifecycle. The body is the [`ResourcePackPush`]
     /// record verbatim: a raw 16-byte uuid, a VarInt-prefixed UTF-8 url, a
     /// VarInt-prefixed UTF-8 SHA-1 hash capped at 40 characters (vanilla's
@@ -1810,15 +1810,15 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes the full `ClientboundUpdateAdvancementsPacket` (26.2) — the
+    /// Encodes the full update-advancements packet (26.2) — the
     /// advancement tree plus per-player progress. The payload is
     /// [`crate::advancements::AdvancementUpdate`] verbatim, built by
     /// [`AdvancementManager::initial_update`](crate::advancements::AdvancementManager::initial_update)
     /// on join (`reset` true, the whole tree as `added`) and by
     /// [`flush_dirty`](crate::advancements::AdvancementManager::flush_dirty)
     /// on every tick that something changed (incremental `added`/`removed`
-    /// deltas plus the changed `progress`). Vanilla's `AdvancementHolder`
-    /// travels as the `added` list and `CriterionProgress` as each
+    /// deltas plus the changed `progress`). Vanilla's advancement holder
+    /// travels as the `added` list and the criterion progress as each
     /// `AdvancementProgressUpdate` entry's epoch-millis. The default emits
     /// nothing, so a protocol without advancement support never shows a tree.
     fn encode_update_advancements(&self, update: &crate::advancements::AdvancementUpdate) -> ServerDirective {
@@ -1826,7 +1826,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes the `ClientboundAwardStatsPacket` (26.2): a batch of
+    /// Encodes the award-stats packet (26.2): a batch of
     /// `(StatKey, count)` pairs, sent in reply to the client's
     /// `ClientCommand(REQUEST_STATS)`. Each `StatKey` is the
     /// stat-type registry id (e.g. `minecraft:mined`) plus the value key
@@ -1838,8 +1838,8 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes the `ClientboundRecipeBookAddPacket` (26.2) — the packet that
-    /// **hands out `RecipeDisplayId`s**.
+    /// Encodes the recipe-book-add packet (26.2) — the packet that
+    /// **hands out recipe display ids**.
     ///
     /// Without it `PLACE_RECIPE` is structurally unreachable rather than merely
     /// unimplemented: the id a client echoes back is a position in *this* list, so
@@ -1861,7 +1861,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes the `ClientboundSelectAdvancementsTabPacket` (26.2), sent in
+    /// Encodes the select-advancements-tab packet (26.2), sent in
     /// reply to the client's `select_advancements_tab` request.
     /// `tab` is the advancement id to open, or `None` to close the screen —
     /// vanilla answers the client's own request with the same id it was given.

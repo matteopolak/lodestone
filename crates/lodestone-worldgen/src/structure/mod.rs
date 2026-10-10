@@ -913,7 +913,7 @@ impl TemplateStore {
 /// Whether a candidate structure's start could be decided at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Validity {
-    /// Pieces generated; vanilla's `isValid()` answer is known and true.
+    /// Pieces generated; vanilla's is valid answer is known and true.
     Valid,
     /// Vanilla would have produced `INVALID_START` — try the next weighted option.
     Invalid,
@@ -1646,7 +1646,7 @@ impl StructureKind {
             let z = cz * 16 + random.next_int_bounded(16);
             let mut y = height.sample(&mut random, ctx.min_y(), ctx.dimension_height());
             let sea_level = ctx.sea_level();
-            // The walk reads `column.getBlock(y)` for air and `getBlock(--y)` for
+            // The walk reads column's get block for air and get block for
             // "soul sand, **or** face-sturdy". Pre-surface those two are one test:
             // soul sand is a *surface-rule* product, so every solid block here is
             // `BlockKind::Stone` and every `Stone` is face-sturdy. The disjunction is

@@ -415,7 +415,7 @@ fn build_pack_stack(builtin: Box<dyn ResourceSource>) -> ResourceManager {
 
 // -- the pack repository ----------------------------------------
 
-/// The user's `resourcepacks/` folder — vanilla's `FolderRepositorySource`
+/// The user's `resourcepacks/` folder — vanilla's folder repository source
 /// root, alongside `saves/`, `servers.json` and `options.json` in the same
 /// platform data directory (and honouring the same `LODESTONE_DATA_DIR`
 /// override).
@@ -432,7 +432,7 @@ pub fn resource_packs_dir() -> PathBuf {
 /// the scan itself needed to be data-pack-specific — only the directory does.
 /// Vanilla scans a *world's own* `datapacks/` folder plus the running
 /// instance's staging area; this client has no per-world folder yet at
-/// creation time (`world_select`'s own module docs — no `LevelStorageSource`),
+/// creation time (`world_select`'s own module docs — no level storage source),
 /// so this is the one staging location, alongside `resourcepacks/` in the same
 /// platform data directory.
 #[must_use]
@@ -754,7 +754,7 @@ fn log_server_pack_render_inputs(id: Uuid, source: &ZipSource, bytes: usize) {
     );
 }
 
-/// Withdraws the live server pack — `ClientboundResourcePackPopPacket`.
+/// Withdraws the live server pack — resource-pack-pop packet.
 /// `Some(id)` clears only if `id` is the pack currently installed (so a pop
 /// racing a newer push cannot remove the newer one); `None` clears
 /// unconditionally, matching vanilla's own "remove every pack". Bumps
@@ -928,7 +928,7 @@ fn selected_pack_sources() -> Vec<Box<dyn ResourceSource>> {
     // is never part of `selected`/`scan_resource_packs`: a server pack does
     // not live in the packs folder and is not player-toggleable from the
     // local Resource Packs screen, the same way vanilla's own
-    // `DownloadedPackSource` keeps it out of `PackRepository`.
+    // The downloaded pack source keeps it out of the pack repository.
     let mut out: Vec<Box<dyn ResourceSource>> = server_pack_source().into_iter().collect();
 
     let selected = selected_packs();
@@ -1011,7 +1011,7 @@ pub fn load_entity_textures() -> std::collections::HashMap<&'static str, lodesto
 /// # Why these are individual PNGs and not the chest *atlas*
 ///
 /// 26.2 stitches `textures/entity/chest/*.png` into `textures/atlas/chest.png`
-/// and `ChestRenderer` submits a `SpriteId` into it. The per-file PNGs are still
+/// and the chest renderer submits a `SpriteId` into it. The per-file PNGs are still
 /// in the jar and each sprite **is** the whole 64×64 sheet, so the model's own
 /// UVs (normalised against 64×64 by the bake) address a direct upload correctly
 /// and identically. Going through the atlas would only add a UV remap this
@@ -1340,7 +1340,7 @@ pub fn load_glint_texture() -> Option<lodestone_assets::Image> {
 }
 
 /// The server list's fallback favicon —
-/// `ServerSelectionList`'s `FaviconTexture.MISSING_ICON`, blitted at 32×32 for
+/// The server selection list's favicon texture's missing icon, blitted at 32×32 for
 /// any row whose server sent no usable icon.
 ///
 /// Loose: it lives at `textures/misc/`, so
@@ -1353,7 +1353,7 @@ pub const UNKNOWN_SERVER_TEXTURE: (&str, &str) = (
 );
 
 /// The Resource Packs screen's fallback pack icon —
-/// `PackSelectionScreen.DEFAULT_ICON`, blitted at
+/// The pack selection screen's default icon, blitted at
 /// 32×32 for any pack that ships no readable `pack.png`, which includes the
 /// built-in row.
 ///
@@ -1364,8 +1364,8 @@ pub const UNKNOWN_PACK_TEXTURE: (&str, &str) = (
     "assets/minecraft/textures/misc/unknown_pack.png",
 );
 
-/// The shared book screen sheet — `BookViewScreen.BOOK_LOCATION`, also used by
-/// `BookEditScreen` and `BookSignScreen`. It is a loose `256×256` texture;
+/// The shared book screen sheet — the book view screen's book location, also used by
+/// The book edit screen and the book sign screen. It is a loose `256×256` texture;
 /// each screen blits its top-left `192×192` logical region, so this cannot be
 /// discovered by the `gui/sprites/**` atlas walk.
 pub const BOOK_GUI_TEXTURE: (&str, &str) = (
@@ -1679,7 +1679,7 @@ pub fn load_recipe_book() -> Option<lodestone_game::recipe::RecipeBook> {
 
 /// Parses an in-pack path `data/<namespace>/<kind>/<rest>.json` into the
 /// `<namespace>:<rest>` [`Identifier`](lodestone_model::Identifier) vanilla's
-/// own `FileToIdConverter` derives, or `None` if `path` is not under
+/// own file to id converter derives, or `None` if `path` is not under
 /// `data/*/<kind>/` or is not a `.json` file. `kind` is `"recipe"` or
 /// `"tags/item"`.
 fn recipe_entry_id(path: &str, kind: &str) -> Option<lodestone_model::Identifier> {
@@ -1704,7 +1704,7 @@ fn recipe_entry_id(path: &str, kind: &str) -> Option<lodestone_model::Identifier
 /// vanilla plank** from the tag instead of adding to it.
 ///
 /// A layer whose bytes are not valid UTF-8/JSON, or whose document has no
-/// `values` array, is skipped — matching vanilla's own tag-loader load's own
+/// `values` array, is skipped — matching vanilla's tag-loader load's
 /// per-entry error-and-continue tolerance — so one
 /// malformed layer never blanks out the layers around it. Returns `None`
 /// only when no layer at all could be read.

@@ -16,7 +16,7 @@
 //! ```
 //!
 //! Vanilla darkens purely client-side, in `LightTexture.updateLightTexture`, by
-//! scaling the **sky** half of the lightmap by `Level.getSkyDarken`. That term did
+//! scaling the **sky** half of the lightmap by Level's get sky darken. That term did
 //! not exist in any shader in this repo. This file gates it *at pixels*, through
 //! the real [`EntityPipeline`], because a sampler-level assertion is precisely
 //! what let the bug ship the first time.
@@ -391,7 +391,7 @@ fn readback(
 ///
 /// [`mob_mean`] averages the **red** byte, and at midnight the lightmap is not
 /// grey: `SkyLightColor` is `Timelines.NIGHT_SKY_LIGHT_COLOR`,
-/// `ARGB.colorFromFloat(1.0, 0.48, 0.48, 1.0)`, i.e. bytes `(122, 122, 255)`.
+/// ARGB's color from float, i.e. bytes `(122, 122, 255)`.
 /// `lightmap.fsh` adds `SkyLightColor * sky_brightness`, so red and blue are
 /// genuinely different numbers, and `notGamma` then scales the whole triple by
 /// `maxScaled / maxComponent` — a factor taken from **blue**, applied to red.
@@ -407,8 +407,8 @@ fn readback(
 /// and it read as a shipped bug in the shader for eleven days.
 ///
 /// Every number below is arithmetic on `assets/minecraft/shaders/core/
-/// lightmap.fsh` and `Timelines`/`EnvironmentAttributes` out of the real 26.2
-/// `client.jar`, plus `Options`'s own decompiled source's default gamma — **not** read back from
+/// lightmap.fsh` and the timelines/environment attributes out of the real 26.2
+/// `client.jar`, plus the options' default gamma — **not** read back from
 /// this crate. For a sky-15, block-0 mob, `get_brightness(15/15) = 1.0` and
 /// `SkyFactor` at midnight is `0.24`, so `sky_brightness = 0.24` and:
 ///

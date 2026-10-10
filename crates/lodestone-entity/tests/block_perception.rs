@@ -378,12 +378,12 @@ fn a_grazing_sheep_holds_still_for_the_whole_animation() {
 }
 
 /// A baby grazes far more often than an adult — and the *ratio* pins the
-/// halving that `Goal.adjustedTickDelay` applies.
+/// halving that Goal's adjusted tick delay applies.
 ///
 /// Vanilla's literals are `1000` and `50`, but neither is the number of ticks
-/// that elapses: `adjustedTickDelay` is `positiveCeilDiv(t, 2)` for a goal that
+/// that elapses: `adjustedTickDelay` is positive ceil div for a goal that
 /// does not override `requiresUpdateEveryTick`, and `GrazeGoal` does not
-/// (`Goal.reducedTickDelay`). So the real intervals are **500 and 25**.
+/// (Goal's reduced tick delay). So the real intervals are **500 and 25**.
 ///
 /// Both hypotheses are computed from outside constants and the measurement must
 /// land on one. A grazing cycle costs `interval + EAT_ANIMATION_TICKS` ticks on

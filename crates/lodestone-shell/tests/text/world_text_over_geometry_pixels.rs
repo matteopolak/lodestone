@@ -682,7 +682,7 @@ fn text_display_glyphs_survive_their_own_background_panel() {
         // Vanilla's own default background, `0x40000000` — translucent black.
         let with_panel = shoot(0x4000_0000_u32 as i32);
         // `0` is vanilla's own "no panel at all" sentinel
-        // (`TextDisplayRenderer.submitInner`'s `if (backgroundColor != 0)`), so
+        // (the text display renderer's submit inner's `if (backgroundColor != 0)`), so
         // this reference draws the *same* glyphs with nothing in front of them.
         let no_panel = shoot(0);
 
@@ -711,7 +711,7 @@ fn text_display_glyphs_survive_their_own_background_panel() {
     // scale), which is between 6.7 and 0.56 `f32` ULP across the sweep. With
     // the glyphs on an unbiased pipeline the middle row measured **389** of
     // **438** px — the wrong hypothesis, watched failing — and with them on
-    // `RenderPipelines.TEXT_POLYGON_OFFSET`'s bias it measures **438**, an
+    // The render pipelines's text polygon offset's bias it measures **438**, an
     // exact match. 99% therefore lands on one hypothesis and not the other,
     // rather than merely asserting "not much was lost". The verdict is taken
     // on the **worst** row so a single bad distance cannot be averaged away.
@@ -1160,7 +1160,7 @@ fn is_ink(px: &[u8]) -> bool {
 ///
 /// The owner's second symptom — *"some blocks like glass don't render at all
 /// when they're behind the billboard panel"* — is the direct consequence of
-/// `RenderPipelines.TEXT_BACKGROUND`'s depth-write flag being ported
+/// The render pipelines's text background's depth-write flag being ported
 /// faithfully into a renderer that has neither of the two things vanilla
 /// leans on (reversed-Z, and a separate translucent render target whose
 /// depth is copied before the translucent features draw). Translucent

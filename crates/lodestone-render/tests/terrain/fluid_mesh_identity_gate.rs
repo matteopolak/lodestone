@@ -476,7 +476,7 @@ impl FluidSectionView for SceneView<'_> {
     /// which implementation the transport resolves to.
     ///
     /// The `Solid`-layer gate is the `canOcclude` half of vanilla's
-    /// `occlusionShape = canOcclude ? getOcclusionShape(state) : Shapes.empty()`
+    /// `occlusionShape = canOcclude ? get_occlusion_shape(state) : Shapes.empty()`
     /// and is not optional: without it every waterlogged leaves block (full-cube
     /// outline, `noOcclusion()`) would cull its own water away entirely.
     fn self_occlusion_at(&self, x: i32, y: i32, z: i32) -> lodestone_assets::fluid::SelfOcclusion {

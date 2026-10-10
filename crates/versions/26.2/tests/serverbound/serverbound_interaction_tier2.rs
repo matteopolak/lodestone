@@ -7,11 +7,11 @@
 //! Expected payloads are built from the wire specification with independent
 //! VarInt / big-endian encoders (never the adapter's own codec), so a
 //! symmetric bug cannot pass. Layouts are verified against 26.2's
-//! `ServerboundContainerButtonClickPacket`, `ServerboundPlayerAbilitiesPacket`,
-//! `ServerboundRenameItemPacket`, `ServerboundSelectTradePacket`,
-//! `ServerboundPickItemFromBlockPacket`, `ServerboundPickItemFromEntityPacket`,
-//! `ServerboundSetBeaconPacket`, `ServerboundEditBookPacket`,
-//! `ServerboundSignUpdatePacket`, and `ServerboundSetCommandBlockPacket`.
+//! Container-button-click packet, player-abilities packet,
+//! Rename-item packet, select-trade packet,
+//! Pick-item-from-block packet, pick-item-from-entity packet,
+//! Set-beacon packet, edit-book packet,
+//! Sign-update packet, and set-command-block packet.
 
 use lodestone_model::{BlockPos, ClientAction, CommandBlockMode, ConnectionState, VersionAdapter};
 use lodestone_v26_2::V770Adapter;

@@ -1563,7 +1563,7 @@ impl NetClient {
     /// (Self::pending_resource_pack_prompt). `accept = false` on a
     /// **required** pack ends the session — vanilla self-disconnects rather
     /// than waiting for the server to notice a client that will never load
-    /// it (`PackConfirmScreen`'s callback,
+    /// it (the pack confirm screen's callback,
     /// `multiplayer.requiredTexturePrompt.disconnect`).
     ///
     /// Best-effort like [`send_action`](Self::send_action): silently
@@ -2086,7 +2086,7 @@ impl Drop for NetClient {
 ///
 /// The server sends no sky array for sections above the top of the lit column, so
 /// every such section arrived `Missing` and read as sky `0`. Vanilla's
-/// `SkyLightSectionStorage` returns `15` there instead. The visible result was
+/// The sky light section storage returns `15` there instead. The visible result was
 /// two player-reported bugs that looked unrelated: **mobs flashing black** when
 /// they jumped or swam up into an empty section, and **the first-person arm going
 /// black over an ocean** — the arm samples at the camera, and over open water the
@@ -2748,7 +2748,7 @@ async fn run_async(
                             // Never authenticated, and this matches vanilla
                             // rather than merely being convenient:
                             // `handleHello` skips the encryption request for
-                            // `isMemoryConnection()`, so a singleplayer host
+                            // is memory connection, so a singleplayer host
                             // has nothing to prove and no session to spend.
                             RemoteAuth::Offline,
                             Some(io),
@@ -2818,7 +2818,7 @@ async fn run_async(
         // **A failure here does not abort the join.** An offline-mode server
         // never sends an encryption request at all — vanilla's own server-side
         // login-hello handling gates it on
-        // `usesAuthentication() && !isMemoryConnection()` — so a stale token has
+        // `uses_authentication() && !is_memory_connection()` — so a stale token has
         // no bearing on joining one, and refusing to dial would break joins that
         // work. The reason is handed to the builder instead and only spent if the
         // server turns out to demand online mode.
@@ -3387,7 +3387,7 @@ async fn run_async(
                     } else if let ClientEvent::ResourcePackPopped { id } = event {
                         // A withdrawn pack must not go on rendering, and a
                         // still-open prompt for it must not go on asking —
-                        // `DownloadedPackSource::popPack`/`popAll`'s own
+                        // The downloaded pack source's pop pack/`popAll`'s own
                         // effect, ported without the manager's generation
                         // bookkeeping (see `crate::resources::clear_server_pack`).
                         crate::resources::clear_server_pack(id);
@@ -3798,7 +3798,7 @@ pub fn start_browser_integrated_worker(
 /// The world name a LAN ping advertises — the world directory's own final
 /// component, or a generic label for a throwaway in-memory world.
 ///
-/// Vanilla's `LanServerPinger` sends `getMotd()`, which for a published
+/// Vanilla's lan server pinger sends get motd, which for a published
 /// singleplayer world is the level name. There is no level-name field on this
 /// side (`crate::saves` calls the one implicit world by its directory), so the
 /// directory name is the closest true answer rather than a fabricated one.
@@ -3952,7 +3952,7 @@ const MAX_PACK_SIZE_BYTES: u64 = 262_144_000;
 
 /// Vanilla's own common-packet-listener resource-pack-url parsing: only `http`/`https`
 /// is accepted; anything else — including a URL vanilla's own `new URL(..)`
-/// would fail to parse at all — is `ServerboundResourcePackPacket
+/// would fail to parse at all — is resource-pack packet
 /// .Action.INVALID_URL`, before the server-pack policy is even consulted.
 /// This client has no URL-parsing library dependency to reuse for the
 /// "otherwise malformed" half of that check, so the scheme prefix is the
@@ -3966,7 +3966,7 @@ fn resource_pack_url_is_valid(url: &str) -> bool {
 /// draws — see [`PendingResourcePackPrompt`]'s doc for why one line rather
 /// than vanilla's title-plus-wrapped-message pair. `required` selects
 /// `multiplayer.{requiredT,t}exturePrompt.line{1,2}`
-/// (`ClientCommonPacketListenerImpl`/`en_us.json`, quoted verbatim); `prompt`
+/// (the client common packet listener impl/`en_us.json`, quoted verbatim); `prompt`
 /// is the server's own optional message, appended the way
 /// `multiplayer.texturePrompt.serverPrompt` appends it (there: a blank line
 /// and a header; here, since this is one line: an em dash).
@@ -4030,7 +4030,7 @@ fn decide_resource_pack_push(
     }
 }
 
-/// Routes one `ClientboundResourcePackPushPacket` according to the pack policy.
+/// Routes one resource-pack-push packet according to the pack policy.
 /// The decision table is:
 ///
 /// 1. **Invalid URL** → `INVALID_URL`, unconditionally, before the policy is
@@ -4407,7 +4407,7 @@ async fn download_pack_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
-/// `DownloadedPackSource.tryParseSha1Hash`: a hash that is not exactly 40
+/// The downloaded pack source's try parse sha1 hash: a hash that is not exactly 40
 /// hex characters is treated as **absent** — vanilla's own leniency for a
 /// server that sends an empty string — and verification is skipped, not
 /// failed. A present, well-formed hash that does not match the downloaded
@@ -5985,7 +5985,7 @@ mod tests {
     /// `decode_explode` (`crates/protocol/v770/src/adapter.rs`) already turns
     /// the `explode` packet into a `ClientEvent::Sound`, and that decode is
     /// proven twice over in `lodestone-v26-2`'s own tests — once against a
-    /// hand-assembled fixture transcribed from `ClientboundExplodePacket`'s
+    /// hand-assembled fixture transcribed from explode packet's
     /// wire spec, once against a real vanilla 26.2 server's actual detonation
     /// (`live_creeper_explosion.rs`, `#[ignore]`d). Neither of those calls
     /// `forward`, which is the function `run()` actually calls in production
@@ -6009,7 +6009,7 @@ mod tests {
         let adapter = lodestone_registry::adapter_for_protocol(776)
             .expect("the `live` feature compiles a family in for protocol 776");
 
-        // `ClientboundExplodePacket`'s wire order: center (3×f64), radius
+        // Explode packet's wire order: center (3×f64), radius
         // (f32), blockCount (i32), playerKnockback (Optional<Vec3>),
         // explosionParticle (ParticleOptions), explosionSound
         // (Holder<SoundEvent>). Packet id 36 is `minecraft:explode`'s

@@ -105,7 +105,7 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// The projectile under test. `minecraft:snowball` is registered to
-/// `ThrownItemRenderer` at scale `1.0`, and its icon is `item/snowball` through
+/// the thrown-item renderer at scale `1.0`, and its icon is `item/snowball` through
 /// `builtin/generated` — i.e. the flat-sprite path, which is the whole reason a
 /// projectile could not have drawn before the extrusion landed.
 const PROJECTILE_TYPE: &str = "snowball";
@@ -146,7 +146,7 @@ const MIN_SILHOUETTE_PX: usize = 250;
 ///
 /// **Measured, not guessed**: 494 against the subject's 3788, i.e. 13%. Not the
 /// ~6% a 1/16-thick slab's *face-to-edge* ratio predicts, because
-/// `ItemModelGenerator` fans one edge quad per boundary texel of the sprite's alpha
+/// the item model generator fans one edge quad per boundary texel of the sprite's alpha
 /// outline — seen side-on those quads are the widest thing left, so the sliver is
 /// twice as bright as the naive ratio. A 10% ceiling failed on a working build; 20%
 /// keeps a 7.7x separation while leaving the control able to fail.
@@ -422,7 +422,7 @@ fn repose(mesh: &ModelMesh, extra: glam::Mat4) -> ModelMesh {
 /// against itself. Hermetic — no GPU, no jar.
 #[test]
 fn the_thrown_item_table_matches_the_26_2_registrations() {
-    // `EntityRenderers`'s own decompiled source registers exactly nine types to `ThrownItemRenderer`.
+    // The entity renderers register exactly nine types to the thrown-item renderer.
     for (type_path, item, scale, full_bright) in [
         ("egg", "minecraft:egg", 1.0, false),
         ("ender_pearl", "minecraft:ender_pearl", 1.0, false),
@@ -432,7 +432,7 @@ fn the_thrown_item_table_matches_the_26_2_registrations() {
             1.0,
             false,
         ),
-        // `EyeOfEnder.getDefaultItem()` is `Items.ENDER_EYE` — the item id differs
+        // EyeOfEnder's get default item is `Items.ENDER_EYE` — the item id differs
         // from the entity type name, which is the one entry a name-derived table
         // would get wrong.
         ("eye_of_ender", "minecraft:ender_eye", 1.0, true),
@@ -691,7 +691,7 @@ fn the_eating_jiggle_follows_the_27th_power_and_not_a_linear_approach() {
 ///   **start** of a use and on later. Reading `< 0.8` as "near the start" inverts
 ///   it, and a still frame cannot tell.
 /// * `applyItemArmTransform` runs **after** `applyEatTransform` for EAT/DRINK
-///   (`hasCustomArmTransform()`), so the offset is the right-hand factor. The
+///   (has custom arm transform), so the offset is the right-hand factor. The
 ///   opposite order is built here and required to differ.
 #[test]
 fn the_eat_chain_gates_its_bob_late_and_applies_the_arm_offset_last() {

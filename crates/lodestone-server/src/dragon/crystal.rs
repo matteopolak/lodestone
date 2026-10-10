@@ -71,7 +71,7 @@ impl NearestCrystal {
         self.0
     }
 
-    /// `if (this.nearestCrystal.isRemoved()) { this.nearestCrystal = null; }`
+    /// `if (this.nearestCrystal.is_removed()) { this.nearestCrystal = null; }`
     /// — called before the heal check each tick. `is_removed` answers
     /// whether the tracked crystal (by id) has been destroyed since last
     /// tracked.
@@ -83,8 +83,8 @@ impl NearestCrystal {
         }
     }
 
-    /// The rescan itself — `this.level().getEntitiesOfClass(EndCrystal.class,
-    /// this.getBoundingBox().inflate(32.0))` reduced to "nearest", folded
+    /// The rescan itself — `this.level().get_entities_of_class(EndCrystal.class,
+    /// this's get bounding box.inflate(32.0))` reduced to "nearest", folded
     /// with the caller doing the actual spatial query and handing back
     /// whichever id (if any) is nearest. Always overwrites (vanilla assigns
     /// unconditionally, including to `None` if the scan found nothing).

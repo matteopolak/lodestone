@@ -112,7 +112,7 @@ impl FluidSectionView for SnapshotFluidView<'_> {
     /// rather than its still/flow sprite.
     ///
     /// Without this override the trait default answered `false` everywhere, so one
-    /// of the five `FluidRenderer` divergences was fixed in `lodestone-render` and
+    /// of the five fluid renderer divergences was fixed in `lodestone-render` and
     /// **not live**: the crate had the behaviour and the shell's view never asked
     /// for it. Same shape as `occludes_at` above, keyed on
     /// `BlockModels::fluid_overlay`.

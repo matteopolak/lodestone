@@ -17,13 +17,13 @@ pub struct HudFrame<'a> {
     /// suspected. Read directly rather than from memory:
     /// `Hud.extractRenderState` (vanilla's own hud rendering, `.cache/mc/26.2/client-src`)
     /// calls `extractCrosshair` whenever the HUD itself is not F1-hidden and the
-    /// active screen is not a `LevelLoadingScreen` — there is no
+    /// active screen is not a level loading screen — there is no
     /// `screen() == null` guard on this call, unlike the sibling
     /// `extractSubtitleOverlay` three lines below it, which does gate on
-    /// `screen() == null || screen().isInGameUi()`. And `extractCrosshair` itself
-    /// gates only on `options.getCameraType().isFirstPerson()`
+    /// `screen() == null || screen().is_in_game_ui()`. And `extractCrosshair` itself
+    /// gates only on get camera type's get camera type
     /// and not being in spectator mode (or, in spectator, aiming at a
-    /// `MenuProvider` via `canRenderCrosshairForSpectator`). So a vanilla
+    /// The menu provider via `canRenderCrosshairForSpectator`). So a vanilla
     /// crosshair stays visible — dimmed only by whatever the screen itself draws
     /// on top of it afterward — behind a pause menu, an inventory, or chat.
     ///
@@ -114,14 +114,14 @@ pub struct HudFrame<'a> {
     /// insertion point while the indicator stayed pinned to the end. Both
     /// halves of vanilla's rule — where the caret sits, and whether it is the
     /// 1 px insert bar or the appended underscore
-    /// (`TextCursorUtils.extractInsertCursor` vs `extractAppendCursor`) — read
+    /// (the text cursor utils's extract insert cursor vs `extractAppendCursor`) — read
     /// this one field.
     pub chat_cursor: Option<usize>,
     /// Whether the input line's blinking caret is in its "on" phase this
     /// frame; only meaningful while `chat_input` is `Some`. Which *shape* it
     /// blinks in is [`Self::chat_cursor`]'s business, not this flag's. Vanilla
     /// blinks it every 300ms (its own text-cursor blink interval,
-    /// `isCursorVisible(millis) == (millis / 300) % 2 == 0`) — the caller
+    /// `is_cursor_visible(millis) == (millis / 300) % 2 == 0`) — the caller
     /// computes this from a wall clock with that same formula so this pure
     /// geometry module owns no clock of its own. Defaults to always-visible
     /// (see [`HudFrame::new`]) so every pre-existing test keeps drawing a
@@ -143,7 +143,7 @@ pub struct HudFrame<'a> {
     /// pixels.
     pub chat_hover_tooltip: Option<ChatHoverTooltip<'a>>,
     /// The scrollback's scroll indicator — vanilla's own scrollbar
-    /// (`ChatComponent.extractRenderState`'s `if (total > 0 && isForeground)`
+    /// (the chat component's extract render state's `if (total > 0 && isForeground)`
     /// block), `Some` only while there is [`crate::chat::ChatScroll`] state to
     /// show. `None` draws nothing, matching vanilla's own
     /// `virtualHeight != chatHeight` gate for "nothing to scroll into".
@@ -179,7 +179,7 @@ pub struct HudFrame<'a> {
     ///
     /// Empty and `None` are the same picture here, but they are not the same
     /// *claim*: `None` is "this frame must not draw the overlay", which is
-    /// vanilla's `screen() == null || !screen().showsActiveEffects()` gate,
+    /// vanilla's `screen() == null || !screen().shows_active_effects()` gate,
     /// and the caller owns that decision. The draw takes the list as data and
     /// has no opinion about which screen is open — the same split
     /// `container::geometry::draw_effect_column` already uses for the
@@ -190,12 +190,12 @@ pub struct HudFrame<'a> {
     /// Active boss bars, drawn stacked at the top-centre in render order.
     pub boss_bars: &'a [BossBarView],
     /// Whether this player can be hurt at all — vanilla's
-    /// own client-side can-hurt-player check, which is `localPlayerMode.isSurvival()`
+    /// own client-side can-hurt-player check, which is local player mode's is survival
     /// and therefore `SURVIVAL || ADVENTURE`. Creative **and spectator** are both
     /// false, which is why this is not a `GameMode::Creative` test: naming the mode
     /// would leave a spectator with a heart row vanilla never draws.
     ///
-    /// `Hud.extractHotbarAndDecorations` calls `extractPlayerHealth` only under this
+    /// Hud's extract hotbar and decorations calls `extractPlayerHealth` only under this
     /// predicate, and that one call draws the *whole* left/right column — the armour
     /// bar, the hearts, the hunger row and the air bubbles. So one flag gates all
     /// four here too, and all four are now present: [`Self::armour`] joined this gate
@@ -204,7 +204,7 @@ pub struct HudFrame<'a> {
     ///
     /// It also stands in for vanilla's `hasExperience()`, which gates the XP bar and
     /// the level number through `nextContextualInfoState`: in 26.2 both methods have
-    /// the identical body (`localPlayerMode.isSurvival()`), so one boolean carries
+    /// the identical body (local player mode's is survival), so one boolean carries
     /// both. **Split this into two fields if they ever diverge upstream** — the
     /// questions are genuinely different even where today's answers are not.
     ///
@@ -225,7 +225,7 @@ pub struct HudFrame<'a> {
     /// packet, so legacy/offline HUDs retain their single row.
     pub max_health: Option<f32>,
     /// Armour points in `0..=20` — vanilla's own get-armor-value accessor, which
-    /// is `Mth.floor(getAttributeValue(Attributes.ARMOR))` and **not** a per-item
+    /// is `Mth.floor(get_attribute_value(Attributes.ARMOR))` and **not** a per-item
     /// table. `Some` once the local player carries a server-fed attribute snapshot;
     /// `None` off a live server, which draws nothing.
     ///
@@ -245,7 +245,7 @@ pub struct HudFrame<'a> {
     /// Current food saturation (the hidden reserve that drains before `food`
     /// itself does), `Some` only on a live survival server. Drives the
     /// hunger-row wobble while it is empty (vanilla's own hud rendering,
-    /// `getSaturationLevel() <= 0.0`) — `None` is treated as "not empty" (the
+    /// `get_saturation_level() <= 0.0`) — `None` is treated as "not empty" (the
     /// row stays flush), which is also this field's default, so a caller that
     /// has not wired it through yet (see `docs/hud-animations.md`) draws
     /// exactly as before this field existed rather than guessing at a real
@@ -295,7 +295,7 @@ pub struct HudFrame<'a> {
     /// offset and colour by [`locator::locator_dots`] — empty when the
     /// local player is tracking no waypoint, which is also
     /// [`HudFrame::new`]'s default. Occupies the same on-screen slot as
-    /// [`Self::xp`] (`ContextualBar` is one mutually-exclusive bar in
+    /// [`Self::xp`] (the contextual bar is one mutually-exclusive bar in
     /// vanilla); a non-empty [`Self::locator`] draws instead of the XP bar
     /// rather than alongside it — see `sprite_vitals`'s own doc for the
     /// priority order this build models (and the one term of vanilla's it
@@ -356,8 +356,8 @@ pub struct HudFrame<'a> {
     ///
     /// **This is a diagnostic, not the real consumer.** Vanilla's border
     /// warning is a blue tint applied to the vignette in
-    /// `Hud.extractVignette`, which needs a
-    /// multiply-blend `RenderPipelines.VIGNETTE` equivalent and
+    /// Hud's extract vignette, which needs a
+    /// multiply-blend render pipelines's vignette equivalent and
     /// `misc/vignette.png` — neither of which exists in `lodestone-render`
     /// yet. This line is the same "did the datum actually reach the running
     /// client" signal `recipe_stats` plays for the corpus loader, and the
@@ -384,7 +384,7 @@ pub struct HudFrame<'a> {
     pub map_debug: Option<(usize, f32)>,
     /// The attack-cooldown fraction (`0.0..=1.0`, full strength at `1.0`) the
     /// crosshair indicator fills to — `Sim::attack_strength_scale`'s value,
-    /// vanilla's `getAttackStrengthScale(0.0F)`. Drawn only while
+    /// vanilla's get attack strength scale. Drawn only while
     /// [`Self::crosshair`] is also set (see that field), and only once the
     /// atlas resolves the two indicator sprites — see the crosshair draw site
     /// in [`HudGeometry::build_inner`] for exactly which vanilla condition is
@@ -392,7 +392,7 @@ pub struct HudFrame<'a> {
     /// icon; `docs/combat.md` names the cut). `None` draws nothing, the
     /// pre-#121 behaviour.
     pub attack_cooldown: Option<f32>,
-    /// Which of vanilla's three `AttackIndicatorStatus` placements the
+    /// Which of vanilla's three attack indicator status placements the
     /// attack-strength value from [`Self::attack_cooldown`] is drawn in —
     /// `options.attackIndicator`, copied here per frame by `app/redraw.rs`.
     ///

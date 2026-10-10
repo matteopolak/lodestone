@@ -32,7 +32,7 @@
 //!   `crate::chat`'s walker only recognises a line that starts with `/`
 //!   (`chat.rs`'s `parse_line`), which every real command-block command does
 //!   **not** (`commandsOnly = true` in vanilla's own
-//!   `CommandSuggestions` constructor, vanilla's own abstract command-block edit-screen base,
+//!   The command suggestions constructor, vanilla's own abstract command-block edit-screen base,
 //!   means the whole line is a command with no leading slash). The adapter
 //!   prepends a synthetic `/`, calls the chat walker, then shifts every byte
 //!   offset back by one and drops the synthetic slash's own span — see
@@ -65,7 +65,7 @@ use super::edit_box::EditBox;
 use super::focus::KeyEvent;
 use crate::chat::{self, Candidate, Completion, HighlightSpan};
 
-/// `AbstractCommandBlockEditScreen`'s `commandEdit` width/height
+/// The abstract command block edit screen's `commandEdit` width/height
 /// (`:46`): `width/2 - 150, 50, 300, 20`.
 pub const COMMAND_DX: f32 = -150.0;
 /// See [`COMMAND_DX`].
@@ -94,14 +94,14 @@ pub const PREVIOUS_H: f32 = 20.0;
 pub const PREVIOUS_DX: f32 = COMMAND_DX;
 
 /// The "Previous Output" label's y (`extractRenderState`, `:158-162`):
-/// `y = 75 + 5*9 + 1 + getPreviousY() - 135`, which for the block screen's
-/// `getPreviousY() == 135` collapses to `75 + 46 = 121`, and the label itself
+/// `y = 75 + 5*9 + 1 + get_previous_y() - 135`, which for the block screen's
+/// `get_previous_y() == 135` collapses to `75 + 46 = 121`, and the label itself
 /// draws at `y + 4 == 125`.
 pub const PREVIOUS_LABEL_Y: f32 = 125.0;
 /// See [`PREVIOUS_LABEL_Y`]; shares [`COMMAND_LABEL_DX`]'s x.
 pub const PREVIOUS_LABEL_DX: f32 = COMMAND_LABEL_DX;
 
-/// `outputButton`'s rect (`:63`): `width/2 + 150 - 20, getPreviousY(), 20, 20`.
+/// `outputButton`'s rect (`:63`): `width/2 + 150 - 20, get_previous_y(), 20, 20`.
 pub const OUTPUT_DX: f32 = 130.0;
 /// See [`OUTPUT_DX`].
 pub const OUTPUT_W: f32 = 20.0;
@@ -134,7 +134,7 @@ pub const CANCEL_DX: f32 = 4.0;
 /// The title's y (`:155`): `SET_COMMAND_LABEL` centred at `width/2, 20`.
 pub const TITLE_Y: f32 = 20.0;
 
-/// `advMode.setCommand` (`en_us.json`).
+/// adv mode's set command (`en_us.json`).
 pub const TITLE_TEXT: &str = "Set Console Command for Block";
 /// `advMode.command`.
 pub const COMMAND_LABEL_TEXT: &str = "Console Command";
@@ -146,11 +146,11 @@ pub const MODE_SEQUENCE_TEXT: &str = "Chain";
 /// `advMode.mode.auto` — `CommandBlockMode::Auto`'s label.
 pub const MODE_AUTO_TEXT: &str = "Repeat";
 /// `advMode.mode.redstone` — `CommandBlockMode::Redstone`'s label (the
-/// default, matching vanilla's `Mode mode = CommandBlockEntity.Mode.REDSTONE`
+/// default, matching vanilla's `Mode mode = command block entity's mode.REDSTONE`
 /// field initialiser, vanilla's own command-block edit-screen rendering).
 pub const MODE_REDSTONE_TEXT: &str = "Impulse";
 
-/// The mode label for `mode`, matching `CommandBlockEditScreen.addExtraControls`'s
+/// The mode label for `mode`, matching command block edit screen's add extra controls's
 /// `switch` (`:41-47`).
 #[must_use]
 pub fn mode_label(mode: CommandBlockMode) -> &'static str {
@@ -163,7 +163,7 @@ pub fn mode_label(mode: CommandBlockMode) -> &'static str {
 
 /// Vanilla's own command-block-entity mode enum's declared order
 /// (vanilla's own command-block-entity declarations: `SEQUENCE, AUTO, REDSTONE`), which is
-/// the order `CycleButton` cycles through.
+/// the order cycle button cycles through.
 #[must_use]
 pub fn next_mode(mode: CommandBlockMode) -> CommandBlockMode {
     match mode {
@@ -243,7 +243,7 @@ pub const PREVIOUS_OUTPUT_ROW: usize = COMMAND_BLOCK_ROWS.len();
 /// module doc) command-block-entity NBT a right-click would read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandBlockOpen {
-    /// The block's world position — `ServerboundSetCommandBlockPacket`'s
+    /// The block's world position — set-command-block packet's
     /// target.
     pub pos: BlockPos,
     /// The command currently stored on the block, if any.
@@ -252,7 +252,7 @@ pub struct CommandBlockOpen {
     pub track_output: bool,
     /// The block's last recorded output line, if [`Self::track_output`] and
     /// the block has run at least once. `None` draws `"-"`, matching
-    /// vanilla's own `previousEdit.setValue("-")` default.
+    /// vanilla's own previous edit's set value default.
     pub previous_output: Option<String>,
     /// The block's current mode.
     pub mode: CommandBlockMode,
@@ -265,7 +265,7 @@ pub struct CommandBlockOpen {
 
 impl Default for CommandBlockOpen {
     /// A freshly placed command block: vanilla's own field initialisers
-    /// (vanilla's own command-block edit-screen rendering, `BaseCommandBlock`'s defaults).
+    /// (vanilla's own command-block edit-screen rendering, the base command block's defaults).
     fn default() -> Self {
         Self {
             pos: BlockPos::new(0, 0, 0),
@@ -417,13 +417,13 @@ impl CommandBlockState {
     }
 
     /// `outputButton`'s click handler
-    /// (`(button, value) -> { commandBlock.setTrackOutput(value);
-    /// this.updatePreviousOutput(value); }`, `:64-67`). Vanilla immediately
+    /// (`(button, value) -> { commandBlock.set_track_output(value);
+    /// this's update previous output; }`, `:64-67`). Vanilla immediately
     /// reads the (possibly stale, until the next output) block's own
-    /// `getLastOutput()` back; this shell has no live block behind the
+    /// get last output back; this shell has no live block behind the
     /// screen to re-read, so toggling off simply blanks the line — matching
-    /// what `onDone` would do anyway (`commandBlock.setLastOutput(null)` when
-    /// `!isTrackOutput()`, `:110-112`) and what a fresh, never-tracked block
+    /// what `onDone` would do anyway (command block's set last output when
+    /// `!is_track_output()`, `:110-112`) and what a fresh, never-tracked block
     /// already shows.
     pub fn toggle_track_output(&mut self) {
         self.track_output = !self.track_output;
@@ -449,7 +449,7 @@ impl CommandBlockState {
     /// completion's own `start`. Returns whether the field changed.
     ///
     /// Vanilla's Tab *cycles the popup's selection* and commits on Enter
-    /// (`CommandSuggestions.SuggestionsList.cycle`/`useSuggestion`); this
+    /// (the command suggestions's suggestions list.cycle/`useSuggestion`); this
     /// commits the top candidate directly, because no popup **selection**
     /// state is modelled here — the popup rows `super::render::
     /// command_block_frame` builds are derived from [`Self::completions`]

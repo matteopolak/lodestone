@@ -90,7 +90,7 @@ impl FluidState {
         self.lava_height > 0.0
     }
 
-    /// Vanilla's own "is underwater" check = `wasEyeInWater && isInWater()`.
+    /// Vanilla's own "is underwater" check = `wasEyeInWater && is_in_water()`.
     /// This is the flag that gates submerged fog, the overlay, the ambient
     /// sounds, and the sprint-swimming pose.
     #[must_use]

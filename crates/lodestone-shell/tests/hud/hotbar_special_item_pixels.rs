@@ -776,7 +776,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
 ///
 /// `assets/minecraft/items/player_head.json` puts a *second* transformation
 /// (`translation: [0.5, 0, 0.5]` plus a 180°-about-X rotation) on the
-/// `minecraft:special` model node itself (`SpecialModelWrapper.Unbaked.bake`,
+/// `minecraft:special model node itself (the special model wrapper's unbaked.bake`,
 /// vanilla's decompiled special-model-wrapper source, 26.2) — carried today by `ItemModelNode::Special`'s
 /// `transformation` field and composed by [`special_pose_and_extent`] via
 /// `lodestone_render::compose_special_node_transform`, the same call
@@ -790,7 +790,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
 /// fallback. See `special_item_rig`'s neighbouring comment in
 /// `block_entity.rs` for the full citation trail, including the flip this
 /// file **used to** apply here, which a closer read of
-/// `SkullSpecialRenderer.submit`/`PlayerHeadSpecialRenderer.submit` showed
+/// The skull special renderer's submit/player head special renderer's submit showed
 /// was wrong (the world-only ground/wall flip never reaches the item path at
 /// all) and which this gate's own bounding-box mismatch caught before it
 /// shipped.
@@ -1551,7 +1551,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
 /// shield equivalent, and `lodestone_render::banner_pattern::
 /// shield_pattern_layers` had no consumer at all) — now draw in the hotbar
 /// through a real `"shield"` mesh (`lodestone_assets::block_entity_models::
-/// shield_model`, `ShieldModel.createLayer` ported) and
+/// shield_model`, the shield model's create layer ported) and
 /// `lodestone_render::shield_item_rig`/`shield_has_patterns`.
 ///
 /// # Two `minecraft:base_color`s, not one
@@ -1567,7 +1567,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
 ///
 /// # The negative control: no `base_color`, no patterns
 ///
-/// `ShieldSpecialRenderer.submit`'s own `hasPatterns` gate means a shield
+/// The shield special renderer's submit's own `hasPatterns` gate means a shield
 /// with neither carries **no** translucent layer at all — only the flat
 /// `shield_base_nopattern` sheet, untinted. That is the common case (straight
 /// off a crafting table) and this gate checks it is not silently treated as

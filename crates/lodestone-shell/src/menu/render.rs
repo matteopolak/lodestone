@@ -153,8 +153,8 @@ const TEXT_SCALE: f32 = 2.0;
 ///
 /// A player report caught `draw_edit_box` as the one vanilla-positioned
 /// widget still drawing at [`TEXT_SCALE`] while its row siblings (the
-/// Done/Cancel buttons on the same `ManageServerScreen`, via [`draw_widget`])
-/// draw at `1.0`. Measured against the jar: vanilla's `Font.lineHeight` is
+/// Done/Cancel buttons on the same manage server screen, via [`draw_widget`])
+/// draw at `1.0`. Measured against the jar: vanilla's Font's line height is
 /// `9` inside `EditBox`'s 20 px box,
 /// a `0.45` ratio; `GLYPH_H(7) * TEXT_SCALE(2.0) = 14` in the same 20 px box
 /// is `0.70` — exactly double. `GLYPH_H(7) * EDIT_TEXT_SCALE(1.0) = 7` is the
@@ -254,34 +254,34 @@ pub const PAUSE_GRID_W: f32 = 212.0;
 /// constant.
 pub const PAUSE_GRID_H: f32 = 166.0;
 
-// -- vanilla's `PauseScreen` cell metrics ----------
+// -- vanilla's pause screen cell metrics ----------
 
-/// `PauseScreen.COLUMNS`.
+/// The pause screen's columns.
 const PAUSE_COLUMNS: usize = 2;
-/// `PauseScreen.MENU_PADDING_TOP` (`:51`) — the first cell's `paddingTop`, which
+/// The pause screen's menu padding top (`:51`) — the first cell's `paddingTop`, which
 /// is what pushes the whole menu below the "Game Menu" heading.
 const PAUSE_MENU_PADDING_TOP: i32 = 50;
-/// `PauseScreen.BUTTON_PADDING` (`:52`) — the default cell padding, applied as
+/// The pause screen's button padding (`:52`) — the default cell padding, applied as
 /// `padding(4, 4, 4, 0)`: left, top, right, **no bottom** (`:93`).
 const PAUSE_BUTTON_PADDING: i32 = 4;
-/// `PauseScreen.BUTTON_WIDTH_FULL` (`:53`). Note it is 204, not
+/// The pause screen's button width full (`:53`). Note it is 204, not
 /// [`widget::BIG_WIDTH`]'s 200 — the pause screen is 4 px wider than the title
 /// screen's stack, which is exactly the 8 px gutter's other half.
 const PAUSE_BUTTON_FULL_W: f32 = 204.0;
-/// `PauseScreen.BUTTON_WIDTH_HALF` (`:54`), also `openScreenButton`'s explicit
+/// The pause screen's button width half (`:54`), also `openScreenButton`'s explicit
 /// `.width(98)` (`:266-268`).
 const PAUSE_BUTTON_HALF_W: f32 = 98.0;
 /// The gap between the pause screen's four icon buttons —
 /// vanilla's own horizontal linear layout at spacing 4 (`:101`).
 const PAUSE_ICON_SPACING: i32 = 4;
 /// Vanilla's font line height, used to centre a label in its widget
-/// (`ActiveTextCollector`).
+/// (the active text collector).
 ///
 /// `pub(super)` so a screen module outside `render` can centre its own text on a
 /// row without restating the 9 — `packs::placement_anchor`'s empty-state line is
 /// the first such caller.
 pub(super) const LINE_H: f32 = 9.0;
-/// Vertical offset of the pause screen's title `StringWidget`.
+/// Vertical offset of the pause screen's title string widget.
 const PAUSE_TITLE_Y: f32 = 40.0;
 /// Baseline of the title screen's two corner strings — vanilla draws both at
 /// `height - 10`.
@@ -319,18 +319,18 @@ const BG: [f32; 4] = [0.10, 0.10, 0.12, 1.0];
 /// a flat 25 %-black fill *is* the vanilla backdrop.
 ///
 /// What is missing is the **blur** vanilla applies behind it when the pause
-/// screen is topmost (`Screen.extractBlurredBackground`, gated on the
+/// screen is topmost (Screen's extract blurred background, gated on the
 /// `menuBackgroundBlurriness` option, which vanilla lets the player set to 0).
 /// At blurriness 0 this is exactly vanilla; above it, vanilla's menu reads
 /// calmer over a busy world than ours does.
 const OVERLAY_BG: [f32; 4] = [0.0, 0.0, 0.0, 64.0 / 255.0];
 
 /// The death screen's own backdrop, decoded rather than eyeballed —
-/// `DeathScreen.extractDeathBackground` calls
+/// The death screen's extract death background calls
 /// vanilla's own gui-graphics extractor's fill-gradient helper applied to
 /// `(0, 0, width, height, 1615855616, -1602211792)`,
 /// and `fillGradient`'s two ints are ARGB colours for the top and bottom edges
-/// respectively (`innerFill` -> `ColoredRectangleRenderState`, whose two colours
+/// respectively (`innerFill` -> colored rectangle render state, whose two colours
 /// are the start and end of the interpolation top-to-bottom).
 ///
 /// `1615855616` as ARGB is alpha `96/255`, red `80/255`, no green or blue: a
@@ -350,8 +350,8 @@ const DEATH_GRADIENT_BOTTOM: [f32; 4] = [128.0 / 255.0, 48.0 / 255.0, 48.0 / 255
 /// a flat quad at 112/255 black *is* the vanilla band background, exactly as
 /// [`OVERLAY_BG`] is the whole-screen one, and there is no tiling to reproduce.
 ///
-/// `AbstractSelectionList.extractListBackground` blits it across `getX()`/`getY()`
-/// to `getRight()`/`getBottom()` before the rows, which is why this is drawn
+/// The abstract selection list's extract list background blits it across `getX()`/`getY()`
+/// to get right/get bottom before the rows, which is why this is drawn
 /// under them and why its rect comes from
 /// [`widget::ListSpec::chrome_rect`] rather than from anything restated.
 ///
@@ -385,7 +385,7 @@ const ROW_SEL: [f32; 4] = [0.36, 0.40, 0.48, 1.0];
 const ROW_OFF: [f32; 4] = [0.16, 0.16, 0.18, 1.0];
 /// Primary text.
 const FG: [f32; 4] = [0.94, 0.94, 0.94, 1.0];
-/// `AbstractSliderButton.HANDLE_WIDTH`: the
+/// The abstract slider button's handle width: the
 /// handle is always 8 px wide, whatever the track's own width is.
 ///
 /// `pub` because the mouse-drag hit-test needs it too — vanilla's

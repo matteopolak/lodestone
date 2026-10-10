@@ -157,7 +157,7 @@ struct VsOut {
     // hurt/death overlay is a hard per-tick gate, not a fade — see
     // `HURT_OVERLAY_ALPHA_BYTE`'s doc.
     @location(4) @interpolate(flat) overlay: f32,
-    // Flat: a creeper's white-flash overlay alpha (`OverlayTexture`'s white
+    // Flat: a creeper's white-flash overlay alpha (the overlay texture's white
     // row), 0.0 when absent. Independent of `overlay` above — vanilla's red
     // and white overlays are different rows of one lookup texture, selected
     // by `hasRedOverlay`, never blended together. See
@@ -266,7 +266,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return shade_entity(in, tex_col);
 }
 
-// `PlayerModel` selects 26.2's `RenderTypes::entityTranslucent`, not the
+// The player model selects 26.2's translucent entity render type, not the
 // ordinary opaque/cutout living-model type.  Its pipeline cuts only alpha below
 // `ALPHA_CUTOUT = 0.1` and blends the surviving colour, preserving the
 // deliberately partially-alpha pixels player skins may use in the second layer.
@@ -282,7 +282,7 @@ fn fs_main_player_skin(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // `EntityPipeline::banner_layer_pipeline`'s fragment entry point.
-// Vanilla's `RenderPipelines.BANNER_PATTERN` draws its mask layers
+// Vanilla's banner-pattern pipeline draws its mask layers
 // translucent, depth-write-off, with **no alpha cutout at all** — a banner
 // pattern's antialiased mask edge is meant to blend, not vanish, and `fs_main`'s
 // unconditional `discard` below 0.5 would lose exactly those edge texels. This
@@ -313,15 +313,15 @@ fn fs_main_emissive(in: VsOut) -> @location(0) vec4<f32> {
 
 // `EntityPipeline::orb_pipeline`'s fragment entry point — the experience-orb
 // billboard. Two differences from `fs_main`, both read off vanilla's own
-// `ExperienceOrbRenderer` rather than chosen:
+// experience-orb renderer rather than chosen:
 //
-//  * the cutout is `0.1`, not `0.5`. `RenderPipelines.ENTITY_TRANSLUCENT` (which
+//  * the cutout is `0.1`, not `0.5`. Vanilla's entity-translucent pipeline (which
 //    the entity translucent-cull item target builds on) declares
 //    `ALPHA_CUTOUT 0.1F` — the same threshold `fs_main_flame` uses and for the
 //    same reason: the orb sprite's glow has a soft low-alpha fringe that a `0.5`
 //    cutout would clip into a hard-edged disc;
 //  * the output alpha is halved. Vanilla's four `vertex` calls are
-//    `setColor(rc, 255, bc, 128)` — a **vertex alpha of 128**, which multiplies
+//    set color — a **vertex alpha of 128**, which multiplies
 //    the texel's. Without it the orb draws fully opaque through the alpha-blended
 //    pipeline, which is the plausible-looking wrong version: it draws, it is the
 //    right colour, and it is twice as solid as vanilla's.
@@ -372,8 +372,8 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // `com.mojang.blaze3d.platform.Lighting.DIFFUSE_LIGHT_0/1` are
     // `(0.2, 1.0, -0.7)` and `(-0.2, 1.0, 0.7)` normalised, and `updateLevel`
     // installs exactly those for the world — the entry the first-person hand also
-    // renders under, since `renderItemInHand` runs inside `renderLevel` and the
-    // only `setupFor(ITEMS_3D)` in `GameRenderer` is afterwards, for the GUI.
+    // renders under, since the in-hand item render runs inside the level render and the
+    // only 3D-items setup in the game renderer is afterwards, for the GUI.
     let light_0 = normalize(vec3<f32>(0.2, 1.0, -0.7));
     let light_1 = normalize(vec3<f32>(-0.2, 1.0, 0.7));
     // `assets/minecraft/shaders/include/light.glsl`:
@@ -405,7 +405,7 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // linear light would pull it toward white. Leather's base sheet is
     // near-greyscale, so it is the whole visible colour of the piece.
     let shaded = linear_to_srgb(tex_col.rgb) * in.tint * diffuse * in.light_term;
-    // Vanilla's hurt/death overlay (`OverlayTexture`, sampled per
+    // Vanilla's hurt/death overlay (the overlay texture, sampled per
     // vanilla's own hurt-overlay flag) is a flat-red **blend**
     // at a fixed alpha, not a multiply — multiplying by red would crush the mob
     // toward black instead of washing it red. Blended in the same gamma-space
@@ -425,7 +425,7 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // possible way: `mix(a, b, t)` is `a` at `t = 0`, and our `overlay` is **0**
     // for an unharmed entity, so it would paint every mob — and the first-person
     // arm — solid red. Vanilla has no such case because its no-overlay state is
-    // alpha *near 1*: `OverlayTexture`'s `y >= 8` rows are white at high alpha,
+    // alpha *near 1*: the overlay texture's `y >= 8` rows are white at high alpha,
     // and `mix(white, colour, ~1)` is a no-op. Our sentinel is the opposite
     // polarity, so the blend has to be written against ours rather than
     // transliterated from vanilla's.
@@ -434,7 +434,7 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // weight is its complement, taken only when the overlay is actually present.
     let red_weight = select(0.0, 1.0 - in.overlay, in.overlay > 0.0);
     var overlaid = mix(shaded, vec3<f32>(1.0, 0.0, 0.0), red_weight);
-    // A creeper's white-flash overlay (`OverlayTexture`'s white row,
+    // A creeper's white-flash overlay (the overlay texture's white row,
     // vanilla's own creeper white-overlay progress). Unlike the red overlay this
     // is a genuine `mix(white, colour, alpha)` with no polarity inversion to
     // account for: our sentinel (`white_overlay == 0` means "absent") already
@@ -444,7 +444,7 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // has it, only gated on the sentinel rather than always applied.
     //
     // **Only applied when the red overlay is absent** — vanilla's
-    // `OverlayTexture` puts red and white on different rows of one lookup
+    // overlay texture puts red and white on different rows of one lookup
     // (`v == 3` for hurt is a flat red regardless of `u`), so a creeper that
     // is somehow both hurt and swelling in the same frame shows red, never a
     // blend of the two. `red_weight > 0.0` is exactly "the red overlay is
@@ -521,7 +521,7 @@ fn fs_main_flame(in: FlameVsOut) -> @location(0) vec4<f32> {
     // Vanilla forces the flame's light coords to full block-light
     // (the entity's light coords with block light forced to 15, as vanilla's
     // own flame feature does) and submits a flat white vertex colour
-    // (`fireVertex`'s `setColor(-1)`, `:71`) with no per-face lighting define
+    // (`fireVertex`'s set color, `:71`) with no per-face lighting define
     // on `ENTITY_CUTOUT_CULL` — fire reads as self-lit, not shaded by the
     // scene the way a mob's body is. This entry point therefore skips
     // `shade_entity`'s two-light diffuse and world-light dimming entirely

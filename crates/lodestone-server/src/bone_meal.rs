@@ -1,4 +1,4 @@
-//! Bone meal — the instant-growth right-click, `BoneMealItem::useOn`.
+//! Bone meal — the instant-growth right-click, the bone meal item's use on.
 //!
 //! # What was missing
 //!
@@ -11,20 +11,20 @@
 //!
 //! So this is the rule layer for one item, not a growth engine: three vanilla
 //! methods per block family (`isValidBonemealTarget`, `isBonemealSuccess`,
-//! `performBonemeal`), plus `BoneMealItem::growCrop`'s own consume-and-report
+//! `performBonemeal`), plus bone meal item's grow crop's own consume-and-report
 //! contract.
 //!
 //! # The per-family variation is the substance
 //!
 //! | family | `isValidBonemealTarget` | `isBonemealSuccess` | `performBonemeal` |
 //! |---|---|---|---|
-//! | `CropBlock` (wheat, carrots, potatoes) | `!isMaxAge` | `true`, no draw | `age += Mth.nextInt(random, 2, 5)`, clamped to 7 |
-//! | `BeetrootBlock` | same | same | the same draw **divided by 3**, so `+0` or `+1`, clamped to 3 |
-//! | `SaplingBlock` | inside build height | `nextFloat() < 0.45` | stage 0 → 1, else grow a tree |
+//! | the crop block (wheat, carrots, potatoes) | `!isMaxAge` | `true`, no draw | `age += Mth.nextInt(random, 2, 5)`, clamped to 7 |
+//! | the beetroot block | same | same | the same draw **divided by 3**, so `+0` or `+1`, clamped to 3 |
+//! | the sapling block | inside build height | `nextFloat() < 0.45` | stage 0 → 1, else grow a tree |
 //! | `GrassBlock` | the cell above is air | `true`, no draw | place up to 128 vegetation features |
 //!
 //! **The item is consumed even when the success roll fails.**
-//! `BoneMealItem::growCrop` shrinks the stack outside the `isBonemealSuccess`
+//! The bone meal item's grow crop shrinks the stack outside the `isBonemealSuccess`
 //! branch, so a sapling eats bone meal 55% of the time for nothing. That is
 //! [`BoneMealOutcome::ConsumedNoChange`], and getting it wrong would give players
 //! free bone meal.
@@ -41,7 +41,7 @@
 //! * a bone meal that finds no valid target draws nothing.
 //!
 //! Beetroot is the one that looks like it should differ and does not: its
-//! `getBonemealAgeIncrease` is `super.getBonemealAgeIncrease(level) / 3`, so it is
+//! `getBonemealAgeIncrease` is `super.get_bonemeal_age_increase(level) / 3`, so it is
 //! the *same single draw*, divided. `(nextInt(4) + 2) / 3` is `0` for one of the
 //! four outcomes and `1` for the other three — a 3-in-4 chance of a single stage,
 //! never two. [`beetroot_advances_by_zero_or_one_from_one_draw`] pins that
@@ -50,7 +50,7 @@
 //! # Two named gaps, both because the growth they need does not exist here
 //!
 //! * **`GrassBlock::performBonemeal`** places vegetation *features*
-//!   (`VegetationPlacements.GRASS_BONEMEAL`, plus the biome's own bone-meal
+//!   (the vegetation placements's grass bonemeal, plus the biome's own bone-meal
 //!   features) across 128 attempts, and each attempt's offset walk and each
 //!   feature placement draw from the same RNG. `lodestone-worldgen` has no feature
 //!   placer, and a partial version — say, dropping one `short_grass` where the
@@ -59,7 +59,7 @@
 //!   that is not vanilla's" failure mode, so this reports
 //!   [`BoneMealOutcome::NotModelled`] and consumes nothing rather than inventing a
 //!   sequence.
-//! * **A stage-1 sapling** needs `TreeGrower::growTree`, the same missing feature
+//! * **A stage-1 sapling** needs tree grower's grow tree, the same missing feature
 //!   placer, and [`crate::growth_tick`] already documents it as an uncloseable gap
 //!   for the random-tick path. Same treatment here.
 //!
@@ -83,10 +83,10 @@ use lodestone_data::block_states::StateId;
 
 use crate::mob_spawn::SpawnRng;
 
-/// `SaplingBlock::isBonemealSuccess`'s threshold.
+/// The sapling block's is bonemeal success's threshold.
 pub const SAPLING_SUCCESS_CHANCE: f32 = 0.45;
 
-/// `CropBlock::getBonemealAgeIncrease`'s `Mth.nextInt(random, 2, 5)` bounds.
+/// The crop block's get bonemeal age increase's `Mth.nextInt(random, 2, 5)` bounds.
 pub const CROP_AGE_INCREASE_MIN: u32 = 2;
 /// The inclusive upper bound of the same expression.
 pub const CROP_AGE_INCREASE_MAX: u32 = 5;
@@ -100,7 +100,7 @@ pub const BONE_MEAL: &str = "minecraft:bone_meal";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoneMealOutcome {
     /// Not a bone-mealable block, or already at max age — vanilla's
-    /// `InteractionResult.PASS`. Nothing is consumed and the caller should fall
+    /// The interaction result's pass. Nothing is consumed and the caller should fall
     /// through to whatever a right-click would otherwise do.
     NotBonemealable,
     /// A valid target whose `isBonemealSuccess` roll failed: **one bone meal is
@@ -135,7 +135,7 @@ pub fn is_bonemealable(state: StateId) -> bool {
 ///
 /// `above_state` is the block directly above the clicked one — the caller reads
 /// it, because this function has no world access. It is used only by the grass
-/// arm (`GrassBlock::isValidBonemealTarget` requires air above); pass anything for
+/// arm (GrassBlock's is valid bonemeal target requires air above); pass anything for
 /// the other families.
 ///
 /// Draws from `rng` exactly as vanilla does — see the module doc's draw table. A
@@ -144,7 +144,7 @@ pub fn is_bonemealable(state: StateId) -> bool {
 pub fn apply_bone_meal(state: StateId, above_state: StateId, rng: &mut SpawnRng) -> BoneMealOutcome {
     if let Some(max_age) = crop_max_age(state) {
         let age = property_u32(state, PropertyKey::Age);
-        // `CropBlock::isValidBonemealTarget` — `!isMaxAge`.
+        // The crop block's is valid bonemeal target — `!isMaxAge`.
         if age >= max_age {
             return BoneMealOutcome::NotBonemealable;
         }
@@ -155,7 +155,7 @@ pub fn apply_bone_meal(state: StateId, above_state: StateId, rng: &mut SpawnRng)
     }
 
     if is_sapling(state) {
-        // `SaplingBlock::isValidBonemealTarget` is a build-height check on
+        // The sapling block's is valid bonemeal target is a build-height check on
         // `pos.above(minimumHeight)`, which is true everywhere a sapling can
         // actually be standing, so it is not modelled as a rejection.
         if rng.next_f32() >= SAPLING_SUCCESS_CHANCE {
@@ -172,7 +172,7 @@ pub fn apply_bone_meal(state: StateId, above_state: StateId, rng: &mut SpawnRng)
     }
 
     if state.block() == Block::GrassBlock {
-        // `GrassBlock::isValidBonemealTarget` — the cell above must be air.
+        // GrassBlock's is valid bonemeal target — the cell above must be air.
         if !matches!(above_state.block(), Block::Air | Block::CaveAir | Block::VoidAir) {
             return BoneMealOutcome::NotBonemealable;
         }

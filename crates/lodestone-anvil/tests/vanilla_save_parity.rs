@@ -756,7 +756,7 @@ impl PalettedKind {
 /// corrupts everything while every palette of 16 or fewer entries still reads
 /// correctly — and it is not a guess here: it was measured against a real 26.2
 /// world (a 20-entry palette taking **342** longs, not 320) and independently
-/// adjudicated by Mojang's own `SimpleBitStorage` in
+/// adjudicated by the game's own bit-packed storage in
 /// `crates/lodestone-server/tests/write_path_jvm_oracle.rs`, whose dense-packing
 /// control disagreed on 16 of 24 probes.
 ///
@@ -1261,7 +1261,7 @@ fn assert_vanilla_accepted_the_world(server_root: &Path) {
 /// - the region file's bytes changed, which a recompression alone would also
 ///   cause — necessary but not sufficient;
 /// - a field **only vanilla writes** (`Heightmaps`) is now present, which
-///   proves the chunk went through `SerializableChunkData` rather than being
+///   proves the chunk went through the game's chunk serialiser rather than being
 ///   carried across as opaque bytes.
 ///
 /// Without this, "zero unallowlisted differences" would be indistinguishable

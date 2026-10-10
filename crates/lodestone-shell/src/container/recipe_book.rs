@@ -24,7 +24,7 @@ use super::FLOATS_PER_VERTEX;
 // recipe-book screen classes.
 //
 // **The screen shift is now real, and this note used to say it was not.** The
-// old text read "this does *not* replicate `RecipeBookComponent.
+// old text read "this does *not* replicate recipe book component.
 // updateScreenPosition` ... Instead the book panel is clamped to a minimum left
 // margin and may overlap the main panel's own left edge at narrow canvases".
 // The owner reported the consequence: "when the screen isn't wide enough the
@@ -33,7 +33,7 @@ use super::FLOATS_PER_VERTEX;
 //
 // The clamp could never have worked, because the layout it was compensating for
 // was inverted. Vanilla does not place the book relative to the container panel
-// — the **book is screen-centred** (`getXOrigin()` is `(width - 147) / 2 -
+// — the **book is screen-centred** (get x origin is `(width - 147) / 2 -
 // xOffset`) and the **panel is what moves** (`updateScreenPosition`). Both live
 // in `super::layout` now: `recipe_book_panel_shift` and
 // `recipe_book_width_too_narrow`, whose docs carry the arithmetic showing every
@@ -44,23 +44,23 @@ use super::FLOATS_PER_VERTEX;
 // that know whether the book is open pass it (`ContainerFrame::with_book_open`
 // for the draw, `layout::hit_test_with_book` for clicks).
 
-/// `RecipeBookComponent.IMAGE_WIDTH`/`IMAGE_HEIGHT` (`RecipeBookComponent.
+/// The recipe book component's image width/`IMAGE_HEIGHT` (the recipe book component.
 /// java:63-64`) — the panel's own background art size.
 pub const RECIPE_PANEL_W: f32 = 147.0;
 /// See [`RECIPE_PANEL_W`].
 pub const RECIPE_PANEL_H: f32 = 166.0;
-/// `RecipeBookComponent.BORDER_WIDTH`.
+/// The recipe book component's border width.
 ///
 /// Kept because it is a real vanilla constant and is re-exported, but **no longer
-/// used as a screen gap**: the book's x comes from `getXOrigin()` now, not from
+/// used as a screen gap**: the book's x comes from get x origin now, not from
 /// the container panel minus a margin. See the module doc.
 pub const RECIPE_PANEL_GAP: f32 = 8.0;
 
 /// The screen-toggle button, in **local coordinates off the main container
 /// panel's own origin** (not the book panel's). Derived, not guessed:
-/// `CraftingScreen.getRecipeBookButtonPosition` returns `(leftPos + 5,
+/// The crafting screen's get recipe book button position returns `(leftPos + 5,
 /// height/2 - 49)` and `topPos == (height -
-/// imageHeight) / 2` for every `AbstractContainerScreen`
+/// imageHeight) / 2` for every abstract container screen
 ///, so subtracting the two —
 /// `(leftPos+5) - leftPos = 5`, `(height/2-49) - (height/2-83) = 34` for
 /// `imageHeight = 166` — cancels the screen height and leftPos out entirely,
@@ -76,7 +76,7 @@ pub const RECIPE_PANEL_GAP: f32 = 8.0;
 pub const RECIPE_TOGGLE_LOCAL: Rect = Rect { x: 5.0, y: 34.0, w: 20.0, h: 18.0 };
 
 /// The **player inventory** screen's toggle offset —
-/// `InventoryScreen.getRecipeBookButtonPosition` returns
+/// The inventory screen's get recipe book button position returns
 /// `new ScreenPosition(this.leftPos + 104, this.height / 2 - 22)`
 ///. Same cancellation as
 /// [`RECIPE_TOGGLE_LOCAL`]'s: `x = 104`, and
@@ -90,11 +90,11 @@ pub const RECIPE_TOGGLE_LOCAL: Rect = Rect { x: 5.0, y: 34.0, w: 20.0, h: 18.0 }
 pub const RECIPE_TOGGLE_LOCAL_INVENTORY: Rect = Rect { x: 104.0, y: 61.0, w: 20.0, h: 18.0 };
 
 /// The **furnace family**'s toggle offset (furnace, blast furnace, smoker,
-/// which all inherit it) — `AbstractFurnaceScreen.getRecipeBookButtonPosition`
+/// which all inherit it) — the abstract furnace screen's get recipe book button position
 /// returns `new ScreenPosition(this.leftPos + 20, this.height / 2 - 49)`
 ///, i.e. the crafting table's `y = 34` but
-/// `x = 20` rather than `5`. `FurnaceScreen`, `BlastFurnaceScreen` and
-/// `SmokerScreen` declare no override of their own.
+/// `x = 20` rather than `5`. The furnace screen, the blast furnace screen and
+/// The smoker screen declare no override of their own.
 pub const RECIPE_TOGGLE_LOCAL_FURNACE: Rect = Rect { x: 20.0, y: 34.0, w: 20.0, h: 18.0 };
 
 /// Which of the three jar-derived toggle offsets `menu`'s screen uses.
@@ -139,7 +139,7 @@ pub const RECIPE_MAGNIFIER: Rect = Rect { x: 8.0, y: 13.0, w: 25.0, h: 14.0 };
 /// 26, 16, ...)` (`:138`).
 pub const RECIPE_FILTER_BUTTON: Rect = Rect { x: 110.0, y: 12.0, w: 26.0, h: 16.0 };
 
-/// `RecipeBookTabButton.WIDTH`/`HEIGHT`.
+/// The recipe book tab button's width/`HEIGHT`.
 pub const RECIPE_TAB_W: f32 = 35.0;
 /// See [`RECIPE_TAB_W`].
 pub const RECIPE_TAB_H: f32 = 27.0;
@@ -153,7 +153,7 @@ pub const RECIPE_TAB_Y0: f32 = 3.0;
 pub const RECIPE_TAB_SPACING: f32 = 27.0;
 
 /// Local origin of the recipe-icon grid's first cell —
-/// `setPosition(xo + 11 + 25*(i%5), yo + 31 + 25*(i/5))`.
+/// set position.
 pub const RECIPE_GRID_ORIGIN: (f32, f32) = (11.0, 31.0);
 /// Grid step, both axes (`:65`).
 pub const RECIPE_GRID_STEP: f32 = 25.0;
@@ -166,13 +166,13 @@ pub const RECIPE_ITEMS_PER_PAGE: usize = RECIPE_GRID_COLS * RECIPE_GRID_ROWS;
 /// Vanilla's own recipe-button widget's own size (ctor `super(0, 0, 25, 25, ...)`).
 pub const RECIPE_BUTTON_SIZE: f32 = 25.0;
 
-/// Page-forward arrow — `ImageButton(xo + 93, yo + 137, 12, 17, ...)`.
+/// Page-forward arrow — the image button(xo + 93, yo + 137, 12, 17, ...).
 pub const RECIPE_PAGE_FORWARD: Rect = Rect { x: 93.0, y: 137.0, w: 12.0, h: 17.0 };
 /// Page-back arrow — `(xo + 38, yo + 137, 12, 17, ...)` (`:70`).
 pub const RECIPE_PAGE_BACK: Rect = Rect { x: 38.0, y: 137.0, w: 12.0, h: 17.0 };
 
 /// One recipe-icon grid cell's local rect, 0-indexed row-major (matches
-/// [`RecipeBookPage`]'s own `buttons` order, and therefore
+/// [recipe book page]'s own `buttons` order, and therefore
 /// [`RecipeBookPanelContents::page_ids`]'s order).
 #[must_use]
 fn recipe_grid_cell_local(i: usize) -> Rect {
@@ -196,7 +196,7 @@ pub struct RecipeBookPanelLayout {
     pub panel: Rect,
     /// The always-present screen toggle (drawn/hit-tested even when the
     /// panel itself is closed — vanilla's own toggle button lives on the
-    /// screen, not inside `RecipeBookComponent`).
+    /// screen, not inside recipe book component).
     pub toggle: Rect,
     /// The search text box.
     pub search_box: Rect,
@@ -209,7 +209,7 @@ pub struct RecipeBookPanelLayout {
     pub tabs: Vec<Rect>,
     /// All 20 grid cells, always present regardless of how many are actually
     /// populated this page — matching vanilla's own fixed 20-button pool
-    /// (`RecipeBookPage`'s `buttons`), which hides unused entries rather
+    /// (the recipe book page's `buttons`), which hides unused entries rather
     /// than not creating them.
     pub recipes: [Rect; RECIPE_ITEMS_PER_PAGE],
     /// The page-forward arrow, only present when there is a next page.
@@ -262,7 +262,7 @@ pub struct RecipeBookPanelLayout {
 }
 
 /// The item icon(s) one recipe-book category tab draws — vanilla's
-/// `RecipeBookComponent.TabInfo` `(primaryIcon, secondaryIcon)`.
+/// The recipe book component's tab info `(primaryIcon, secondaryIcon)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecipeTabIcons {
     /// Always drawn.
@@ -273,7 +273,7 @@ pub struct RecipeTabIcons {
 }
 
 /// Local x of a tab's icon when it is the only one —
-/// `graphics.fakeItem(primaryIcon, getX() + 9 + moveLeft, getY() + 5)`.
+/// `graphics.fake_item(primaryIcon, getX() + 9 + moveLeft, getY() + 5)`.
 const RECIPE_TAB_ICON_SOLO_X: f32 = 9.0;
 /// Local x of the **first** of two icons — `getX() + 3 + moveLeft` (`:76`).
 const RECIPE_TAB_ICON_PAIR_X: f32 = 3.0;
@@ -300,7 +300,7 @@ fn icon(path: &str) -> ItemStack {
 ///
 /// # Where these come from
 ///
-/// Each `TabInfo` list is declared per *screen*, not per category, so the same
+/// Each tab info list is declared per *screen*, not per category, so the same
 /// [`RecipeCategory`](lodestone_game::recipe::RecipeCategory) has a different
 /// icon in different books — `Blocks` is `stone` in a furnace and
 /// `redstone_ore` in a blast furnace, `Misc` is `lava_bucket + apple` at a
@@ -315,7 +315,7 @@ fn icon(path: &str) -> ItemStack {
 /// | BlastFurnace | vanilla's own blast-furnace-screen rendering | `redstone_ore`, `iron_shovel + golden_leggings` |
 /// | Smoker | vanilla's own smoker-screen rendering | `porkchop` |
 ///
-/// Vanilla's leading `TabInfo(SearchRecipeBookCategory)` — the `compass` "all"
+/// Vanilla's leading tab info(the search recipe book category) — the `compass` "all"
 /// tab — has no counterpart here: this client models "all categories" as
 /// `tab == None` with no tab widget of its own (see
 /// [`RecipeBookPanelContents`]), so the compass is deliberately absent rather
@@ -402,8 +402,8 @@ pub fn recipe_book_panel_layout_with_scale(
     // `slot_layout`'s own `height: 166.0` for both); the extra term below is
     // `0` for those two and keeps this correct if either ever isn't.
     let by = my + (main_layout.height - RECIPE_PANEL_H) * 0.5;
-    // **Screen**-centred, then shifted left by `xOffset` — `getXOrigin()` is
-    // `(this.width - 147) / 2 - this.xOffset`
+    // **Screen**-centred, then shifted left by `xOffset` — get x origin is
+    // `(this.width - 147) / 2 - this.x_offset`
     // and `xOffset` is `widthTooNarrow ? 0 : 86` (`:117`). It is *not* placed
     // relative to the container panel, which is what this used to do; see
     // `layout::recipe_book_panel_shift`'s own doc for why that could never fit.
@@ -567,7 +567,7 @@ pub struct RecipeBookPanelContents<'a> {
     /// [`RecipeBookPanelLayout::recipes`]`[i]`.
     pub page_ids: Vec<&'a lodestone_model::Identifier>,
     /// Total page count (at least `1`, even for zero results, matching
-    /// `RecipeBookPage.totalPages`'s own `ceil` — an empty result set is
+    /// The recipe book page's total pages's own `ceil` — an empty result set is
     /// page `0` of `1`, not page `0` of `0`).
     pub total_pages: usize,
     /// The page actually shown, clamped into `0..total_pages`.
@@ -647,10 +647,10 @@ pub fn recipe_book_panel_contents_filtered<'a>(
 /// as a loose extra — see
 /// [`crate::resources::RECIPE_BOOK_TEXTURES`].
 pub const RECIPE_SPRITE_PANEL: &str = crate::resources::RECIPE_BOOK_PANEL_SPRITE;
-/// The toggle button — `RecipeBookComponent.RECIPE_BUTTON_SPRITES`
+/// The toggle button — the recipe book component's recipe button sprites
 ///, 20×18.
 pub const RECIPE_SPRITE_BUTTON: &str = "recipe_book/button";
-/// An unselected category tab — `RecipeBookTabButton.SPRITES`
+/// An unselected category tab — the recipe book tab button's sprites
 ///, 35×27.
 pub const RECIPE_SPRITE_TAB: &str = "recipe_book/tab";
 /// A selected category tab. Note vanilla's own recipe-book-tab-button widget reads
@@ -659,7 +659,7 @@ pub const RECIPE_SPRITE_TAB: &str = "recipe_book/tab";
 pub const RECIPE_SPRITE_TAB_SELECTED: &str = "recipe_book/tab_selected";
 /// The filter cycle-button in its **not-filtering** state, 26×16 —
 /// vanilla's own crafting recipe-book component. `filter_disabled` is the "All"
-/// state (`getFilterButtonTextures().get(filtering, hovered)` with
+/// state (get filter button textures's get filter button textures with
 /// `filtering == false`, vanilla's own recipe-book component).
 ///
 /// Both states are now real: [`RECIPE_SPRITE_FILTER_ENABLED`] is the other
@@ -669,7 +669,7 @@ pub const RECIPE_SPRITE_TAB_SELECTED: &str = "recipe_book/tab_selected";
 /// `SessionRecipeBookSettings` island).
 pub const RECIPE_SPRITE_FILTER: &str = "recipe_book/filter_disabled";
 /// The same cycle-button in its **Craftable** state —
-/// `getFilterButtonTextures().get(true, false)`, vanilla's own recipe-book component.
+/// get filter button textures's get filter button textures, vanilla's own recipe-book component.
 /// A distinct `gui/sprites/recipe_book/**` entry, so it is already stitched
 /// into [`GuiAtlas`](lodestone_render::GuiAtlas) exactly like its sibling and
 /// needed no new atlas entry.
@@ -684,7 +684,7 @@ pub const RECIPE_SPRITE_PAGE_FORWARD: &str = "recipe_book/page_forward";
 pub const RECIPE_SPRITE_PAGE_BACK: &str = "recipe_book/page_backward";
 /// A populated recipe cell's frame, 25×25 — vanilla's own recipe-button widget.
 ///
-/// Vanilla picks between four of these from `StackedItemContents`
+/// Vanilla picks between four of these from the stacked item contents
 /// (craftable/uncraftable × single/many). Craftability is not modelled here, so
 /// the *craftable* frame is used unconditionally: this panel browses the whole
 /// corpus rather than only what the inventory can make, so drawing everything
@@ -700,7 +700,7 @@ pub const RECIPE_SPRITE_SLOT: &str = "recipe_book/slot_craftable";
 pub const RECIPE_PANEL_SRC: [f32; 4] = [1.0, 1.0, RECIPE_PANEL_W, RECIPE_PANEL_H];
 
 /// The declared (16x-baseline) sheet size [`RECIPE_PANEL_SRC`]'s coordinates
-/// are authored against — the trailing `256, 256` of `RecipeBookComponent`'s
+/// are authored against — the trailing `256, 256` of the recipe book component's
 /// `blit(..., 147, 166, 256, 256)`. Not yet consumed: the panel is currently
 /// drawn through
 /// [`GuiAtlas::subregion_quad`](lodestone_render::GuiAtlas::subregion_quad),
@@ -840,14 +840,14 @@ const SEARCH_TEXT_INSET: f32 = 4.0;
 const SEARCH_GLYPH_H: f32 = 8.0;
 /// Vanilla's own edit-box's set-text-color call with `-1` — opaque white.
 const SEARCH_TEXT_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-/// Vanilla's own search-hint style's `ChatFormatting.GRAY`,
+/// Vanilla's own search-hint style's chat formatting's gray,
 /// which is `0xAAAAAA`.
 const SEARCH_HINT_COLOUR: [f32; 4] = [0.666_666_7, 0.666_666_7, 0.666_666_7, 1.0];
 /// Vanilla's own recipe-book component's search-hint translation key, whose
 /// `en_us` value is `"Search..."`.
 const SEARCH_HINT: &str = "Search...";
 
-/// Vanilla's own icon inset within a `RecipeButton` — `offset = 4`
+/// Vanilla's own icon inset within a recipe button — `offset = 4`
 /// (vanilla's own recipe-button widget, the non-multi-recipe branch — the "stack two
 /// icons" `offset` dance for a multi-recipe button is not modelled, see the
 /// module doc's other documented simplifications).
@@ -923,8 +923,8 @@ pub fn recipe_book_panel_geometry(
 /// # What vanilla adds and this deliberately does not
 ///
 /// `getTooltipText` appends `gui.recipebook.moreRecipes` ("Right Click for More")
-/// **only when `hasMultipleRecipes()`**, which is `selectedEntries.size() > 1` on
-/// the button's `RecipeCollection`. This client has no collection grouping:
+/// **only when has multiple recipes**, which is `selectedEntries.size() > 1` on
+/// the button's recipe collection. This client has no collection grouping:
 /// [`lodestone_game::recipe::RecipeBook::browse`] hands back one recipe id per
 /// button, so every button we draw carries exactly one recipe and vanilla's
 /// predicate is false for all of them. Emitting the line anyway would be
@@ -1005,7 +1005,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
     // The toggle button is the one widget that draws even when the panel
     // itself is closed — vanilla's toggle lives on the screen, not inside
-    // `RecipeBookComponent` (see `RecipeBookPanelHit::Toggle`'s own doc).
+    // The recipe book component (see `RecipeBookPanelHit::Toggle`'s own doc).
     let mut b = Builder::new(w, h, font);
     b.rect_px(layout.toggle.x, layout.toggle.y, layout.toggle.w, layout.toggle.h, TOGGLE_COLOUR);
     // The real art, in draw order. Built alongside the flat fills rather than
@@ -1054,7 +1054,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     // the glyph inside the button.
     //
     // The All/Craftable state, however, *is* modelled now — vanilla's
-    // `getFilterButtonTextures().get(filtering, hovered)`
+    // get filter button textures's get filter button textures
     //, with `hovered` still unmodelled.
     sprites.push(whole(
         if layout.filtering { RECIPE_SPRITE_FILTER_ENABLED } else { RECIPE_SPRITE_FILTER },
@@ -1080,7 +1080,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     }
 
     // A slot frame for **populated cells only** — vanilla hides an unused
-    // recipe-button widget outright (vanilla's own recipe-book-page's own visibility pass), and
+    // recipe-button widget outright (vanilla's recipe-book-page's visibility pass), and
     // an empty cell therefore shows the bare page. Verified by decoding
     // `recipe_book.png`: the whole grid region of the sheet is uniform opaque
     // white with no slot frames baked in, so emitting all 20 would draw a grid
@@ -1153,7 +1153,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
         }
     }
 
-    // The category tabs' own item icons — `RecipeBookTabButton.extractIcon`
+    // The category tabs' own item icons — the recipe book tab button's extract icon
     //, which the panel had none of: the tabs
     // drew their sprite and nothing on it, so every category slot was blank.
     //
@@ -1237,7 +1237,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
         }
     }
 
-    // The hovered recipe button's tooltip — `RecipeBookPage.extractTooltip`.
+    // The hovered recipe button's tooltip — the recipe book page's extract tooltip.
     //
     // **Last of all, deliberately.** This appends to the tail of the colour
     // stream, which the caller draws after both item passes, so the tooltip sits
@@ -1267,7 +1267,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
             (w, h),
             // No scroll-selection tracking on this screen — a bundle in the
             // recipe book preview always draws its grid with nothing
-            // highlighted, matching `BundleContents::NO_SELECTED_ITEM_INDEX`.
+            // highlighted, matching bundle contents's no selected item index.
             None,
         );
     }

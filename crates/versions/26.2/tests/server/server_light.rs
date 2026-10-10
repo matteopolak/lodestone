@@ -3,7 +3,7 @@
 //! # What this gate is for
 //!
 //! `crates/lodestone-world/src/lighting.rs` is a 1,105-line port of vanilla's
-//! `LightEngine`/`BlockLightEngine`/`SkyLightEngine`, unit-tested, benched, and
+//! the block-light and sky-light engines, unit-tested, benched, and
 //! judged against a real vanilla 26.2 server (`live_terrain_light.rs`). Until
 //! this crate's own wiring landed, its only production caller was the *client's* singleplayer worldgen.
 //! Every column `V770ServerProtocol::encode_chunk` sent carried
@@ -12,7 +12,7 @@
 //!
 //! **`Missing` is not darkness.** A client resolves an absent overworld sky
 //! section to full daylight (`lodestone_render::SkyDefault::Full`; vanilla's own
-//! client does the same through `SkyLightSectionStorage`), so the symptom was a
+//! client does the same through its sky-light section storage), so the symptom was a
 //! uniformly *bright* world — lit caves, lit sealed rooms, no night. Establishing
 //! that direction first mattered: anyone hunting this by looking for blackness
 //! was looking for the wrong colour.
@@ -260,7 +260,7 @@ struct Expectation {
 /// Two shapes, both predicted from vanilla's own rule:
 ///
 /// * the first air cell above the highest dampening block in a column is open to
-///   the sky (`vanilla's own chunk sky light sources's own is edge occluded`'s scalar case is
+///   the sky (the sky-light edge-occlusion scalar case is
 ///   `dampening != 0`), so its sky light is exactly `15`;
 /// * a cell with 17 blocks of continuous dampening-15 material directly above it
 ///   and dampening-15 material 16 blocks out on all four horizontal sides cannot

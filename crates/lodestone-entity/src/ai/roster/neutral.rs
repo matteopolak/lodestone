@@ -1202,7 +1202,7 @@ mod tests {
             3,
             63,
         );
-        mob.set_follow_range(64.0); // EnderMan.createAttributes' real FOLLOW_RANGE
+        mob.set_follow_range(64.0); // EnderMan's create attributes' real FOLLOW_RANGE
         mob.set_nearest_player(Some(far_target));
         // Acquisition needs the stare (or a live grudge, exercised elsewhere);
         // once a target is *held*, vanilla's `continueAggroTargetConditions`

@@ -297,7 +297,7 @@ fn every_new_event_reaches_its_session_component() {
     assert_eq!(book.ghost().map(|ghost| ghost.window_id), Some(2));
     assert_eq!(book.property_set_count(), 1);
     assert_eq!(book.stonecutter_results().len(), 1);
-    // The join a panel needs, since a RecipeDisplayId carries no recipe name.
+    // The join a panel needs, since a recipe display id carries no recipe name.
     assert_eq!(book.unlocked_producing(item(12)).count(), 1);
     // The book's grouping, tab and reveal gate reach the store, not just the
     // result ids: a fold that pattern-matched only the ids it already used

@@ -14,13 +14,13 @@
 //! bodies are built by hand from `f64::to_be_bytes` / `f32::to_be_bytes`,
 //! never from the adapter's own encoder.
 //!
-//! The rule (see `vanilla's own local player's own send position`): position is "dirty" when the
+//! The rule (the local player's position-send rule): position is "dirty" when the
 //! squared distance from the last **sent** position exceeds `(2e-4)²`, or
 //! every 20 ticks regardless of movement (a periodic forced update,
 //! `positionReminder >= 20`); rotation is dirty on *any* nonzero yaw/pitch
-//! delta from the last sent rotation. Both dirty sends `PosRot`; position
+//! delta from the last sent rotation. Both dirty sends position+rotation; position
 //! only sends `Pos`; rotation only sends `Rot`; neither, but on-ground or
-//! horizontal-collision changed since the last tick, sends `StatusOnly`;
+//! horizontal-collision changed since the last tick, sends status-only;
 //! otherwise nothing is sent — a deliberate `None`, not a bug. A single
 //! adapter instance is reused across each test's sequence of calls, exactly
 //! as one adapter is reused across a connection's lifetime.
@@ -105,7 +105,7 @@ const BASE_ROT: Rotation = Rotation {
 
 /// The very first `Move` on a fresh adapter always reads as maximally dirty
 /// (vanilla's `LocalPlayer` fields zero-initialize identically), so it always
-/// sends `PosRot`. Establishing that baseline here, rather than relying on
+/// sends position+rotation. Establishing that baseline here, rather than relying on
 /// `serverbound_actions.rs`, keeps every test in this file self-contained.
 fn establish_baseline(adapter: &V770Adapter) {
     adapter
@@ -249,7 +249,7 @@ fn on_ground_change_alone_sends_status_only_packet() {
     establish_baseline(&adapter);
 
     // Same position and rotation as the baseline, but on_ground flips from
-    // true to false: only the status changed, so `StatusOnly` is sent with
+    // true to false: only the status changed, so a status-only packet is sent with
     // the on-ground bit cleared.
     let encoded = adapter
         .encode_action(
@@ -332,7 +332,7 @@ fn periodic_reminder_forces_a_position_send_every_20_ticks_even_when_idle() {
 
     // The 20th tick since the baseline forces a full position resend
     // (`positionReminder >= 20`) even though nothing actually moved. Since
-    // rotation is still unchanged, this is a `Pos` packet, not `PosRot`.
+    // rotation is still unchanged, this is a position-only packet, not position+rotation.
     let encoded = adapter
         .encode_action(
             ConnectionState::Play,
@@ -523,7 +523,7 @@ fn correction_decode_does_not_rewrite_an_independent_move() {
         .expect("encode move")
         .expect("a move this far from the last sent position always sends");
 
-    // `PosRot` is not asserted here — rotation dirtiness is the sibling tests'
+    // Position+rotation is not asserted here — rotation dirtiness is the sibling tests'
     // subject. What matters is the three coordinates and the flags byte.
     let (packet_id, body) = encoded;
     assert_eq!(packet_id, play::serverbound::MOVE_PLAYER_POS);

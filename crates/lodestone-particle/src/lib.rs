@@ -1887,7 +1887,7 @@ impl Particle {
                 self.tick_base(view);
                 self.tick_overrides();
                 if !self.removed {
-                    // `if (level.getBlockState(...).isAir()) yd -= 0.0074F` —
+                    // `if (level.get_block_state(...).isAir()) yd -= 0.0074F` —
                     // approximated as "not in water", which is the distinction
                     // the sink exists to make and the one this view can answer.
                     let (bx, by, bz) = block_containing(self.x, self.y, self.z);
@@ -2486,7 +2486,7 @@ impl Particle {
     /// makes a short-lived wake start already-grown, and dropping it gives
     /// every ring the same opening frame.
     ///
-    /// `setSprite(sprites.get(life % 4, 4))` is `sprites[(life % 4) * 4 / 4]`,
+    /// Set sprite is `sprites[(life % 4) * 4 / 4]`,
     /// i.e. the frame index is `life % 4` outright — a four-frame cycle over
     /// the splash sheet rather than an age ramp, so this is deliberately not
     /// [`Self::set_sprite_from_age`].
@@ -2757,7 +2757,7 @@ impl Particle {
     /// ```text
     /// for (i = 0; i < 6; i++) {
     ///     xx = x + (nextDouble() - nextDouble()) * 4.0;   // ditto yy, zz
-    ///     level.addParticle(EXPLOSION, xx, yy, zz, (float)age / lifetime, 0.0, 0.0);
+    ///     level's add particle(EXPLOSION, xx, yy, zz, (float)age / lifetime, 0.0, 0.0);
     /// }
     /// age++;
     /// if (age == lifetime) remove();
@@ -3195,7 +3195,7 @@ pub struct ParticleEngine {
 
 impl ParticleEngine {
     /// Vanilla has no single global particle cap — it limits some types
-    /// individually through `ParticleLimit` and scales spawn *rates* with the
+    /// individually through per-type limits and scales spawn *rates* with the
     /// particle setting. A hard ceiling is ours, not vanilla's, and exists so a
     /// pathological emitter cannot stall a frame. It is high enough that normal
     /// play never reaches it.

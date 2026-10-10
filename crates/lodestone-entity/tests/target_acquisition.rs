@@ -25,8 +25,8 @@
 //!
 //! The numbers come from the jar, not from our tables:
 //!
-//! * `FOLLOW_RANGE` is `16.0` for every mob (`Mob.createMobAttributes`), raised to
-//!   `35.0` by the zombie family (`Zombie.createAttributes`).
+//! * `FOLLOW_RANGE` is `16.0` for every mob (Mob's create mob attributes), raised to
+//!   `35.0` by the zombie family (Zombie's create attributes).
 //! * The cut is a full 3-D `distanceToSqr` against `max(range, 2.0)`
 //!   (targeting conditions).
 //! * A target that *leaves* follow range is dropped
@@ -48,7 +48,7 @@ use lodestone_entity::ai::{
 use lodestone_entity::pathfinding::{Aabb, MobShape, PathType, PathWorld};
 use lodestone_model::Vec3;
 
-/// Vanilla's zombie `FOLLOW_RANGE` (`Zombie.createAttributes`,
+/// Vanilla's zombie `FOLLOW_RANGE` (Zombie's create attributes,
 /// `.add(Attributes.FOLLOW_RANGE, 35.0)`).
 const ZOMBIE_FOLLOW_RANGE: f64 = 35.0;
 

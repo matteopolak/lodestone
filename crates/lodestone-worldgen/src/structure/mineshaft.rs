@@ -242,7 +242,7 @@ pub struct Shaft {
 }
 
 impl Shaft {
-    /// `findCollisionPiece(box)` — the first piece whose box intersects, or none.
+    /// find collision piece — the first piece whose box intersects, or none.
     ///
     /// Linear over every piece placed so far, exactly as vanilla's is. The order is
     /// load-bearing only in that it decides *which* piece is reported, and nothing
@@ -258,7 +258,7 @@ impl Shaft {
         self.pieces.len() - 1
     }
 
-    /// `getBoundingBox()` — the union. Never empty: the room is added first.
+    /// get bounding box — the union. Never empty: the room is added first.
     fn bounding_box(&self) -> BoundingBox {
         self.pieces
             .iter()
@@ -1144,12 +1144,12 @@ impl Place<'_, '_> {
         self.view.set_id(pos, transformed.id);
     }
 
-    /// `getBlock(x, y, z, chunkBB)`, minus the chunk gate.
+    /// get block, minus the chunk gate.
     fn air_at(&self, x: i32, y: i32, z: i32) -> bool {
         self.view.is_air(self.node.world_pos(x, y, z))
     }
 
-    /// `isInterior(x, y, z, chunkBB)` — the `(y + 1)` position sits below the
+    /// is interior — the `(y + 1)` position sits below the
     /// `OCEAN_FLOOR_WG` height, i.e. the piece is underground here.
     fn is_interior(&self, x: i32, y: i32, z: i32) -> bool {
         let pos = self.node.world_pos(x, y + 1, z);

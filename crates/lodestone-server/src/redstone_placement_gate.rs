@@ -25,7 +25,7 @@
 //!
 //! The four delay settings come from [`ORACLE_REPEATER_DELAY`], measured on a
 //! **live vanilla 26.2 server** in `9eb8703`. The *placement* delay comes from
-//! the decompiled jar (`DiodeBlock.setPlacedBy`).
+//! the decompiled jar (the diode block's set placed by).
 //! Both originate outside this crate.
 //!
 //! # Two different delays, and separating them is the point
@@ -34,9 +34,9 @@
 //! plausible wrong model of the code under test:
 //!
 //! * A **signal change** reaching an already-placed repeater goes through
-//!   `DiodeBlock.checkTickOnNeighbor` and is delayed
-//!   `getDelay(state)` — `2d` game ticks, `d` being the `delay` property.
-//! * A **placement** goes through `DiodeBlock.setPlacedBy`, which
+//!   The diode block's check tick on neighbor and is delayed
+//!   get delay — `2d` game ticks, `d` being the `delay` property.
+//! * A **placement** goes through the diode block's set placed by, which
 //!   is `if (shouldTurnOn) scheduleTick(pos, this, 1)`. Delay **1**, at every
 //!   one of the four settings.
 //!
@@ -50,8 +50,8 @@
 //! # The tick arithmetic, and why it is `1 + delay` and not `delay`
 //!
 //! Vanilla handles queued packets at the top of a tick
-//! (`MinecraftServer.tickServer` -> `tickConnections`) and drains
-//! `ServerLevel.blockTicks` later in that **same** tick, so a placement
+//! (the minecraft server's tick server -> `tickConnections`) and drains
+//! The server level's block ticks later in that **same** tick, so a placement
 //! arriving between tick `N-1` and tick `N` is processed against `N` and fires
 //! at `N + delay`. `run_tick_loop` reproduces that: the inbound drain this
 //! issue added sits after `game_tick += 1` and before the `block_ticks` drain,
@@ -108,8 +108,8 @@ const OUT_X: i32 = 5;
 /// [`the_oracle_table_matches_the_live_measurement_it_was_transcribed_from`].
 const ORACLE_REPEATER_DELAY: &[(u32, u64)] = &[(1, 2), (2, 4), (3, 6), (4, 8)];
 
-/// `DiodeBlock.setPlacedBy`:
-/// `level.scheduleTick(pos, this, 1)`. Not `getDelay(state)`, and not shared
+/// The diode block's set placed by:
+/// `level.scheduleTick(pos, this, 1)`. Not get delay, and not shared
 /// with the table above — see this module's own doc comment.
 const JAR_PLACEMENT_DELAY: u64 = 1;
 
@@ -699,7 +699,7 @@ fn the_falling_edge_only_model_is_the_one_a_falling_edge_measurement_cannot_see(
 
 /// **A repeater placement's own scenario.** A repeater dropped into an already-powered
 /// line lights on tick `1 + 1`, at **every** delay setting — `setPlacedBy`'s
-/// delay is a literal `1`, not `getDelay(state)`.
+/// delay is a literal `1`, not get delay.
 ///
 /// This is the gate that fails if `react_at_placement` is ever "simplified"
 /// into `propagate_and_react`, and the gate that fails if the placement path
@@ -1180,7 +1180,7 @@ fn hopper_rig(power_the_upper: bool) -> (Arc<RigWorld>, BlockEntityHandle) {
             redstone_torch::set_standing_lit(true),
         );
     }
-    // Both hoppers start `enabled=true`, as vanilla's `HopperBlock` constructor's
+    // Both hoppers start `enabled=true`, as vanilla's hopper block constructor's
     // default state does; the lock is what has to change one of them.
     for y in [HOP_LOWER_Y, HOP_UPPER_Y] {
         world.set_block(HOP_X, y, ROW_Z, hopper_state(true));

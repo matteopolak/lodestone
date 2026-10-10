@@ -32,7 +32,7 @@
 //! - **The dig-position search is a bounded box scan around the sniffer's
 //!   own feet** ([`find_dig_position`]), not random land position's
 //!   pathfinding-aware sampling, and skips the real reachability check
-//!   (`Path::canReach`) entirely — the same "no bounding-box on this seam"
+//!   (Path's can reach) entirely — the same "no bounding-box on this seam"
 //!   cut `RamTarget`'s own doc already discloses for a different species. A
 //!   dig position behind unnavigable terrain fails closed through the
 //!   Brain's own `WalkToPoi` -> `MoveToTargetSink` (never arrives, so
@@ -47,7 +47,7 @@
 //!   `randomTeleport`/facing-offset seam" this crate already discloses
 //!   elsewhere.
 //! - **Mid-dig cancellation only checks panic**, not vanilla's fuller
-//!   `canStillUse` (`SNIFFER_DIGGING present && canDig() && !isInLove()`).
+//!   `canStillUse` (`SNIFFER_DIGGING present && can_dig() && !is_in_love()`).
 //!
 //! # How to change it
 //!
@@ -55,7 +55,7 @@
 //! - **Dig-search radius/shape**: [`find_dig_position`] — the one function
 //!   that reads [`ChunkWorld`].
 //! - **Eligibility**: [`eligible_to_sniff`]/[`eligible_to_dig`], mirroring
-//!   `Sniffer.canSniff`/`canDig` minus the checks this seam cannot make
+//!   Sniffer's can sniff/`canDig` minus the checks this seam cannot make
 //!   (`isTempted`, `onGround`, `isPassenger`).
 //!
 //! # Dependencies
@@ -74,7 +74,7 @@ pub const SNIFFING_MIN_TICKS: i32 = 40;
 pub const SNIFFING_MAX_TICKS: i32 = 80;
 
 /// Sniffer brain's own single-duration constructor argument — real
-/// vanilla's `Searching.canStillUse` actually stops the instant the walk
+/// vanilla's Searching's can still use actually stops the instant the walk
 /// target is reached (an arrival this module detects itself, see the module
 /// doc), so this is purely the "gave up" timeout.
 pub const SEARCHING_TIMEOUT_TICKS: i32 = 600;
@@ -91,7 +91,7 @@ pub const RISING_TICKS: i32 = 40;
 /// the next sniff may start.
 pub const SNIFF_COOLDOWN_TICKS: i32 = 9600;
 
-/// `Sniffer.storeExploredPosition`'s own `limit(20L)`.
+/// Sniffer's store explored position's own `limit(20L)`.
 pub const EXPLORED_POSITIONS_CAP: usize = 20;
 
 /// Not a vanilla constant — the horizontal half-width of
@@ -174,14 +174,14 @@ impl SnifferState {
     }
 }
 
-/// `Sniffer.canSniff()`, minus the checks this seam cannot make at all
+/// Sniffer's can sniff, minus the checks this seam cannot make at all
 /// (`isTempted` — no temptation-in-progress read on `SimMob`; `onGround`/
 /// `isPassenger` — no ground/mount state tracked for a walking mob).
 fn eligible_to_sniff(m: &SimMob<'_>) -> bool {
     !m.is_panicking() && !m.in_water() && !m.is_in_love() && !m.is_leashed()
 }
 
-/// `Sniffer.canDig()`, the same narrowing [`eligible_to_sniff`] discloses.
+/// Sniffer's can dig, the same narrowing [`eligible_to_sniff`] discloses.
 fn eligible_to_dig(m: &SimMob<'_>) -> bool {
     !m.is_panicking() && !m.is_baby() && !m.in_water() && !m.is_leashed()
 }
@@ -220,7 +220,7 @@ fn roll_duration(rng: &mut SpawnRng, min: i32, max: i32) -> i32 {
     min + rng.next_int(max + 1 - min)
 }
 
-/// `Sniffer.calculateDigPosition`, collapsed to a single bounded box scan —
+/// Sniffer's calculate dig position, collapsed to a single bounded box scan —
 /// see the module doc's disclosed cut against random land position's
 /// pathfinding-aware five-candidate search. Returns the nearest diggable,
 /// headroom-clear, not-recently-explored candidate's own **walkable cell**
@@ -338,8 +338,8 @@ impl<'w> MobSim<'w> {
                         continue;
                     };
                     if super::dist_sqr(m.position(), target) <= DIG_ARRIVAL_DISTANCE_SQR {
-                        // `Searching.stop`: `if (canDig() && canSniff())
-                        // setMemory(SNIFFER_DIGGING, true)`, re-checked here
+                        // `Searching.stop`: `if (can_dig() && can_sniff())
+                        // set_memory(SNIFFER_DIGGING, true)`, re-checked here
                         // rather than trusted from the search above — the
                         // terrain (or another sniffer's own dig) may have
                         // changed in the time it took to walk over.
@@ -370,7 +370,7 @@ impl<'w> MobSim<'w> {
                     m.sniffer_state_ticks -= 1;
                     if m.sniffer_state_ticks <= 0 {
                         // Finished-digging state -> `RISING`;
-                        // `onDiggingComplete(true)`'s explored-position
+                        // on digging complete's explored-position
                         // record happens here rather than in `RISING`'s own
                         // stop, since this module has no separate
                         // "timed out vs finished" distinction to gate it on
@@ -395,7 +395,7 @@ impl<'w> MobSim<'w> {
         if loot_drops.is_empty() {
             return;
         }
-        // `Sniffer.dropSeed`/`dropFromGiftLootTable(SNIFFER_DIGGING, …)` —
+        // Sniffer's drop seed/drop from gift loot table —
         // the same loot-table-then-`spawn_item` shape `resolve_cat_gifts`
         // already uses, with the item spawned at the sniffer's own position
         // (disclosed — see the module doc's "no head-forward offset" cut).

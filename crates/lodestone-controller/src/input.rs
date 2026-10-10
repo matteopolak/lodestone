@@ -418,8 +418,8 @@ pub fn movement_intent_with_food(state: &InputState, sprint_allowed_by_food: boo
 /// applied here:
 ///
 /// * The sprint veto — `canStartSprinting`'s `isSprintingPossible` ANDs in
-///   `!isSlowDueToUsingItem()`, where `isSlowDueToUsingItem = isUsingItem() &&
-///   !useEffects.canSprint()`. This is a **second, independent** conjunct
+///   `!is_slow_due_to_using_item()`, where `isSlowDueToUsingItem = is_using_item() &&
+///   !useEffects.can_sprint()`. This is a **second, independent** conjunct
 ///   alongside the food gate (`sprint_allowed_by_food`): either one alone can
 ///   veto sprint, and neither replaces the other — a spear (`can_sprint =
 ///   true`) does not override a starving player, and full food does not let

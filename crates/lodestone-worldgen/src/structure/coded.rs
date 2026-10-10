@@ -192,7 +192,7 @@ impl Builder {
         }
     }
 
-    /// `updateHeightPositionToLowestGroundHeight(level, offset)`.
+    /// update height position to lowest ground height.
     ///
     /// Scans **every** column of the box for the lowest ground height and moves the
     /// box down onto it. Chunk-independent in vanilla as well as here — it is the
@@ -273,7 +273,7 @@ impl Builder {
         self.height_position = Some(height);
     }
 
-    /// `getWorldX(x, z)`.
+    /// get world x.
     #[must_use]
     pub fn world_x(&self, x: i32, z: i32) -> i32 {
         match self.orientation {
@@ -283,13 +283,13 @@ impl Builder {
         }
     }
 
-    /// `getWorldY(y)`.
+    /// get world y.
     #[must_use]
     pub fn world_y(&self, y: i32) -> i32 {
         y + self.box_.min[1]
     }
 
-    /// `getWorldZ(x, z)`.
+    /// get world z.
     #[must_use]
     pub fn world_z(&self, x: i32, z: i32) -> i32 {
         match self.orientation {
@@ -299,7 +299,7 @@ impl Builder {
         }
     }
 
-    /// `getWorldPos(x, y, z)`.
+    /// get world pos.
     #[must_use]
     pub fn world_pos(&self, x: i32, y: i32, z: i32) -> [i32; 3] {
         [self.world_x(x, z), self.world_y(y), self.world_z(x, z)]
@@ -649,7 +649,7 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
     random: &mut R,
 ) -> Vec<StructurePiece> {
     let orientation = Facing::random(random);
-    // `updateHeightPositionToLowestGroundHeight(level, -random.nextInt(3))` — the
+    // update height position to lowest ground height — the
     // draw happens at `postProcess` time in vanilla, from the *decorating* random,
     // and comes out of the structure's own per-chunk stream here for the reason S2
     // recorded for the beached shipwreck's `nextInt(3)`.
@@ -1724,7 +1724,7 @@ mod tests {
             .iter()
             .filter(|b| b.state.canonical_state() == "minecraft:mossy_cobblestone")
             .count();
-        // 12 `placeBlock(MOSSY_COBBLESTONE, …)` statements are unconditional and are
+        // 12 place block statements are unconditional and are
         // *not* selector draws, so the predicted fraction is 0.4·n/(n+12).
         assert_eq!(cobble + mossy, 1_522 + 12, "cobble {cobble} + mossy {mossy}");
         let fraction = cobble as f64 / (cobble + mossy) as f64;
@@ -1766,7 +1766,7 @@ mod tests {
     }
 
     /// A pyramid is a pure function of `(world seed, chunk, terrain)` — the property the
-    /// per-chunk clip depends on, and the one vanilla's `level.getRandom()` cellar
+    /// per-chunk clip depends on, and the one vanilla's level's get random cellar
     /// draws do **not** have.
     #[test]
     fn a_coded_piece_is_reproducible_block_for_block() {

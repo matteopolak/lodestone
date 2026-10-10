@@ -265,12 +265,12 @@ fn debug_overlay_shows_weather_columns() {
 }
 
 /// The F3 overlay's plate, ink and pitch, against the literals in
-/// `DebugScreenOverlay`.
+/// The debug screen overlay.
 ///
 /// # Where the expected values come from
 ///
 /// `extractLines` is four numbers: `int height = 9`, the two margins spent as
-/// `left = alignLeft ? 2 : guiWidth() - 2 - width` and `top = 2 + height * i`,
+/// `left = alignLeft ? 2 : gui_width() - 2 - width` and `top = 2 + height * i`,
 /// `graphics.fill(…, -1873784752)` and `graphics.text(…, -2039584, false)`.
 /// The two colours below are those **signed Java `int`s, transcribed as
 /// written and unpacked here** rather than restated as four floats — a
@@ -279,7 +279,7 @@ fn debug_overlay_shows_weather_columns() {
 /// hypothesis.
 #[test]
 fn debug_overlay_plate_and_ink_match_vanillas_fill_literals() {
-    /// `DebugScreenOverlay.extractLines`' `graphics.fill(…, -1873784752)`.
+    /// The debug screen overlay's extract lines' `graphics.fill(…, -1873784752)`.
     const VANILLA_PLATE_ARGB: i32 = -1_873_784_752;
     /// Its `graphics.text(…, -2039584, false)`.
     const VANILLA_INK_ARGB: i32 = -2_039_584;
@@ -328,8 +328,8 @@ fn debug_overlay_plate_and_ink_match_vanillas_fill_literals() {
 }
 
 /// Every ported line of the F3 overlay, character for character, against the
-/// format strings in `DebugEntryPosition`, `DebugEntrySectionPosition`,
-/// `DebugEntryLight` and `DebugEntryLookingAt.BlockStateInfo`.
+/// format strings in the debug entry position, the debug entry section position,
+/// The debug entry light and the debug entry looking at's block state info.
 ///
 /// # Why this position
 ///
@@ -342,7 +342,7 @@ fn debug_overlay_plate_and_ink_match_vanillas_fill_literals() {
 /// | `x` negative | the region hint's arithmetic shift and mask (`-1 & 31 == 31`, `-1 >> 5 == -1`) and the `%02d` section-relative pad (`-1 & 15 == 15`) |
 /// | fractional `y` and `z` | vanilla's asymmetric `%.3f / %.5f / %.3f` — a uniform `%.2f`, or space separators, differ visibly |
 /// | `y = 70.25` | section Y is `70 >> 4 == 4`, not the block Y the `Chunk:` line used to print |
-/// | `yaw = 405` | `Mth.wrapDegrees` — prints `45.0`, not `405.0` |
+/// | `yaw = 405` | Mth's wrap degrees — prints `45.0`, not `405.0` |
 /// | `the_nether`, not `overworld` | a hardcoded dimension default, which is what this line read before it was wired to `ServerDimension` |
 /// | hitboxes **on**, borders **off** | the two `Debug overlays:` states are deliberately *different*. Equal booleans are the one input a transposed pair survives, and they are adjacent same-typed fields — the cheapest bug in the file |
 ///

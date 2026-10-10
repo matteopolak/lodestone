@@ -3,8 +3,8 @@
 //!
 //! Expected payload is built independently of the adapter's own codec, so a
 //! symmetric bug cannot pass. Layout is verified against 26.2's
-//! `ServerboundChangeGameModePacket` (a single VarInt `GameType` id via
-//! `vanilla's own byte buf codecs's own id mapper`: `0` survival, `1` creative, `2` adventure, `3`
+//! Change-game-mode packet (a single VarInt `GameType` id via
+//! an id-mapper codec: `0` survival, `1` creative, `2` adventure, `3`
 //! spectator — matching `GameType`'s declared enum order exactly).
 //!
 //! Sent by the singleplayer/LAN cheats-enabled F4 game-mode switcher. This

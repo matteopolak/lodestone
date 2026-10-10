@@ -7,20 +7,20 @@
 //! — the per-tick, per-entity-ticking-chunk strike
 //! selection — plus its own lightning-bolt entity tick and
 //! the thunder-hit table across `Entity`, `Creeper`, `Pig`, `Villager`,
-//! `MushroomCow` and `Turtle`. Nothing about lightning existed in this crate
+//! The mushroom cow and `Turtle`. Nothing about lightning existed in this crate
 //! before this module: `crate::burning`'s own doc lists it under "What is not
 //! here" and says why — it needs an entity type `MobSim` does not have.
 //!
 //! # How it works
 //!
-//! [`should_attempt_strike`] is the outer gate, `ServerLevel.tickThunder`'s
-//! `raining && this.isThundering() && this.random.nextInt(100000) == 0` —
+//! [`should_attempt_strike`] is the outer gate, the server level's tick thunder's
+//! `raining && this.is_thundering() && this.random.nextInt(100000) == 0` —
 //! **gated on the thunder state, not merely on rain**, and short-circuiting
 //! exactly as the Java `&&` chain does: the `nextInt(100000)` draw itself
 //! only happens when both booleans already hold, so a merely-rainy, non-
 //! thundering world draws nothing here every tick.
 //!
-//! [`block_random_pos`] is `Level.getBlockRandomPos` — **not**
+//! [`block_random_pos`] is Level's get block random pos — **not**
 //! `java.util.Random`: it is the level's own tiny in-place LCG
 //! (`randValue = randValue * 3 + 1013904223`), a completely separate stream
 //! from every `LegacyRandomSource`/[`SpawnRng`] draw in this crate, which is
@@ -54,7 +54,7 @@
 //! | `minecraft:creeper` | `Creeper.thunderHit` | the default, **plus** `DATA_IS_POWERED` set true (a charged creeper) |
 //! | `minecraft:pig` | `Pig.thunderHit` | converts to `minecraft:zombified_piglin`, gated on `difficulty != PEACEFUL`; falls back to the default on Peaceful (or if the conversion fails) |
 //! | `minecraft:villager` | `Villager.thunderHit` | converts to `minecraft:witch`, same Peaceful gate and fallback |
-//! | `minecraft:mooshroom` | `MushroomCow.thunderHit` | swaps red/brown, guarded so the *same* bolt cannot flip it twice (per-mooshroom "last bolt UUID" state, which lives with the mob) |
+//! | `minecraft:mooshroom` | the mushroom cow's thunder hit | swaps red/brown, guarded so the *same* bolt cannot flip it twice (per-mooshroom "last bolt UUID" state, which lives with the mob) |
 //! | `minecraft:turtle` | `Turtle.thunderHit` | **overrides** the default entirely with a lethal hit (`Float.MAX_VALUE` damage) — it does **not** call `super.thunderHit`, so a struck turtle is never ignited |
 //!
 //! Two commonly-misremembered claims this table corrects, both checked
@@ -67,12 +67,12 @@
 //!   all — it runs backwards from how that phrasing suggests.** A naturally
 //!   spawned `SkeletonHorse` can be flagged `isTrap` (see
 //!   [`should_be_skeleton_trap`]); when a player later comes within 10
-//!   blocks, `SkeletonTrapGoal.tick` fires **once**, spawning a **cosmetic**
+//!   blocks, the skeleton trap goal's tick fires **once**, spawning a **cosmetic**
 //!   (`visualOnly = true`) `LightningBolt` at the horse plus a skeleton rider
 //!   and three more horse-and-skeleton pairs. Lightning does not strike a
 //!   horse and turn it into a trap; a pre-flagged trap horse *casts* a
 //!   decorative bolt when approached. That mechanism is mob AI
-//!   (goal-selector wiring, a natural-spawn flag, `EnchantmentHelper`'s
+//!   (goal-selector wiring, a natural-spawn flag, the enchantment helper's
 //!   `MOB_SPAWN_EQUIPMENT` provider) entirely in `crate::mobs`'s territory,
 //!   not this module's — [`should_be_skeleton_trap`] only ports the *roll*
 //!   `tickThunder` makes to decide whether the horse should be flagged, which
@@ -85,7 +85,7 @@
 //! live-entity tracker, in `crate::mobs`, off limits here) has no
 //! `LightningBolt`/`SkeletonHorse` sidecar, no conversion primitive
 //! (`grep`ping `crate::mobs`/`crate::lodestone-entity` for "convert" or
-//! "ConversionParams" is empty), and no per-entity "struck by this bolt"
+//! "conversion params" is empty), and no per-entity "struck by this bolt"
 //! flag for the mooshroom guard or the creeper's `DATA_IS_POWERED`. So this
 //! module stops at **deciding**: [`tick_thunder_for_chunk`] decides a strike
 //! should happen and where, publishing a [`Strike`] onto a [`LightningFeed`];
@@ -106,7 +106,7 @@
 //! module is the missing producer's decision half, not its production half.
 //!
 //! `find_lightning_target_around`'s AABB is a documented approximation of
-//! `AABB.encapsulatingFullBlocks(center, center.atY(maxY + 1)).inflate(3.0)`
+//! `AABB.encapsulating_full_blocks(center, center.atY(maxY + 1)).inflate(3.0)`
 //! (see [`entity_search_bounds`]) rather than a byte-exact port, and the
 //! lightning-rod POI search (`findLightningRod`, up to 128 blocks) has no
 //! model here at all — this crate has no POI manager — so
@@ -141,9 +141,9 @@ pub const DAMAGE_RADIUS: f64 = 3.0;
 pub const DETECTION_RADIUS: f64 = 15.0;
 /// `Entity.thunderHit`'s default damage.
 pub const DEFAULT_DAMAGE: f32 = 5.0;
-/// `ServerLevel.tickThunder`'s outer roll bound — `random.nextInt(100000) == 0`.
+/// The server level's tick thunder's outer roll bound — `random.nextInt(100000) == 0`.
 pub const STRIKE_ROLL_BOUND: i32 = 100_000;
-/// `SkeletonHorse`'s trap-chance scale — `getEffectiveDifficulty() * 0.01`.
+/// `SkeletonHorse`'s trap-chance scale — `get_effective_difficulty() * 0.01`.
 pub const TRAP_CHANCE_SCALE: f64 = 0.01;
 /// `minecraft:lightning_rod` — the block `#minecraft:lightning_rods` tags,
 /// approximated here as the single block it actually contains rather than a
@@ -200,7 +200,7 @@ fn blocks_motion(state: StateId) -> bool {
     lodestone_data::block_solidity::blocks_motion(state)
 }
 
-/// `Level.getBlockRandomPos` — the level's own tiny LCG, mutated in place.
+/// Level's get block random pos — the level's own tiny LCG, mutated in place.
 /// **Not** a `java.util.Random`/[`SpawnRng`] draw; see the module doc.
 #[must_use]
 pub fn block_random_pos(rand_value: &mut i32, xo: i32, yo: i32, zo: i32, y_mask: i32) -> BlockPos {
@@ -209,7 +209,7 @@ pub fn block_random_pos(rand_value: &mut i32, xo: i32, yo: i32, zo: i32, y_mask:
     BlockPos::new(xo + (val & 15), yo + ((val >> 16) & y_mask), zo + ((val >> 8) & 15))
 }
 
-/// `Level.getHeightmapPos(MOTION_BLOCKING, ...)` reduced to a real block scan:
+/// Level's get heightmap pos reduced to a real block scan:
 /// the first air cell above the highest motion-blocking cell in the column.
 #[must_use]
 pub fn motion_blocking_heightmap_pos<S: ChunkSource + ?Sized>(
@@ -229,7 +229,7 @@ pub fn motion_blocking_heightmap_pos<S: ChunkSource + ?Sized>(
     BlockPos::new(x, env.min_y, z)
 }
 
-/// `Level.canSeeSky` plus the heightmap term, for [`is_raining_at`] — the
+/// Level's can see sky plus the heightmap term, for [`is_raining_at`] — the
 /// same technique [`crate::fire::sky_exposed`] uses, duplicated because that
 /// one is private to its module.
 #[must_use]
@@ -245,7 +245,7 @@ pub fn sky_exposed<S: ChunkSource + ?Sized>(world: &S, env: LightningEnv, pos: B
     true
 }
 
-/// `Level.isRainingAt` — raining, and nothing motion-blocking overhead. The
+/// Level's is raining at — raining, and nothing motion-blocking overhead. The
 /// biome-precipitation term is absent, the same documented reduction
 /// [`crate::fire::is_raining_at`] makes.
 #[must_use]
@@ -253,7 +253,7 @@ pub fn is_raining_at<S: ChunkSource + ?Sized>(world: &S, env: LightningEnv, pos:
     raining && sky_exposed(world, env, pos)
 }
 
-/// `ServerLevel.tickThunder`'s outer gate — gated on **thunder**, not merely
+/// The server level's tick thunder's outer gate — gated on **thunder**, not merely
 /// on rain, and short-circuiting the `nextInt` draw exactly as vanilla's `&&`
 /// chain does.
 #[must_use]
@@ -261,7 +261,7 @@ pub fn should_attempt_strike(raining: bool, thundering: bool, rng: &mut SpawnRng
     raining && thundering && rng.next_int(STRIKE_ROLL_BOUND) == 0
 }
 
-/// `AABB.encapsulatingFullBlocks(center, center.atY(maxY + 1)).inflate(3.0)`,
+/// `AABB.encapsulating_full_blocks(center, center.atY(maxY + 1)).inflate(3.0)`,
 /// as the six bounds a caller would filter entity positions against. A
 /// documented approximation (see the module doc) rather than a byte-exact
 /// port of `AABB`'s own arithmetic, but it is the same shape: a single-column
@@ -289,7 +289,7 @@ fn within_bounds(min: BlockPos, max: BlockPos, pos: BlockPos) -> bool {
 ///
 /// `living_entities` is every alive, sky-visible entity's position anywhere
 /// in the world — filtering to the search box happens inside this function,
-/// matching vanilla's own `getEntitiesOfClass(..., search, ...)` shape rather
+/// matching vanilla's own get entities of class shape rather
 /// than asking the caller to pre-cull.
 #[must_use]
 pub fn find_lightning_target_around<S: ChunkSource + ?Sized>(
@@ -320,19 +320,19 @@ pub fn find_lightning_target_around<S: ChunkSource + ?Sized>(
     center
 }
 
-/// `LightningBolt.getStrikePosition` — the block one below where the bolt
+/// LightningBolt's get strike position — the block one below where the bolt
 /// entity itself stands (`BlockPos.containing(x, y - 1e-6, z)`, and the
-/// entity's own `y` is the struck cell's `y` exactly, via `Vec3.atBottomCenterOf`
+/// entity's own `y` is the struck cell's `y` exactly, via Vec3's at bottom center of
 /// — so subtracting an epsilon and flooring always lands one row down).
 #[must_use]
 pub fn strike_ground_pos(bolt_pos: BlockPos) -> BlockPos {
     BlockPos::new(bolt_pos.x, bolt_pos.y - 1, bolt_pos.z)
 }
 
-/// `SkeletonHorse.checkSkeletonHorseSpawnRules`'s sibling decision inside
+/// SkeletonHorse's check skeleton horse spawn rules's sibling decision inside
 /// `tickThunder` — whether *this* strike should instead flag a naturally
 /// spawned `SkeletonHorse` as a trap: `spawnMobs && random.nextDouble() <
-/// difficulty.getEffectiveDifficulty() * 0.01 && the block below is not a
+/// difficulty's get effective difficulty * 0.01 && the block below is not a
 /// lightning rod`. The one genuine consumer of
 /// [`crate::regional_difficulty::DifficultyInstance`] in this tree — see that
 /// module's doc for why its other named consumers are out of reach.
@@ -350,13 +350,13 @@ pub fn should_be_skeleton_trap(
 
 /// A strike this tick decided on — [`tick_thunder_for_chunk`]'s result and
 /// [`LightningFeed`]'s element. `pos` is the bolt entity's own spawn position
-/// (`Vec3.atBottomCenterOf(pos)` in vanilla — this crate's entity positions
+/// (Vec3's at bottom center of in vanilla — this crate's entity positions
 /// are block-granular here, one level up from the eventual float position a
 /// spawner would snap to).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Strike {
     pub pos: BlockPos,
-    /// `LightningBolt::setVisualOnly` — true for a skeleton-horse-trap bolt,
+    /// LightningBolt's set visual only — true for a skeleton-horse-trap bolt,
     /// which ignites nothing and hits no entities (see [`tick_bolt`]).
     pub visual_only: bool,
 }
@@ -380,7 +380,7 @@ impl LightningFeed {
     }
 }
 
-/// `ServerLevel.tickThunder`, for one chunk, one tick — the whole per-chunk
+/// The server level's tick thunder, for one chunk, one tick — the whole per-chunk
 /// decision the module doc describes. Returns `None` on every early exit
 /// (gate roll missed, target not actually raining-at) exactly as vanilla's
 /// `if` chain would simply not reach `addFreshEntity`.
@@ -411,7 +411,7 @@ pub fn tick_thunder_for_chunk<S: ChunkSource + ?Sized>(
         return None;
     }
     let difficulty_instance = DifficultyInstance::new(difficulty, total_game_time, 0, moon_brightness_for_day_time(day_time));
-    // `!this.getBlockState(pos.below()).is(BlockTags.LIGHTNING_RODS)` — `pos`
+    // `!this.get_block_state(pos.below()).is(BlockTags.LIGHTNING_RODS)` — `pos`
     // here is `target` itself (the bolt's own position), not the ground cell
     // a spawned bolt's `getStrikePosition` would compute; `pos.below()` and
     // `strike_ground_pos(target)` are the same offset by coincidence of both
@@ -448,7 +448,7 @@ pub struct BoltTickEffects {
     /// `life == 2`'s client-side sound pair — this crate has no client-side
     /// branch, so the caller turns this into whatever sound event it sends.
     pub play_thunder_sounds: bool,
-    /// Positions to attempt `BaseFireBlock::getState`/`canSurvive` ignition
+    /// Positions to attempt base fire block's get state/`canSurvive` ignition
     /// at, in order: the struck ground cell first (if any), then up to four
     /// random offsets — populated only when ignition is attempted at all
     /// (see the two fields below for when that is).
@@ -457,7 +457,7 @@ pub struct BoltTickEffects {
     pub power_lightning_rod: bool,
     /// `clearCopperOnLightningStrike` — same as above.
     pub clear_copper: bool,
-    /// `gameEvent(LIGHTNING_STRIKE)` — same as above.
+    /// game event — same as above.
     pub game_event: bool,
     /// `life >= 0 && !visualOnly` — entities within [`DAMAGE_RADIUS`] of the
     /// bolt should be resolved through [`resolve_effect`] this tick.
@@ -541,7 +541,7 @@ pub enum LightningEffect {
     ConvertToZombifiedPiglin,
     /// `Villager.thunderHit`, `difficulty != PEACEFUL`: converts to `minecraft:witch`.
     ConvertToWitch,
-    /// `MushroomCow.thunderHit`: toggles red/brown, guarded per-bolt by the
+    /// The mushroom cow's thunder hit: toggles red/brown, guarded per-bolt by the
     /// caller (this module has no per-entity "last bolt" state to check).
     ToggleMooshroomVariant,
 }

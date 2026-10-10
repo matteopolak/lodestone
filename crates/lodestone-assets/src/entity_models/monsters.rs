@@ -1339,7 +1339,7 @@ pub fn witch_model() -> EntityModelDef {
 /// in `villagerLikeScale` = a mesh-transformer scaling of `0.9375`. Head carries a hat
 /// (deform 0.51) with a flat brim rotated `-π/2`, plus the trademark nose; body
 /// carries a jacket overlay (deform 0.5); the arms are one part posed forward
-/// (`offsetAndRotation(0,3,-1, -0.75,0,0)`) holding both limb cubes and a
+/// (offset and rotation) holding both limb cubes and a
 /// connecting cube. 11 boxes.
 ///
 /// Profession/type/biome skins are *overlay layers* composited over this base

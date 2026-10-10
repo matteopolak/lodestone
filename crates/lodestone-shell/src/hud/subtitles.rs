@@ -24,7 +24,7 @@ mod subtitle_layout {
 /// Vanilla's sound-subtitle overlay: one right-aligned plate per live caption,
 /// stacked upward from just above the hotbar, oldest at the bottom.
 ///
-/// Ported from `SubtitleOverlay.extractRenderState`
+/// Ported from the subtitle overlay's extract render state
 ///. Two details are load-bearing:
 ///
 /// * **Every row is the same width**, `max(text widths)` plus the width of
@@ -53,7 +53,7 @@ pub(super) fn draw_sound_subtitles(b: &mut Builder, captions: &[crate::audio::su
 
     for (row, caption) in captions.iter().enumerate() {
         let cy = b.h - BOTTOM_INSET - row as f32 * ROW_STEP;
-        // `getBackgroundColor(0.8F)`: black at 80%, the non-chat text plate.
+        // get background color: black at 80%, the non-chat text plate.
         b.rect_px(
             cx - half_w - PLATE_PAD,
             cy - half_h - PLATE_PAD,

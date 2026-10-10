@@ -108,7 +108,7 @@ impl<'w> MobSim<'w> {
     ///
     /// Refuses when `player_entity_id` rides no mob, the mob it rides is
     /// not a camel, or `SimMob::camel_dash_cooldown` has not yet reached
-    /// zero (vanilla's own rider-jump handler's own cooldown-at-or-below-zero
+    /// zero (vanilla's rider-jump handler's cooldown-at-or-below-zero
     /// gate). Two of
     /// vanilla's three gates are not checked at all — see
     /// `ServerBound::PlayerInput`'s consumer for why (no saddle-equip

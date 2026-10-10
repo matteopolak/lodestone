@@ -1,14 +1,14 @@
 //! The Controls menu's Key Binds screen — vanilla's
-//! `KeyBindsScreen`/`KeyBindsList`, over the rebindable layer
+//! The key binds screen/key binds list, over the rebindable layer
 //! [`crate::keybinds`] already built with no screen in front of it.
 //!
 //! ## Why this is not one more `options.rs` page
 //!
-//! Every other settings page is `OptionsList` geometry: fixed-width columns,
+//! Every other settings page is the options list geometry: fixed-width columns,
 //! one widget per `addBig`/`addSmall` cell, a caption plus a value.
-//! `KeyBindsList` is a different `AbstractSelectionList` entirely
-//!: `getRowWidth()` is 340 (not 310), every row's real
-//! height is a flat 20 (not `OptionsList`'s header-dependent rule), and an
+//! The key binds list is a different abstract selection list entirely
+//!: get row width is 340 (not 310), every row's real
+//! height is a flat 20 (not the options list's header-dependent rule), and an
 //! action row carries **two** buttons anchored from the row's *right* edge —
 //! a 75 px bind button and a 50 px reset button, 5 px apart — plus a name
 //! label at the *left* edge. None of `options.rs`'s [`super::options::Cell`],
@@ -58,31 +58,31 @@
 //! line named, in logical GUI pixels — nothing here is measured off our own
 //! output.
 //!
-//! - `KeyBindsList.ITEM_HEIGHT = 20` (`:21`) — every row, category or action,
-//!   is this tall. Unlike `OptionsList`, there is no
-//!   [`super::options::header_padding_top`] rule: a `CategoryEntry` is added
-//!   through the same `addEntry(entry, defaultEntryHeight)` as a `KeyEntry`
+//! - The key binds list's item height = 20 (`:21`) — every row, category or action,
+//!   is this tall. Unlike the options list, there is no
+//!   [`super::options::header_padding_top`] rule: a category entry is added
+//!   through the same add entry as a key entry
 //!   (vanilla's own key-binds list and its own abstract selection-list base), so the
 //!   window math here has no first-entry special case.
-//! - `getRowWidth() = 340` (`:59-61`). `getRowLeft() = x + width/2 -
+//! - `get_row_width() = 340` (`:59-61`). `get_row_left() = x + width/2 -
 //!   rowWidth/2`, and this list's `x`
 //!   is 0 (the whole canvas width), so [`ROW_LEFT`] is `width/2 - 170`.
-//! - `scrollBarX() = getRowRight() + scrollbarWidth() + 2`
-//!  , and `scrollbarWidth()` is the
+//! - `scroll_bar_x() = getRowRight() + scrollbar_width() + 2`
+//!  , and scrollbar width is the
 //!   record default `6` — `width/2 + 170 + 8`.
-//! - `KeyEntry.extractContent` (`:129-143`): `resetButtonX = scrollBarX() -
+//! - The key entry's extract content (`:129-143`): `resetButtonX = scroll_bar_x() -
 //!   50 - 10`, `changeButtonX = resetButtonX - 5 - 75`, `buttonY =
-//!   getContentY() - 2`. `getContentY() = getY() + 2`,
+//!   get content y - 2`. `get_content_y() = getY() + 2`,
 //!   so `buttonY` is exactly the entry's own `y` — a button fills its 20 px
-//!   row with no inset, unlike `OptionsList`'s 2 px content margin.
-//! - The name label draws at `(getContentX(), getContentYMiddle() - 9/2)`
-//!   (`:137`). `getContentX() = getX() + 2` and `getContentHeight() =
-//!   getHeight() - 4 = 16`, so `getContentYMiddle() = y + 2 + 8 = y + 10`, and
+//!   row with no inset, unlike the options list's 2 px content margin.
+//! - The name label draws at `(get_content_x(), get_content_y_middle() - 9/2)`
+//!   (`:137`). `get_content_x() = getX() + 2` and `get_content_height() =
+//!   get height - 4 = 16`, so `get_content_y_middle() = y + 2 + 8 = y + 10`, and
 //!   `9/2` is Java integer division (`4`) — the label's line-top is `y + 6`.
-//! - `CategoryEntry.extractContent` (`:74-77`) centres a
-//!   `FocusableTextWidget` at `width/2 - categoryName.getWidth()/2`, drawn at
-//!   `getContentBottom() - categoryName.getHeight()`. This client has no
-//!   `FocusableTextWidget` (no border chrome, no focus fill) and no font
+//! - The category entry's extract content (`:74-77`) centres a
+//!   The focusable text widget at `width/2 - categoryName.getWidth()/2`, drawn at
+//!   `get_content_bottom() - categoryName.get_height()`. This client has no
+//!   The focusable text widget (no border chrome, no focus fill) and no font
 //!   metrics available at layout-build time to replicate the exact
 //!   `getWidth()/2` centring — so, like every settings-page header before it
 //!   ([`super::options`]'s own departures), a category header here is a plain
@@ -90,7 +90,7 @@
 //!   `width/2`, which centres the *drawn* text exactly the way vanilla
 //!   centres its widget, without needing to know its width up front. The
 //!   vertical position is a documented approximation
-//!   ([`CATEGORY_TEXT_DY`]) rather than `FocusableTextWidget`'s real border
+//!   ([`CATEGORY_TEXT_DY`]) rather than the focusable text widget's real border
 //!   metrics, which this client does not model.
 //! - The footer is vanilla's own horizontal linear layout at spacing 8 of two default-width
 //!   (150 px) buttons — **identical** in shape
@@ -128,25 +128,25 @@ use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
 
 // -- vanilla's metrics, transcribed (see the module docs) --------------------
 
-/// `KeyBindsList.ITEM_HEIGHT` (`:21`).
+/// The key binds list's item height (`:21`).
 pub const ROW_H: f32 = 20.0;
 /// Vanilla's own key-binds list's get-row-width accessor (`:59-61`).
 pub const ROW_WIDTH: f32 = 340.0;
-/// `KeyEntry.changeButton`'s bound width (`:114`).
+/// The key entry's change button's bound width (`:114`).
 pub const BIND_BUTTON_W: f32 = 75.0;
-/// `KeyEntry.resetButton`'s bound width (`:124`).
+/// The key entry's reset button's bound width (`:124`).
 pub const RESET_BUTTON_W: f32 = 50.0;
-/// `resetButtonX = scrollBarX() - 50 - 10`'s trailing gap (`:130`).
+/// `resetButtonX = scroll_bar_x() - 50 - 10`'s trailing gap (`:130`).
 const RESET_RIGHT_GAP: f32 = 10.0;
 /// `changeButtonX = resetButtonX - 5 - 75`'s gap (`:134`).
 const BIND_RESET_GAP: f32 = 5.0;
-/// `AbstractScrollArea.ScrollbarSettings` default `scrollbarWidth` (`:145`),
-/// plus `scrollBarX()`'s own `+ 2`.
+/// The abstract scroll area's scrollbar settings default `scrollbarWidth` (`:145`),
+/// plus scroll bar x's own `+ 2`.
 const SCROLLBAR_GAP: f32 = 6.0 + 2.0;
-/// `getContentX()`'s `+2`.
+/// get content x's `+2`.
 const NAME_LEFT_INSET: f32 = 2.0;
 /// The name label's line-top offset from the entry's own `y` — derived in the
-/// module docs: `getContentYMiddle() - 9/2 = (y + 10) - 4 = y + 6`.
+/// module docs: `get_content_y_middle() - 9/2 = (y + 10) - 4 = y + 6`.
 const NAME_TEXT_DY: f32 = 6.0;
 /// The category header's line-top offset from the entry's own `y` —
 /// documented approximation, see the module docs' geometry section.
@@ -160,7 +160,7 @@ pub const LIST_WINDOW_PX: f32 = crate::config::MIN_SCALED_HEIGHT as f32
     - options::FOOTER_HEIGHT
     - options::LIST_TOP_INSET;
 
-/// `getRowLeft()` on a `width`-wide canvas (vanilla's own abstract
+/// get row left on a `width`-wide canvas (vanilla's own abstract
 /// selection-list base,
 /// this list's own `x = 0`).
 #[must_use]
@@ -174,13 +174,13 @@ pub fn row_right(width: f32) -> f32 {
     row_left(width) + ROW_WIDTH
 }
 
-/// `scrollBarX()` (`:289-291`).
+/// scroll bar x (`:289-291`).
 #[must_use]
 pub fn scrollbar_x(width: f32) -> f32 {
     row_right(width) + SCROLLBAR_GAP
 }
 
-/// The reset button's x (`KeyEntry.extractContent:130`).
+/// The reset button's x (the key entry's extract content:130).
 #[must_use]
 pub fn reset_button_x(width: f32) -> f32 {
     scrollbar_x(width) - RESET_BUTTON_W - RESET_RIGHT_GAP
@@ -192,7 +192,7 @@ pub fn bind_button_x(width: f32) -> f32 {
     reset_button_x(width) - BIND_RESET_GAP - BIND_BUTTON_W
 }
 
-/// The name label's x (`getContentX()`, `:137`).
+/// The name label's x (get content x, `:137`).
 #[must_use]
 pub fn name_x(width: f32) -> f32 {
     row_left(width) + NAME_LEFT_INSET
@@ -325,9 +325,9 @@ impl KeyControl {
     /// A bind button is always live — capturing a new binding is always
     /// available, even for an already-default one. A reset button is live
     /// only when its action is *not* already default
-    /// (`KeyEntry.refreshEntry`'s `resetButton.active = !key.isDefault()`,
+    /// (the key entry's refresh entry's `resetButton.active = !key.is_default()`,
     /// `:158`); Reset Keys mirrors that at the whole-table level
-    /// (`KeyBindsScreen.extractRenderState`'s `canReset` scan, `:91-100`).
+    /// (the key binds screen's extract render state's `canReset` scan, `:91-100`).
     #[must_use]
     pub fn is_live(self, keybinds: &Keybinds) -> bool {
         match self {
@@ -361,7 +361,7 @@ pub enum KeyPlacement {
     /// The per-row reset button, same row.
     Reset { row: u16, scroll: f32 },
     /// The action's name label (not a [`KeyControl`] — a
-    /// [`super::render::MenuLabel`], like an `OptionsList` header).
+    /// [`super::render::MenuLabel`], like an options list header).
     Name { row: u16, scroll: f32 },
     /// The category header label, also a [`super::render::MenuLabel`].
     Category { row: u16, scroll: f32 },
@@ -614,7 +614,7 @@ impl KeyBindsNav {
     }
 
     /// Bring the cursor's row into the band — vanilla's
-    /// `AbstractSelectionList.ensureVisible`, through
+    /// The abstract selection list's ensure visible, through
     /// [`super::widget::ScrollList::scroll_to_entry`].
     ///
     /// This used to be a hand-rolled `while !visible_rows(self.first).contains(
@@ -687,7 +687,7 @@ impl KeyBindsNav {
     /// [`super::options::SettingsNav::activate`]'s own doc, including its
     /// `isActive()` guard: a `Reset`/`ResetAll` that is not
     /// [`KeyControl::is_live`] does nothing at all, the same
-    /// `AbstractWidget.mouseClicked` rule every other inactive control in
+    /// The abstract widget's mouse clicked rule every other inactive control in
     /// this tree already follows. Needs `keybinds` for exactly that check —
     /// unlike [`Self::step`]/[`Self::hover_row`], which only need this
     /// screen's fixed *structure*.
@@ -713,7 +713,7 @@ impl KeyBindsNav {
     }
 
     /// Escape: cancel a pending capture if there is one (vanilla's own
-    /// `keyPressed` intercept sets `InputConstants.UNKNOWN` on Escape while
+    /// `keyPressed` intercept sets the input constants's unknown on Escape while
     /// capturing — **this client does not**, deliberately: see
     /// [`super::nav::MenuNav::capture_binding`]'s doc on the `Pause`-unbind
     /// hazard `docs/keybindings.md` already names). Otherwise leave the page.
@@ -825,8 +825,8 @@ pub fn frame(nav: &KeyBindsNav, keybinds: &Keybinds) -> MenuFrame<'static> {
 }
 
 /// The category's caption, verbatim from `en_us.json`'s **real** 26.2 key —
-/// `key.category.minecraft.<id>` (`KeyMapping.Category.label`,
-/// vanilla's own key-binding declarations, vanilla's own to-language-key helper). **Not**
+/// `key.category.minecraft.<id> (the key mapping's category.label`,
+/// vanilla's key-binding declarations, vanilla's to-language-key helper). **Not**
 /// `key.categories.<id>`, which is legacy/unused text still sitting in the lang
 /// file from an older versioning scheme — a trap worth naming because it reads
 /// as the obvious key and is wrong (measured by reading `toLanguageKey`'s
@@ -846,7 +846,7 @@ pub fn category_caption(category: Category) -> &'static str {
 }
 
 /// The action's caption, verbatim from `en_us.json` at its own [`InputAction::name`]
-/// key — except [`InputAction::Pause`], which is not a vanilla `KeyMapping` at
+/// key — except [`InputAction::Pause`], which is not a vanilla key mapping at
 /// all (see that variant's own doc) and so has no `en_us.json` line; "Pause
 /// Game" is this client's own caption for it, in the same spirit as
 /// `key.lodestone.pause`'s namespaced name.
@@ -941,7 +941,7 @@ mod tests {
             .collect();
         // 37: 30 (Friends, Pick Block and Take Screenshot included) plus the seven F3
         // chords, which vanilla's own persisted-options declarations declare as `Category.DEBUG`
-        // `KeyMapping`s in `debugKeys` and vanilla's own debug-key handling
+        // The key mappings in `debugKeys` and vanilla's own debug-key handling
         // dispatches through its own key-matching check — so they belong on this
         // screen, and hardcoding them in `resolve_key` was the divergence.
         // Debug was already non-empty (`DebugOverlay`), so the *category* list
@@ -1385,7 +1385,7 @@ mod tests {
     /// Two expressions from two modules required to agree, rather than one
     /// asserted against itself: [`list_spec`]'s [`ROW_WIDTH`] band goes through
     /// `ListSpec::row_right` and `ScrollList::scrollbar_x`, while [`scrollbar_x`]
-    /// here is this screen's transcription of `AbstractSelectionList:289-291`.
+    /// here is this screen's transcription of the abstract selection list:289-291.
     #[test]
     fn the_shared_primitive_puts_the_bar_where_this_screen_already_drew_it() {
         for w in [640.0_f32, 854.0, 1280.0] {

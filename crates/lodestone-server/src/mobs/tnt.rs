@@ -248,7 +248,7 @@ impl<'w> MobSim<'w> {
     pub fn spawn_tnt(&mut self, position: Vec3, fuse: i32) -> i32 {
         let id = self.next_id;
         self.next_id += 1;
-        // `double rot = level.getRandom().nextDouble() * (float)(Math.PI * 2);`
+        // `double rot = level.get_random().nextDouble() * (float)(Math.PI * 2);`
         let rot = self.tnt_rng.next_f64() * std::f64::consts::PI * 2.0;
         let velocity = Vec3d::new(
             -rot.sin() * LAUNCH_HORIZONTAL,

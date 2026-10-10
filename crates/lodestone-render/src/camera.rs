@@ -33,7 +33,7 @@
 //!   `depthFar = max(renderDistance_chunks * 16 * 4, cloudRange_chunks * 16)`,
 //!   i.e. **four times the render distance in blocks**, not a fixed 512. At
 //!   RD 32 that is `2048`. Use [`Camera::far_for_render_distance`]. The `[0,1]`
-//!   depth choice matches vanilla's `isZZeroToOne()` device path on Metal, and
+//!   depth choice matches vanilla's is z zero to one device path on Metal, and
 //!   like vanilla the range is **reversed** — near maps to `1`, far to `0`.
 //! * **Eye height / camera offset:** the camera position is the *eye*, which sits
 //!   `entity.y + eyeHeight` above the feet, with standing
@@ -302,7 +302,7 @@ impl Camera {
     /// sky geometry by the camera's world position every frame, sliding the
     /// horizon out of alignment as soon as the player moves. Vanilla achieves
     /// the same thing by never touching its model-view translation when
-    /// drawing the sky (`SkyRenderer`/`LevelRenderer` push only rotation onto
+    /// drawing the sky (the sky and level renderers push only rotation onto
     /// the pose stack); this is the equivalent for a `view * projection`
     /// pipeline: zero the view matrix's translation column, keep its
     /// rotation/scale block, then project as usual.
@@ -425,7 +425,7 @@ pub fn nausea_portal_warp(intensity: f32, angle_degrees: f32) -> Mat4 {
 /// (vanilla's decompiled abstract-client-player source, 26.2):
 ///
 /// ```text
-/// } else if (firstPerson && this.isScoping()) {
+/// } else if (firstPerson && this's is scoping) {
 ///     return 0.1F;
 /// }
 /// ```

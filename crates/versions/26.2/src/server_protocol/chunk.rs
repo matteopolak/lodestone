@@ -810,7 +810,7 @@ impl LightProperties for V770LightProps {
 /// legal wire form, and it is *not* "no light": a client resolves an absent sky
 /// section to its dimension default, which in the overworld is **full daylight**
 /// (`lodestone_render::SkyDefault::Full`; vanilla's own client does the same
-/// through `SkyLightSectionStorage`). So the symptom was a **fully bright**
+/// through its sky-light section storage). So the symptom was a **fully bright**
 /// world — caves and sealed rooms included — not a dark one. Anyone hunting this
 /// bug by looking for blackness was looking for the wrong colour.
 ///

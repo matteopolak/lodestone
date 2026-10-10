@@ -390,7 +390,7 @@ pub enum Processor {
     /// * the walk is over the *whole* piece, so it must not be clipped to a chunk
     ///   first — see [`super::template::StructureTemplate::place`];
     /// * `limit` is an `IntProvider` sampled **before** the shuffle. Every bundled
-    ///   use is a bare int (`ConstantInt`), which draws nothing; a provider that
+    ///   use is a bare int (a constant), which draws nothing; a provider that
     ///   did draw would shift the whole shuffle, so
     ///   [`super::pool::PoolStore`] refuses anything else rather than assuming;
     /// * a delegate that returns the block unchanged consumes an index and **not**
@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     /// `high_rampart`'s own numbers, with the chance **predicted** at four
-    /// distances from `clampedLerp(inverseLerp(d, 0, 100), 0.0, 0.05)` rather than
+    /// distances from clamped lerp rather than
     /// asserted to "increase with height".
     ///
     /// The wrong-argument-order hypothesis is excluded explicitly: reading

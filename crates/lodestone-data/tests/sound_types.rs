@@ -9,7 +9,7 @@
 //!
 //! Vanilla's own level-event handler's break case plays the block-state's own
 //! sound type's break sound at
-//! `(soundType.getVolume() + 1.0F) / 2.0F` and `soundType.getPitch() * 0.8F`. The
+//! `(soundType.get_volume() + 1.0F) / 2.0F` and `soundType.get_pitch() * 0.8F`. The
 //! packet carries only the state id, so the sound is a **local lookup** — which
 //! is why every block break in lodestone was silent while the event was decoded,
 //! routed and handled (`docs/sound-playback.md`).

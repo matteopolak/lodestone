@@ -111,7 +111,7 @@ impl MenuNav {
                     // Advancements follows the same shape as the two above. Its state
                     // is reset on entry so a reopened screen starts on the
                     // default tab with each tab freshly centred, matching
-                    // vanilla's per-screen `AdvancementTab` lifetime.
+                    // vanilla's per-screen advancement tab lifetime.
                     PauseButton::Advancements => {
                         self.advancements = crate::menu::advancements::AdvancementsState::default();
                         ui.open_advancements_from_pause();
@@ -255,7 +255,7 @@ impl MenuNav {
     /// focused) that is false on open. With nothing focused, vanilla's Enter
     /// does nothing.
     ///
-    /// Escape is deliberately **not** gated: `shouldCloseOnEsc()` is true here
+    /// Escape is deliberately **not** gated: should close on esc is true here
     /// and Escape is handled by the screen itself, not by a focused child, so
     /// it is unconditional — which also means there is always a keyboard way
     /// out even before the first Tab.
@@ -287,7 +287,7 @@ impl MenuNav {
         }
     }
 
-    /// [`Self::click`]'s Statistics arm — `ContainerEventHandler.mouseClicked`:
+    /// [`Self::click`]'s Statistics arm — the container event handler's mouse clicked:
     /// focus the child that was hit, *then* call its `onClick`.
     ///
     /// Its own arm rather than the shared `hover` + `Enter` fall-through, for
@@ -345,7 +345,7 @@ impl MenuNav {
                 }
                 MenuAction::None
             }
-            // Vanilla's `ConfirmLinkScreen` always returns to the screen it
+            // Vanilla's confirm link screen always returns to the screen it
             // was opened over regardless of which button answered — see
             // `clickUrlAction` — so opening the link also closes this screen,
             // not just the confirmation sub-view.

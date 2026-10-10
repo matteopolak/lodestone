@@ -16,7 +16,7 @@
 //! # Why a `Goal` and not a second driver entry point
 //!
 //! Vanilla's `Mob` holds `goalSelector` **and** `brain`, and
-//! `Mob.customServerAiStep` ticks both. The tempting mirror of that here is a
+//! Mob's custom server ai step ticks both. The tempting mirror of that here is a
 //! second host-side call — `MobSim` learns to call `mob.tick_brain(&mut brain)`
 //! next to `mob.tick(&mut goals)`. That is how the first island was built: a
 //! subsystem whose only route to production is a call site somebody has to
@@ -127,8 +127,8 @@ impl Goal for BrainGoal {
 
     /// Runs one brain tick, after re-evaluating which activity should be active.
     ///
-    /// The order matters and matches vanilla `Mob.customServerAiStep` →
-    /// species `Ai.updateActivity` → `brain.tick`: the activity switch happens
+    /// The order matters and matches vanilla Mob's custom server ai step →
+    /// species Ai's update activity → `brain.tick`: the activity switch happens
     /// **before** the tick, so a behaviour that became eligible this tick is
     /// scheduled this tick rather than next.
     ///

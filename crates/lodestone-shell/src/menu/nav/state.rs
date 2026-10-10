@@ -59,7 +59,7 @@ impl MenuNav {
     /// frame by `app.rs` and handed to `Sim::set_damage_tilt_strength`, exactly
     /// like [`MenuNav::view_bobbing`], because the two are the halves of one
     /// vanilla split: View Bobbing gates the walk bob and this scales the damage
-    /// tilt, and `GameRenderer.renderLevel` applies the second whether or not the
+    /// tilt, and the game renderer's render level applies the second whether or not the
     /// first is on.
     #[must_use]
     pub fn damage_tilt_strength(&self) -> f32 {
@@ -423,9 +423,9 @@ impl MenuNav {
     /// `crate::keybinds::InputAction::Pause`'s own doc names it: unbinding the
     /// only gameplay route to the pause screen (and so to Quit to Title)
     /// strands a session with no way out but the window's close button.
-    /// Vanilla's own `KeyBindsScreen.keyPressed` sets `InputConstants.UNKNOWN`
+    /// Vanilla's own key binds screen's key pressed sets the input constants's unknown
     /// unconditionally on Escape while capturing (`:73-74`) — `Pause` is not a
-    /// real vanilla `KeyMapping`, so vanilla never has this hazard to guard.
+    /// real vanilla key mapping, so vanilla never has this hazard to guard.
     /// Escape while capturing `Pause` here instead cancels the capture with
     /// its *old* binding intact ([`super::key_binds::KeyBindsNav::escape`]
     /// already does that for every action); this method additionally refuses

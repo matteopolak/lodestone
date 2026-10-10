@@ -4,7 +4,7 @@
 //! # What it is
 //!
 //! [`ActiveEffects`] is one entity's set of live effects — vanilla's
-//! `LivingEntity.activeEffects`, a map from effect id to [`EffectInstance`]
+//! The living entity's active effects, a map from effect id to [`EffectInstance`]
 //! (`MobEffectInstance`). One [`tick`](ActiveEffects::tick) call advances every
 //! instance and reports what to do to health and hunger as an [`EffectTick`].
 //!
@@ -81,12 +81,12 @@
 //!
 //! An infinite duration (`-1`) is longer than everything, which is why
 //! `isShorterDurationThan` is written as
-//! `!this.isInfiniteDuration() && (this.duration < other.duration || other.isInfiniteDuration())`
+//! `!this.is_infinite_duration() && (this.duration < other.duration || other.is_infinite_duration())`
 //! rather than as a plain comparison.
 //!
 //! ## A splash/lingering potion's impact-time burst is [`potion_splash_effects`]
 //!
-//! `ThrownSplashPotion.onHitAsPotion` splits a potion's built-in effect list by
+//! The thrown splash potion's on hit as potion splits a potion's built-in effect list by
 //! instant-vs-timed and scales each by distance from the impact —
 //! [`splash_scale`] is `1.0 - sqrt(dist) / 4.0`, and an instant effect
 //! ([`effect_is_instantaneous`] — only `instant_health`/`instant_damage` are
@@ -134,7 +134,7 @@
 //! * **The splash formula**: [`potion_splash_effects`] is the one entry point;
 //!   its pieces ([`splash_scale`], [`splash_instant_amount`],
 //!   [`splash_timed_duration`], [`splash_would_be_dropped`]) are separated
-//!   because each is independently testable against `AbstractThrownPotion`'s own
+//!   because each is independently testable against the abstract thrown potion's own
 //!   named constant or `MobEffectInstance` method.
 //!
 //! # Dependencies
@@ -175,17 +175,17 @@ impl EffectKey for String {
     fn resolve_effect(self) -> Option<MobEffectId> { self.as_str().resolve_effect() }
 }
 
-/// Vanilla's sentinel for an infinite effect (`MobEffectInstance.isInfiniteDuration`
+/// Vanilla's sentinel for an infinite effect (MobEffectInstance's is infinite duration
 /// tests `duration == -1`).
 pub const INFINITE_DURATION: i32 = -1;
 
-/// `PoisonMobEffect.DAMAGE_INTERVAL`.
+/// The poison mob effect's damage interval.
 pub const POISON_INTERVAL: i32 = 25;
 
-/// `WitherMobEffect.DAMAGE_INTERVAL`.
+/// The wither mob effect's damage interval.
 pub const WITHER_INTERVAL: i32 = 40;
 
-/// `RegenerationMobEffect`'s interval — a literal `50` in its
+/// The regeneration mob effect's interval — a literal `50` in its
 /// `shouldApplyEffectTickThisTick`, with no named constant beside it.
 pub const REGENERATION_INTERVAL: i32 = 50;
 
@@ -289,7 +289,7 @@ pub fn should_apply_this_tick(base_interval: i32, amplifier: u32, tick_count: i3
     }
 }
 
-/// The instant-health heal for an amplifier — `HealOrHarmMobEffect`'s
+/// The instant-health heal for an amplifier — the heal or harm mob effect's
 /// `4 << amplification`.
 #[must_use]
 pub fn instant_health_amount(amplifier: u32) -> f32 {
@@ -320,16 +320,16 @@ pub fn saturation_food_points(amplifier: u32) -> i32 {
 // splash-potion on-hit-as-potion routine.
 // ---------------------------------------------------------------------------
 
-/// `AbstractThrownPotion.SPLASH_RANGE` — a splash/lingering blast only reaches
+/// The abstract thrown potion's splash range — a splash/lingering blast only reaches
 /// an entity within four blocks of the impact point.
 pub const SPLASH_RANGE: f64 = 4.0;
 
-/// `AbstractThrownPotion.SPLASH_RANGE_SQ` — the squared form `onHitAsPotion`'s
+/// The abstract thrown potion's splash range sq — the squared form `onHitAsPotion`'s
 /// own `dist < 16.0` guard actually compares against, since the distance it has
 /// in hand is already squared.
 pub const SPLASH_RANGE_SQ: f64 = 16.0;
 
-/// `ThrownSplashPotion.onHitAsPotion`'s falloff: `1.0 - Math.sqrt(dist) / 4.0`,
+/// The thrown splash potion's on hit as potion's falloff: `1.0 - Math.sqrt(dist) / 4.0`,
 /// where `distance_sq` is a squared distance already checked against
 /// [`SPLASH_RANGE_SQ`] (this function does not gate on it).
 ///
@@ -410,7 +410,7 @@ pub enum SplashEffect {
     },
 }
 
-/// `ThrownSplashPotion.onHitAsPotion`'s whole per-entity loop, for one entity
+/// The thrown splash potion's on hit as potion's whole per-entity loop, for one entity
 /// already known to be in range: every one of `potion`'s **built-in**
 /// effects (see the module doc for why not `customEffects`), split
 /// instant-vs-timed and scaled by `scale` ([`splash_scale`] of that entity's own
@@ -616,10 +616,10 @@ pub fn food_consume_effects(item: &str) -> &'static [FoodEffectGrant] {
         .map_or(&[] as &[FoodEffectGrant], |&(_, grants)| grants)
 }
 
-/// `Consumables.HONEY_BOTTLE`'s `onConsume(new
-/// RemoveStatusEffectsConsumeEffect(MobEffects.POISON))` — the one food whose
+/// `Consumables.HONEY_BOTTLE`'s `on consume(new
+/// The remove status effects consume effect(the mob effects's poison))` — the one food whose
 /// consume effect *removes* rather than grants. Deterministic (no probability
-/// field on `RemoveStatusEffectsConsumeEffect`), so the caller need only check
+/// field on the remove status effects consume effect), so the caller need only check
 /// this and, if `true`, call `ActiveEffects::remove("minecraft:poison")`.
 #[must_use]
 pub fn removes_poison_on_consume(item: &str) -> bool {
@@ -787,7 +787,7 @@ impl EffectTick {
     }
 }
 
-/// One entity's live effects — vanilla's `LivingEntity.activeEffects`.
+/// One entity's live effects — vanilla's living entity's active effects.
 ///
 /// A `BTreeMap` rather than a `HashMap` so iteration order is stable: several effects
 /// can fire on the same tick, and a caller reporting them (or a gate asserting them)
@@ -1001,8 +1001,8 @@ impl ActiveEffects {
         self.0.clear();
     }
 
-    /// Advances every effect by one tick — `LivingEntity.tickEffects` over
-    /// `MobEffectInstance.tickServer`.
+    /// Advances every effect by one tick — the living entity's tick effects over
+    /// MobEffectInstance's tick server.
     ///
     /// `entity_tick_count` is the entity's own age, used **only** as the modulo input
     /// for an infinite effect (vanilla's `target.tickCount`); a finite effect counts
@@ -1034,7 +1034,7 @@ impl ActiveEffects {
                 && should_apply_this_tick(base, instance.amplifier, tick_count)
             {
                 match action {
-                    // Poison's own guard: `if (mob.getHealth() > 1.0F)`. Poison
+                    // Poison's own guard: `if (mob.get_health() > 1.0F)`. Poison
                     // cannot kill, and this is the one `if` that says so.
                     PeriodicAction::PoisonDamage => {
                         if health > 1.0 {
@@ -1305,8 +1305,8 @@ mod tests {
     /// after.
     ///
     /// This gate was written wrong first, predicting a fourth tick. `tickServer`
-    /// returns `hasRemainingDuration()` *after* `tickDownDuration`, and
-    /// `LivingEntity.tickEffects` removes the effect when that is false — so a
+    /// returns has remaining duration *after* `tickDownDuration`, and
+    /// The living entity's tick effects removes the effect when that is false — so a
     /// 3-tick effect is gone at the end of tick **3**, having applied its last
     /// periodic hit on tick 3 and not on 4. An off-by-one here gives every effect in
     /// the game one extra tick of life.
@@ -1420,7 +1420,7 @@ mod tests {
 
     /// A **stronger but shorter** application pushes the current one onto the chain,
     /// so the longer weak effect comes back — the mirror image of the case above, and
-    /// vanilla's `takeOver.isShorterDurationThan(this)` branch.
+    /// vanilla's take over's is shorter duration than branch.
     #[test]
     fn a_stronger_shorter_application_demotes_the_current_one() {
         let mut effects = ActiveEffects::new();
@@ -1633,7 +1633,7 @@ mod tests {
     /// integers, not just different floats that happen to round the same.
     #[test]
     fn splash_instant_amount_scales_down_not_just_direction() {
-        // instant_damage at amplifier 0 is 6.0 (HealOrHarmMobEffect's own `6 <<
+        // instant_damage at amplifier 0 is 6.0 (the heal or harm mob effect's own `6 <<
         // amplification`).
         let base = instant_damage_amount(0);
         assert_eq!(splash_instant_amount(base, 1.0), 6.0, "a direct hit is unscaled");
@@ -1860,8 +1860,8 @@ mod tests {
     }
 
     /// Only honey bottle removes poison on consume — the deterministic
-    /// `RemoveStatusEffectsConsumeEffect` arm, distinct from every probabilistic
-    /// `ApplyStatusEffectsConsumeEffect` row above.
+    /// The remove status effects consume effect arm, distinct from every probabilistic
+    /// The apply status effects consume effect row above.
     #[test]
     fn only_honey_bottle_removes_poison() {
         assert!(removes_poison_on_consume("minecraft:honey_bottle"));

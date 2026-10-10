@@ -38,7 +38,7 @@ pub(super) struct EntityRenderer {
     deferred_armour_specs: Option<Vec<((&'static str, ArmourLayerType), String)>>,
     pub(super) pipeline: EntityPipeline,
     texture_sampler: wgpu::Sampler,
-    /// `PlayerModel`'s own `ENTITY_TRANSLUCENT` equivalent.  Player skins are
+    /// The player model's own `ENTITY_TRANSLUCENT` equivalent.  Player skins are
     /// the one ordinary-body texture family whose partially-alpha outer-layer
     /// texels must blend at the 26.2 `0.1` cutout threshold; mobs continue to
     /// use [`Self::pipeline`]'s opaque cutout contract.
@@ -224,7 +224,7 @@ pub(super) struct EntityRenderer {
     /// binding per frame.
     ///
     /// They ride the **base** entity pipeline rather than a sixth of their own:
-    /// both vanilla renderers use `RenderTypes.entityCutout`/`entityCutoutCull`,
+    /// both vanilla renderers use the render types's entity cutout/`entityCutoutCull`,
     /// which is `DepthStencilState.DEFAULT` plus a `0.5` alpha cutout — exactly
     /// what `build_entity_pipeline`'s `fs_main` arm already is. The orb needed
     /// its own pipeline because `ENTITY_TRANSLUCENT` blends and cuts at `0.1`;

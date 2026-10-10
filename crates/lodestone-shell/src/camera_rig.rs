@@ -1309,7 +1309,7 @@ mod tests {
     fn the_phase_accumulates_six_tenths_of_the_distance_actually_moved() {
         let mut b = ViewBob::new();
         b.tick(1.0, 0.13, true, false, false);
-        // `addWalkedDistance(length * 0.6)`, then negated by
+        // add walked distance, then negated by
         // `getBackwardsInterpolatedWalkDistance`.
         assert!(
             (b.frame(1.0).walk_phase - -(0.6 + 0.6)).abs() < 1e-6,
@@ -2294,7 +2294,7 @@ mod tests {
         let front = third_person_camera(eye, CameraType::ThirdPersonFront, &world);
         let back = third_person_camera(eye, CameraType::ThirdPersonBack, &world);
 
-        // `setRotation(yRot + 180, -xRot)`: the two angles, not a direction, and
+        // set rotation: the two angles, not a direction, and
         // unwrapped. `yaw: 0` is the case a wrap gets wrong in the invisible
         // direction — it lands back on `0` and mirrors nothing — so it is the yaw
         // this test uses.

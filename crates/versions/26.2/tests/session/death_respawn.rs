@@ -111,7 +111,7 @@ fn handle_play_respawn_emits_dimension_and_game_mode_without_death_location() {
     // game_type=1 (creative), previous_game_type=-1 (none), is_debug=false,
     // is_flat=false, last_death_location=None, portal_cooldown=0,
     // sea_level=63, data_to_keep=0. Bytes hand-built from
-    // `ClientboundRespawnPacket`'s `CommonPlayerSpawnInfo`-derived wire shape.
+    // Respawn packet's common-player-spawn-info-derived wire shape.
     let golden: &[u8] = &[
         0x00, 0x14, 0x6D, 0x69, 0x6E, 0x65, 0x63, 0x72, 0x61, 0x66, 0x74, 0x3A, 0x74, 0x68, 0x65,
         0x5F, 0x6E, 0x65, 0x74, 0x68, 0x65, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,

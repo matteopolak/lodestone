@@ -14,7 +14,7 @@
 //! it, and a guest that does not use an ungranted import must still load. So the
 //! host instantiates through the `Linker` itself and reaches the three exports with
 //! `Instance::get_typed_func`, using the generated `event`/`action` types — which
-//! derive `ComponentType`/`Lift`/`Lower` — as the signature. The typed lifting is
+//! derive the component-model lift/lower traits — as the signature. The typed lifting is
 //! the part worth having; the all-or-nothing linking is not.
 
 #![allow(clippy::needless_lifetimes, missing_debug_implementations)]

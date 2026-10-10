@@ -791,7 +791,7 @@ fn structures_from_nbt(
 /// vanilla writes light-only sections one past each end of the world, and
 /// inferring the extent from the section list would produce a column 32 rows
 /// taller than the world. Sections outside `[min_y, min_y + height)` are
-/// skipped, exactly as `SerializableChunkData.parse` skips them.
+/// skipped, exactly as the serializable chunk data's parse skips them.
 pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn, Error> {
     column_from_nbt_with_status(nbt, min_y, height, true)
 }
@@ -1079,9 +1079,9 @@ pub struct SavedTick {
 pub struct ChunkExtras {
     /// Every block entity in the chunk, at its **absolute** position.
     pub block_entities: Vec<(BlockPos, BlockEntity)>,
-    /// Pending entries of `ServerLevel.blockTicks` inside this chunk.
+    /// Pending entries of the server level's block ticks inside this chunk.
     pub block_ticks: Vec<SavedTick>,
-    /// Pending entries of `ServerLevel.fluidTicks` inside this chunk.
+    /// Pending entries of the server level's fluid ticks inside this chunk.
     pub fluid_ticks: Vec<SavedTick>,
 }
 
@@ -2108,7 +2108,7 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
         // key was emitted by older Lodestone versions, so retain it as a
         // read-only compatibility alias for worlds written before the fix.
         "minecraft:mob_spawner" | "minecraft:spawner" => {
-            // `BaseSpawner.load`: `SpawnData` (if present) is parsed
+            // The base spawner's load: `SpawnData` (if present) is parsed
             // unconditionally; `SpawnPotentials`, if *absent*, falls back to a
             // one-entry weighted list built from that same `SpawnData` (or a
             // fresh empty one) — not to an empty list. Reproduced exactly

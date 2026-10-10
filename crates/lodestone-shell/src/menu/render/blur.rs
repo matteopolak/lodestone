@@ -9,9 +9,9 @@
 //!
 //! ## How it works
 //!
-//! Vanilla's mechanism (`Screen::extractBackground` →
-//! `extractBlurredBackground` → `GuiRenderState::blurBeforeThisStratum` →
-//! `GameRenderer::processBlurEffect` running the `minecraft:blur` post
+//! Vanilla's mechanism (Screen's extract background →
+//! `extractBlurredBackground` → gui render state's blur before this stratum →
+//! The game renderer's process blur effect running the `minecraft:blur` post
 //! chain) is a **six-pass separable box blur** — three horizontal+vertical
 //! pairs — over whatever the frame already holds, run *before* the screen's
 //! own widgets draw on top. See `../../shaders/menu_blur.wgsl` for the exact
@@ -34,7 +34,7 @@
 //! allocations.
 //!
 //! **Radius `0` skips the pass entirely**, which is vanilla's own gate:
-//! `Screen.extractBlurredBackground` calls `blurBeforeThisStratum()` only when
+//! Screen's extract blurred background calls blur before this stratum only when
 //! `blurRadius >= 1.0F`. A zero-radius box filter is an identity convolution, so
 //! running it would be six full-screen passes to reproduce the source — the skip
 //! is the behaviour, not an optimisation on top of it.
@@ -44,7 +44,7 @@
 //! entirely (no encoder, no submit) whenever the flag is unset, which is
 //! every `Clear`-pass ([`super::owns_frame`]) screen and every overlay that
 //! does not want it (sign edit, command block edit — vanilla's own
-//! `isInGameUi() == true` fork, which skips the blur too; see
+//! `is_in_game_ui() == true` fork, which skips the blur too; see
 //! `menu_blur.wgsl`'s module doc).
 //!
 //! ## Configuration
@@ -422,7 +422,7 @@ impl MenuBlur {
         if width == 0 || height == 0 {
             return;
         }
-        // Vanilla's own gate, not a shortcut: `Screen.extractBlurredBackground`
+        // Vanilla's own gate, not a shortcut: Screen's extract blurred background
         // only asks for the blur at `blurRadius >= 1.0F`, and a zero-radius box
         // filter is the identity — six full-screen passes to reproduce the
         // source exactly. Skipping leaves the sharp background the caller

@@ -31,25 +31,25 @@ pub(super) const PACK_ROW_PAD: f32 = 2.0;
 /// The 32 px icon size used by the account and server lists as well, so this
 /// pass has one mosaic size rather than three.
 pub(super) const PACK_ICON: f32 = 32.0;
-/// `nameWidget.setPosition(getContentX() + 32 + 2, …)` /
-/// `descriptionWidget.setPosition(getContentX() + 32 + 2, …)` (`:214,217`) — the
+/// `nameWidget.set_position(get_content_x() + 32 + 2, …)` /
+/// `descriptionWidget.set_position(get_content_x() + 32 + 2, …)` (`:214,217`) — the
 /// icon column plus a 2 px gutter, which both text lines measure from.
 pub(super) const PACK_TEXT_DX: f32 = PACK_ICON + 2.0;
-/// The name line's y within the content box: `getContentY() + 1` (`:214`).
+/// The name line's y within the content box: `get_content_y() + 1` (`:214`).
 pub(super) const PACK_NAME_DY: f32 = 1.0;
-/// The description block's y within the content box: `getContentY() + 12`
+/// The description block's y within the content box: `get_content_y() + 12`
 /// (`:217`).
 pub(super) const PACK_DESC_DY: f32 = 12.0;
-/// `PackEntry.MAX_DESCRIPTION_WIDTH_PIXELS` (`:111`), which vanilla applies to
+/// The pack entry's max description width pixels (`:111`), which vanilla applies to
 /// **both** widgets' `setMaxWidth` (`:213,216`).
 ///
 /// Vanilla subtracts a further 6 when its own list is scrollable, because its
-/// scrollbar sits at `getRight() - scrollbarWidth()` — *inside* the 200 px list.
+/// scrollbar sits at `get_right() - scrollbar_width()` — *inside* the 200 px list.
 /// This screen's bar does not: both columns share one [`super::packs::BAND_W`]
 /// band, so the bar is outside either column and there is nothing for the text to
 /// run under. Deliberately unported for that reason, not overlooked.
 const PACK_TEXT_MAX_W: f32 = 157.0;
-/// `descriptionWidget.setMaxRows(2)` (`:127`).
+/// description widget's set max rows (`:127`).
 const PACK_DESC_ROWS: usize = 2;
 /// The description's colour: vanilla's own empty style with color -8355712 (`:125,152`) —
 /// `0x808080`, vanilla's flat mid-grey, not this pass's own [`FG_DIM`].
@@ -76,7 +76,7 @@ pub(super) const PACK_UNSELECT_SPRITES: (&str, &str) = (
     "transferable_list/unselect",
     "transferable_list/unselect_highlighted",
 );
-/// The fallback pack icon: vanilla's `PackSelectionScreen.DEFAULT_ICON`
+/// The fallback pack icon: vanilla's pack selection screen's default icon
 ///, `textures/misc/unknown_pack.png`, blitted for
 /// any pack that ships no readable `pack.png` — which is every built-in row and
 /// most hand-made packs.
@@ -90,14 +90,14 @@ const TOOLTIP_FRAME_TOP: [f32; 4] = [80.0 / 255.0, 0.0, 1.0, 80.0 / 255.0];
 /// `tooltip/frame.png`'s bottom bar and the dark end of its side gradient —
 /// (40, 0, 127, 80).
 const TOOLTIP_FRAME_BOTTOM: [f32; 4] = [40.0 / 255.0, 0.0, 127.0 / 255.0, 80.0 / 255.0];
-/// `TooltipRenderUtil.PADDING` — the text's inset
+/// The tooltip render util's padding — the text's inset
 /// from the tooltip's fill edges: 3 px each side, so a `w×h` content box carries
 /// a `(w+6)×(h+6)` fill.
 pub(super) const TOOLTIP_PAD: f32 = 3.0;
-/// `TooltipRenderUtil.MOUSE_OFFSET` — the content
+/// The tooltip render util's mouse offset — the content
 /// box's top-left starts this far right of, and this far above, the cursor.
 pub(super) const TOOLTIP_MOUSE_OFFSET: f32 = 12.0;
-/// `ClientTextTooltip`'s line box: vanilla's 9 px `Font.lineHeight` plus a 1 px
+/// The client text tooltip's line box: vanilla's 9 px Font's line height plus a 1 px
 /// drop-shadow overhang, and the +2 interline
 /// gap vanilla adds after the first line brings that second line's offset back to
 /// the same 12 as [`TOOLTIP_MOUSE_OFFSET`]. The first line starts at `y`; a
@@ -116,7 +116,7 @@ pub(super) const TOOLTIP_LINE_H: f32 = 10.0;
 /// drawn as backdrop → *every* sprite → the rest of the colour stream, so any
 /// flat quad emitted after the backdrop landed on top of every sprite in the
 /// frame no matter when it was emitted. A selected list row fills its interior
-/// opaque black under its content (`AbstractSelectionList.extractItem`), and the
+/// opaque black under its content (the abstract selection list's extract item), and the
 /// fallback icons for a server with no favicon and a pack with no `pack.png` are
 /// *sprites* — so selecting such a row painted the black fill over its icon and
 /// the thumbnail came out solid black, while a row whose icon was a real
@@ -213,7 +213,7 @@ pub fn build(
     }
     let backdrop_floats = b.verts.len();
 
-    // `Screen.extractMenuBackgroundTexture` tiles a raw texture in 32 logical
+    // Screen's extract menu background texture tiles a raw texture in 32 logical
     // pixel squares. A single stretched atlas sprite would make a pack's
     // patterned screen art look unlike vanilla; individual quads also keep the
     // atlas sampler inside this sprite rather than repeating into a neighbour.
@@ -249,7 +249,7 @@ pub fn build(
     }
 
     if frame.book_background {
-        // `BookViewScreen`/`BookEditScreen` blit the 192×192 top-left window
+        // The book view screen/book edit screen blit the 192×192 top-left window
         // from `textures/gui/book.png`'s 256×256 logical sheet. The sheet is a
         // loose menu-atlas extra, so this resolves from the active pack stack
         // instead of being a procedural rectangle or a jar-pinned texture.
@@ -277,7 +277,7 @@ pub fn build(
         }
         // The loading screen's progress bar, drawn after the labels
         // so it sits over the backdrop and under nothing. Vanilla's
-        // `LevelLoadingScreen` geometry: 200x2, centred, black track, green
+        // The level loading screen geometry: 200x2, centred, black track, green
         // fill; the fill is `round(fraction * 200)` so a partial column shows as
         // a whole pixel rather than a sub-pixel smear.
         if let Some(progress) = frame.progress {
@@ -363,9 +363,9 @@ pub fn build(
     // The multiplayer list's scrollbar (the owner's first report: "server list
     // needs a scrollbar"). Drawn *before* the rows so a row can never be painted
     // over by the bar — vanilla's order is the reverse (`extractScrollbar` runs last
-    // in `AbstractSelectionList.extractWidgetRenderState`) because it scissors the
+    // in the abstract selection list's extract widget render state) because it scissors the
     // rows to the band first; the bar sits outside the rows here either way
-    // (`scrollBarX() = getRowRight() + 8`), so the order is not observable.
+    // (`scroll_bar_x() = getRowRight() + 8`), so the order is not observable.
     //
     // Every input is derived from the same expressions the rows are placed by —
     // `server_list_block().content_top`, `SERVER_LIST_FOOTER_H`,
@@ -376,13 +376,13 @@ pub fn build(
     // rather than "the active screen's" — so a second screen adopting `ScrollList`
     // got correct geometry, green tests and no bar at all. Any screen that returns a
     // spec from `MenuNav::active_list` is drawn here now, and `row_right` comes off
-    // the spec's own `getRowLeft()` expression rather than from a screen-specific
+    // the spec's own get row left expression rather than from a screen-specific
     // constant, so the bar cannot sit somewhere its rows are not.
     let active_list = frame.list.as_ref().and_then(|spec| {
         spec.model(height)
             .map(|list| (list, spec.row_right(width)))
     });
-    // The band's own tinted background — `AbstractSelectionList.extractListBackground`,
+    // The band's own tinted background — the abstract selection list's extract list background,
     // which runs *before* the scissored rows, so this has to go here and not with the
     // separators after them. See `LIST_BAND_TINT` for the decoded texture.
     //
@@ -449,7 +449,7 @@ pub fn build(
         // was not, so the two could and did disagree (a multiplayer row stayed
         // hit-testable below the band while the draw clipped it away). Only the
         // vertical extent is common; each branch adds its own horizontal one,
-        // because the three `AbstractSelectionList` screens have narrower columns
+        // because the three abstract selection list screens have narrower columns
         // than the canvas and a two-column settings row straddles the centre.
         let clip_band = row
             .is_scrolling_list_row()
@@ -460,12 +460,12 @@ pub fn build(
             })
             .flatten();
         // A multiplayer-list entry is neither a button nor a field: it is
-        // an `ObjectSelectionList` row with a favicon, two text columns, a status
+        // an object selection list row with a favicon, two text columns, a status
         // sprite and a quadrant hover overlay. Tested before `slot` because it
         // carries none — `row_rect` places it from `entry.index`.
         if row.entry.is_some() {
             // Clipped to the list's band — vanilla's `enableScissor` around
-            // `AbstractSelectionList.extractListItems`.
+            // The abstract selection list's extract list items.
             //
             // **This is what makes the clip real.** `Quads::with_clip` landed with
             // no caller, and an unexercised clip is worse than none: it reads as
@@ -587,7 +587,7 @@ pub fn build(
             // over the footer. That is the overlap a player reported on the settings
             // screen — `MenuRow::is_scrolling_list_row` is the predicate that
             // decides, and it deliberately excludes the footer, the title and
-            // `OptionsScreen`'s own grid (clipping *those* to the band would erase
+            // The options screen's own grid (clipping *those* to the band would erase
             // them).
             //
             // Horizontal extent is the full canvas here for `list_labels`' reason —
@@ -733,7 +733,7 @@ pub fn build(
     }
 
     // The two separators that fence the band off from the header and the footer —
-    // `AbstractSelectionList.extractListSeparators`, which runs **after** the
+    // The abstract selection list's extract list separators, which runs **after** the
     // scissored rows and before the scrollbar, hence their position here rather than
     // beside the tint. Drawn after the rows so a row cut flush at the band edge is
     // capped by the bar rather than butting into the buttons below it, which is what
@@ -749,8 +749,8 @@ pub fn build(
         // The **header** bar is suppressed when a tab bar owns this boundary
         // instead (visual audit — a full-width bar here used to
         // run underneath the *entire* tab row, including the selected tab,
-        // which is exactly what vanilla's own `MenuTabBar` does not do:
-        // `MenuTabBar.extractWidgetRenderState` blits `Screen.HEADER_SEPARATOR`
+        // which is exactly what vanilla's own menu tab bar does not do:
+        // The menu tab bar's extract widget render state blits `Screen.HEADER_SEPARATOR`
         // only in the two margins **outside** the tab strip — see `draw_tab`'s
         // own margin-separator arm — never under any tab, selected or not.
         // Drawing both here made every tab, not just the selected one, read as
@@ -788,7 +788,7 @@ pub fn build(
         }
     }
 
-    // A widget's own `AbstractWidget.setTooltip` text — the settings tree's
+    // A widget's own abstract widget's set tooltip text — the settings tree's
     // per-option hints. Resolved here rather than inside the row loop because it
     // needs the *one* row under the cursor and the loop visits all of them.
     //
@@ -798,7 +798,7 @@ pub fn build(
     // band shows nothing, which is what stops a hint hanging over the footer.
     //
     // Wrapped to `Tooltip.MAX_WIDTH` in the font this pass draws with, which is
-    // `Tooltip.splitTooltip`'s job in vanilla; `wrap_measured` also splits the
+    // Tooltip's split tooltip's job in vanilla; `wrap_measured` also splits the
     // explicit `\n`s several of the strings carry.
     //
     // **Hover only, not keyboard focus, and that is a named departure.** Vanilla's
@@ -852,7 +852,7 @@ pub fn build(
 }
 
 /// The raw screen-background texture vanilla selects for this frame, if the
-/// screen uses one. `TitleScreen.extractBackground` is empty, and the death
+/// screen uses one. TitleScreen's extract background is empty, and the death
 /// screen supplies its own gradient, so neither gets this base `Screen` art.
 pub(super) fn screen_background_sprite(frame: &MenuFrame<'_>) -> Option<&'static str> {
     if frame.logo || frame.backdrop == MenuBackdrop::DeathGradient {
@@ -868,7 +868,7 @@ pub(super) fn screen_background_sprite(frame: &MenuFrame<'_>) -> Option<&'static
 }
 
 /// Vanilla passes a declared `32 x 32` texture size to
-/// `Screen.extractMenuBackgroundTexture`, even though the bundled texture is
+/// Screen's extract menu background texture, even though the bundled texture is
 /// currently 16 x 16. The declaration fixes the logical tiling period; a
 /// higher-resolution pack still occupies this same 32-pixel tile.
 fn tile_screen_background(b: &mut Quads<'_>, id: &str, width: f32, height: f32, scroll: f32) {
@@ -938,8 +938,8 @@ fn draw_vignette(b: &mut Quads<'_>, width: f32, height: f32) {
 /// sprite, and — when the cursor is inside the row — the join/move-up/move-down
 /// overlay on the icon.
 ///
-/// Mirrors `ServerSelectionList.OnlineServerEntry.extractContent`
-/// plus `AbstractSelectionList.extractItem`'s
+/// Mirrors the server selection list's online server entry.extract_content
+/// plus abstract selection list's extract item's
 /// selection pass (`:354-370`), and it **decides nothing**: which sprite, which
 /// colour and which arrows apply are all resolved into [`ServerEntryView`] by
 /// [`server_list_frame`]. What it does own is everything canvas-dependent — the
@@ -953,7 +953,7 @@ fn draw_vignette(b: &mut Quads<'_>, width: f32, height: f32) {
 /// ## Two things that are not vanilla's, named rather than hidden
 ///
 /// - **The MOTD wrap is greedy on whitespace**, where vanilla's `font.split` is a
-///   full `StringSplitter` that also breaks inside an over-long word and carries
+///   full string splitter that also breaks inside an over-long word and carries
 ///   style across the break. A word wider than the column is therefore drawn past
 ///   the wrap width here instead of being cut; the column is 267 px, so it takes a
 ///   ~44-character unbroken run to notice.
@@ -999,7 +999,7 @@ fn draw_server_entry(
     let (ix, iy, iw, ih) = server_entry_icon_rect(view.index, width, view.scroll);
     let text_x = cx + SERVER_ENTRY_ICON + SERVER_ENTRY_TEXT_GAP;
 
-    // The favicon, or `FaviconTexture`'s fallback when the server sent none
+    // The favicon, or the favicon texture's fallback when the server sent none
     // (`:313,438-440`). The mosaic path is this shell's stand-in for a per-server
     // runtime texture — see the module docs.
     if let Some(icon) = row.favicon.as_ref() {
@@ -1105,7 +1105,7 @@ fn draw_server_entry(
     // the cursor is over the status *text* — the player count, or an
     // incompatible server's version string —
     // `mouseX >= statusX && mouseX <= statusX + statusWidth && mouseY >=
-    // getContentY() && mouseY <= getContentY() - 1 + 9`
+    // get content y && mouseY <= get content y - 1 + 9`
     //. The ping-latency tooltip vanilla
     // checks first (`:358-362`) is deliberately absent — the "who's online"
     // half of the screen is the half this shell has the model for, and the icon
@@ -1122,14 +1122,14 @@ fn draw_server_entry(
 }
 
 /// Draws the multiplayer list's "who's online" tooltip — vanilla's
-/// `DefaultTooltipPositioner`-positioned `TooltipRenderUtil` box
+/// The default tooltip positioner-positioned tooltip render util box
 /// (its own default-tooltip-positioner type, its own tooltip-render-util helper), which this
 /// pipeline has no sprite path for, so it draws the two sprites' *visible*
 /// pixels as flat quads instead.
 ///
 /// ## Why these exact rects
 ///
-/// `TooltipRenderUtil.renderTooltipInternal` positions the **content** box
+/// The tooltip render util's render tooltip internal positions the **content** box
 /// (text only, `w×h`), then blits `tooltip/background.png` inset by
 /// [`TOOLTIP_PAD`] + its 9 px transparent border, and `tooltip/frame.png` with
 /// its 10 px border — i.e. the fill at `[x-3, y-3, w+6, h+6]`, the frame at
@@ -1142,7 +1142,7 @@ fn draw_server_entry(
 /// carry. So the outline below is not a stylised box; it is the frame sprite's
 /// nine-slice geometry, corners open.
 ///
-/// Positioning is `DefaultTooltipPositioner` (`:13-29`) exactly: content top-left
+/// Positioning is the default tooltip positioner (`:13-29`) exactly: content top-left
 /// at the cursor + ([`TOOLTIP_MOUSE_OFFSET`], -[`TOOLTIP_MOUSE_OFFSET`]),
 /// flipping left of the cursor when that runs past the right edge, and clamped
 /// to the bottom. Text is drawn white with vanilla's drop shadow, which this
@@ -1155,7 +1155,7 @@ fn draw_tooltip(b: &mut Quads<'_>, lines: &[String], at: (f32, f32), width: f32,
         .iter()
         .map(|l| b.text_width(l, 1.0))
         .fold(0.0_f32, f32::max);
-    // `ClientTextTooltip.getHeight` (`:20-22`): `(n == 1 ? -2 : 0) + 10n`.
+    // The client text tooltip's get height (`:20-22`): `(n == 1 ? -2 : 0) + 10n`.
     let h = if lines.len() == 1 {
         8.0
     } else {
@@ -1175,7 +1175,7 @@ fn draw_tooltip(b: &mut Quads<'_>, lines: &[String], at: (f32, f32), width: f32,
     b.rect(rx - TOOLTIP_PAD, ry - 2.0, 1.0, h + 4.0, TOOLTIP_FRAME_TOP);
     b.rect(rx - 2.0, ry + h + 2.0, w + 4.0, 1.0, TOOLTIP_FRAME_BOTTOM);
     b.rect(rx + w + 2.0, ry - 2.0, 1.0, h + 4.0, TOOLTIP_FRAME_BOTTOM);
-    // `ClientTextTooltip.renderText` (`:33-36`): first line at `y`, then the
+    // The client text tooltip's render text (`:33-36`): first line at `y`, then the
     // +2 interline gap brings each later line to `y + 12 + 10*(i-1)`.
     for (i, line) in lines.iter().enumerate() {
         let ly = if i == 0 {
@@ -1344,7 +1344,7 @@ pub(super) fn restyle_wrapped(spans: &[TextSpan], lines: &[String]) -> Vec<Vec<T
 /// ## Why this is a second function rather than a flag on the first
 ///
 /// [`wrap_measured`] deliberately does *not* break inside a word, because
-/// `ServerSelectionList` wraps a MOTD with `Font.split` and the difference only
+/// The server selection list wraps a MOTD with `Font.split` and the difference only
 /// shows on a ~44-character unbroken run — a documented simplification of the
 /// multiplayer screen, and not one worth changing under it.
 ///
@@ -1353,7 +1353,7 @@ pub(super) fn restyle_wrapped(spans: &[TextSpan], lines: &[String]) -> Vec<Vec<T
 /// response body, and JSON has no whitespace in it at all, so a whitespace-only
 /// wrap emits one enormous line and the greedy fallback ("a word that does not
 /// fit starts a line") does not save it. This is also *closer* to vanilla than
-/// its sibling — `StringSplitter` breaks mid-word too — so the two are not a
+/// its sibling — the string splitter breaks mid-word too — so the two are not a
 /// fidelity choice, they are two different requirements.
 ///
 /// The single-glyph guard is load-bearing: at a column narrower than one
@@ -1445,7 +1445,7 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
         return;
     };
 
-    // `AbstractSelectionList.extractItem`'s selection pass: a 1 px outline with
+    // The abstract selection list's extract item's selection pass: a 1 px outline with
     // the interior filled black, drawn *under* the content (`:354-370`). The
     // outline is the focused variant because this screen's list is focused
     // whenever it is up — the buttons are a separate cursor (see
@@ -1478,7 +1478,7 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
     b.text(detail, text_x, cy + ACCOUNTS_DETAIL_Y, 1.0, ACCOUNTS_DIM);
 }
 
-/// Draws one world-list row — `WorldSelectionList.WorldListEntry.extractContent`.
+/// Draws one world-list row — the world selection list's world list entry.extract_content.
 ///
 /// The selection outline, then three text lines at
 /// [`WORLD_LIST_LINE_DY`]'s offsets, all measured from the row's **content** rect
@@ -1486,7 +1486,7 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
 /// [`WORLD_LIST_TEXT_DX`] for the icon column.
 ///
 /// **The icon column is reserved and left empty**, and that is deliberate rather
-/// than unfinished: vanilla blits a 32×32 `FaviconTexture.forWorld` there, backed
+/// than unfinished: vanilla blits a 32×32 favicon texture's for world there, backed
 /// by the `icon.png` the client writes on quit. This client writes none (see
 /// `crate::saves::WorldSummary`'s doc on the fields it deliberately does not
 /// port), so there is nothing to blit — and the column still has to exist,
@@ -1526,11 +1526,11 @@ fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, h
     let text_x = cx + WORLD_LIST_TEXT_DX;
     let room = world_list_text_width();
 
-    // The world's thumbnail — `WorldListEntry.extractContent` blits
-    // `this.icon.textureLocation()`, and that is a `FaviconTexture`: the **same**
+    // The world's thumbnail — the world list entry's extract content blits
+    // icon's texture location, and that is a favicon texture: the **same**
     // class the server list uses, so a world with no readable `icon.png` gets the
     // same `textures/misc/unknown_server.png` fallback a server with no favicon
-    // does (`FaviconTexture.MISSING_LOCATION`). Drawing the fallback is therefore
+    // does (the favicon texture's missing location). Drawing the fallback is therefore
     // vanilla, not a placeholder invented here.
     //
     // `row.favicon` is the same field a server row and a pack row carry, and it is
@@ -1568,7 +1568,7 @@ fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, h
     }
 }
 
-/// Draws one resource-pack row — `TransferableSelectionList.PackEntry.extractContent`.
+/// Draws one resource-pack row — the transferable selection list's pack entry.extract_content.
 ///
 /// The selection outline, the 32×32 `pack.png` thumbnail, the pack name, up to two
 /// description lines under it, and — while the row is the list's selection or under
@@ -1594,7 +1594,7 @@ fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, h
 ///   drawn there here, so splitting the icon would leave a dead half.
 /// - **No incompatible marking.** Vanilla fills the content box dark red
 ///   (`-8978432`, `:139-144`) and swaps the name for `pack.incompatible` when
-///   `PackCompatibility` rejects the pack's format. Still deliberately out of scope
+///   The pack compatibility rejects the pack's format. Still deliberately out of scope
 ///   for the reason `packs`'s module doc gives: nothing in this client declares a
 ///   *host* `pack_format` to compare against, and
 ///   [`crate::resources::DiscoveredPack`] drops `pack.mcmeta`'s
@@ -1618,7 +1618,7 @@ fn draw_pack_entry(
         return;
     };
 
-    // `AbstractSelectionList.extractItem`'s selection pass: a 1 px outline with the
+    // The abstract selection list's extract item's selection pass: a 1 px outline with the
     // interior filled black, drawn *under* the content (`:354-370`). Focused
     // variant, for `draw_server_entry`'s reason — this screen's list is focused
     // whenever the cursor is on one of its rows.
@@ -1627,11 +1627,11 @@ fn draw_pack_entry(
         b.rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, PACK_SELECTION_FILL);
     }
 
-    // The content box: `getContentX()`/`getContentY()`, the entry inset by
+    // The content box: get content x/get content y, the entry inset by
     // `CONTENT_PADDING`.
     let (cx, cy) = (x + PACK_ROW_PAD, y + PACK_ROW_PAD);
 
-    // `graphics.blit(…, this.pack.getIconTexture(), getContentX(), getContentY(), …,
+    // `graphics.blit(…, this.pack.get_icon_texture(), get_content_x(), get_content_y(), …,
     // 32, 32, …)` (`:146`). The mosaic path is this shell's stand-in for a per-pack
     // runtime texture, the same one a server favicon and an account head take; a
     // pack that ships no readable `pack.png` gets vanilla's own `DEFAULT_ICON`.
@@ -1640,10 +1640,10 @@ fn draw_pack_entry(
         None => b.sprite(PACK_UNKNOWN_ICON, cx, cy, PACK_ICON, PACK_ICON, LABEL),
     }
 
-    // `if (this.showHoverOverlay() && (hovered || getSelected() == this && isFocused()))`
+    // `if (this.show_hover_overlay() && (hovered || get_selected() == this && isFocused()))`
     // (`:155`) — so the overlay follows the *selection* as well as the mouse, which
     // is what makes it visible under keyboard navigation. A pack that can neither be
-    // selected nor unselected (the built-in one: `isFixedPosition() && isRequired()`)
+    // selected nor unselected (the built-in one: `is_fixed_position() && is_required()`)
     // draws none at all, exactly as vanilla's does not.
     let in_rect = |(mx, my): (f32, f32), rx: f32, ry: f32, rw: f32, rh: f32| {
         mx >= rx && mx < rx + rw && my >= ry && my < ry + rh
@@ -1665,9 +1665,9 @@ fn draw_pack_entry(
         }
     }
 
-    // `nameWidget` at `getContentX() + 32 + 2, getContentY() + 1`, then
-    // `descriptionWidget` at `+ 12` (`:213-218`), both `setMaxWidth(157)`. Vanilla's
-    // `StringWidget`/`MultiLineTextWidget` clip and wrap to that width; here that is
+    // `nameWidget` at `get_content_x() + 32 + 2, get_content_y() + 1`, then
+    // `descriptionWidget` at `+ 12` (`:213-218`), both set max width. Vanilla's
+    // The string widget/multi line text widget clip and wrap to that width; here that is
     // `clip_measured` and `wrap_measured`, measured in the font this `Quads` will
     // actually draw with.
     let tx = cx + PACK_TEXT_DX;
@@ -1787,8 +1787,8 @@ fn draw_widget(
     // every `MenuRow` with a fresh `label.to_string()` every frame — and a menu
     // screen draws nine of these with no world behind it, so it is not worth a
     // lifetime parameter on `Widget` to avoid.
-    // A settings slider carries `AbstractSliderButton`'s track instead of
-    // `AbstractButton`'s three `widget/button*` states. Which sprite
+    // A settings slider carries abstract slider button's track instead of
+    // The abstract button's three `widget/button*` states. Which sprite
     // set a row gets is still the *widget's* decision, not this function's — the
     // only thing decided here is which kind of widget the row is.
     let mut widget = if row.slider {
@@ -1800,7 +1800,7 @@ fn draw_widget(
     widget.focused = selected;
     widget.hovered = hovered;
     widget.icon = row.icon;
-    // `AbstractWidget.extractRenderState` wraps everything in `if (this.visible)`
+    // The abstract widget's extract render state wraps everything in `if (this.visible)`
     //. No row sets this yet; the guard is here so
     // that the day one does, it does not have to be remembered.
     if !widget.visible {
@@ -1808,7 +1808,7 @@ fn draw_widget(
     }
 
     if let Some(page) = row.book_page {
-        // `BookViewScreen.updateButtonVisibility` hides an unavailable turn
+        // The book view screen's update button visibility hides an unavailable turn
         // arrow outright; unlike ordinary buttons, a disabled page arrow is
         // not drawn as a grey control.
         if !row.enabled {
@@ -1834,7 +1834,7 @@ fn draw_widget(
     }
 
     // `WidgetSprites::get(active, hoveredOrFocused)`
-    // with `AbstractButton`'s three-argument sprite set: disabled wins over
+    // with the abstract button's three-argument sprite set: disabled wins over
     // hovered, which is why a greyed-out button under the cursor still looks
     // greyed out. The rule lives in `menu::widget`; this only asks.
     //
@@ -1871,7 +1871,7 @@ fn draw_widget(
         }
     }
 
-    // `AbstractSliderButton.extractWidgetRenderState` blits the handle right
+    // The abstract slider button's extract widget render state blits the handle right
     // after the track and before the label:
     // `getX() + (int)(this.value * (this.width - 8))`, width 8, full row
     // height. `row.slider_value` is `None` for a slider this client holds no
@@ -1913,8 +1913,8 @@ fn draw_widget(
     }
 
     let colour = widget.message_colour();
-    // `extractScrollingStringOverContents(output, message, 2)` →
-    // `acceptScrollingWithDefaultCenter(msg, x+2, x+w-2, y, y+h)`
+    // extract scrolling string over contents →
+    // accept scrolling with default center
     // (vanilla's own abstract-button base, its own abstract-widget base), whose centre
     // is `(left + right) / 2` and whose top is
     // `(top + bottom - lineHeight) / 2 + 1`.
@@ -1933,23 +1933,23 @@ fn draw_widget(
     b.text(label, tx, ty, 1.0, colour);
 }
 
-/// Draws one [`MenuRow::tab`] entry — vanilla's `MenuTabButton.
+/// Draws one [`MenuRow::tab`] entry — vanilla's menu tab button.
 /// extractWidgetRenderState`: a `widget/tab*`
 /// background keyed by `(selected, hoveredOrFocused)` (see [`widget::
 /// TAB_SPRITES`]'s own doc for why that is the right axis, not `active`),
 /// then — only while selected — the inset panel merge and the underline,
 /// then the label (vanilla's own order: `blitSprite`, then
-/// `if (isSelected()) { renderMenuBackground(); renderFocusUnderline(); }`,
-/// then `renderLabel()` unconditionally last — so the underline sits
+/// `if (is_selected()) { render_menu_background(); render_focus_underline(); }`,
+/// then render label unconditionally last — so the underline sits
 /// *beneath* the label z-order-wise, not drawn over it).
 ///
 /// ## "Meshes with the border, and changes when selected"
 ///
 /// Two vanilla behaviours this now ports, neither of which is a size choice —
-/// `MenuTabBar.HEIGHT`/`tab_bar_geometry` were already vanilla's own
+/// The menu tab bar's height/`tab_bar_geometry` were already vanilla's own
 /// constants, so the visual gap was never the tab bar's *dimensions*:
 ///
-/// - **The panel merge.** `MenuTabButton.renderMenuBackground` fills
+/// - **The panel merge.** menu tab button's render menu background fills
 ///   `(x+2, y+2)..(right-2, bottom)` — inset 2 px on the left/top only, flush
 ///   with the bottom and right — with the same surface the content panel
 ///   below is drawn on, so the selected tab's own bottom edge disappears into
@@ -1960,7 +1960,7 @@ fn draw_widget(
 ///   already tinted with (see `merges_with_band`'s own doc), which is what
 ///   makes the two literally the same fill rather than two colours that
 ///   happen to look similar.
-/// - **The flanking separators, and *only* there.** `MenuTabBar.
+/// - **The flanking separators, and *only* there.** menu tab bar.
 ///   extractWidgetRenderState` blits `Screen.HEADER_SEPARATOR` in exactly two
 ///   places — before the first tab and after the last — never under any tab,
 ///   selected or not; the visual difference between tabs is carried entirely
@@ -2018,16 +2018,16 @@ fn draw_tab(
     }
 
     // `renderLabel`: horizontally centred in `[x + 1, x + w - 1]`
-    // (`acceptScrollingWithDefaultCenter`'s `centerX`, via `TextAlignment.
+    // (`acceptScrollingWithDefaultCenter`'s `centerX`, via the text alignment.
     // CENTER` — matched by `tx` below) and vertically centred between a
     // `top` that drops 3 px unless selected and `bottom = y + h`
-    // (`ActiveTextCollector.defaultScrollingHelper`'s `(top + bottom -
+    // (the active text collector's default scrolling helper's `(top + bottom -
     // lineHeight) / 2 + 1` — matched by `widget::tab_label_top`, which is
     // *not* the same as drawing flush against `top`; see its own doc for the
     // "too high up" incident this fixed). Colour follows `active` —
-    // vanilla's `WithInactiveMessage`, the same rule `Widget::
+    // vanilla's with inactive message, the same rule `Widget::
     // message_colour` already applies everywhere else. Drawn last, matching
-    // vanilla's own order (see this function's own doc) — over the merge
+    // vanilla's order (see this function's doc) — over the merge
     // fill and the underline.
     let colour = if row.enabled {
         widget::ACTIVE_LABEL
@@ -2098,9 +2098,9 @@ fn draw_arrow(b: &mut Quads<'_>, arrow: Arrow, x: f32, y: f32, w: f32, h: f32, c
 /// comes from [`EditBox::draw_state`], every colour from
 /// [`EditBox::text_colour`], and the sprite id from
 /// [`EditBox::background_sprite`] — which is `SPRITES.get(isActive(),
-/// isFocused())`, *not* the button's `isHoveredOrFocused()`, so hovering a field
+/// isFocused())`, *not* the button's is hovered or focused, so hovering a field
 /// deliberately does not highlight it. Mirrors
-/// `EditBox.extractWidgetRenderState`.
+/// EditBox's extract widget render state.
 ///
 /// ## The reposition, and why it is on a clone
 ///
@@ -2129,7 +2129,7 @@ fn draw_edit_box(b: &mut Quads<'_>, edit: &EditBox, x: f32, y: f32, w: f32, h: f
     edit.widget.y = y;
     edit.widget.width = w;
     edit.widget.height = h;
-    // `AbstractWidget.extractRenderState`'s `if (this.visible)`
+    // The abstract widget's extract render state's `if (this.visible)`
     //.
     if !edit.widget.visible {
         return;
@@ -2162,7 +2162,7 @@ fn draw_edit_box(b: &mut Quads<'_>, edit: &EditBox, x: f32, y: f32, w: f32, h: f
     let glyph_h = GLYPH_H as f32 * EDIT_TEXT_SCALE;
 
     // Selection first, so the glyphs land on top of it. Vanilla inverts the text
-    // under the block (`graphics.textHighlight(.., invertHighlightedTextColor)`);
+    // under the block (graphics's text highlight);
     // a flat fill is the equivalent this pipeline can draw, and it is the same
     // colour the row cursor uses elsewhere.
     if let Some((from, to)) = state.highlight {
@@ -2274,7 +2274,7 @@ impl Quads<'_> {
 
     /// Run `body` with everything it emits clipped to `(x, y, w, h)` — this
     /// pipeline's stand-in for vanilla's `enableScissor`/`disableScissor`
-    /// (`AbstractSelectionList`).
+    /// (the abstract selection list).
     ///
     /// ## Why this is not `set_scissor_rect`
     ///
@@ -2545,7 +2545,7 @@ impl Quads<'_> {
 
     /// Like [`Self::rect`], but the top edge is `top` and the bottom edge is
     /// `bottom`, interpolated per-vertex — the death screen's own
-    /// `fillGradient` (`DeathScreen.extractDeathBackground`), which a single
+    /// `fillGradient` (the death screen's extract death background), which a single
     /// flat [`Self::rect`] call cannot reproduce. No clip-time colour
     /// interpolation is needed: [`Self::clipped_rect`] only ever crops this
     /// quad's edges to the whole canvas (the death screen draws it at

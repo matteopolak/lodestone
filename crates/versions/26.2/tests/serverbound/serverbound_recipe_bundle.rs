@@ -6,14 +6,14 @@
 //! Expected payloads are built from the wire specification with an
 //! independent VarInt encoder (never the adapter's own codec), so a
 //! symmetric bug cannot pass. Layouts are verified against 26.2's
-//! `ServerboundSelectBundleItemPacket` (two VarInts: slot id, selected item
-//! index), `ServerboundContainerSlotStateChangedPacket` (VarInt slot id,
+//! Select-bundle-item packet (two VarInts: slot id, selected item
+//! index), container-slot-state-changed packet (VarInt slot id,
 //! VarInt container id, then a plain trailing boolean),
-//! `ServerboundRecipeBookChangeSettingsPacket` (VarInt `RecipeBookType`
+//! Recipe-book-change-settings packet (VarInt `RecipeBookType`
 //! ordinal via `writeEnum`, then two plain booleans: open, filtering),
-//! `ServerboundRecipeBookSeenRecipePacket` (single VarInt `RecipeDisplayId`
-//! index), and `ServerboundPlaceRecipePacket` (VarInt container id, VarInt
-//! `RecipeDisplayId` index, then a plain trailing boolean for "use max
+//! Recipe-book-seen-recipe packet (single VarInt recipe display id
+//! index), and place-recipe packet (VarInt container id, VarInt
+//! recipe display id index, then a plain trailing boolean for "use max
 //! items").
 //!
 //! All five actions are routine survival-gameplay interactions (recipe book

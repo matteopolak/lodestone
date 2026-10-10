@@ -9,12 +9,12 @@
 //!   (`:32`) — that field is declared but never referenced anywhere in the
 //!   class (checked directly, not assumed); the two call sites that actually
 //!   set a transfer cooldown hardcode the literal `8`
-//!   (`tryMoveItems`: `entity.setCooldown(8)`, `:124`; `tryMoveInItem`:
-//!   `hopperBlockEntity.setCooldown(8 - skipTickCount)`, `:340`). This
+//!   (`tryMoveItems`: entity's set cooldown, `:124`; `tryMoveInItem`:
+//!   hopper block entity's set cooldown, `:340`). This
 //!   module names its own [`TRANSFER_COOLDOWN_TICKS`] constant rather than
 //!   reusing that dead field, restated with the citation.
 //! * `pushItemsTick` (`:97-104`): `cooldownTime--` happens **every** tick,
-//!   unconditionally; only once `!isOnCooldown()` (`cooldownTime <= 0`) does
+//!   unconditionally; only once `!is_on_cooldown()` (`cooldownTime <= 0`) does
 //!   it reset to exactly `0` and attempt a transfer. This is why a hopper
 //!   with nothing to do retries every single tick (cooldown pinned at `0`,
 //!   never drifting negative) while one that just moved an item waits the
@@ -22,7 +22,7 @@
 //!   halves.
 //! * `tryMoveItems` (`:106-131`): gated on not-on-cooldown **and** the
 //!   block's `ENABLED` state (the redstone-lock rule — vanilla keys this off
-//!   `HopperBlock.checkPoweredState`'s `!level.hasNeighborSignal(pos)`, kept
+//!   The hopper block's check powered state's `!level.has_neighbor_signal(pos)`, kept
 //!   on the block state rather than the block entity, so [`Hopper::tick`]
 //!   takes `enabled` as a caller-supplied argument rather than owning it).
 //!   Ejects first (if non-empty), *then* independently attempts a suck (if
@@ -46,7 +46,7 @@
 //!
 //! ## What this module does not model
 //!
-//! * **Face restrictions** (`WorldlyContainer.getSlotsForFace`/
+//! * **Face restrictions** (the worldly container's get slots for face/
 //!   `canPlaceItemThroughFace`/`canTakeItemThroughFace`) — e.g. a furnace
 //!   only accepting fuel through its side slot, or a brewing stand only
 //!   handing back an empty bottle through the bottom. [`try_move_one_item`]
@@ -57,7 +57,7 @@
 //!   kind (furnace fuel slot, composter) is expected to pre-filter which
 //!   slots it hands to this function.
 //! * **Item-entity suction and hopper-to-world drop.** `suckInItems`'s
-//!   loose-`ItemEntity` branch and any world-drop-on-full-eject path need an
+//!   loose-the item entity branch and any world-drop-on-full-eject path need an
 //!   item-entity registry this crate does not have yet (per the issue's own
 //!   scope note: "the last needs the item-entity issue in Phase A"). Also
 //!   confirmed directly: `ejectItems` returns `false` outright when there is
@@ -70,12 +70,12 @@
 //!   cross-hopper same-tick ordering this crate's tick loop does not
 //!   establish yet; [`Hopper::tick`] always uses the full 8-tick cooldown.
 //! * **Hopper minecarts** (vanilla's own separate minecart-hopper entity) — a different entity
-//!   entirely (no cooldown field, `isGridAligned() == false`); out of scope
+//!   entirely (no cooldown field, `is_grid_aligned() == false`); out of scope
 //!   for a block entity issue.
 
 use lodestone_model::ItemStack;
 
-/// `HopperBlockEntity.HOPPER_CONTAINER_SIZE` (`:33`).
+/// The hopper block entity's hopper container size (`:33`).
 pub const HOPPER_SIZE: usize = 5;
 
 /// The literal `8` both cooldown-setting call sites use (see the module doc
@@ -190,7 +190,7 @@ impl Hopper {
 
     /// Advances by exactly one server tick. `enabled` is the block's
     /// `ENABLED` state (the redstone-lock rule — `true` means *not*
-    /// powered, matching vanilla's `!level.hasNeighborSignal(pos)`).
+    /// powered, matching vanilla's `!level.has_neighbor_signal(pos)`).
     /// `below`/`above` are the adjacent containers' slot arrays, if any
     /// exist there at all (`None` mirrors vanilla's `getAttachedContainer`/
     /// `getSourceContainer` returning `null` — a no-op, not an error).
@@ -209,7 +209,7 @@ impl Hopper {
         if self.is_on_cooldown() {
             return HopperTick::default();
         }
-        // `entity.setCooldown(0)` — pin at exactly 0 rather than drifting
+        // entity's set cooldown — pin at exactly 0 rather than drifting
         // further negative while idle.
         self.cooldown = 0;
 
@@ -245,7 +245,7 @@ fn same_item_same_components(a: &ItemStack, b: &ItemStack) -> bool {
 }
 
 /// Moves **at most one item** from the first eligible non-empty slot in
-/// `from` into `to`, mirroring `HopperBlockEntity.addItem`/`tryMoveInItem`
+/// `from` into `to`, mirroring hopper block entity's add item/`tryMoveInItem`
 /// (`:282-348`): scans `from` in order, and for the first non-empty slot,
 /// tries every slot in `to` in order — landing in the first empty slot
 /// outright, or merging one item into the first slot holding the same item
@@ -284,21 +284,21 @@ pub fn try_move_one_item(from: &mut [Option<ItemStack>], to: &mut [Option<ItemSt
     false
 }
 
-/// The dropper-push counterpart to [`try_move_one_item`]: `HopperBlockEntity
+/// The dropper-push counterpart to [`try_move_one_item`]: the hopper block entity
 /// .addItem`/`tryMoveInItem`, but for a caller that has already chosen its one
 /// source item externally rather than scanning a `from` array in slot order.
 ///
-/// `DropperBlock.dispenseFrom` fixes the source slot with
-/// `DispenserBlockEntity.getRandomSlot` *before* the container check ever
+/// The dropper block's dispense from fixes the source slot with
+/// The dispenser block entity's get random slot *before* the container check ever
 /// runs (`crate::redstone_dispenser`'s own module doc explains why that
 /// ordering makes [`try_move_one_item`] not a drop-in reuse here), then calls
-/// `HopperBlockEntity.addItem(blockEntity, into, itemStack.copyWithCount(1),
-/// direction.getOpposite())` — always exactly one item. This mirrors that:
+/// The hopper block entity's add item(blockEntity, into, item stack's copy with count,
+/// direction's get opposite)` — always exactly one item. This mirrors that:
 /// tries every slot in `to` in order, landing in the first empty slot
 /// outright or merging into the first slot holding the same item with room
 /// under [`MAX_STACK_SIZE`], and returns `None` once `item` is fully placed.
 /// `Some(item)` (unchanged, since a single item cannot partially land) means
-/// no slot accepted it — vanilla's own remainder, which `DropperBlock
+/// no slot accepted it — vanilla's own remainder, which the dropper block
 /// .dispenseFrom` reads as "leave the source stack exactly as it was", **not**
 /// as a cue to fall back to a toss (see this module's own doc comment on the
 /// face-restriction gap this shares with [`try_move_one_item`]).
@@ -410,7 +410,7 @@ mod tests {
 
     /// **Control, the discriminating "full or absent" pair's full half**: every
     /// slot full or mismatched hands the whole item straight back, unchanged —
-    /// this is what `DropperBlock.dispenseFrom` reads as "leave the source
+    /// this is what dropper block's dispense from reads as "leave the source
     /// slot exactly as it was", not as a cue to toss.
     #[test]
     fn try_move_item_into_a_full_container_returns_the_item_untouched() {

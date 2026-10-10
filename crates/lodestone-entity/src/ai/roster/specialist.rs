@@ -139,7 +139,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 ///
 /// * Vanilla's own start step sets `attackTime = -10` — a lead-in, not a zero.
 /// * Vanilla's own per-tick update increments **first** and then tests
-///   `attackTime >= getAttackDuration()`.
+///   `attackTime >= get_attack_duration()`.
 ///
 /// So damage lands on the `duration + 10`-th tick the goal runs, not the
 /// `duration`-th: **90** for a guardian (its own attack-duration getter → 80, matching
@@ -178,7 +178,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 ///   which has no seam.
 #[derive(Debug)]
 pub struct GuardianBeamGoal {
-    /// The species' `getAttackDuration()`: 80 for a guardian, 60 for an elder.
+    /// The species' get attack duration: 80 for a guardian, 60 for an elder.
     attack_duration: i32,
     /// Vanilla's own `attackTime` field. Starts negative.
     attack_time: i32,
@@ -193,16 +193,16 @@ impl GuardianBeamGoal {
     /// zero.
     const CHARGE_LEAD_IN: i32 = -10;
 
-    /// An ordinary guardian's `getAttackDuration()` (`Guardian`'s
+    /// An ordinary guardian's get attack duration (`Guardian`'s
     /// `ATTACK_TIME = 80` constant).
     const GUARDIAN_DURATION: i32 = 80;
 
-    /// An elder guardian's overridden `getAttackDuration()`
+    /// An elder guardian's overridden get attack duration
     /// (vanilla's own elder-guardian attack-duration getter).
     const ELDER_DURATION: i32 = 60;
 
     /// Vanilla's squared give-up distance for a non-elder
-    /// (vanilla's own continue-eligibility check, `distanceToSqr(target) > 9.0` —
+    /// (vanilla's own continue-eligibility check, `distance_to_sqr(target) > 9.0` —
     /// 3 blocks). The same 9.0 appears in vanilla's own guardian attack-target selector,
     /// which is why a guardian never beams something in its face.
     const MIN_RANGE_SQR: f64 = 9.0;
@@ -315,7 +315,7 @@ pub fn guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(GuardianBeamGoal::guardian())
 }
 
-/// The same registration on an elder guardian, whose `getAttackDuration()` is 60
+/// The same registration on an elder guardian, whose get attack duration is 60
 /// (vanilla's own elder-guardian attack-duration getter).
 ///
 /// A separate builder rather than a parameter because a [`Registration`] table is
@@ -498,7 +498,7 @@ mod tests {
             ("guardian", guardian_rows),
             // `ElderGuardian` declares no `registerGoals`, so its expected rows
             // are the guardian's *same* cited lines. The difference between the
-            // two species is `getAttackDuration()`, which no multiset can see.
+            // two species is get attack duration, which no multiset can see.
             ("elder_guardian", guardian_rows),
             (
                 "ghast",
@@ -679,7 +679,7 @@ mod tests {
     /// | hypothesis | guardian | elder | comes from |
     /// |---|---|---|---|
     /// | **correct** | **90** | **70** | `duration + 10`; `start()` sets `attackTime = -10` and `tick` increments before comparing |
-    /// | dropped the lead-in | 80 | 60 | reading `ATTACK_TIME = 80` / `getAttackDuration()` and stopping there |
+    /// | dropped the lead-in | 80 | 60 | reading `ATTACK_TIME = 80` / get attack duration and stopping there |
     /// | missed the elder override | 90 | 90 | `ElderGuardian` declares no `registerGoals`, so its table is the guardian's |
     ///
     /// Every assertion below is written to fail under both wrong hypotheses, and

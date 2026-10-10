@@ -32,7 +32,7 @@ pub(super) struct RecipePanelState {
     /// flag is what stops `search` being a field nothing ever writes — an
     /// island one layer down.
     pub(super) search_focused: bool,
-    /// Vanilla's All/Craftable cycle-button state (`RecipeBookComponent`'s
+    /// Vanilla's All/Craftable cycle-button state (the recipe book component's
     /// `filtering`): `true` hides every recipe the player cannot currently
     /// make. Drives both the button art
     /// ([`crate::container::RECIPE_SPRITE_FILTER_ENABLED`]) and the browsed set

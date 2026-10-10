@@ -22,13 +22,13 @@
 //!
 //! It lives in `lodestone-game` because **both sides read it**, and they read
 //! disjoint halves of the *same* effect. Vanilla runs
-//! `Consumable.emitParticlesAndSounds` on client and server alike and each side
+//! Consumable's emit particles and sounds on client and server alike and each side
 //! drops what it cannot do:
 //!
 //! | half | why it lands where it does |
 //! |---|---|
-//! | particles | `ServerLevel.addParticle` is a no-op, so particles are **always** client-predicted |
-//! | sound | `Entity.playSound` → `level.playSound(null, …)`; `ClientLevel.playSeededSound` skips it because `except == null` is not the local player, so the sound is **always** the server's broadcast |
+//! | particles | the server level's add-particle is a no-op, so particles are **always** client-predicted |
+//! | sound | the entity's play-sound routes to the level's sound call with a null excluded player; the client level's seeded-sound handler skips it because `except == null` is not the local player, so the sound is **always** the server's broadcast |
 //!
 //! So a client that emits the sound itself double-plays it against a real server,
 //! and a server that emits particles sends nothing anyone can see. The split is
@@ -51,9 +51,9 @@
 
 /// Which of vanilla's two consume animations an item uses.
 ///
-/// No `Consumable` in 26.2 uses any other `ItemUseAnimation` value, so this is a
+/// No consumable in 26.2 uses any other item-use animation value, so this is a
 /// two-variant enum rather than the full ten-variant one — the other eight are
-/// selected from `BLOCKS_ATTACKS`/`KINETIC_WEAPON`/per-item identity and are not
+/// selected from the blocks-attacks / kinetic-weapon components and per-item identity and are not
 /// consume animations at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsumeAnimation {
@@ -96,7 +96,7 @@ pub const HONEY_DRINK_SOUND: &str = "minecraft:item.honey_bottle.drink";
 /// source.
 ///
 /// Player-only and food-only: it comes from the `minecraft:food` component's
-/// `ConsumableListener`, so a mob eating, or anyone drinking a potion, does not
+/// consumable listener, so a mob eating, or anyone drinking a potion, does not
 /// burp.
 pub const BURP_SOUND: &str = "minecraft:entity.player.burp";
 
@@ -114,10 +114,10 @@ pub const CONSUME_EFFECTS_INTERVAL: u32 = 4;
 /// the use has elapsed.
 pub const CONSUME_EFFECTS_START_FRACTION: f32 = 0.218_75;
 
-/// `ItemStack.onUseTick`'s particle count — the burst on each periodic emission.
+/// ItemStack's on use tick's particle count — the burst on each periodic emission.
 pub const PERIODIC_PARTICLE_COUNT: u32 = 5;
 
-/// `Consumable.onConsume`'s particle count — the larger burst on the final bite.
+/// Consumable's on consume's particle count — the larger burst on the final bite.
 pub const FINISH_PARTICLE_COUNT: u32 = 16;
 
 /// The `minecraft:consumable` component of `item` (a full registry name such as
@@ -167,7 +167,7 @@ pub fn should_emit_consume_effects(consume_ticks: u32, remaining_ticks: u32) -> 
 
 /// Vanilla's own use-item-remaining-ticks getter, computed from an upward-counting tick total —
 /// the inverse of vanilla's own ticks-using-item getter, which is
-/// `getUseDuration() - getUseItemRemainingTicks()`.
+/// `get_use_duration() - get_use_item_remaining_ticks()`.
 ///
 /// This client counts **up** (`lodestone_ecs::player::ItemUseTicks`) because
 /// counting up needs no per-item `getUseDuration` for a bow, whose duration is
@@ -192,7 +192,7 @@ const fn food(consume_ticks: u32) -> Consumable {
     }
 }
 
-/// Vanilla's own default-drink shape — note `hasConsumeParticles(false)`, which is the
+/// Vanilla's own default-drink shape — note has consume particles, which is the
 /// whole reason a potion throws no crumbs.
 const fn drink(consume_ticks: u32, sound: &'static str) -> Consumable {
     Consumable {
@@ -248,15 +248,15 @@ pub const CONSUMABLES: &[(&str, Consumable)] = &[
     ("minecraft:cooked_rabbit", food(DEFAULT_CONSUME_TICKS)),
     ("minecraft:cooked_salmon", food(DEFAULT_CONSUME_TICKS)),
     ("minecraft:cookie", food(DEFAULT_CONSUME_TICKS)),
-    // `Consumables.DRIED_KELP = defaultFood().consumeSeconds(0.8F)` — the fast one,
+    // `Consumables.DRIED_KELP = default_food().consume_seconds(0.8F)` — the fast one,
     // and the reason `consume_ticks` is per item rather than a constant.
     ("minecraft:dried_kelp", food(16)),
     ("minecraft:enchanted_golden_apple", food(DEFAULT_CONSUME_TICKS)),
     ("minecraft:glow_berries", food(DEFAULT_CONSUME_TICKS)),
     ("minecraft:golden_apple", food(DEFAULT_CONSUME_TICKS)),
     ("minecraft:golden_carrot", food(DEFAULT_CONSUME_TICKS)),
-    // `Consumables.HONEY_BOTTLE = defaultDrink().consumeSeconds(2.0F)
-    //  .sound(SoundEvents.HONEY_DRINK)` — the slow one, and the only `sound`
+    // The honey bottle's consumable (a 2.0 s default drink)
+    //  with the honey-drink sound — the slow one, and the only `sound`
     // override in the game.
     ("minecraft:honey_bottle", drink(40, HONEY_DRINK_SOUND)),
     ("minecraft:melon_slice", food(DEFAULT_CONSUME_TICKS)),
@@ -266,7 +266,7 @@ pub const CONSUMABLES: &[(&str, Consumable)] = &[
     ),
     ("minecraft:mushroom_stew", food(DEFAULT_CONSUME_TICKS)),
     ("minecraft:mutton", food(DEFAULT_CONSUME_TICKS)),
-    // `Consumables.OMINOUS_BOTTLE = defaultDrink().soundAfterConsume(…)`. That
+    // `Consumables.OMINOUS_BOTTLE = default_drink().sound_after_consume(…)`. That
     // builder call is an `onConsume` effect, **not** a `sound` override — see the
     // module docs.
     (
@@ -311,7 +311,7 @@ mod tests {
     }
 
     /// Every drink has `hasConsumeParticles = false` and every food has it true,
-    /// because both come from `defaultDrink()`/`defaultFood()` and nothing
+    /// because both come from default drink/default food and nothing
     /// overrides the flag. Asserted rather than folded into `animation`, so a
     /// version that *does* override it fails here instead of silently agreeing.
     #[test]

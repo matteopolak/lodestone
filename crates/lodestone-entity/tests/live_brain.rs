@@ -7,7 +7,7 @@
 //! that output is **architecture-agnostic**: a goal-system pig and a brain-system
 //! goat idle-stroll identically. Worse, a brain's working memory
 //! (`walk_target`, `hurt_by`, panic markers) is **not NBT-serializable**
-//! (`MemoryModuleType::canSerialize()` is false for the transient ones), so it
+//! (MemoryModuleType's can serialize is false for the transient ones), so it
 //! can be neither read nor injected over RCON. We verified both facts live:
 //! `data get entity … Brain` returns `{memories:{}}` for an actively-strolling
 //! goat, and `data modify … Brain.memories."minecraft:walk_target"` does not

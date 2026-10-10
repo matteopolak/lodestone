@@ -28,8 +28,8 @@
 //! ## Payloads are opaque, on purpose
 //!
 //! A subscription's value codec is chosen per registry entry and the seventeen
-//! registered ones share no shape at all — `DebugBeeInfo`, `DebugBrainDump`,
-//! `List<BlockPos>`, `Unit` (zero bytes), and one (`dedicated_server_tick_time`)
+//! registered ones share no shape at all — a bee info record, a brain dump,
+//! a list of block positions, unit (zero bytes), and one (`dedicated_server_tick_time`)
 //! whose value codec is `null` and throws if it is ever sent as a value. Seventeen
 //! decoders for a debug overlay is the wrong trade, so this store carries bytes
 //! and a renderer decodes the one or two feeds it actually draws.

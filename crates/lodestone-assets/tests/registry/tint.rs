@@ -33,7 +33,7 @@ fn coord_colormap() -> Colormap {
 #[test]
 fn colormap_sample_matches_vanilla_index() {
     let cm = coord_colormap();
-    // ColorMapColorUtil: rain *= temp; x=(1-temp)*255; y=(1-rain)*255.
+    // Colormap lookup: rain *= temp; x=(1-temp)*255; y=(1-rain)*255.
     // temp=0.5, downfall=1.0 -> rain=0.5 -> x=127, y=127.
     let c = cm.sample(0.5, 1.0);
     assert_eq!((c >> 16) & 0xFF, 127, "x index");

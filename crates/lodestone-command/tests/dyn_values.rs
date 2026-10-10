@@ -29,7 +29,7 @@ impl ArgumentType for SelectorArgument {
     fn parse(&self, reader: &mut StringReader) -> Result<ParsedValue, ParseError> {
         // `read_unquoted_string` would consume nothing here: `@` is not in
         // `StringReader::is_allowed_in_unquoted_string`'s `[0-9A-Za-z_.+-]`,
-        // which is exactly why vanilla's own `EntitySelectorParser` reads the
+        // which is exactly why the game's entity-selector parser reads the
         // `@` with a bare `read()` before dispatching on the kind character.
         let kind = match (reader.read(), reader.read()) {
             (Some('@'), Some(kind)) => kind,

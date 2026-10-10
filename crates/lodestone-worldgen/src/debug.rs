@@ -19,9 +19,9 @@
 //!   `(x, z)`, whether this Y is one state from the ordered list or air.
 //! * Everywhere else is air — `fillFromNoise` is a no-op and
 //!   `getBaseColumn` returns an empty column, so nothing but
-//!   `applyBiomeDecoration`'s two rows ever writes a block.
+//!   the decoration step's two rows ever writes a block.
 //! * The biome is fixed to `minecraft:plains` everywhere
-//!   (`new FixedBiomeSource(plains)`) — [`DEBUG_BIOME`].
+//!   (a fixed-biome source of plains) — [`DEBUG_BIOME`].
 //!
 //! Vanilla's own "get block state for"'s index math (its own math-helper
 //! absolute-value over `worldX * GRID_WIDTH + worldZ`

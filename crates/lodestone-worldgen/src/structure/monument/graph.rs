@@ -38,7 +38,7 @@ impl RoomDef {
         }
     }
 
-    /// `isSpecial()`.
+    /// is special.
     pub(super) fn is_special(&self) -> bool {
         self.index >= 75
     }

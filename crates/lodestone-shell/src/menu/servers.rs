@@ -52,7 +52,7 @@ pub const MAX_NAME_CHARS: usize = 48;
 /// This server's resource-pack policy — vanilla's
 /// own server-pack-status enum,
 /// declared `ENABLED, DISABLED, PROMPT` in that order (the order
-/// `CycleButton` cycles forward through, and the order [`Self::cycle`]
+/// The cycle button cycles forward through, and the order [`Self::cycle`]
 /// mirrors).
 ///
 /// The on-disk encoding matches vanilla's own `FIELD_CODEC` exactly, field
@@ -68,7 +68,7 @@ pub enum ServerPackPolicy {
     /// An optional pushed pack is declined with no prompt. A **required**
     /// pack still prompts — vanilla will not silently disconnect a player
     /// who never set an opinion on this particular pack
-    /// (vanilla's own server-side resource-pack-push handler's own
+    /// (vanilla's server-side resource-pack-push handler's
     /// condition: `status != PROMPT && (!required || status != DISABLED)`
     /// is the auto-apply path, so `DISABLED` only takes it when the pack is
     /// *not* required).
@@ -86,7 +86,7 @@ impl Default for ServerPackPolicy {
 
 impl ServerPackPolicy {
     /// Advances to the next value in declaration order, wrapping — the
-    /// `ManageServerScreen`'s `CycleButton` click.
+    /// The manage server screen's cycle button click.
     #[must_use]
     pub fn cycle(self) -> Self {
         match self {
@@ -313,7 +313,7 @@ impl ServerList {
                 // Vanilla's own field name and tri-state shape — see
                 // `ServerPackPolicy`'s doc. Omitted (not written as `null`)
                 // for `Prompt`, matching `FIELD_CODEC`'s
-                // `optionalFieldOf("acceptTextures")`.
+                // optional field of.
                 if let Some(accept) = e.pack_status.accept_textures() {
                     obj.insert("acceptTextures".into(), accept.into());
                 }
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn pack_policy_defaults_to_prompt_and_round_trips_through_json() {
         // A freshly added entry is Prompt, matching a freshly added vanilla
-        // server (`ServerData.packStatus = ServerData.ServerPackStatus.PROMPT`).
+        // server (ServerData.packStatus = server data's server pack status's prompt).
         let entry = ServerEntry::new("Home", "mc.example.com", None);
         assert_eq!(entry.pack_status, ServerPackPolicy::Prompt);
 
@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn pack_policy_cycles_enabled_disabled_prompt_and_wraps() {
-        // Declaration order, vanilla's own `CycleButton` forward direction.
+        // Declaration order, vanilla's own cycle button forward direction.
         assert_eq!(ServerPackPolicy::Enabled.cycle(), ServerPackPolicy::Disabled);
         assert_eq!(ServerPackPolicy::Disabled.cycle(), ServerPackPolicy::Prompt);
         assert_eq!(ServerPackPolicy::Prompt.cycle(), ServerPackPolicy::Enabled);

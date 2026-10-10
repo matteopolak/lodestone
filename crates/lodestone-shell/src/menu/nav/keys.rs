@@ -49,7 +49,7 @@ impl MenuNav {
             // through to the catch-all below: that catch-all
             // routes Escape through `UiState::on_escape`, but the death
             // screen must swallow Escape entirely (vanilla's
-            // `shouldCloseOnEsc() == false`), which `key_death` does by
+            // `should_close_on_esc() == false`), which `key_death` does by
             // simply never calling `on_escape`.
             Screen::Death => self.key_death(ui, key),
             // The error screen has exactly one affordance — go back — reachable
@@ -147,14 +147,14 @@ impl MenuNav {
                     // A click landed on a present-but-disabled vanilla button
                     // (the mouse *can* highlight one — see `hover` — even though
                     // the keyboard steps over it). Vanilla's
-                    // `AbstractWidget.mouseClicked` returns false for an inactive
+                    // The abstract widget's mouse clicked returns false for an inactive
                     // widget, so nothing happens. Returning here rather than
                     // leaving the highlight where it was is what stops a click on
                     // Advancements activating whatever *used* to be selected.
                     return MenuAction::None;
                 }
                 match button {
-                    // Vanilla's `TitleScreen` opens `SelectWorldScreen` here; it
+                    // Vanilla's `TitleScreen` opens select world screen here; it
                     // does not start a world.
                     MainButton::Singleplayer => {
                         // `open_world_list`, not `ui.open_world_select()`: the save
@@ -164,7 +164,7 @@ impl MenuNav {
                     }
                     MainButton::Multiplayer => {
                         ui.open_server_list();
-                        // Vanilla builds a fresh `JoinMultiplayerScreen`
+                        // Vanilla builds a fresh join multiplayer screen
                         // (`scrollAmount` starts at 0) every time this is
                         // pressed; `clamp_server` below then re-derives the
                         // window from wherever `self.server` already points,
@@ -175,8 +175,8 @@ impl MenuNav {
                         MenuAction::Reprobe(None)
                     }
                     MainButton::Options => {
-                        // Vanilla builds a **new** `OptionsScreen` every time
-                        // (vanilla's own title-screen rendering's `setScreen(new OptionsScreen(…))`),
+                        // Vanilla builds a **new** options screen every time
+                        // (vanilla's own title-screen rendering's set screen),
                         // so re-entering Options never resumes three pages deep.
                         // Opened from the title, so `inWorld` is false — the
                         // root's Online button is live (`SettingsPage::Online`),
@@ -197,10 +197,10 @@ impl MenuNav {
                         crate::menu::accounts::open_in_browser(crate::menu::github::REPOSITORY_URL);
                         MenuAction::None
                     }
-                    // Vanilla constructs `LanguageSelectScreen`/
-                    // `AccessibilityOptionsScreen` directly from the title
+                    // Vanilla constructs language select screen/
+                    // The accessibility options screen directly from the title
                     //, with `lastScreen = this`
-                    // — never through `OptionsScreen`. `open_at` lands on the
+                    // — never through the options screen. `open_at` lands on the
                     // page with an empty stack so Escape/Done leaves straight
                     // back to the title (one Escape, not two through the root
                     // grid) — see `SettingsNav::open_at`'s own doc.
@@ -271,7 +271,7 @@ impl MenuNav {
                 ui.on_escape();
                 MenuAction::None
             }
-            // F5, `JoinMultiplayerScreen.keyPressed`'s `event.key() == 294`
+            // F5, the join multiplayer screen's key pressed's `event.key() == 294`
             // (`:231-239`). Every row, not the selected one: vanilla's refresh
             // replaces the whole screen.
             MenuKey::Refresh => MenuAction::RefreshList,
@@ -316,7 +316,7 @@ impl MenuNav {
         }
     }
 
-    /// Discards the form; the list is untouched. Vanilla's `CommonComponents.GUI_CANCEL`
+    /// Discards the form; the list is untouched. Vanilla's common components's gui cancel
     /// and Escape's own meaning on this
     /// screen ([`FormOutcome::Cancel`]) — shared by [`key_edit`](Self::key_edit)
     /// and [`Self::click`]'s [`CANCEL_ROW`] arm so the button and the key do
@@ -328,7 +328,7 @@ impl MenuNav {
 
     /// Validates and saves the form, exactly as `Enter` does
     /// ([`FormOutcome::Save`]) — shared with [`Self::click`]'s [`DONE_ROW`]
-    /// arm (vanilla's `CommonComponents.GUI_DONE`,
+    /// arm (vanilla's common components's gui done,
     /// vanilla's own manage-server screen rendering) for the same reason
     /// [`Self::cancel_edit`] is shared.
     pub(super) fn save_entry(&mut self, ui: &mut UiState) -> MenuAction {
@@ -378,14 +378,14 @@ impl MenuNav {
             return MenuAction::None;
         };
         match key {
-            // Vanilla's `AbstractCommandBlockEditScreen.keyPressed`: Escape
-            // is `Screen`'s own `shouldCloseOnEsc()` path (`:129`, unguarded —
+            // Vanilla's abstract command block edit screen's key pressed: Escape
+            // is `Screen`'s own should close on esc path (`:129`, unguarded —
             // unlike `Screen::Death`'s override), which is Cancel here.
             MenuKey::Escape => {
                 self.close_command_block(ui);
                 MenuAction::None
             }
-            // `event.isConfirmation() -> this.onDone()` (`:134-136`), reached
+            // `event.is_confirmation() -> this.on_done()` (`:134-136`), reached
             // only when the (currently always-empty, see the module doc)
             // suggestion list did not consume Enter first.
             MenuKey::Enter => self.activate_command_block_row(
@@ -405,7 +405,7 @@ impl MenuNav {
                 MenuAction::None
             }
             // Vanilla cycles the suggestion list with Tab/Up/Down
-            // (`CommandSuggestions.SuggestionsList.keyPressed`). This comment
+            // (the command suggestions's suggestions list.keyPressed). This comment
             // used to end "With no command tree ever reaching this client yet
             // … there is nothing to cycle" — true when written, stale since
             // The tree the server sent is in `self.command_tree`,
@@ -481,7 +481,7 @@ impl MenuNav {
                 MenuAction::None
             }
             CommandBlockRow::Done => {
-                // `populateAndSendPacket(); this.onClose();`
+                // `populate_and_send_packet(); this.on_close();`
                 // — vanilla sends first
                 // and closes second, and the order matters here for the same
                 // reason: `close_command_block` drops `self.command_block`, so
@@ -500,7 +500,7 @@ impl MenuNav {
     /// The sign-editing screen.
     ///
     /// Unlike [`Self::key_command_block`], Up/Down are **not** no-ops here —
-    /// vanilla's `AbstractSignEditScreen.keyPressed` uses them (plus Enter) to
+    /// vanilla's abstract sign edit screen's key pressed uses them (plus Enter) to
     /// switch which line is focused, and that is this screen's only keyboard
     /// navigation: there is no suggestion popup, no toggle row, nothing Tab
     /// would do. See [`sign_edit::SignEditState::next_line`]/[`previous_line`
@@ -510,7 +510,7 @@ impl MenuNav {
             return MenuAction::None;
         };
         match key {
-            // `onClose()` → `onDone()` → `removed()`, which sends
+            // on close → on done → `removed()`, which sends
             // unconditionally — see the module
             // doc on why this screen has no Cancel that skips the send.
             MenuKey::Escape => {
@@ -523,7 +523,7 @@ impl MenuNav {
                 state.previous_line();
                 MenuAction::None
             }
-            // `event.isDown() || event.isConfirmation()`: Enter behaves exactly
+            // `event.is_down() || event.is_confirmation()`: Enter behaves exactly
             // like Down here — it does **not** activate Done. Only a real click
             // on the Done row (or Escape) closes this screen.
             MenuKey::Down | MenuKey::Enter => {
@@ -582,7 +582,7 @@ impl MenuNav {
     /// no Tab traversal is needed because neither layout has more than one
     /// focusable field (see [`book_edit::BookEditState::handle_key`]'s own
     /// doc). Enter inserts a newline in the page rather than acting as
-    /// "Done" — vanilla's `MultilineTextField.keyPressed`'s `case 257` — and
+    /// "Done" — vanilla's multiline text field's key pressed's `case 257` — and
     /// does nothing while signing (there is no multi-line field there to
     /// insert into; Finalize is a click-only affordance, like `SignEdit`'s
     /// own Done).
@@ -702,7 +702,7 @@ impl MenuNav {
     /// this screen to type into.
     ///
     /// **Up/Down are an approximation, and the divergence is named rather
-    /// than hidden**: `BookViewScreen.keyPressed` binds GLFW `266`/`267` —
+    /// than hidden**: the book view screen's key pressed binds GLFW `266`/`267` —
     /// Page Up and Page Down — to the back and forward buttons, and
     /// [`MenuKey`] carries no variant for either. (Left/Right/Home/End used
     /// to be the same gap and no longer are — they travel as
@@ -780,7 +780,7 @@ impl MenuNav {
     /// The two page rows are guarded on the state's own
     /// `can_page_back`/`can_page_forward` rather than only on the frame's
     /// `enabled` flag, so a click that arrives against a stale frame cannot
-    /// walk off either end — `BookViewScreen` achieves the same by hiding
+    /// walk off either end — the book view screen achieves the same by hiding
     /// the buttons outright (`updateButtonVisibility`).
     pub(super) fn activate_book_view_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         let Some(state) = self.book_view.as_mut() else {
@@ -845,7 +845,7 @@ impl MenuNav {
         use crate::menu::world_select::WorldSelectOutcome;
         match outcome {
             WorldSelectOutcome::Handled => MenuAction::None,
-            // Vanilla's `onClose()`/Back: `setScreen(this.lastScreen)`, the title.
+            // Vanilla's on close/Back: set screen, the title.
             WorldSelectOutcome::Close => {
                 ui.close_world_select();
                 MenuAction::None
@@ -901,7 +901,7 @@ impl MenuNav {
 
     /// The confirmation screen. Every key goes through
     /// [`crate::menu::confirm::ConfirmNav::handle_key`], which is vanilla's
-    /// `ConfirmScreen.keyPressed` order — including its Escape branch, which is
+    /// The confirm screen's key pressed order — including its Escape branch, which is
     /// `callback.accept(false)` rather than `onClose`.
     pub(super) fn key_confirm(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = self.confirm.handle_key(key);
@@ -916,7 +916,7 @@ impl MenuNav {
     /// somewhere a folder name has been carried to.
     ///
     /// Both answers `close_confirm` **and re-read the list** —
-    /// `WorldSelectionList.deleteWorld`'s callback calls `returnToScreen()`
+    /// The world selection list's delete world's callback calls return to screen
     /// outside its own `if (result)` — so the
     /// screen the player lands on always reflects the disk rather than what was
     /// enumerated before the confirmation opened. That matters even for a cancel:
@@ -949,7 +949,7 @@ impl MenuNav {
                 ui.close_confirm();
                 self.refresh_world_list(ui);
                 // Reported over a screen the player recognises rather than
-                // swallowed — vanilla logs it and raises `SystemToast
+                // swallowed — vanilla logs it and raises system toast
                 // .onWorldDeleteFailure`, and
                 // this shell has no toast layer, so the world list's own error
                 // line is where it goes (the same place a failed create goes).

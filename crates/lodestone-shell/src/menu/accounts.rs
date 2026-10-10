@@ -73,7 +73,7 @@
 //! door and it guarantees the old name stays live when it refuses, so a rejected
 //! edit shows [`crate::offline_identity::NameError`]'s own `Display` and keeps
 //! the field open. Re-deriving the rule locally would be a second copy of
-//! vanilla's `StringUtil.isValidPlayerName` to drift from the server's.
+//! vanilla's string util's is valid player name to drift from the server's.
 //!
 //! ## Credentials never touch this screen
 //!
@@ -230,7 +230,7 @@ struct State {
     /// — matching the server list's own letter-command buttons, which have
     /// no visual focus state at all today.
     focus: usize,
-    /// The list's scroll offset, in **logical pixels** — `AbstractScrollArea`'s
+    /// The list's scroll offset, in **logical pixels** — the abstract scroll area's
     /// `scrollAmount`, exactly as [`super::nav::MenuNav::server_scroll`] carries
     /// the multiplayer list's.
     ///
@@ -356,7 +356,7 @@ pub const NAME_EDIT_FIELD_ROW: usize = 0;
 pub const NAME_EDIT_DONE_ROW: usize = 1;
 
 /// The longest offline name a server will accept — vanilla's
-/// `StringUtil.isValidPlayerName` cap, the same 16 `char`s
+/// The string util's is valid player name cap, the same 16 `char`s
 /// [`crate::offline_identity::validate_username`] enforces.
 ///
 /// Set on the [`EditBox`] as well as checked on commit, and the duplication is
@@ -564,7 +564,7 @@ impl AccountsNav {
     }
 
     /// Scroll the list by `notches` of mouse wheel, at a `canvas_height`-tall
-    /// canvas — vanilla's `AbstractScrollArea::mouseScrolled`.
+    /// canvas — vanilla's abstract scroll area's mouse scrolled.
     ///
     /// Delegates to [`super::widget::ScrollList::mouse_scrolled`] through
     /// [`super::render::accounts_list_spec`], the *same* expression the scrollbar
@@ -713,7 +713,7 @@ impl AccountsNav {
     /// silently re-aim Select and Remove at whatever the cursor last passed
     /// over — the reported bug that `hovering_an_account_does_not_change_what_select_acts_on`
     /// guards. A click is the opposite: vanilla's
-    /// `AbstractSelectionList.mouseClicked` ends in `setSelected`, so a click
+    /// The abstract selection list's mouse clicked ends in `setSelected`, so a click
     /// *is* how the cursor moves. Leaving `highlighted` behind here would aim
     /// Remove at the keyboard's last row while the click visibly moved the
     /// highlight somewhere else.
@@ -832,7 +832,7 @@ impl AccountsNav {
             MenuKey::Enter => {
                 if st.focus < list_len {
                     let logical = st.focus;
-                    // A click **does** select — `AbstractSelectionList.mouseClicked`
+                    // A click **does** select — the abstract selection list's mouse clicked
                     // ends in `setSelected` (vanilla's own object-selection list plus
                     // its own abstract selection-list base). Only *hover* does not.
                     //
@@ -995,7 +995,7 @@ fn third_button(st: &State) -> ThirdButton {
 /// edit is a change to an existing name rather than a fresh one.
 fn begin_name_edit(st: &mut State) {
     // Geometry is a placeholder: `draw_edit_box` repositions its clone into the
-    // row's `Slot` before reading any of it (`OptionsSubScreen.init`'s
+    // row's `Slot` before reading any of it (the options sub screen's init's
     // build-then-reposition order), so seeding real numbers here would be a
     // second, unread source of truth for the field's rect.
     let mut edit = EditBox::default_sized("Offline name");
@@ -1126,7 +1126,7 @@ fn list_len(st: &State) -> usize {
 }
 
 /// Keep [`State::highlighted`] inside the scrolled band — vanilla's
-/// `AbstractSelectionList.scrollToEntry` (`:251-261`).
+/// The abstract selection list's scroll to entry (`:251-261`).
 ///
 /// **Delegates to [`super::widget::ScrollList::scroll_to_entry`] rather than
 /// restating the clamp**, which is what makes an arrow press move the minimum

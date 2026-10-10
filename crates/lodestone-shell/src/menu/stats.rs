@@ -54,7 +54,7 @@
 //!
 //! Flat rows, no header-padding rule — the same departure
 //! [`super::key_binds`] and [`super::social`] already make for their own
-//! non-`OptionsList` screens, reusing [`super::options`]'s footer primitives
+//! non-the options list screens, reusing [`super::options`]'s footer primitives
 //! rather than a fourth reimplementation of the same arithmetic.
 
 use super::layout;

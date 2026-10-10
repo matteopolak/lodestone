@@ -97,7 +97,7 @@ fn detaching_returns_the_lead_unless_creative() {
 }
 
 /// One player cannot steal another's already-leashed mob just by
-/// holding a lead — vanilla's `!(leashable.getLeashHolder() instanceof
+/// holding a lead — vanilla's `!(leashable.get_leash_holder() instanceof
 /// Player)` guard.
 #[test]
 fn a_different_players_lead_cannot_steal_an_already_leashed_mob() {

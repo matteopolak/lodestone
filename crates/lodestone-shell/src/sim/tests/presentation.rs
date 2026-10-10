@@ -127,7 +127,7 @@ fn a_healthy_live_session_never_fires_the_id_space_diagnostic() {
 }
 
 /// The discriminating gate for the vanilla `yBodyRot`/`yHeadRot` split
-/// (`LivingEntity.tickHeadTurn`): looking around while standing still must
+/// (the living entity's tick head turn): looking around while standing still must
 /// **not** turn the third-person body until the head exceeds `50°` relative
 /// to it (`Player.getMaxHeadRotationRelativeToBody`'s default), and once it
 /// does, the body must snap so the head sits at *exactly* that clamp — not
@@ -169,7 +169,7 @@ fn body_yaw_holds_still_within_the_clamp_and_snaps_once_it_is_exceeded() {
             // tick_head_turn: no movement candidate, so the 0.3 catch-up
             // term is a no-op (target == body_yaw); the clamp then bumps
             // body_yaw by (90 - 50) = 40 so the head sits exactly at the
-            // 50° boundary. Derived from `LivingEntity.tickHeadTurn`, not
+            // 50° boundary. Derived from the living entity's tick head turn, not
             // guessed.
             expected_body_delta: 40.0,
             expected_head_relative: 50.0,
@@ -210,7 +210,7 @@ fn body_yaw_holds_still_within_the_clamp_and_snaps_once_it_is_exceeded() {
     );
 }
 
-/// The movement-direction clause `LivingEntity.tick` feeds `tickHeadTurn`'s
+/// The movement-direction clause living entity's tick feeds `tickHeadTurn`'s
 /// candidate: while the feet are moving, the body eases toward the
 /// *walking* direction rather than the look direction. Strafing
 /// perpendicular to a fixed look yaw is the case that discriminates this

@@ -52,13 +52,13 @@ use lodestone_model::event::{TrackedWaypoint, WaypointId, WaypointPosition};
 /// dot draws, per the module doc's "what this does not model".
 pub const DEFAULT_DOT_SPRITE: &str = "hud/locator_bar_dot/default";
 
-/// `ContextualBar::VISIBLE_DEGREE_RANGE` / `LocatorBar::DOT_SIZE`'s siblings.
+/// The contextual bar's visible degree range / locator bar's dot size's siblings.
 const VISIBLE_DEGREE_RANGE: f32 = 60.0;
 const DOT_SIZE: i32 = 9;
 
 /// One dot's screen position (an offset in pixels from the bar's own
 /// horizontal centre, matching `screenMiddle + dotPosition` in
-/// `LocatorBar.extractRenderState`) and colour.
+/// The locator bar's extract render state) and colour.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LocatorDot {
     /// Pixels from the bar's centre column — negative is left, positive is
@@ -70,7 +70,7 @@ pub struct LocatorDot {
     pub color: [f32; 4],
 }
 
-/// `Mth.wrapDegrees(float)` — wrap to `(-180, 180]`.
+/// Mth's wrap degrees — wrap to `(-180, 180]`.
 fn wrap_degrees(angle: f32) -> f32 {
     let mut normalized = angle % 360.0;
     if normalized >= 180.0 {
@@ -82,16 +82,16 @@ fn wrap_degrees(angle: f32) -> f32 {
     normalized
 }
 
-/// `TrackedWaypoint::yawAngleToCamera`, for the three position kinds that
+/// TrackedWaypoint's yaw angle to camera, for the three position kinds that
 /// carry a direction at all — `None` for [`WaypointPosition::Empty`], which
-/// vanilla's own `EmptyWaypoint` answers with `NaN` and which this port
+/// vanilla's own empty waypoint answers with `NaN` and which this port
 /// instead declines to emit at all (see the module doc's "what this does
 /// not model" — a `NaN`-driven vanilla edge case, not a feature).
 ///
 /// `camera_pos`/`target` are world coordinates; the block-centre offset
-/// (`+0.5`) matches vanilla's own at-center-of helper, and the `Vec3iWaypoint` variant's
+/// (`+0.5`) matches vanilla's own at-center-of helper, and the vec3i waypoint variant's
 /// short-range "is this an entity's own eye position" branch
-/// (vanilla's own tracked-waypoint declarations' `Vec3iWaypoint::position`) is not reproduced —
+/// (vanilla's own tracked-waypoint declarations' vec3i waypoint's position) is not reproduced —
 /// this always aims at the reported block position, which is exact for
 /// every non-entity waypoint and correct for an entity one to within its
 /// own last-reported position.
@@ -112,7 +112,7 @@ fn yaw_angle_to_camera(
             direction_angle_deg(camera_pos - target)
         }
         WaypointPosition::Chunk(chunk) => {
-            // `ChunkWaypoint::position(positionY)` ->
+            // The chunk waypoint's position ->
             // vanilla's own at-center-of helper applied to the chunk position's
             // own middle-block-position accessor at `(int) positionY`:
             // the chunk's centre **block**, `+0.5` on every axis including Y,
@@ -130,7 +130,7 @@ fn yaw_angle_to_camera(
     Some(wrap_degrees(waypoint_angle_deg - camera_yaw))
 }
 
-/// `Vec3::rotateClockwise90` (`(x, y, z) -> (-z, y, x)`) followed by
+/// Vec3's rotate clockwise 90 (`(x, y, z) -> (-z, y, x)`) followed by
 /// `atan2(rotated.z, rotated.x)` in degrees — `rotated.z == direction.x` and
 /// `rotated.x == -direction.z`, so this is `atan2(direction.x, -direction.z)`
 /// written out rather than through an intermediate rotated vector, since
@@ -192,7 +192,7 @@ fn hash_color(id: &WaypointId) -> [f32; 4] {
 ///
 /// `local_id` excludes the camera-entity's own waypoint
 /// (vanilla's own locator-bar rendering's `!waypoint.id().left().map(uuid ->
-/// uuid.equals(cameraEntity.getUUID()))` check) — `None` when the local
+/// uuid.equals(camera entity's get uuid))` check) — `None` when the local
 /// player has no known waypoint identity (the common case: vanilla only
 /// tracks a waypoint for a player carrying specific items, and this build
 /// does not resolve the local player's own UUID into a
@@ -230,7 +230,7 @@ pub fn locator_dots<'a>(
         .collect()
 }
 
-/// The dot sprite's native size — `LocatorBar::DOT_SIZE`, both axes.
+/// The dot sprite's native size — the locator bar's dot size, both axes.
 #[must_use]
 pub const fn dot_size() -> i32 {
     DOT_SIZE
@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// [`WaypointPosition::Empty`] must never draw — vanilla's own
-    /// `EmptyWaypoint::yawAngleToCamera` returns `NaN`, which happens to
+    /// The empty waypoint's yaw angle to camera returns `NaN`, which happens to
     /// satisfy vanilla's clip check by accident (a `NaN` comparison is
     /// always false, so `!(NaN <= -60) && !(NaN > 60)` is `true`); this port
     /// declines up front instead, per the module doc.

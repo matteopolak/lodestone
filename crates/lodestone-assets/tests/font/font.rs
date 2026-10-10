@@ -277,7 +277,7 @@ fn first_declared_provider_wins_on_overlap() {
 /// deliberately different advances (bitmap 3, space 40 -- equal advances
 /// cannot distinguish "the right provider won" from "the right *value*
 /// happened to come out"). Declaration order is what vanilla's
-/// `FontManager`'s double-reversal composes down to (the reversal exists to
+/// font manager's double-reversal composes down to (the reversal exists to
 /// make cross-*pack* priority work while preserving each pack's own JSON
 /// order, not to bias one provider *type* over another) -- so the earlier
 /// declaration wins here regardless of its kind, exactly as the previous

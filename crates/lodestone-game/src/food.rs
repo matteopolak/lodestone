@@ -66,7 +66,7 @@ pub fn always_eat_for_food(item: &str) -> Option<bool> {
 }
 
 /// Vanilla's own can-eat check — `abilities.invulnerable || canAlwaysEat ||
-/// foodData.needsFood()`, where `needsFood()` is `foodLevel < 20`. Mirrors
+/// foodData.needs_food()`, where needs food is `foodLevel < 20`. Mirrors
 /// `lodestone_server::item_use::can_eat` so a client prediction of "am I
 /// about to eat" agrees with what the server will actually accept.
 #[must_use]

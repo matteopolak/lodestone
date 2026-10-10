@@ -693,7 +693,7 @@ async fn past_the_hosted_capacity_cap_the_view_cannot_stay_resident() {
 fn the_default_render_distance_is_under_the_old_ceiling_on_both_arms() {
     /// `crates/lodestone-shell/src/config.rs`'s `DEFAULT_RENDER_DISTANCE`.
     const DEFAULT_RENDER_DISTANCE: i32 = 8;
-    /// The shell serves `render_distance + 1` — vanilla's `ChunkTrackingView`
+    /// The shell serves `render_distance + 1` — vanilla's chunk tracking view
     /// buffer ring (`crates/lodestone-shell/src/app/session.rs`).
     const SERVED: i32 = DEFAULT_RENDER_DISTANCE + 1;
 

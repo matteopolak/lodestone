@@ -6,11 +6,11 @@ use super::{
 /// The conduit's eye — vanilla's own conduit-renderer eye-layer construction:
 ///
 /// ```text
-/// eye  texOffs(0, 0)  addBox(-4, -4, 0,  8, 8, 0, CubeDeformation(0.01F))  pose ZERO
+/// eye  tex offset (0, 0)  box (-4, -4, 0,  8, 8, 0) grown by 0.01  pose ZERO
 /// ```
 ///
 /// A near-planar box: zero depth grown by `0.01` texels on every axis by the
-/// deformation, matching vanilla's own `CubeDeformation` rather than a hand
+/// deformation, matching vanilla's own grow rather than a hand
 /// wave at "basically a quad". This is the part vanilla's own conduit-renderer
 /// submit step
 /// billboards toward the camera and re-skins between `open_eye`/`closed_eye`
@@ -93,7 +93,7 @@ pub fn conduit_shell_model() -> EntityModelDef {
 /// ```
 ///
 /// Named `"shell"` in the jar too (vanilla's own cage-layer construction also calls
-/// `addOrReplaceChild("shell", …)`) — the two are still separate *models*
+/// add or replace child) — the two are still separate *models*
 /// here (`conduit_shell` vs `conduit_cage`), each its own
 /// [`BlockEntityModelEntry`] with its own sheet, since a real client never
 /// draws both in the same frame (vanilla's own conduit-renderer submit step

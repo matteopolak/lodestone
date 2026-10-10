@@ -84,7 +84,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     });
 
     // `/worldborder center <x> <z>` — see the module doc for why this is two
-    // chained doubles rather than one `Vec2Argument`-shaped node.
+    // chained doubles rather than one vec2 argument-shaped node.
     let center = registrar.literal(worldborder, "center");
     let (center_x_node, center_x_key) = registrar.arg(center, "x", DoubleArgument::new());
     let (center_z_node, center_z_key) = registrar.arg(center_x_node, "z", DoubleArgument::new());

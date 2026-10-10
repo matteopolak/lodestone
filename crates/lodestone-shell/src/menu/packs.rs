@@ -1,4 +1,4 @@
-//! The Resource Packs screen — vanilla's `PackSelectionScreen`.
+//! The Resource Packs screen — vanilla's pack selection screen.
 //!
 //! ## What it is
 //!
@@ -47,7 +47,7 @@
 //! [`super::render::MenuRow::pack`] routes it to `draw_pack_entry`, which draws
 //! the 32×32 `pack.png` thumbnail (or vanilla's own `unknown_pack` fallback), the
 //! name, up to two grey description lines and the `transferable_list/select`
-//! overlay — `TransferableSelectionList.PackEntry.extractContent`'s shape, with
+//! overlay — the transferable selection list's pack entry.extract_content's shape, with
 //! that function's doc naming the three departures.
 //!
 //! It was a button for one release, and worth recording *why* nothing caught it:
@@ -71,7 +71,7 @@
 //!   old pack loads and its stale paths silently resolve to nothing.
 //! - **A search box** and the **drag-and-drop-file hint** (`pack.dropInfo`).
 //!   The hint would advertise a file-drop handler that does not exist; the
-//!   header stays the generic 33 px `OptionsSubScreen` band rather than
+//!   header stays the generic 33 px options sub screen band rather than
 //!   vanilla's taller one because neither line is drawn.
 //! - **A scrollbar.** Both lists share one vertical band, and
 //!   [`list_spec`] declares it so the rows get clipped to it
@@ -97,12 +97,12 @@
 //!   through [`options::footer_rects`].
 //! - The two lists: `width/2 - 15 - 200` and `width/2 + 15`, each 200 px wide,
 //!   at the header's bottom. Row geometry:
-//!   `TransferableSelectionList::getRowWidth() = width - 4` (`:44-46`), item
+//!   The transferable selection list's get row width = width - 4 (`:44-46`), item
 //!   height 36, and the underlined header entry's `(int)(9.0F * 1.5F) = 13`
 //!   (`:59-60`, Java's truncating cast).
 //! - The per-row move buttons are **this client's shape, not vanilla's**:
 //!   vanilla draws hover-revealed 32 px sprite zones over the pack icon's two
-//!   right quadrants (`TransferableSelectionList.PackEntry.extractContent`,
+//!   right quadrants (the transferable selection list's pack entry.extract_content,
 //!   `:187-209`). Two right-anchored square buttons per row is
 //!   [`super::key_binds`]'s existing row shape, which this pipeline already draws
 //!   and hit-tests, and is recorded here rather than presented as transcribed.
@@ -199,17 +199,17 @@ impl PackRow {
 
 // -- geometry, transcribed (see the module docs) -----------------------------
 
-/// `TransferableSelectionList`'s per-list width.
+/// The transferable selection list's per-list width.
 pub const LIST_W: f32 = 200.0;
 /// The gap between each list's inner edge and the screen's centre —
 /// `this.width / 2 - 15 - 200` / `this.width / 2 + 15` (`:165,169`).
 pub const LIST_GAP: f32 = 15.0;
-/// `TransferableSelectionList::getRowWidth() = this.width - 4` (`:44-46`).
+/// The transferable selection list's get row width = this.width - 4 (`:44-46`).
 pub const ROW_W: f32 = LIST_W - 4.0;
 /// The header ("Available"/"Selected") entry height: Java's truncating
 /// `(int)(9.0F * 1.5F)` (`:59-60`).
 pub const HEADER_ROW_H: f32 = 13.0;
-/// A pack row's height — `ObjectSelectionList`'s `itemHeight` (`:38`).
+/// A pack row's height — the object selection list's `itemHeight` (`:38`).
 pub const ROW_H: f32 = 36.0;
 /// Side of a per-row move button — see the module docs on why this shape is
 /// this client's rather than vanilla's.
@@ -437,7 +437,7 @@ impl PacksNav {
     /// Rescans the packs folder and re-derives both columns from the persisted
     /// order — called from [`super::options::SettingsNav::activate`] whenever
     /// the page is entered, which is also vanilla's cadence (a new screen over
-    /// a freshly reloaded `PackRepository` each time).
+    /// a freshly reloaded pack repository each time).
     pub fn reset(&mut self) {
         let discovered = discover();
         let order = crate::resources::selected_packs();
@@ -699,7 +699,7 @@ impl PacksNav {
 
     /// Whether a control can be activated. A move button at an order boundary
     /// is inactive — vanilla's own guard on its move arrows
-    /// (`TransferableSelectionList.Entry`'s `canMoveUp`/`canMoveDown`).
+    /// (the transferable selection list's entry's `canMoveUp`/`canMoveDown`).
     #[must_use]
     pub fn is_live(&self, control: PacksControl) -> bool {
         match control {
@@ -749,7 +749,7 @@ impl PacksNav {
     /// followed the mouse and the keyboard focus went with it. The multiplayer
     /// list already had this right — `nav::MenuNav::hover_list` records nothing
     /// for a server row, for the same reason, after a player reported the same
-    /// symptom there. Vanilla reaches `AbstractSelectionList.setSelected` only
+    /// symptom there. Vanilla reaches abstract selection list's set selected only
     /// from `setFocused` and the click paths, never from hover.
     ///
     /// The row's hover *visuals* need no state: `draw_pack_entry` resolves the
@@ -817,8 +817,8 @@ impl PacksNav {
         }
     }
 
-    /// Escape: leave the page — `Screen.shouldCloseOnEsc` plus
-    /// `OptionsSubScreen.onClose`, the same as every settings sub-screen. The
+    /// Escape: leave the page — Screen's should close on esc plus
+    /// The options sub screen's on close, the same as every settings sub-screen. The
     /// order is committed either way (vanilla's `onClose` reloads too), so
     /// Escape is not a cancel.
     pub fn escape(&mut self) -> PacksOutcome {
@@ -828,7 +828,7 @@ impl PacksNav {
     /// Moves the pack at `row` of `from` into the other column.
     ///
     /// A newly selected pack goes to the **top** of Selected — vanilla's
-    /// `FolderRepositorySource.DISCOVERED_PACK_SELECTION_CONFIG`, whose default
+    /// The folder repository source's discovered pack selection config, whose default
     /// position is `Pack.Position.TOP` — i.e. it wins over everything already
     /// there, which is what a player who just enabled a pack expects to see.
     fn transfer(&mut self, from: PackList, row: usize) {
@@ -930,8 +930,8 @@ impl PacksNav {
 /// Installs this screen's order into the live pack stack and persists it.
 ///
 /// Called from [`super::nav::MenuNav`]'s `apply_packs` on the way out, which is
-/// vanilla's cadence: `PackSelectionScreen.onClose` commits the model and calls
-/// `minecraft.reloadResourcePacks()`. `set_selected_packs` bumps
+/// vanilla's cadence: the pack selection screen's on close commits the model and calls
+/// minecraft's reload resource packs. `set_selected_packs` bumps
 /// `crate::resources::pack_generation`, which `Sim::reload_resource_pack_atlas`
 /// polls once per presented frame — so on a live world the atlas, the mesh
 /// worker pool and every loaded column's geometry catch up within a frame or
@@ -1016,7 +1016,7 @@ pub fn frame(nav: &PacksNav) -> MenuFrame<'static> {
                         entry.description.clone(),
                         entry.icon.clone(),
                         Some(PackEntryView {
-                            // `canSelect()`/`canUnselect()`: an Available row can
+                            // can select/can unselect: an Available row can
                             // be selected, a Selected row unselected — except the
                             // built-in one, which is neither and therefore draws
                             // no hover overlay at all, as vanilla's does not.
@@ -1104,15 +1104,15 @@ pub fn frame(nav: &PacksNav) -> MenuFrame<'static> {
 ///
 /// ## This is a deliberate divergence, not a port
 ///
-/// **Vanilla's `PackSelectionScreen` has no empty state.** Its two lists render
+/// **Vanilla's pack selection screen has no empty state.** Its two lists render
 /// nothing when they have no children, and there is no `pack.*` translation key
 /// for one — `pack.dropInfo` ("Drag and drop files into this window to add
-/// packs") is a `StringWidget` in the header that vanilla draws *unconditionally*,
+/// packs") is a string widget in the header that vanilla draws *unconditionally*,
 /// and `pack.folderInfo` ("(Place pack files here)") is the Open Pack Folder
 /// button's tooltip. Vanilla gets away with it because the built-in pack always
 /// occupies Selected, so the screen never looks wholly blank; this client's
 /// owner asked for one anyway, which is the same shape as
-/// [`super::world_select`]'s recorded deviation over `CreateWorldScreen` — a
+/// [`super::world_select`]'s recorded deviation over the create world screen — a
 /// changed label with the reason written down, rather than a silent port.
 ///
 /// ## Two different truths, and neither is "you have no packs"

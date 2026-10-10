@@ -376,7 +376,7 @@ impl TextArea {
         !c.is_whitespace()
     }
 
-    /// `getPreviousWord()`.
+    /// get previous word.
     #[must_use]
     pub fn previous_word(&self) -> StringView {
         if self.value.is_empty() {
@@ -393,7 +393,7 @@ impl TextArea {
         StringView { begin: start, end: word_end(&chars, start) }
     }
 
-    /// `getNextWord()`.
+    /// get next word.
     #[must_use]
     pub fn next_word(&self) -> StringView {
         if self.value.is_empty() {

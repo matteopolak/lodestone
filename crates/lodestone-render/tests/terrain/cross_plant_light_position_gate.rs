@@ -3,7 +3,7 @@
 //!
 //! # The defect
 //!
-//! Vanilla's `ModelBlockRenderer`/`BlockModelLighter` samples a quad's light
+//! Vanilla's block-renderer lighting samples a quad's light
 //! from **the neighbour the quad's `cullface` opens into** if it has one, or
 //! from **the neighbour in `quad.direction()`** only when the quad's plane is
 //! flush with the block boundary (`faceCubic`, vanilla's decompiled block-model-lighter source:
@@ -281,11 +281,11 @@ fn the_falsifiable_prediction_all_four_quads_bake_to_north_or_south() {
 /// not the north neighbour's (`0x00`).
 ///
 /// **Expected value's origin, outside this crate:**
-/// `BlockModelLighter`'s own decompiled source says the sample cell is `pos` when
-/// `faceCubic` is false; `:268`'s `NORTH` arm needs `minZ == maxZ`, which
+/// the block-model lighter's source says the sample cell is `pos` when
+/// the face-cubic flag is false; the NORTH arm needs `minZ == maxZ`, which
 /// `cross.json`'s `"angle": 45` rotation makes false; and
-/// `ModelBlockRenderer`'s own decompiled source plus `"ambientocclusion": false` selects
-/// `tesselateFlat`, whose unculled bucket passes `CHECK_LIGHT` (`-1`). The
+/// the model block renderer's source plus `"ambientocclusion": false` selects
+/// the flat tessellation, whose unculled bucket passes CHECK_LIGHT (`-1`). The
 /// plant's own cell is `0xF0` by this view's construction, so vanilla's
 /// answer is `0xF0` for all 16 vertices.
 ///

@@ -185,7 +185,7 @@ pub(super) fn apply_container_clicked<P: ServerProtocol>(
         creative,
         Some(&recipe),
         // `Player`/`Container`/`CraftingTable` layouts have no `mayPickup`
-        // override anywhere in vanilla — only `ItemCombinerMenu`'s result
+        // override anywhere in vanilla — only the item combiner menu's result
         // slot does, and that shape is handled by `apply_workstation_clicked`
         // above, never reaching here.
         None,
@@ -576,7 +576,7 @@ pub(super) fn apply_enchanting_clicked<P: ServerProtocol>(
 /// further — the real packet does not carry one either).
 ///
 /// Returns the directives to resend (the refreshed content, then the
-/// `cost` data slot — vanilla's own anvil-menu single `DataSlot`) once the rename
+/// `cost` data slot — vanilla's own anvil-menu single data slot) once the rename
 /// actually changed something; `Vec::new()` for a rejected/no-op rename or
 /// when no anvil is open, matching `setItemName`'s own `validatedName !=
 /// this.itemName` early return.
@@ -666,7 +666,7 @@ pub(super) fn apply_edit_book(
 /// [`ServerBound::SetBeacon`]'s consumer — vanilla's own beacon-menu
 /// update-effects routine, reached the same way its own set-beacon-packet handler gates it: only while a
 /// beacon is currently open (vanilla's own `containerMenu instanceof
-/// BeaconMenu` check).
+/// The beacon menu check).
 ///
 /// `levels` is **not** re-derived here — vanilla's own beacon-menu levels getter reads the
 /// block entity's own tracked field, last refreshed when the menu opened
@@ -865,7 +865,7 @@ pub(super) fn apply_lectern_button_click<P: ServerProtocol>(
 /// `fresh_seed` is a pre-drawn `[0, i32::MAX)` roll from the caller's own
 /// `SpawnRng` — the same "pre-drawn value" shape `apply_use_item_on`'s
 /// composter `roll` already uses — only consumed when the enchant actually
-/// succeeds, matching vanilla's own on-enchantment-performed routine's own reroll.
+/// succeeds, matching vanilla's on-enchantment-performed routine's reroll.
 ///
 /// Returns the directives to send (the XP update, if any levels were spent,
 /// then the refreshed menu content) or `Vec::new()` when the click is

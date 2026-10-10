@@ -1,5 +1,5 @@
 //! The loom (station half): a real, server-computed banner
-//! pattern list and result — `LoomMenu`'s own `getSelectablePatterns` /
+//! pattern list and result — the loom menu's own `getSelectablePatterns` /
 //! `setupResultSlot`.
 //!
 //! # What it is
@@ -9,7 +9,7 @@
 //! `#minecraft:no_item_required` (the base grid drawn in the UI); a pattern
 //! *item* in that slot offers exactly the one pattern its own
 //! `minecraft:provides_banner_patterns` component names — and vanilla
-//! auto-selects that single option (`LoomMenu.slotsChanged`'s
+//! auto-selects that single option (the loom menu's slots changed's
 //! `selectablePatterns.size() == 1` branch) without needing a button click
 //! at all, which is why applying a pattern item to a banner+dye pair works
 //! today with no `ContainerButtonClick` support built anywhere in this
@@ -51,8 +51,8 @@
 
 use lodestone_model::{BannerPatternLayer, ItemStack};
 
-/// A banner's own real cap — `BannerBlockEntity`'s pattern list is capped at
-/// six layers (`hasMaxPatterns` in `LoomMenu.slotsChanged`).
+/// A banner's own real cap — the banner block entity's pattern list is capped at
+/// six layers (`hasMaxPatterns` in the loom menu's slots changed).
 const MAX_BANNER_PATTERNS: usize = 6;
 
 /// `tags/banner_pattern/pattern_item/*.json`, one row per file — `(pattern
@@ -108,13 +108,13 @@ const BASE_PATTERNS: &[&str] = &[
     "gradient_up",
 ];
 
-/// `BannerItem` — `LoomMenu`'s `bannerSlot.mayPlace`.
+/// The banner item — the loom menu's `bannerSlot.mayPlace`.
 #[must_use]
 pub fn is_banner_item(item: &str) -> bool {
     item.strip_prefix("minecraft:").is_some_and(|rest| rest.ends_with("_banner"))
 }
 
-/// `LoomMenu.isDyeItem` — `ItemTags.LOOM_DYES` plus a `DYE` component, which
+/// The loom menu's is dye item — the item tags's loom dyes plus a `DYE` component, which
 /// in this crate's data is the same `*_dye` suffix convention every dye item
 /// already follows.
 #[must_use]
@@ -122,7 +122,7 @@ pub fn is_dye_item(item: &str) -> bool {
     item.strip_prefix("minecraft:").is_some_and(|rest| rest.ends_with("_dye"))
 }
 
-/// `LoomMenu.isPatternItem` — a [`PATTERN_ITEMS`] member.
+/// The loom menu's is pattern item — a [`PATTERN_ITEMS`] member.
 #[must_use]
 pub fn is_pattern_item(item: &str) -> bool {
     let bare = item.strip_prefix("minecraft:").unwrap_or(item);
@@ -137,7 +137,7 @@ fn dye_color(item: &str) -> Option<String> {
     Some(item.strip_prefix("minecraft:")?.strip_suffix("_dye")?.to_owned())
 }
 
-/// `LoomMenu.getSelectablePatterns`: the pattern-item slot's single granted
+/// The loom menu's get selectable patterns: the pattern-item slot's single granted
 /// pattern, or the 32-pattern base grid when the slot is empty, or nothing
 /// for an item this crate does not recognise as a pattern item (vanilla's
 /// own `mayPlace` would already have refused it into the slot). Returns an
@@ -167,7 +167,7 @@ pub fn selectable_pattern_count(pattern_item: Option<&ItemStack>) -> usize {
 }
 
 /// The loom's result slot: `banner` with one new pattern layer applied, or
-/// `None` if the inputs cannot produce one — `LoomMenu.setupResultSlot`
+/// `None` if the inputs cannot produce one — the loom menu's setup result slot
 /// folded with `slotsChanged`'s own auto-select branch.
 ///
 /// `selected` is consulted only when [`selectable_patterns`] offers more
@@ -216,7 +216,7 @@ mod tests {
     }
 
     /// A specific pattern *item* auto-selects its own one pattern —
-    /// `LoomMenu.slotsChanged`'s `selectablePatterns.size() == 1` branch —
+    /// The loom menu's slots changed's `selectablePatterns.size() == 1` branch —
     /// with `selected` left `None`, proving the common case needs no
     /// `ContainerButtonClick` at all.
     #[test]
@@ -277,7 +277,7 @@ mod tests {
     }
 
     /// Missing banner, missing dye, a non-banner/non-dye item, and a full
-    /// six-pattern banner must all refuse — `LoomMenu`'s own guards.
+    /// six-pattern banner must all refuse — the loom menu's own guards.
     #[test]
     fn missing_or_invalid_inputs_and_a_full_banner_all_refuse() {
         let banner = stack("minecraft:white_banner");

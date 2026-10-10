@@ -60,7 +60,7 @@ const H: u32 = 240;
 
 /// The plate's alpha, straight from `gpu/nametag.rs`'s `BACKGROUND_ARGB`
 /// (`0x40000000` — black at vanilla's `getBackgroundOpacity` fallback of
-/// `0.25`, rounded by `ARGB.as8BitChannel`). Restated here rather than imported
+/// `0.25`, rounded by ARGB's as 8b it channel). Restated here rather than imported
 /// because the constant is private to that module; if the two ever disagree the
 /// subject arm's exact prediction is what goes red.
 const PLATE_ALPHA: f32 = 64.0 / 255.0;

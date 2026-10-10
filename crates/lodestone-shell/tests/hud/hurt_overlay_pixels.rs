@@ -42,7 +42,7 @@
 //! pixels above a row that was drawing perfectly.
 //!
 //! The "is it redder?" predicate is derived from the one vanilla constant this
-//! effect has: `OverlayTexture`'s red row is a flat `(255, 0, 0)` at alpha
+//! effect has: the overlay texture's red row is a flat `(255, 0, 0)` at alpha
 //! `HURT_OVERLAY_ALPHA_BYTE`, so a reddened pixel is one whose distance to pure
 //! red *decreased*. Nothing here hardcodes an expected RGB triple.
 //!
@@ -108,9 +108,9 @@ use lodestone_render::{
 const W: u32 = 320;
 const H: u32 = 240;
 
-/// Vanilla's overlay colour: `OverlayTexture`'s red row is a flat
+/// Vanilla's overlay colour: the overlay texture's red row is a flat
 /// `ARGB.color(-1291911168)` = `(a = 178, 255, 0, 0)`, sampled whenever
-/// `LivingEntityRenderer`'s own decompiled source sets `hasRedOverlay`. The predicate below is
+/// The living entity renderer's own decompiled source sets `hasRedOverlay`. The predicate below is
 /// derived from *this*, not from any measured pixel value.
 const VANILLA_OVERLAY_RGB: [i32; 3] = [255, 0, 0];
 

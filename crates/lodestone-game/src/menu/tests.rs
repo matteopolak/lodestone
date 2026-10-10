@@ -200,7 +200,7 @@ use super::*;
     }
 
     /// Vanilla's own drag commit step. The per-slot amount is clamped by
-    /// `min(source.getMaxStackSize(), slot.getMaxStackSize(source))` **after**
+    /// `min(source.get_max_stack_size(), slot.get_max_stack_size(source))` **after**
     /// adding what the slot already holds, and the shortfall stays on the
     /// cursor. Slot 0 starts at 62 of a 64 cap, so it can only take 2 of its
     /// nominal 5; the other 3 must come back.
@@ -377,7 +377,7 @@ use super::*;
 
     /// Vanilla's own pick-all gather step. It runs **two** passes over
     /// the slot list, and pass 0 skips any slot whose stack is already at its
-    /// own max (`itemStack.getCount() != itemStack.getMaxStackSize()`). So a
+    /// own max (`itemStack.getCount() != itemStack.get_max_stack_size()`). So a
     /// full stack is only drawn from once every partial one has been consumed.
     ///
     /// Cursor 4 + partials 30 and 20 = 54; the remaining 10 then comes off the

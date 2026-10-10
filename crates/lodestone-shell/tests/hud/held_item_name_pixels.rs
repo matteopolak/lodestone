@@ -15,16 +15,16 @@
 //!
 //! # The position
 //!
-//! `Hud.extractSelectedItemName` (`Hud`'s own decompiled source in the 26.2 client):
+//! Hud's extract selected item name (`Hud`'s own decompiled source in the 26.2 client):
 //! `x = (guiWidth - strWidth) / 2`, `y = guiHeight - 59`, drawn **unscaled**
-//! (a plain `graphics.textWithBackdrop` call — no `×2`, unlike this file's
+//! (a plain graphics's text with backdrop call — no `×2`, unlike this file's
 //! debug/chat text). The expected x is derived from the vanilla font's own
 //! measured string width, not restated as a constant.
 //!
 //! # Also proves italic shear reaches this same draw
 //!
 //! An item's custom name draws **italic** (`Hud`'s own decompiled source,
-//! `.withStyle(ChatFormatting.ITALIC)` when `has(DataComponents.CUSTOM_NAME)`)
+//! `.with_style(the chat formatting's italic)` when `has(the data components's custom name)`)
 //! — [`a_custom_named_item_draws_narrower_when_forced_upright`] proves this
 //! specific consumer actually exercises that fix's italic shear, by comparing the
 //! real (sheared) ink width against the width the *same* string would

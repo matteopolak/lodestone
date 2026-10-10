@@ -59,8 +59,8 @@
 //!   stream is empty. So **if a login test suddenly gets no chunks, dump
 //!   `set_health` and check for `0.0` before suspecting your own code** — that
 //!   means you inherited a dead player, not that you broke something. (The
-//!   decompiled `hasClientLoaded()` gate is a dead end: `sendNextChunks` runs
-//!   unconditionally per tick from `MinecraftServer`.)
+//!   client-loaded gate is a dead end: chunk sending runs
+//!   unconditionally per tick from the server main loop.)
 //! * Death/respawn handling (`set_health`, `combat_death`,
 //!   `client_command(perform_respawn)`, auto-respawn) is being implemented by
 //!   the `impl-world` agent — coordinate rather than duplicating it here.

@@ -418,7 +418,7 @@ fn a_pack_menu_background_tiles_over_the_pause_screen() {
     );
 }
 
-/// BookViewScreen and BookEditScreen blit the loose `gui/book.png` sheet,
+/// The book view screen and the book edit screen blit the loose `gui/book.png` sheet,
 /// rather than composing a panel from `gui/sprites/**`. Keep that source in
 /// the menu atlas extras so the active resource-pack stack supplies the art.
 #[test]

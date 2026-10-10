@@ -911,7 +911,7 @@ mod raid_tests {
         world
     }
 
-    /// **`start_raid` refuses Peaceful** — `getNumGroups(Peaceful) == 0`, so
+    /// **`start_raid` refuses Peaceful** — `get_num_groups(Peaceful) == 0`, so
     /// there is nothing to wave through and no raid is created at all.
     #[test]
     fn control_a_peaceful_raid_never_starts() {

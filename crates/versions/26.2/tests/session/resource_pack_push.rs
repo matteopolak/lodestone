@@ -31,7 +31,7 @@
 //!
 //! # Why the push arrives in Play, not Configuration
 //!
-//! Vanilla pushes during Configuration (its `ServerResourcePackConfigurationTask`);
+//! Vanilla pushes during Configuration (a dedicated configuration task);
 //! this crate's `begin_configuration` is a static vec with no arguments to carry
 //! a pack, and the feed's drain point is `serve_play`'s timer — so the push
 //! reaches the client after the configuration handoff. Both `v26-2` decode arms

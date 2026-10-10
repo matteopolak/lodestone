@@ -610,7 +610,7 @@ impl V770Adapter {
             return Ok(directives);
         }
         if packet_id == play::clientbound::SET_DEFAULT_SPAWN_POSITION {
-            // Reshaped in 26.2 to carry a full RespawnData: a dimension-qualified
+            // Reshaped in 26.2 to carry a full respawn-data record: a dimension-qualified
             // position plus yaw and pitch. The model now models all of these.
             let spawn: SetDefaultSpawnPosition = decode_full(payload)?;
             let dimension = spawn.location.dimension.parse().map_err(|_| {
@@ -1430,7 +1430,7 @@ fn decode_waypoint(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     };
     let style = parse_key(&reader.string(32767).map_err(dec_err)?, "waypoint style")?;
     let color = if reader.bool().map_err(dec_err)? {
-        // `vanilla's own byte buf codecs's own rgb color` is a plain big-endian int.
+        // The RGB colour codec is a plain big-endian int.
         #[allow(clippy::cast_sign_loss)]
         Some(reader.i32().map_err(dec_err)? as u32)
     } else {

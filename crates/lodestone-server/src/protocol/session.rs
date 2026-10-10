@@ -478,8 +478,8 @@ pub enum MetadataField {
     /// producer's own species knowledge: only
     /// [`crate::mobs::MobSim::snapshots`]'s vehicle loop ever builds this
     /// variant, and every entry in that loop is a boat (`TrackedVehicle`
-    /// carries no other species), never a `LivingEntity` or a
-    /// `ThrownTrident`.
+    /// carries no other species), never a living entity or a
+    /// The thrown trident.
     BoatPaddles {
         /// Index 11.
         left: bool,
@@ -495,7 +495,7 @@ pub enum MetadataField {
     /// committed jar dump (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`)
     /// — an experience orb's value, a primed TNT's fuse, a fishing hook's hooked
     /// entity and a display entity's interpolation delay alongside this one —
-    /// and index 9's has two. None of them is a `LivingEntity`, so no census
+    /// and index 9's has two. None of them is a living entity, so no census
     /// column separates them and the guard is the same one
     /// [`BoatPaddles`](Self::BoatPaddles) states: the *producer*'s own species
     /// knowledge. Only [`crate::mobs::MobSim::snapshots`]'s vehicle loop ever
@@ -639,7 +639,7 @@ pub enum MetadataField {
     /// too" reasoning: an axolotl that stops playing dead must send `false`,
     /// not merely stop sending `true`. Backed by
     /// [`crate::mobs::SimMob::axolotl_is_playing_dead`], itself
-    /// vanilla's own axolotl hurt-server routine's own trigger collapsed to a plain countdown —
+    /// vanilla's axolotl hurt-server routine's trigger collapsed to a plain countdown —
     /// see that method's own doc for the roll and the disclosed narrowings.
     PlayingDead(bool),
     /// Vanilla's own camel dash synced-data field — index 19, one of the `BOOLEAN` claimants

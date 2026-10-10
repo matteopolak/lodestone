@@ -370,7 +370,7 @@ fn player_interact_veto_denies_air_branch_before_firework_boost() {
 /// `UseItemOn` + `SwingArm` pair and never reach the generic use.
 ///
 /// That gate is worth more than the branch it fixes, because the server's
-/// `ServerPlayerGameMode.useItemOn` never reaches `Item.use`: `USE_ITEM` is
+/// The server player game mode's use item on never reaches `Item.use`: `USE_ITEM` is
 /// the *only* route by which a boat is placed, food is eaten, a drink is
 /// drunk, a helmet is equipped on use, or a bow starts drawing. All of that
 /// worked aimed at open air or at a mob and did nothing aimed at a block —
@@ -426,8 +426,8 @@ fn use_item_live_falls_through_to_generic_use_with_a_block_targeted() {
 /// an unconditional `use_item_generic()` call.
 ///
 /// Vanilla's `case BLOCK` is **not** a `break` like `case ENTITY`'s:
-/// `Minecraft.startUseItem` returns on `InteractionResult.Success` *and* on
-/// `InteractionResult.Fail`, reaching the generic use only for a non-consuming
+/// Minecraft's start use item returns on the interaction result's success *and* on
+/// The interaction result's fail, reaching the generic use only for a non-consuming
 /// result. So a **placeable** item in hand must not produce a second send: the
 /// item's own `useOn` is what answered, and falling through would let a carved
 /// pumpkin aimed at an illegal face equip itself onto the player's head
@@ -579,7 +579,7 @@ fn a_disagreeing_server_set_slot_overwrites_the_predicted_equip() {
 //
 // Vanilla's own snowball/egg/ender-pearl/throwable-potion use routines
 // all return
-// `InteractionResult.SUCCESS`, whose `swingSource()` is `CLIENT`
+// The interaction result's success, whose swing source is `CLIENT`
 // — vanilla's own start-use-item routine swings on
 // exactly that condition. `use_item_generic` is the shell's landing site for
 // all four (none of them is a block or an `EntityRayTarget` hit in the common
@@ -715,9 +715,9 @@ fn use_item_live_with_an_empty_hand_does_not_swing() {
 // click that reached it.
 //
 // Vanilla's rule is one condition, applied identically at all three of
-// `Minecraft.startUseItem`'s call sites: swing only when the result is an
-// `InteractionResult.Success` whose `swingSource()` is `CLIENT`.
-// `InteractionResult.CONSUME` is `SwingSource.NONE`, and it is what a drawn
+// Minecraft's start use item's call sites: swing only when the result is an
+// The interaction result's success whose swing source is `CLIENT`.
+// The interaction result's consume is the swing source's none, and it is what a drawn
 // bow, a raised shield, a spyglass and a bite of food all return; `PASS` is
 // what an idle sword or pickaxe returns. All five were swinging here.
 
@@ -790,8 +790,8 @@ fn a_use_that_vanilla_does_not_swing_for_leaves_the_arm_still() {
 
 /// The same rule on the **block** path, which has its own swing site.
 ///
-/// `MultiPlayerGameMode.performUseItemOn` returns the base `Item.useOn`'s
-/// `PASS` for a sword against plain stone, so `Minecraft.startUseItem`'s
+/// The multi player game mode's perform use item on returns the base `Item.useOn`'s
+/// `PASS` for a sword against plain stone, so Minecraft's start use item's
 /// `case BLOCK` swings nothing and falls through to the generic use — which,
 /// for a sword, is also `PASS`. Before the fix this swung twice over: once
 /// unconditionally after the `USE_ITEM_ON` send and once in the fall-through.
@@ -835,7 +835,7 @@ fn right_clicking_a_plain_block_with_a_sword_does_not_swing() {
 ///
 /// `UseOnDecision::Nothing` collapses two vanilla outcomes: the base
 /// `Item.useOn`'s `PASS` (the sword above) and the overrides that act on the
-/// block. `FlintAndSteelItem.useOn` returns `InteractionResult.SUCCESS`, so
+/// block. The flint and steel item's use on returns interaction result's success, so
 /// vanilla swings **and returns** — it never reaches `gameMode.useItem`. Both
 /// halves are asserted here, because a gate that only checked the swing would
 /// pass against a version that also sent a spurious generic use.
@@ -920,7 +920,7 @@ fn an_entity_right_click_swings_exactly_once() {
 /// Finding 1: [`Sim::end_use_live`] must send `ReleaseUseItem` when a use
 /// was actually in progress — the packet that was a serverbound island
 /// (encoded by all four protocol adapters, zero producers anywhere in
-/// this shell). Bow, crossbow and shield are all `useOnRelease() ==
+/// this shell). Bow, crossbow and shield are all `use_on_release() ==
 /// true` and cannot complete a
 /// use without it.
 #[test]
@@ -1154,7 +1154,7 @@ fn right_clicking_food_at_a_full_hunger_bar_does_not_slow_movement() {
 }
 
 /// Holding `key.use` through a completed food use must begin the next use,
-/// matching `Minecraft.handleKeybinds` polling the held key rather than only
+/// matching Minecraft's handle keybinds polling the held key rather than only
 /// reacting to the original OS press edge.  The loopback action stream is the
 /// client/server seam: a second `UseItem` is what lets the authoritative server
 /// start the second bite.

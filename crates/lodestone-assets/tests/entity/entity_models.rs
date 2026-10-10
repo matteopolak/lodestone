@@ -52,9 +52,9 @@ fn every_model_bakes_nonempty() {
 }
 
 /// UVs must be finite and within a *gross* sanity envelope of the model's
-/// declared sheet. Vanilla is emphatically not strictly `[0, 1]`: `SalmonModel`
-/// uses a negative `texOffs(-4, 0)`, `CodModel` a negative `texOffs(20, -6)`,
-/// and `PufferfishBigModel`'s fins run ~7 texels off the right edge of their
+/// declared sheet. Vanilla is emphatically not strictly `[0, 1]`: the salmon model
+/// uses a negative tex offset (-4, 0), the cod model one of (20, -6),
+/// and the big pufferfish model's fins run ~7 texels off the right edge of their
 /// 32x32 sheet — all ship in the game and sample off-sheet on purpose. So the
 /// real gates on UV correctness are the box-count test and the real-PNG
 /// sheet-size check; this one only catches a catastrophic offset (NaN, or a
@@ -1019,7 +1019,7 @@ fn posed_all(model: &EntityModelDef, flip_y: bool) -> Vec<PosedVertex> {
 /// # Why this test exists rather than a Y-flip pixel gate
 ///
 /// A two-direction long-axis pixel test cannot catch a wrong `scale(1, -1, 1)`,
-/// since `ArrowModel` is symmetric under `y → −y`. The conclusion drawn from
+/// since the arrow model is symmetric under `y → −y`. The conclusion drawn from
 /// that — "so resolving the
 /// flip needs a texel comparison against a captured vanilla frame, or a live
 /// oracle" — does not follow, and this test is why. The flip is **not observable at
@@ -1037,7 +1037,7 @@ fn posed_all(model: &EntityModelDef, flip_y: bool) -> Vec<PosedVertex> {
 ///    have caught, now proved rather than assumed.
 ///
 /// 2. **The two shaft planes' `(position, uv)` pairs are identical too**, because
-///    they are built from the *same* `CubeListBuilder` and therefore carry
+///    they are built from the *same* cube-list builder and therefore carry
 ///    identical UVs: the parts exchange places vertex-for-vertex *and*
 ///    texel-for-texel. This is the important half, because the shaft box is the one
 ///    that samples the arrowhead — the only genuinely Y-asymmetric region of
@@ -1187,7 +1187,7 @@ fn the_trident_rig_points_along_negative_y() {
     );
 }
 
-/// `ghast_model`'s nine tentacle lengths are `SingleThreadedRandomSource(1660)`
+/// `ghast_model`'s nine tentacle lengths are seed-1660 random
 /// draws (`nextInt(7) + 8` each), and used to come from a local reimplementation
 /// of `java.util.Random` — since consolidated into `lodestone-javarandom`. The
 /// expected lengths below come from an **independent** Python re-implementation

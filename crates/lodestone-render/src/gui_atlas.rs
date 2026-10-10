@@ -39,7 +39,7 @@ const SPRITES_INFIX: &str = "/textures/gui/sprites/";
 /// one: `gui/sprites` with an empty prefix, and `mob_effect` under a
 /// `mob_effect/` prefix. So `assets/<ns>/textures/mob_effect/<name>.png`
 /// belongs to this atlas under the id `mob_effect/<name>` — which is exactly
-/// the id vanilla's `Hud.getMobEffectSprite` builds when it blits a status
+/// the id vanilla's Hud's get mob effect sprite builds when it blits a status
 /// effect's icon.
 ///
 /// Implementing only the first source is what made those icons unreachable
@@ -445,9 +445,9 @@ impl GuiAtlas {
     /// pixel size.
     ///
     /// Mirrors vanilla's own
-    /// `GuiGraphicsExtractor.blitSprite(pipeline, sprite, spriteWidth,
-    /// spriteHeight, textureX, textureY, x, y, width, height, color)`, whose
-    /// UV is `sprite.getU((float) textureX / spriteWidth)` — always a
+    /// sprite blit with a texture sub-rectangle (sprite size, texture x/y,
+    /// position, size, colour), whose
+    /// UV is the sprite's U at `textureX / spriteWidth` — always a
     /// **fraction** of the declared `spriteWidth`/`spriteHeight` pair applied
     /// to the sprite's real UV span, never an absolute real-pixel offset. The
     /// recipe book panel's own doc example —
@@ -604,7 +604,7 @@ mod tests {
     ///
     /// Three arms, because the id transform is the part that can be wrong:
     /// the icon is present, it is filed under the **prefixed** id vanilla's
-    /// `Hud.getMobEffectSprite` builds, and the unprefixed name is *not* an
+    /// Hud's get mob effect sprite builds, and the unprefixed name is *not* an
     /// id — a source enumerated with the wrong prefix passes a presence check
     /// and fails every real lookup.
     #[test]

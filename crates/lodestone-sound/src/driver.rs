@@ -351,7 +351,7 @@ impl SoundDriver {
 }
 
 /// Maps a model [`SoundCategory`](ModelCategory) to the audio engine's bus by
-/// ordinal. The two enums share vanilla's `SoundSource` order exactly (the
+/// ordinal. The two enums share vanilla's sound-source order exactly (the
 /// names differ only in pluralisation), so the ordinal is the safe bridge — a
 /// name match would be fragile. Both have 11 buses ending in `Ui`.
 ///
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn category_maps_to_the_matching_audio_bus_by_ordinal() {
         // The model->audio category bridge is by ordinal, and both enums are
-        // vanilla's SoundSource order. Spot-check every bus.
+        // the game's sound-source order. Spot-check every bus.
         for m in ModelCategory::ALL {
             let a = map_category(m);
             assert_eq!(

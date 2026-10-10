@@ -223,11 +223,11 @@ pub enum GameRuleError {
 /// # Two transcription notes
 ///
 /// * `advance_time` and `advance_weather` are registered as
-///   `!SharedConstants.DEBUG_WORLD_RECREATE`, which is `false` in any non-debug
+///   !shared constants's debug world recreate, which is `false` in any non-debug
 ///   build, so both default `true`. The expression is recorded here rather than
 ///   the folded constant because the fold is the thing that could be wrong.
 /// * `max_minecart_speed` is registered behind
-///   `FeatureFlagSet.of(FeatureFlags.MINECART_IMPROVEMENTS)`, so vanilla omits
+///   The feature flag set's of, so vanilla omits
 ///   it from a world whose feature set lacks that flag. This crate has no
 ///   feature-flag model, so it is unconditionally present — a disclosed
 ///   simplification whose only effect is that `/gamerule` lists one rule a
@@ -305,7 +305,7 @@ pub const UNIVERSAL_ANGER: &str = "universal_anger";
 pub const RANDOM_TICK_SPEED: &str = "random_tick_speed";
 /// `GameRules.SPAWN_MOBS` — pre-26.2's `doMobSpawning`.
 pub const SPAWN_MOBS: &str = "spawn_mobs";
-/// `GameRules.SPAWNER_BLOCKS_WORK` — `ServerLevel.isSpawnerBlockEnabled`. Read
+/// `GameRules.SPAWNER_BLOCKS_WORK` — the server level's is spawner block enabled. Read
 /// by `crate::tick::run_tick_loop`'s spawner-block tick pass
 /// (`crate::mob_spawner::SpawnCtx::spawner_blocks_work`).
 pub const SPAWNER_BLOCKS_WORK: &str = "spawner_blocks_work";
@@ -330,14 +330,14 @@ pub const BLOCK_DROPS: &str = "block_drops";
 /// `mob_drops` — pre-26.2 `doMobLoot`. Read by `crate::mobs::MobSim::reap_dead`.
 pub const MOB_DROPS: &str = "mob_drops";
 
-/// `GameRules.TNT_EXPLODES`. Read by every `TntBlock::prime` call site
+/// `GameRules.TNT_EXPLODES`. Read by every tnt block's prime call site
 /// (`crate::server`'s flint-and-steel arm, `crate::fire`'s burnout arm, the
 /// redstone-signal arm) and by `tick::run_tick_loop`'s chain-reaction arm,
 /// matching vanilla's own gate on all four.
 pub const TNT_EXPLODES: &str = "tnt_explodes";
 
 /// `allow_entering_nether_using_portals`. Read by `crate::server`'s portal-travel
-/// tick, which is where vanilla consults it (`Level.isAllowedToEnterPortal`).
+/// tick, which is where vanilla consults it (Level's is allowed to enter portal).
 ///
 /// **One-directional, exactly like vanilla's.** The rule gates *entering* the
 /// Nether; a player already there can always come home, or turning it off would
@@ -345,7 +345,7 @@ pub const TNT_EXPLODES: &str = "tnt_explodes";
 pub const ALLOW_ENTERING_NETHER_USING_PORTALS: &str = "allow_entering_nether_using_portals";
 
 /// `players_nether_portal_default_delay` — ticks a survival player must stand in a
-/// portal, 80 by default. `NetherPortalBlock.getPortalTransitionTime`.
+/// portal, 80 by default. The nether portal block's get portal transition time.
 pub const PLAYERS_NETHER_PORTAL_DEFAULT_DELAY: &str = "players_nether_portal_default_delay";
 
 /// `players_nether_portal_creative_delay` — the same for a player whose abilities
@@ -356,7 +356,7 @@ pub const PLAYERS_NETHER_PORTAL_CREATIVE_DELAY: &str = "players_nether_portal_cr
 /// Looks a rule's spec up by identifier, tolerating a `minecraft:` namespace.
 ///
 /// The namespace is accepted because the rule *registry* is namespaced
-/// (`Registry.register(BuiltInRegistries.GAME_RULE, id, ...)`) even though every
+/// (the rule registry's registration call) even though every
 /// wire and command form carries the bare id, so both spellings name the same
 /// rule and rejecting one would be an arbitrary difference from vanilla.
 #[must_use]
@@ -478,7 +478,7 @@ impl GameRules {
     }
 
     /// `spawner_blocks_work` — whether a `minecraft:spawner` block entity may
-    /// fire at all (`ServerLevel.isSpawnerBlockEnabled`). Read by
+    /// fire at all (the server level's is spawner block enabled). Read by
     /// `crate::tick::run_tick_loop`'s spawner-block tick pass.
     #[must_use]
     pub fn spawner_blocks_work(&self) -> bool {

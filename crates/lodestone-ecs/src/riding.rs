@@ -13,7 +13,7 @@
 //! vehicle's own position-rider routine(passenger, moveFunction):
 //!   position = this.passenger-riding-position(passenger)
 //!   offset   = passenger.vehicle-attachment-point(this)
-//!   passenger.setPos(position - offset)
+//!   passenger's set pos
 //! ```
 //!
 //! so, spelled out:
@@ -32,7 +32,7 @@
 //!   the clamped attachment lookup for the PASSENGER attachment, at the
 //!   passenger's index, rotated by `vehicle.yRot`
 //!   (vanilla's own default passenger-attachment-point routine), where `index` is
-//!   `vehicle.getPassengers().indexOf(passenger)`.
+//!   get passengers's get passengers.
 //! * the vehicle-attachment-point routine = the unclamped attachment lookup for
 //!   the VEHICLE attachment, always index `0`, rotated by `this.yRot`
 //!   (vanilla's own vehicle-attachment-point routine) — always index `0`, and rotated by the
@@ -134,12 +134,12 @@ pub const PLAYER_VEHICLE_ATTACHMENT_Y: f64 = 0.6;
 ///
 /// Vanilla's own abstract-boat override never
 /// consults `dimensions.attachments()`; it builds the point from an abstract
-/// `rideHeight(dimensions)` and a **Z** (forward/back) offset:
+/// ride height and a **Z** (forward/back) offset:
 ///
 /// ```text
-/// offset = getSinglePassengerXOffset()                    // 0.0, or 0.15 for chest boats
+/// offset = get single passenger x offset                    // 0.0, or 0.15 for chest boats
 /// if passengers.size() > 1 { offset = if index == 0 { 0.2 } else { -0.6 } }
-/// Vec3(0, rideHeight(dimensions), offset)
+/// Vec3(0, ride height, offset)
 /// ```
 ///
 /// Vanilla's own ride-height override is `height / 3.0` for boats and chest boats
@@ -218,12 +218,12 @@ pub fn passenger_attachment_local(
 /// the full ~70-row registry belongs in a generated `lodestone-data` table
 /// instead of here.
 fn declared_passenger_attachment(entity_type_path: &str, seat_index: usize) -> Option<Vec3d> {
-    // Every value below is `passengerAttachments(y)`, i.e. `(0, y, 0)` —
+    // Every value below is passenger attachments, i.e. `(0, y, 0)` —
     // vanilla's own entity-type builder's passenger-attachments setter.
     let y = match entity_type_path {
         // Shared by every minecart variant: chest,
         // furnace, hopper, tnt, spawner and command-block minecarts all repeat
-        // `.sized(0.98F, 0.7F).passengerAttachments(0.1875F)` verbatim
+        // `.sized(0.98F, 0.7F).passenger_attachments(0.1875F)` verbatim
         // in their own entity-type registry declarations, so one arm covers the
         // family. Note it is far *below* the
         // `0.7` box top the fallback would give — a minecart seat is inside the
@@ -388,7 +388,7 @@ pub fn rotate_attachment(point: Vec3d, yaw_degrees: f32) -> Vec3d {
 ///
 /// The camera needs nothing further: 26.2's own camera-align-with-entity
 /// routine has **no
-/// `isPassenger()` branch** except one for lerped new-behaviour minecarts, and
+/// is passenger branch** except one for lerped new-behaviour minecarts, and
 /// riding does not change the player's pose or eye height — vanilla's own
 /// player-pose-update routine
 /// has no riding case and there is no
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn a_minecart_seats_the_player_below_its_own_roof() {
         // Vanilla's own MINECART entity-type declaration: minecart is `sized(0.98F, 0.7F)` with
-        // `passengerAttachments(0.1875F)`. Seat = 0.1875, minus the player's own
+        // passenger attachments. Seat = 0.1875, minus the player's own
         // 0.6 vehicle attachment.
         let seat = player_seat_position(Vec3d::new(0.0, 64.0, 0.0), 0.0, "minecart", 0.7, 0, None);
         assert!(
@@ -453,7 +453,7 @@ mod tests {
     fn the_players_vehicle_attachment_lowers_the_seat_by_six_tenths() {
         // Vanilla's own default-vehicle-attachment constant of `(0.0, 0.6, 0.0)`.
         let with = player_seat_position(Vec3d::new(0.0, 0.0, 0.0), 0.0, "pig", 0.9, 0, None);
-        // Vanilla's own PIG entity-type declaration: pig declares `passengerAttachments(0.86875F)`.
+        // Vanilla's own PIG entity-type declaration: pig declares passenger attachments.
         assert!((with.y - (0.868_75 - 0.6)).abs() < 1e-9, "pig seat {}", with.y);
         assert!(
             with.y < 0.868_75,

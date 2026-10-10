@@ -168,7 +168,7 @@
 //! The default capacity is 512 because it covers the default streamed view. The
 //! shell serves
 //! `view_radius = render_distance + 1` (`crates/lodestone-shell/src/app/session.rs`
-//! — the `+ 1` is vanilla's `ChunkTrackingView` buffer ring and is correct), so
+//! — the `+ 1` is vanilla's chunk tracking view buffer ring and is correct), so
 //! the streamed square is `(2 × (rd + 1) + 1)²`: 361 columns at `rd = 8`, 441 at
 //! 9, **529 at 10**, **729 at vanilla's own default of 12**, 4,489 at the
 //! slider's maximum of 32. One notch of the render-distance slider past 9 and the

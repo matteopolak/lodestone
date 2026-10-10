@@ -64,7 +64,7 @@ pub enum NetUpdate {
         /// signature, a sender whose public key we never saw, and — because the
         /// driver's verification is compiled out for `wasm32` — every message
         /// in a browser session. A consumer must read it as vanilla reads
-        /// `ChatTrustLevel`: verified, or not verified, with no third state
+        /// The chat trust level: verified, or not verified, with no third state
         /// claimed. In particular it cannot express vanilla's `MODIFIED`, which
         /// needs the signed content compared against the displayed content and
         /// is not computed anywhere here.
@@ -190,7 +190,7 @@ pub enum NetUpdate {
         /// Server entity id selected as the camera subject.
         entity_id: i32,
     },
-    /// A `block_event` (vanilla's `ClientboundBlockEventPacket`): two opaque
+    /// A `block_event` (vanilla's block-event packet): two opaque
     /// parameter bytes for the block at `pos`.
     ///
     /// Deliberately **uninterpreted here**. The two bytes mean completely
@@ -231,7 +231,7 @@ pub enum NetUpdate {
         knockback: Option<Vec3>,
     },
     /// The server authorised the local player to edit a sign (vanilla's
-    /// `ClientboundOpenSignEditorPacket`, decoded as
+    /// Open-sign-editor packet, decoded as
     /// `ClientEvent::SignEditorOpened`).
     ///
     /// Same shape as [`NetUpdate::BlockEvent`] immediately above: the decode
@@ -249,7 +249,7 @@ pub enum NetUpdate {
         is_front_text: bool,
     },
     /// The server requested that the book in one of the player's hands opens
-    /// (`ClientboundOpenBookPacket`, decoded as [`ClientEvent::BookOpened`]).
+    /// (open-book packet, decoded as [`ClientEvent::BookOpened`]).
     ///
     /// This remains a hand selector rather than carrying book contents: the
     /// matching inventory update is the authoritative source of the item's
@@ -389,7 +389,7 @@ pub enum NetUpdate {
     /// player who cannot see the port cannot tell anyone how to join.
     ///
     /// `Sim::poll_net` turns this into the chat line vanilla's
-    /// `menu.multiplayerOptions.publish.started.lan` is.
+    /// `menu.multiplayer_options.publish.started.lan` is.
     LanOpened {
         /// The TCP port the listener actually bound.
         port: u16,

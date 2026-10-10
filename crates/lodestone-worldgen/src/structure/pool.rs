@@ -30,7 +30,7 @@
 //!   Shuffling the 8 raw entries instead would consume 7 and desynchronise every
 //!   subsequent draw in the structure.
 //! * **A `terrain_matching` projection carries a processor**:
-//!   vanilla's own terrain-matching projection's own list is
+//!   vanilla's terrain-matching projection's list is
 //!   `[gravity processor(WORLD_SURFACE_WG, -1)]`, appended *after* the element's
 //!   own processors. That single entry is what makes a village street follow a
 //!   hillside, and a projection treated as a mere flag places every street flat.
@@ -70,14 +70,14 @@ use crate::feature::BlockPos;
 use crate::feature::vegetation::{PlacedRef, VegGrid, VegTags};
 use lodestone_worldgen_core::rng::RandomSource;
 
-/// `StructureTemplatePool.Projection`.
+/// The pool projection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Projection {
     /// `rigid` — the element sits where the joint puts it, and no processor is
     /// appended.
     Rigid,
     /// `terrain_matching` — the element's Y comes from the terrain, and
-    /// `GravityProcessor(WORLD_SURFACE_WG, -1)` is appended to its chain.
+    /// a gravity processor (world-surface, -1) is appended to its chain.
     TerrainMatching,
 }
 
@@ -90,18 +90,18 @@ impl Projection {
         }
     }
 
-    /// True for `RIGID` — the flag `JigsawPlacement` branches on in five places.
+    /// True for `RIGID` — the flag jigsaw placement branches on in five places.
     #[must_use]
     pub fn is_rigid(self) -> bool {
         self == Self::Rigid
     }
 }
 
-/// One element of a pool — vanilla's `StructurePoolElement` hierarchy.
+/// One element of a pool — vanilla's pool-element hierarchy.
 #[derive(Debug, Clone)]
 pub enum PoolElement {
     /// `single_pool_element` / `legacy_single_pool_element`. The two differ only
-    /// in their `BlockIgnoreProcessor`: legacy also drops the template's **air**
+    /// in their block-ignore processor: legacy also drops the template's **air**
     /// (`STRUCTURE_AND_AIR` instead of `STRUCTURE_BLOCK`), which is why a legacy
     /// village house does not clear the ground it stands on to an air box.
     Single {
@@ -227,24 +227,24 @@ impl PoolFeaturePlacement {
 }
 
 impl PoolElement {
-    /// `getProjection()`.
+    /// get projection.
     #[must_use]
     pub fn projection(&self) -> Projection {
         match self {
             Self::Single { projection, .. }
             | Self::List { projection, .. }
             | Self::Feature { projection, .. } => *projection,
-            // `EmptyPoolElement`'s constructor passes `TERRAIN_MATCHING`.
+            // The empty pool element's constructor passes `TERRAIN_MATCHING`.
             Self::Empty => Projection::TerrainMatching,
         }
     }
 
-    /// `getGroundLevelDelta()`.
+    /// The pool element's ground-level delta.
     ///
-    /// **Constant 1 in 26.2**, for every element type — `StructurePoolElement`
+    /// **Constant 1 in 26.2**, for every element type — the base element type
     /// declares it and nothing overrides it. Older versions read a `bottom` data
-    /// marker out of the template, and the S3 handoff note expected that; the
-    /// record definition says otherwise, so the marker is not needed here at all.
+    /// marker out of the template; the record definition says otherwise, so the
+    /// marker is not needed here at all.
     #[must_use]
     pub fn ground_level_delta(&self) -> i32 {
         1
@@ -278,7 +278,7 @@ impl PoolElement {
         }
     }
 
-    /// `getBoundingBox(manager, position, rotation)`.
+    /// get bounding box.
     ///
     /// `None` for [`Self::Empty`], where vanilla throws — every call site filters
     /// it first, and returning `None` makes that filter checkable instead of a
@@ -415,8 +415,8 @@ impl TemplatePool {
         self.expanded.len()
     }
 
-    /// `getRandomTemplate(random)` — one `nextInt(size)`, or
-    /// `EmptyPoolElement.INSTANCE` and **no draw** for an empty pool.
+    /// A random template — one bounded int draw over the pool size, or
+    /// the empty element and **no draw** for an empty pool.
     pub fn random_template<R: RandomSource>(&self, random: &mut R) -> Arc<PoolElement> {
         if self.expanded.is_empty() {
             return Arc::new(PoolElement::Empty);
@@ -760,7 +760,7 @@ impl PoolStore {
             }
             "minecraft:capped" => {
                 let delegate = self.parse_processor(resolver, &value["delegate"])?;
-                // `IntProviders.POSITIVE_CODEC` accepts a bare int (`ConstantInt`,
+                // The positive int-provider codec accepts a bare int (a constant,
                 // no draw) or a tagged provider (which *does* draw, before the
                 // shuffle). Every bundled `capped` uses the bare form; anything
                 // else is refused rather than approximated, because a draw here
@@ -800,7 +800,7 @@ impl PoolStore {
                 value["probability"].as_f64().unwrap_or(1.0) as f32,
             )),
             // `tag_match`'s `tag` field is a bare tag *name* (`"minecraft:doors"`),
-            // where a `HolderSet<Block>` field spells the same thing `"#minecraft:doors"`.
+            // where a block holder-set field spells the same thing `"#minecraft:doors"`.
             // Two spellings of one concept, and reading the bare one as a block id
             // yields an empty set that matches nothing.
             "minecraft:tag_match" => Ok(RuleTest::TagMatch(self.block_set(
@@ -811,7 +811,7 @@ impl PoolStore {
         }
     }
 
-    /// A `HolderSet<Block>`-shaped field — a `#tag`, a bare id, or a list of
+    /// A block holder-set-shaped field — a `#tag`, a bare id, or a list of
     /// either — flattened to block ids, memoised per spelling.
     fn block_set(&mut self, resolver: &dyn Resolver, value: &Value) -> Result<Arc<HashSet<Block>>, String> {
         let key = value.to_string();
@@ -827,7 +827,7 @@ impl PoolStore {
     }
 }
 
-/// A `HolderSet<Block>` spelling: `"#tag"`, a bare block id, or a list of either.
+/// A block holder-set spelling: `"#tag"`, a bare block id, or a list of either.
 /// Recursive, because block tags nest, and cycle-guarded — the same shape
 /// `crate::block_tag::resolve_block_tag` and `super::resolve_biome_set` use.
 fn collect_blocks(

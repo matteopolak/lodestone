@@ -11,7 +11,7 @@
 //!   channels the server has registered interest in. Inbound payloads on a
 //!   registered channel are dispatched to that channel's handler; payloads on
 //!   an unregistered channel are silently dropped, exactly vanilla's
-//!   `DiscardedPayload` fallback. It also carries the server→client broadcast
+//!   The discarded payload fallback. It also carries the server→client broadcast
 //!   queue: [`PluginChannelRegistry::broadcast`] publishes a payload for every
 //!   connection, and each connection's loop drains it, sending only channels
 //!   that connection actually supports.

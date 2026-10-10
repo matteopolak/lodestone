@@ -93,7 +93,7 @@ pub trait BrainMob {
     }
 
     /// Commands navigation toward `target` at `speed`. Returns whether a path
-    /// was found (vanilla's `navigation.moveTo`).
+    /// was found (vanilla's navigation's move to).
     fn move_to(&mut self, target: Vec3, speed: f32) -> bool;
 
     /// Whether navigation has finished or has no path.
@@ -232,7 +232,7 @@ pub trait BrainMob {
     /// through [`super::sensor::SnifferDigTargetSensor`], the same
     /// [`delivery_target`](Self::delivery_target) host-computed-candidate
     /// shape: the host (`SimMob::tick_sniffers`) runs the block-tag search
-    /// vanilla's `Sniffer.calculateDigPosition` performs and hands back
+    /// vanilla's Sniffer's calculate dig position performs and hands back
     /// only the answer, present only while the sniffer's own state machine
     /// is in its walking-there phase. Defaults to `None`.
     fn sniffer_dig_target(&self) -> Option<Vec3> {

@@ -6,7 +6,7 @@
 use super::*;
 
 /// What `FallingBlock.tick` decided at one position: the block is unsupported and
-/// is about to become a `FallingBlockEntity`.
+/// is about to become a falling block entity.
 ///
 /// Returned rather than applied because the two halves live in different places —
 /// the world mutation is the caller's (`crate::tick`'s drain owns the column and

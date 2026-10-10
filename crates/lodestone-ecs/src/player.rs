@@ -81,7 +81,7 @@ use crate::entity::{Attributes, EntityIndex, Leashed, Position};
 use crate::schedules::{Extract, GameTick};
 use crate::sets::{ExtractSet, TickSet};
 
-/// Eye height of vanilla's own SWIMMING pose — vanilla's own scalable-dimensions-with-eye-height constructor: `scalable(0.6F, 0.6F).withEyeHeight(0.4F)`
+/// Eye height of vanilla's SWIMMING pose — vanilla's scalable-dimensions-with-eye-height constructor: 6F)'s with eye height
 /// (vanilla's own per-pose dimensions table, shared with `FALL_FLYING` and `SPIN_ATTACK`).
 pub const SWIMMING_EYE_HEIGHT: f32 = 0.4;
 /// Eye height of vanilla's own CROUCHING pose — `1.27F` (vanilla's own per-pose dimensions table).
@@ -678,7 +678,7 @@ pub struct LastPlayerInput(pub Option<PlayerInput>);
 /// own "was sprinting" field (vanilla's own sprinting-sync routine).
 ///
 /// A **separate packet** from [`LastPlayerInput`] and both are needed:
-/// `ServerboundPlayerInputPacket` only stores its `sprint` bit as
+/// The player-input packet only stores its `sprint` bit as
 /// vanilla's own server-player last-client-input field, while the thing that actually calls
 /// its own sprinting setter is its own player-command handler. Without this the
 /// server never believes we are sprinting, so its own swimming-pose update can
@@ -693,7 +693,7 @@ pub struct LastSprintingSent(pub Option<bool>);
 /// The last creative-flight state put on the wire as a
 /// [`ClientAction::SetFlying`](lodestone_model::ClientAction::SetFlying), mirroring
 /// vanilla's own abilities-update routine →
-/// `ServerboundPlayerAbilitiesPacket`.
+/// the player-abilities packet.
 ///
 /// # Why the echo is not optional
 ///
@@ -951,7 +951,7 @@ pub struct GliderEquipped(pub bool);
 ///
 /// # Why a countdown and not a tracked entity
 ///
-/// Vanilla's boost is applied by the `FireworkRocketEntity`'s own `tick`
+/// Vanilla's boost is applied by the rocket entity's own tick
 /// for as long as that entity is attached
 /// and alive, and the client learns the attachment from the rocket's
 /// `DATA_ATTACHED_TO_TARGET` entity data. This client does not decode that
@@ -964,7 +964,7 @@ pub struct FireworkBoost(pub u32);
 /// How many ticks the local player has been holding the use button *with an
 /// item in progress*, or `None` when nothing is being used.
 ///
-/// This is `getUseDuration() - getUseItemRemainingTicks()` — vanilla's own
+/// This is `get_use_duration() - get_use_item_remaining_ticks()` — vanilla's own
 /// "time held" value, which vanilla's own trident-item release routine compares against its `10`-tick
 /// `THROW_THRESHOLD_TIME`. The driver arms it at the
 /// press edge and reads it at the release edge; [`tick_item_use`] advances it.
@@ -1201,7 +1201,7 @@ fn fly_step(
     // submerged fog — noclipping through an ocean should not tint the whole
     // view. Real submersion resumes the moment physics-walk does.
     *fluid = FluidState::NONE;
-    // Vanilla's own swimming-update routine forces `setSwimming(false)` while
+    // Vanilla's own swimming-update routine forces set swimming while
     // `abilities.flying`. Free-fly never calls
     // `lodestone_physics::tick`, so nothing would otherwise clear a swim pose
     // entered before taking off — the player would fly around with a 0.4 eye
@@ -1236,7 +1236,7 @@ fn player_fluid_state(
 ///
 /// Vanilla applies Speed/Slowness as `MOVEMENT_SPEED` `ADD_MULTIPLIED_TOTAL`
 /// modifiers **server-side** (vanilla's own effect-added routine) and syncs the
-/// folded result over `ClientboundUpdateAttributesPacket` — but
+/// folded result over the update-attributes packet — but
 /// `lodestone-server`'s attribute snapshot only ever publishes the four
 /// combat attributes (`armor`/`armor_toughness`/`knockback_resistance`/
 /// `attack_damage`); `minecraft:movement_speed` itself never reaches the
@@ -1383,7 +1383,7 @@ pub fn player_physics(
         // `minecraft:movement_speed`, which is what makes Speed, Slowness, Soul
         // Speed and boot enchantments reach physics at all: vanilla folds every
         // one of them into this attribute **server-side**
-        // (vanilla's own effect-added routine is `!isClientSide()`-gated) and syncs the
+        // (vanilla's own effect-added routine is `!is_client_side()`-gated) and syncs the
         // result, so this single read covers the lot without a client-side
         // effect-to-modifier translation.
         //
@@ -1479,11 +1479,11 @@ pub fn player_physics(
 ///
 /// # Order is load-bearing and matches vanilla exactly
 ///
-/// Everything here happens *before* `super.aiStep()` in vanilla, and
-/// `super.aiStep()` is what contains the travel dispatch. So the toggle and the
+/// Everything here happens *before* super's ai step in vanilla, and
+/// super's ai step is what contains the travel dispatch. So the toggle and the
 /// vertical impulse both land on the velocity that [`player_physics`] then
 /// integrates this same tick. The landing cancel is the mirror image — it is
-/// *after* `super.aiStep()` — and therefore lives in a separate system,
+/// *after* super's ai step — and therefore lives in a separate system,
 /// [`cancel_flight_on_landing`].
 ///
 /// # The toggle
@@ -1491,7 +1491,7 @@ pub fn player_physics(
 /// ```text
 /// if (abilities.mayfly && !wasJumping && jump() && !wasAutoJump) {
 ///    if (jumpTriggerTime == 0) jumpTriggerTime = 7;
-///    else if (!isSwimming()) { abilities.flying = !abilities.flying; jumpTriggerTime = 0; }
+///    else if (!is swimming) { abilities.flying = !abilities.flying; jumpTriggerTime = 0; }
 /// }
 /// ```
 ///
@@ -1501,7 +1501,7 @@ pub fn player_physics(
 ///
 /// # The vertical impulse uses the **raw** ability speed
 ///
-/// `inputYa * abilities.getFlyingSpeed() * 3.0F` — *not* the sprint-doubled value
+/// `inputYa * abilities.get_flying_speed() * 3.0F` — *not* the sprint-doubled value
 /// vanilla's own flying-speed accessor returns. Sprinting doubles horizontal flight and
 /// leaves the climb rate alone. Reusing
 /// [`lodestone_physics::player_flying_speed`] here would sprint-double it and
@@ -1509,10 +1509,10 @@ pub fn player_physics(
 ///
 /// # Divergences, deliberate
 ///
-/// * **`isControlledCamera()`** is vacuously true — this engine has no camera
+/// * **is controlled camera** is vacuously true — this engine has no camera
 ///   possession.
 /// * **The one-shot hop on engaging flight while standing** (`if (abilities.flying
-///   && this.onGround()) this.jumpFromGround();`) is **not** modelled:
+///   && this.onGround()) this's jump from ground;`) is **not** modelled:
 ///   `jump_from_ground` is private to `lodestone-physics` and needs a
 ///   `CollisionView` for vanilla's own block-jump-factor query, which this system does not hold.
 ///   The cost is a slightly less snappy takeoff from the ground (vanilla gets a
@@ -1520,7 +1520,7 @@ pub fn player_physics(
 ///   fires on the same tick. Pinned by
 ///   `takeoff_from_the_ground_does_not_model_vanillas_one_shot_hop`.
 /// * **Auto-jump** (vanilla's own "was auto jump" field) does not exist here, so its `!` is vacuous.
-/// * **`!isSwimming()`** *is* modelled, because a sprint-swimmer double-tapping
+/// * **`!is_swimming()`** *is* modelled, because a sprint-swimmer double-tapping
 ///   space would otherwise take off mid-stroke.
 pub fn apply_creative_flight_input(
     mut players: Query<
@@ -1571,7 +1571,7 @@ pub fn apply_creative_flight_input(
             }
             if input_ya != 0 {
                 // The `f32` product widened to `f64` by vanilla's own vector-add routine, exactly as
-                // vanilla: `inputYa * abilities.getFlyingSpeed() * 3.0F` is a
+                // vanilla: `inputYa * abilities.get_flying_speed() * 3.0F` is a
                 // `float` expression before it reaches the `double` vector.
                 let impulse = input_ya as f32 * abilities.flying_speed * 3.0;
                 state.0.velocity.y += f64::from(impulse);
@@ -1584,10 +1584,10 @@ pub fn apply_creative_flight_input(
 /// flight (vanilla's own client-side ai-step routine's tail).
 ///
 /// ```text
-/// super.aiStep();
-/// if (this.onGround() && abilities.flying && !this.minecraft.gameMode.isSpectator()) {
+/// super's ai step;
+/// if (this.onGround() && abilities.flying && !game mode's is spectator) {
 ///    abilities.flying = false;
-///    this.onUpdateAbilities();
+///    this's on update abilities;
 /// }
 /// ```
 ///
@@ -1624,10 +1624,10 @@ pub fn cancel_flight_on_landing(
 /// see the same `on_ground`:
 ///
 /// * the **start** is vanilla's own client-side ai-step routine's `if (input.jump() && !wasJumping &&
-///   !onClimbable() && tryToStartFallFlying())`,
+///   !on climbable && try to start fall flying)`,
 ///   which is client-authoritative — the client sets the shared flag itself and
 ///   tells the server afterwards ([`send_fall_flying_command`] is that telling);
-/// * the **stop** is vanilla's own fall-flying-update routine's `!canGlide()` branch,
+/// * the **stop** is vanilla's own fall-flying-update routine's `!can_glide()` branch,
 ///   which vanilla runs server-side and syncs back. This client has no server
 ///   that tracks glide state at all, so it
 ///   is predicted here. Without it a landing player keeps `fall_flying` set,
@@ -1684,7 +1684,7 @@ pub fn update_fall_flying_state(
 /// firework-rocket boost.
 ///
 /// vanilla's own firework-rocket-entity tick routine's attached branch is gated on
-/// `attachedToEntity.isFallFlying()` — a
+/// attached to entity's is fall flying — a
 /// rocket attached to a player who stops gliding stops boosting, but keeps
 /// ticking down, which is why the countdown is spent whether or not the impulse
 /// lands.
@@ -1726,8 +1726,8 @@ pub fn tick_item_use(mut ticks: ResMut<ItemUseTicks>) {
 /// sends it from inside its own ai-step, *before* the tick's movement packet, and this
 /// crate cannot order against `lodestone_controller`'s `ActionQueue` writers.
 ///
-/// vanilla's own client-side ai-step routine sends one `ServerboundPlayerCommandPacket(
-/// START_FALL_FLYING)` on the tick `tryToStartFallFlying()` returns true
+/// Vanilla's own client-side ai-step routine sends one start-fall-flying player command
+/// on the tick its start-fall-flying check returns true
 /// and never resends it — the server owns the
 /// shared flag from then on. [`FallFlyingSent`] is that once-per-glide latch,
 /// the same shape [`LastSprintingSent`] gives the sprint edge.
@@ -1780,7 +1780,7 @@ pub fn send_fall_flying_command(
 ///
 /// The camera is *not* separately taught about vehicles, and 26.2's own client
 /// does not teach it either: vanilla's own camera-align-with-entity routine has **no
-/// `isPassenger()` branch** other than a lerp fix-up for new-behaviour minecarts,
+/// is passenger branch** other than a lerp fix-up for new-behaviour minecarts,
 /// and riding changes neither the player's pose nor its eye height
 /// (vanilla's own player-pose-update routine has no riding case, and
 /// there is no `SITTING` pose — a mounted player keeps
@@ -1793,11 +1793,11 @@ pub fn send_fall_flying_command(
 ///
 /// Vanilla runs the passenger's full tick — travel included, with the same
 /// `xxa`/`zza` the vehicle reads — and only then overwrites the position:
-/// `rideTick()` is `setDeltaMovement(ZERO); this.tick(); vehicle.positionRider(this)`,
+/// ride tick is `setDeltaMovement(ZERO); this.tick(); vehicle.position_rider(this)`,
 /// and vanilla's own living-entity ai-step routine still reaches
-/// `travel(input)` for a passenger because `canSimulateMovement()` — which
-/// vanilla's own can-simulate-movement override as `!isClientSide() ||
-/// isLocalPlayer()` — is true for the local player either way. So a walking player's one tick of drift out of the seat
+/// `travel(input)` for a passenger because can simulate movement — which
+/// vanilla's own can-simulate-movement override as `!is_client_side() ||
+/// is_local_player()` — is true for the local player either way. So a walking player's one tick of drift out of the seat
 /// really does happen upstream and really is thrown away here. Suppressing
 /// `player_physics` instead would be a *different* engine, and it would also
 /// throw away the fluid-state computation the pose and fog read.
@@ -1812,7 +1812,7 @@ pub fn send_fall_flying_command(
 ///
 /// # `on_ground` is forced false — but *not* to avoid the flying kick
 ///
-/// vanilla's own player tick routine has `if (isSpectator() || isPassenger()) setOnGround(false);`
+/// Vanilla's own player tick routine has `if (is_spectator() || is_passenger()) set_on_ground(false);`
 /// — unconditional, before anything else in `tick()`. This closes the
 /// `spectator_or_passenger_note` contract test in
 /// `lodestone-physics/tests/on_ground.rs`, which existed precisely because the
@@ -1822,11 +1822,9 @@ pub fn send_fall_flying_command(
 /// `PlayerState::on_ground`'s own docs frame the flag as a wire contract guarded
 /// by the server's own above-ground tick counter / `multiplayer.disconnect.flying`
 /// counter, which would make this a kick-avoidance necessity. It is not: the
-/// server's float check is explicitly `&& !this.player.isPassenger()`
-/// (`ServerGamePacketListenerImpl`'s floating check), and its move handler
+/// server's float check explicitly excludes passengers, and its move handler
 /// **discards a passenger's reported position outright**, keeping only the
-/// rotation (`ServerGamePacketListenerImpl`'s move handler:
-/// `absSnapTo(getX(), getY(), getZ(), targetYRot, targetXRot)`). So neither the
+/// rotation (it snaps position back to the server's own). So neither the
 /// position nor the flag we send while mounted can desync us.
 ///
 /// What the override is actually for is every **local** consumer of the flag:
@@ -1898,11 +1896,11 @@ pub fn pin_passenger_to_vehicle(
         let Some(facts) = version.entity_facts(&kind.0) else {
             continue;
         };
-        // vanilla's own default passenger-attachment-point routine: `vehicle.getPassengers().indexOf(passenger)`. A
+        // vanilla's own default passenger-attachment-point routine: get passengers's get passengers. A
         // vehicle with no `Passengers` component yet, or a list that does not
         // mention us, reads as seat 0 — which is what `indexOf` returning `-1`
-        // then feeding vanilla's own `clamp(index, 0, size - 1)` gives in vanilla
-        // (`EntityAttachments::getClamped`), so the degenerate case agrees rather
+        // then feeding the game's own clamp to `0..size-1` gives in vanilla
+        // (its attachment-point clamped lookup), so the degenerate case agrees rather
         // than merely being harmless.
         let seat_index = own_id
             .0
@@ -2195,7 +2193,7 @@ impl Plugin for LocalPlayerPlugin {
         );
 
         // `.chain()` reproduces vanilla's own client-side ai-step routine's three-part ordering around
-        // `super.aiStep()`, and the order is observable rather than cosmetic:
+        // super's ai step, and the order is observable rather than cosmetic:
         // the toggle and the vertical impulse must land on the velocity this
         // tick's travel integrates, while the landing cancel must read the
         // `on_ground` that same travel just wrote. Registered as one chain so a
@@ -2228,7 +2226,7 @@ impl Plugin for LocalPlayerPlugin {
                 // camera one tick behind the boat it is sitting in.
                 //
                 // `charge_riding_jump` is first of the three because it is
-                // vanilla's own client-side ai-step routine's own jump block, which vanilla runs before
+                // vanilla's client-side ai-step routine's jump block, which vanilla runs before
                 // `travel` — the charge released this tick has to reach this
                 // tick's impulse.
                 crate::vehicle::charge_riding_jump,
@@ -2237,7 +2235,7 @@ impl Plugin for LocalPlayerPlugin {
                 // The glide report's outbound half, and **`TickSet::Physics` is where
                 // vanilla puts it**: its own client-side ai-step routine sends
                 // START_FALL_FLYING inline, and
-                // `sendPosition()` runs afterwards from its own client-side tick routine — so
+                // send position runs afterwards from its own client-side tick routine — so
                 // the command precedes the tick's movement packet on the wire,
                 // which queueing it here reproduces and queueing it in
                 // `TickSet::Send` would not.
@@ -3454,8 +3452,8 @@ mod tests {
     /// **The end-to-end seat pin, with the value predicted from vanilla's
     /// constants rather than from our own arithmetic.**
     ///
-    /// A minecart is `sized(0.98F, 0.7F)` with `passengerAttachments(0.1875F)`
-    /// (vanilla's own MINECART entity-type declaration), and the player's own `VEHICLE` attachment is
+    /// A minecart is `sized(0.98F, 0.7F)` with passenger attachments
+    /// (vanilla's MINECART entity-type declaration), and the player's `VEHICLE` attachment is
     /// `0.6` (vanilla's own default-vehicle-attachment constant). So a rider's feet sit at
     /// `cart.y + 0.1875 - 0.6 = cart.y - 0.4125`, i.e. **below** the cart's
     /// origin, and the camera then sits 1.62 above that.
@@ -3523,8 +3521,8 @@ mod tests {
         );
     }
 
-    /// vanilla's own player tick routine's `if (isSpectator() || isPassenger())
-    /// setOnGround(false);`. This is the `spectator_or_passenger_note` contract in
+    /// vanilla's own player tick routine's `if (is_spectator() || is_passenger())
+    /// set on ground;`. This is the `spectator_or_passenger_note` contract in
     /// `lodestone-physics/tests/on_ground.rs`, made executable.
     ///
     /// The seat is deliberately placed a fraction of a block **above the floor the
@@ -3787,7 +3785,7 @@ mod tests {
         assert!(!gliding(&app, entity));
     }
 
-    /// The boost's magnitude, predicted from vanilla's own firework-rocket-entity tick routine's own
+    /// The boost's magnitude, predicted from vanilla's firework-rocket-entity tick routine's
     /// line rather than asserted as "faster".
     ///
     /// From rest, looking straight down the `+Z` axis (yaw 0, pitch 0), the look
@@ -3834,7 +3832,7 @@ mod tests {
         let (mut app, entity) = app_with_airborne_player();
         app.insert_resource(FireworkBoost(3));
         // Not gliding: vanilla's own firework-rocket-entity tick routine's attached branch is gated on
-        // `attachedToEntity.isFallFlying()`, so the rocket keeps ticking down
+        // attached to entity's is fall flying, so the rocket keeps ticking down
         // while boosting nothing.
         for _ in 0..3 {
             run_tick(&mut app);

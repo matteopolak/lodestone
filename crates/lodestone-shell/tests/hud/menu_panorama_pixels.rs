@@ -518,9 +518,9 @@ fn assert_band_is_clear_of_loading_label(
 /// the translucent backdrop colour in `build`, *and* it was the only thing
 /// suppressing the panorama in `MenuRenderer::draw`. So asking for a wash turned
 /// the sky off, and the screen came out as a flat clear with a translucent quad on
-/// it. No vanilla path produces that: `ConnectScreen` overrides no background and
-/// takes the base `Screen.extractBackground` (panorama → blur → wash), and
-/// `LevelLoadingScreen.extractBackground`'s `OTHER` arm calls `extractPanorama`
+/// it. No vanilla path produces that: the connect screen overrides no background and
+/// takes the base Screen's extract background (panorama → blur → wash), and
+/// The level loading screen's extract background's `OTHER` arm calls `extractPanorama`
 /// with no `minecraft.level == null` gate at all.
 ///
 /// # Three hypotheses, and why the wrong two are the interesting ones

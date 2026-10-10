@@ -112,7 +112,7 @@ fn stack(name: &str, count: u32) -> ItemStack {
 /// disagrees with the marked default for 661 of 797 multi-state blocks, and
 /// `minecraft:furnace` is one of them. So the expectation now comes from
 /// `lodestone_data::snow_support::is_default_state` — vanilla's own
-/// `state == block.defaultBlockState()`, dumped from the 26.2 server — which is
+/// `state == block.default_block_state()`, dumped from the 26.2 server — which is
 /// *outside* the resolver under test rather than a second copy of it.
 fn resolve_state(state: &str) -> u32 {
     let (name, raw_props) = match state.split_once('[') {

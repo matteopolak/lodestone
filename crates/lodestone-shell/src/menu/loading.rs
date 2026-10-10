@@ -87,7 +87,7 @@
 //!
 //! **`connect.authorizing`, `connect.encrypting` and `connect.negotiating` are
 //! deliberately absent.** Vanilla sets them from inside
-//! `ClientHandshakePacketListenerImpl`, i.e. from the handshake state machine
+//! The client handshake packet listener impl, i.e. from the handshake state machine
 //! itself. Ours lives in `lodestone-client`, behind one infallible
 //! `ClientBuilder::connect().await`, so the shell cannot observe those three
 //! boundaries at all. Adding them would mean the label changing on a timer
@@ -325,7 +325,7 @@ pub struct TerrainChunkGrid {
     /// loading view rather than cosmetic metadata.
     pub center: (i32, i32),
     /// Row-major statuses, `x` fastest, [`Self::diameter`]`(radius)`² entries
-    /// — matches `LevelLoadingScreen.extractChunksForRendering`'s own
+    /// — matches the level loading screen's extract chunks for rendering's own
     /// `for (x) { for (z) }` iteration order.
     pub cells: Vec<ChunkCellStatus>,
 }
@@ -353,7 +353,7 @@ impl TerrainChunkGrid {
         }
     }
 
-    /// Cells per side: `LevelLoadingScreen.extractChunksForRendering`'s
+    /// Cells per side: the level loading screen's extract chunks for rendering's
     /// `diameter = statusView.radius() * 2 + 1`.
     #[must_use]
     pub const fn diameter(radius: u32) -> usize {
@@ -517,7 +517,7 @@ impl WorldWait {
     /// [`ConnectPhase::key`] is.
     ///
     /// `multiplayer.applyingPack` is a real 26.2 key with exactly this meaning.
-    /// Vanilla's *server-pack* path shows a `LoadingOverlay` rather than a
+    /// Vanilla's *server-pack* path shows a loading overlay rather than a
     /// worded screen and so does not use this string itself — Realms' own
     /// pack-application wait does — but it is the jar's own phrasing for the
     /// state, not one invented here, which is the rule this module holds itself

@@ -45,7 +45,7 @@
 //!
 //! [`DisplayTransform`] stores the *raw JSON numbers*
 //! (`lodestone_assets`'s parser is deliberately verbatim, and its tests assert
-//! exactly that). Vanilla's `ItemTransform` deserializer multiplies the
+//! exactly that). Vanilla's item-transform deserializer multiplies the
 //! translation by `1/16` and clamps it to `±5`, and clamps the scale to `±4`.
 //! Applying those here keeps the parsed struct honest — a field that silently
 //! means "the JSON value ÷ 16" is worse than one that means the JSON value — and
@@ -70,10 +70,10 @@ use lodestone_assets::{
 pub const UNITS_PER_BLOCK: f32 = 16.0;
 
 /// Vanilla's clamp on a display translation, in **blocks** (i.e. applied after
-/// the `/16`). From `ItemTransform`'s deserializer.
+/// the `/16`). From the item transform's deserializer.
 pub const TRANSLATION_LIMIT: f32 = 5.0;
 
-/// Vanilla's clamp on a display scale. From `ItemTransform`'s deserializer.
+/// Vanilla's clamp on a display scale. From the item transform's deserializer.
 pub const SCALE_LIMIT: f32 = 4.0;
 
 /// Half the depth range [`gui_ortho`] maps into `0..1` clip depth, in GUI
@@ -88,9 +88,9 @@ pub const GUI_DEPTH_HALF_RANGE: f32 = 1000.0;
 /// T(translation/16) · Rx · Ry · Rz · S(scale) · T(-0.5, -0.5, -0.5)
 /// ```
 ///
-/// Read right to left, that is vanilla's order: `ItemRenderer` pushes
-/// `translate(-0.5, -0.5, -0.5)` **after** `ItemTransform.apply` has pushed
-/// translate → rotate → scale, and a `PoseStack` right-multiplies, so the
+/// Read right to left, that is vanilla's order: the item renderer pushes
+/// `translate(-0.5, -0.5, -0.5)` **after** the item transform's apply has pushed
+/// translate → rotate → scale, and a pose stack right-multiplies, so the
 /// innermost operation is the centring. The model is centred on the origin
 /// first, then scaled, then rotated, then translated — which is why the
 /// transformed centre of the unit cube lands exactly on `translation/16`
@@ -104,8 +104,8 @@ pub fn display_matrix(transform: &DisplayTransform) -> Mat4 {
 
 /// [`display_matrix`], with vanilla's **left-hand fix** optionally applied.
 ///
-/// `ItemTransform.apply(applyLeftHandFix, pose)` (26.2's decompiled
-/// item-transform apply function) negates exactly three
+/// Vanilla's item-transform apply with the left-hand fix (26.2)
+/// negates exactly three
 /// numbers when the display context is a left-hand one: `translation.x`,
 /// `rotation.y` and `rotation.z`. Everything else is untouched.
 ///
@@ -115,7 +115,7 @@ pub fn display_matrix(transform: &DisplayTransform) -> Mat4 {
 /// answers an undeclared `thirdperson_lefthand` with the *right*-hand transform
 /// ([`DisplaySlot::left_hand_fallback`](lodestone_assets::DisplaySlot::left_hand_fallback)).
 /// It is tempting to read that as "the left hand is handled", but vanilla's
-/// `ItemDisplayContext.leftHand()` is `true` for **every** left-hand context,
+/// the display context's left-hand flag is `true` for **every** left-hand context,
 /// declared or not — so the mirror is applied on top of a *declared*
 /// `thirdperson_lefthand` too. Skipping it puts a sword through the back of an
 /// off hand rather than out of the front of it.
@@ -180,7 +180,7 @@ pub fn gui_item_pose(rect_px: [f32; 4], transform: &DisplayTransform) -> Mat4 {
 /// exactly this product (`result.translation(t); result.rotate(left);
 /// result.scale(s); result.rotate(right);`, each JOML call right-multiplying
 /// the running matrix) — no `/16`, no clamp, unlike [`display_matrix`]: this
-/// is a different vanilla type (`Transformation`, not `ItemTransform`) with
+/// is a different vanilla type (a plain transformation, not an item transform)
 /// its own codec and no such deserializer-side massaging.
 #[must_use]
 pub fn node_transform_matrix(t: &ItemNodeTransform) -> Mat4 {
@@ -201,7 +201,7 @@ pub fn node_transform_matrix(t: &ItemNodeTransform) -> Mat4 {
 /// Vanilla's unbaked special-model-wrapper bake function computes
 /// `Transformation.compose(transformation, this.transformation)`, which is
 /// vanilla's transformation-record compose function (`Matrix4fc parent, Optional<Transformation>
-/// transform`) → `parent.mul(transform.getMatrix())`. JOML's `Matrix4f.mul`
+/// transform`) → `parent.mul(transform's get matrix)`. JOML's `Matrix4f.mul`
 /// is `this * other`; applied to a column vector right-to-left, `other` (the
 /// node's own transform) acts on the model *first*, `parent` (the
 /// already-built outer placement — `display.<context>`, or the world/hand/
@@ -232,7 +232,7 @@ pub fn compose_special_node_transform(outer: Mat4, transformation: &[ItemNodeTra
 ///
 /// This recovers the canonical item-definition wrapper when a pack selects the
 /// raw `minecraft:head` renderer but supplies no node transformation. The 26.2
-/// `SkullSpecialRenderer` submits the Y-down skull mesh without a local pose;
+/// skull special renderer submits the Y-down skull mesh without a local pose;
 /// vanilla's `items/*_head.json` definitions supply
 /// `T(+0.5, 0, +0.5) * Rx(180°)`. A pack that replaces `player_head.json` with
 /// an empty generic-head node otherwise loses both terms.
@@ -305,11 +305,11 @@ pub fn gui_ortho(width_px: u32, height_px: u32) -> Mat4 {
 // Which variant: the live item property context
 // ---------------------------------------------------------------------------
 
-/// `minecraft:crossbow/pull`'s denominator: `CrossbowItem.getChargeDuration` with
+/// `minecraft:crossbow/pull`'s denominator: the crossbow's charge duration with
 /// **no Quick Charge**, `floor(1.25 * 20)`.
 ///
 /// Read from vanilla's crossbow-item charge-duration function
-/// (`Mth.floor(EnchantmentHelper.modifyCrossbowChargingTime(stack, user, 1.25F) * 20.0F)`),
+/// (`floor(modified_charge_time(stack, user, 1.25) * 20)`),
 /// not guessed. The enchantment level is not modelled anywhere on this side of the
 /// wire — `RenderEquipment` narrows a stack to a bare item id long before a draw —
 /// so an enchanted crossbow winds visually slower than it really does. That is the
@@ -333,7 +333,7 @@ pub const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
 /// | property | source |
 /// |---|---|
 /// | `minecraft:display_context` | [`Self::display`] — static per pass |
-/// | `minecraft:using_item` | `LivingEntity`'s flags byte, via `lodestone_ecs`'s `ItemUse` |
+/// | `minecraft:using_item` | the living entity's flags byte, via `lodestone_ecs`'s `ItemUse` |
 /// | `minecraft:use_duration` | `ItemUse::ticks` |
 /// | `minecraft:crossbow/pull` | `ItemUse::ticks / `[`CROSSBOW_CHARGE_TICKS`] |
 ///
@@ -347,33 +347,33 @@ pub const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
 ///
 /// # `use_duration` counts UP, `use_cycle` counts DOWN — do not unify them
 ///
-/// Vanilla's `UseDuration.get` returns
-/// `stack.getUseDuration(owner) - owner.getUseItemRemainingTicks()`, i.e.
-/// `getTicksUsingItem()`, which **increases** from 0 as the bow is drawn. Our
+/// Vanilla's use-duration property returns
+/// the stack's use duration minus the owner's remaining use ticks, i.e.
+/// The ticks spent using the item, which **increases** from 0 as the bow is drawn. Our
 /// `ItemUse::ticks` already *is* that number (it counts up from the rising edge of
 /// the using-item bit precisely so no per-item `getUseDuration` lookup is needed),
 /// so [`Self::use_ticks`] is fed in **directly, with no inversion**.
 ///
-/// `UseCycle` in the same package is `getUseItemRemainingTicks() % period` — the
-/// *other* direction — and it needs the per-item `getUseDuration` we do not model
+/// The use-cycle property in the same package is the remaining use ticks `% period` — the
+/// *other* direction — and it needs the per-item use duration we do not model
 /// (a brush's is 200 ticks). It is therefore listed as unsourced above, and an
 /// "obvious" `duration - ticks` inversion applied to `use_duration` to make the two
 /// look alike would pin a drawn bow at `bow_pulling_0` forever while reading, from
 /// the property name alone, perfectly correct.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ItemStateContext {
-    /// Which of vanilla's nine `ItemDisplayContext`s this pass draws in. The one
+    /// Which of vanilla's nine item display contexts this pass draws in. The one
     /// property that is a property of the *pass* rather than of the stack, and the
     /// one that fixes 26 items with no live state at all.
     pub display: DisplaySlot,
     /// Whether the holder is using **this** item right now — vanilla's
-    /// `owner.isUsingItem() && owner.getUseItem() == itemStack`. The second half is
+    /// `owner.is_using_item() && owner.get_use_item() == itemStack`. The second half is
     /// why a caller must check the *hand*: an entity drawing a bow in the main hand
     /// is not using the shield in its off hand.
     pub using: bool,
-    /// `getTicksUsingItem()` — ticks elapsed since the use began, counting **up**
+    /// get ticks using item — ticks elapsed since the use began, counting **up**
     /// from 0. Meaningless while `!using`, and read as `0` there, matching
-    /// vanilla's `getUseItem() != itemStack` early return.
+    /// vanilla's `get_use_item() != itemStack` early return.
     pub use_ticks: u32,
     /// `minecraft:custom_model_data` numeric selector at index zero. The
     /// network component is a list; vanilla's range property reads this first
@@ -437,20 +437,20 @@ impl ItemPropertyContext for ItemStateContext {
     }
 
     fn range(&self, property: &str) -> f32 {
-        // `CustomModelData` is a property of the stack, not of an active use.
+        // Custom model data is a property of the stack, not of an active use.
         // Check it before the use-state gate below: a gun in an inventory or a
         // resting hand must select its model just as it does while being used.
         if property == "minecraft:custom_model_data" {
             return self.custom_model_data;
         }
         if !self.using {
-            // Both sourced ranges are gated on `getUseItem() == itemStack` in
+            // Both sourced ranges are gated on `get_use_item() == itemStack` in
             // vanilla and return `0.0F` otherwise. Gating here rather than at each
             // arm keeps a future property from silently forgetting it.
             return 0.0;
         }
         match property {
-            // `getTicksUsingItem()` verbatim; see the type docs for why there is
+            // get ticks using item verbatim; see the type docs for why there is
             // no inversion here.
             "minecraft:use_duration" => self.use_ticks as f32,
             // `useDuration / getChargeDuration`. Vanilla additionally returns 0
@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn unwrapped_generic_head_reinstates_the_canonical_wrapper_in_gui_and_third_person() {
-        // 26.2's SkullSpecialRenderer submits the raw Y-down skull box. The
+        // 26.2's skull special renderer submits the raw Y-down skull box. The
         // canonical items/*_head.json definitions supply the missing local
         // wrapper T(.5, 0, .5) * Rx(180°). This server pack retargets a player
         // head to `minecraft:head` but leaves that node empty, so the complete
@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn the_left_hand_fix_negates_exactly_translation_x_and_rotation_yz() {
-        // Hand-derived from `ItemTransform.apply`: with rotation [0, 90, 0] and
+        // Hand-derived from the item transform's apply: with rotation [0, 90, 0] and
         // translation [16, 32, 48] the right hand puts the cube centre at
         // (1, 2, 3) blocks and the left hand at (-1, 2, 3) — only x flips.
         let t = DisplayTransform {
@@ -1135,7 +1135,7 @@ mod tests {
     }
 
     /// The inversion trap, as a control: had `use_duration` been fed
-    /// `getUseItemRemainingTicks()`-style (counting **down** from a duration)
+    /// get use item remaining ticks-style (counting **down** from a duration)
     /// instead of `ItemUse::ticks`, every crossing above would land on a different
     /// model. Asserting the wrong hypothesis *fails* is what makes the right one
     /// evidence rather than a coincidence.
@@ -1163,7 +1163,7 @@ mod tests {
         // Fully wound at the charge duration itself, not before it.
         assert!(ctx(24).range("minecraft:crossbow/pull") < 1.0);
         assert!(ctx(25).range("minecraft:crossbow/pull") >= 1.0);
-        // Not in use: zero, matching vanilla's `getUseItem() != itemStack` return.
+        // Not in use: zero, matching vanilla's `get_use_item() != itemStack` return.
         assert_eq!(
             ItemStateContext::new(DisplaySlot::ThirdPersonRightHand)
                 .range("minecraft:crossbow/pull"),
@@ -1198,7 +1198,7 @@ mod tests {
             DisplaySlot::ALL.len(),
             "the nine contexts have nine distinct keys"
         );
-        // Spot-check against `ItemDisplayContext.getSerializedName()` verbatim, so
+        // Spot-check against the display context's serialized names verbatim, so
         // the loop above cannot be satisfied by nine consistently wrong keys.
         assert!(names.contains("firstperson_righthand"));
         assert!(names.contains("thirdperson_righthand"));

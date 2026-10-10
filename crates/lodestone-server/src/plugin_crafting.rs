@@ -58,7 +58,7 @@
 //!
 //! **Cost is untouched.** Vanilla's own `PrepareAnvilEvent` only ever lets a
 //! plugin replace the *result* `ItemStack`, never the anvil's XP-level cost —
-//! `AnvilMenu`'s `cost` `DataSlot` is computed once, from the pre-click cells
+//! The anvil menu's `cost` data slot is computed once, from the pre-click cells
 //! alone, by `crate::server::apply_workstation_clicked`'s own `anvil_cost`
 //! binding, entirely separately from [`workstation_result`]. This module
 //! follows that: a hook that replaces the result does not, and cannot, change
@@ -109,7 +109,7 @@ pub struct StationInputs {
     /// [`StationVerdict::Replace`] able to *tweak* a real result (append a
     /// lore line, force a custom name) rather than forcing every replacing
     /// hook to reimplement the station's own recipe — the same shape
-    /// Bukkit's own `PrepareAnvilEvent.getResult()` gives a plugin before it
+    /// Bukkit's own PrepareAnvilEvent's get result gives a plugin before it
     /// calls `setResult`.
     pub computed: Option<ItemStack>,
 }
@@ -120,7 +120,7 @@ pub enum StationVerdict {
     /// Leave the station's own computed result (or lack of one) unchanged.
     Allow,
     /// Refuse to produce a result at all, regardless of what the station
-    /// itself computed — `PrepareAnvilEvent.setResult(null)`'s shape.
+    /// itself computed — PrepareAnvilEvent's set result's shape.
     Deny,
     /// Replace the result with a plugin-supplied stack.
     Replace(ItemStack),

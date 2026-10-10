@@ -31,7 +31,7 @@ fn edit_book_draft_save_updates_pages_without_transmuting() {
 
 /// The signing path: a title present transmutes the stack to
 /// `minecraft:written_book` and stamps the signer's name as author —
-/// vanilla's own sign-book handler's own literal `0`/`true` for
+/// vanilla's sign-book handler's literal `0`/`true` for
 /// generation/resolved.
 #[test]
 fn edit_book_signing_transmutes_to_written_book() {
@@ -77,7 +77,7 @@ fn edit_book_refuses_a_main_storage_slot() {
 }
 
 /// **Control**: an item that is not a writable book must be refused —
-/// vanilla's `carried.has(DataComponents.WRITABLE_BOOK_CONTENT)` gate.
+/// vanilla's `carried.has(the data components's writable book content)` gate.
 /// Without this, any item in the targeted slot would silently gain book
 /// content.
 #[test]
@@ -1133,7 +1133,7 @@ fn a_stonecutter_button_click_then_take_produces_the_selected_recipe_and_consume
 
 /// This runs end to end: a loom with a banner, a dye and a specific
 /// pattern *item* auto-selects that item's one pattern — no
-/// `ContainerButtonClick` needed, matching vanilla's own loom-menu slots-changed routine's own
+/// `ContainerButtonClick` needed, matching vanilla's loom-menu slots-changed routine's
 /// auto-select branch — and taking the result consumes exactly one
 /// banner and one dye while leaving the pattern item untouched, so it
 /// can stamp a second banner.

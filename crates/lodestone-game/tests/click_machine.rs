@@ -1,5 +1,5 @@
 //! Behavioural tests for the container click state machine, hand-computed
-//! against vanilla `AbstractContainerMenu.doClick` semantics.
+//! against vanilla's container-menu click semantics.
 
 use lodestone_game::click::{
     Click, ContainerInput, PlayerCtx, QuickCraftType, drag_header, drag_type, quick_craft_mask,
@@ -139,7 +139,7 @@ fn throw_ctrl_q_drops_whole_slot() {
 }
 
 /// Vanilla's own click-handler THROW step: `THROW` bails out entirely when
-/// `!player.canDropItems()`, before taking anything from the slot. Vanilla
+/// `!player.can_drop_items()`, before taking anything from the slot. Vanilla
 /// gates it *inside* the `THROW` arm, unlike the outside-cursor drop (`PICKUP`
 /// with `slotIndex == -999`, `:404-412`), which drops unconditionally — so this
 /// is a control specific to `Throw`, not a general "can't drop" gate.
@@ -396,7 +396,7 @@ fn middle_click_clone_noop_in_survival() {
 }
 
 /// Vanilla's own click-handler CLONE step additionally requires
-/// `this.getCarried().isEmpty()`. A creative middle-click while already
+/// get carried's get carried. A creative middle-click while already
 /// holding something must not overwrite the cursor.
 #[test]
 fn middle_click_clone_refuses_when_cursor_is_occupied() {

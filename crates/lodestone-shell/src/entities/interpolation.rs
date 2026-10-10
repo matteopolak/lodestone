@@ -372,7 +372,7 @@ pub(super) struct ArmPoseChoice {
 /// # Bow vs crossbow: two different triggers, and only one is the using-item bit
 ///
 /// * **Bow** — vanilla's own bow use-animation, gated purely on
-///   `getUsedItemHand() == hand && getUseItemRemainingTicks() > 0`. Our
+///   `get_used_item_hand() == hand && get_use_item_remaining_ticks() > 0`. Our
 ///   [`ItemUse`] flag is exactly that gate.
 /// * **Crossbow charge** — vanilla's own crossbow use-animation, same gate, plus the wind
 ///   fraction from the tick counter.
@@ -429,7 +429,7 @@ pub(super) fn arm_pose_for(
     // the base using-item rule exactly as vanilla's `? :` puts it ahead of the
     // base case.
     //
-    // `getMainArm() == arm` is vanilla's left-handed fork. The bow always sits
+    // `get_main_arm() == arm` is vanilla's left-handed fork. The bow always sits
     // in the main *hand* (`main_hand_holds_bow` only ever looks at
     // `EquipmentSlot::MainHand`), so the physical arm that draws it is simply
     // `main_arm_left` — a left-handed skeleton draws with its left arm.
@@ -514,7 +514,7 @@ pub(super) fn in_use_arm_pose(
 /// hang, which is what this build already did and what vanilla does.
 ///
 /// Vanilla poses each arm from its own hand and can raise **both** at once
-/// (`getMainArm() == arm ? mainHandPose : offHandPose`). [`ArmPoseChoice`] carries
+/// (`get_main_arm() == arm ? mainHandPose : offHandPose`). [`ArmPoseChoice`] carries
 /// one pose and one hand, so the main hand wins when both are full; the off hand is
 /// reached only when the main hand is empty, which is the case that would otherwise
 /// pose the wrong arm.
@@ -569,7 +569,7 @@ pub(super) fn main_hand_holds_bow(equipment: &[(EquipmentSlot, ResourceLocation)
     })
 }
 
-/// Wraps degrees into `(-180, 180]`, like `Mth.wrapDegrees`.
+/// Wraps degrees into `(-180, 180]`, like Mth's wrap degrees.
 pub(super) fn wrap_degrees(deg: f32) -> f32 {
     angle_diff(deg, 0.0)
 }

@@ -172,7 +172,7 @@ pub fn stat_value_registry(stat_type_id: i32) -> Option<StatValueRegistry> {
         "minecraft:mined" => StatValueRegistry::Block,
         "minecraft:killed" | "minecraft:killed_by" => StatValueRegistry::EntityType,
         "minecraft:custom" => StatValueRegistry::CustomStat,
-        // crafted / used / broken / picked_up / dropped are all `vanilla's own registries's own item`.
+        // crafted / used / broken / picked_up / dropped are all the item registry.
         _ => StatValueRegistry::Item,
     })
 }
@@ -180,13 +180,13 @@ pub fn stat_value_registry(stat_type_id: i32) -> Option<StatValueRegistry> {
 /// The registry a stat value id indexes. See [`stat_value_registry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatValueRegistry {
-    /// `vanilla's own registries's own block` -- `minecraft:mined`.
+    /// The block registry -- `minecraft:mined`.
     Block,
-    /// `vanilla's own registries's own item` -- crafted, used, broken, picked_up, dropped.
+    /// The item registry -- crafted, used, broken, picked_up, dropped.
     Item,
-    /// `vanilla's own registries's own entity type` -- killed, killed_by.
+    /// The entity type registry -- killed, killed_by.
     EntityType,
-    /// `vanilla's own registries's own custom stat` -- [`CUSTOM_STAT_ENTRIES`].
+    /// The custom stat registry -- [`CUSTOM_STAT_ENTRIES`].
     CustomStat,
 }
 

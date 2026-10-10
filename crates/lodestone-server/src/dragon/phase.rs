@@ -5,8 +5,8 @@
 //! # The one deliberate substitution, named up front
 //!
 //! Vanilla drives most transitions off a `Path`/`Node` search across a fixed
-//! 12-node ring above the arena (`EnderDragon.findClosestNode`/`findPath`,
-//! `DragonFlightHistory`) — full 3D flight pathfinding that this codebase's
+//! 12-node ring above the arena (EnderDragon's find closest node/`findPath`,
+//! The dragon flight history) — full 3D flight pathfinding that this codebase's
 //! flying-mob AI does not have (`lodestone-entity`'s goal/pathfinder stack is
 //! built for ground navigation over [`crate::mobs::ChunkWorld`], not aerial
 //! node graphs). Porting that graph is a separate, large piece of work and is
@@ -24,16 +24,16 @@
 //!
 //! # Phase ids
 //!
-//! [`Phase::id`] matches `EnderDragonPhase`'s own static-initializer order
+//! [`Phase::id`] matches the ender dragon phase's own static-initializer order
 //! (`HOLDING_PATTERN` through `HOVERING`), because that order **is** the wire
-//! value `EnderDragon.DATA_PHASE` carries (`EnderDragonPhaseManager.setPhase`
-//! calls `dragon.getEntityData().set(DATA_PHASE, target.getId())`) — a client
+//! value `EnderDragon.DATA_PHASE` carries (the ender dragon phase manager's set phase
+//! calls get entity data's get entity data) — a client
 //! that ever decodes this field needs the same numbering.
 
 use std::fmt;
 
 /// One of the eleven ender-dragon phases. Order and discriminants match
-/// `EnderDragonPhase`'s declaration order exactly — see the module doc.
+/// The ender dragon phase's declaration order exactly — see the module doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     HoldingPattern = 0,
@@ -50,18 +50,18 @@ pub enum Phase {
 }
 
 impl Phase {
-    /// The wire id — `EnderDragonPhase.getId()`.
+    /// The wire id — the ender dragon phase's get id.
     #[must_use]
     pub const fn id(self) -> i32 {
         self as i32
     }
 
-    /// `DragonPhaseInstance.isSitting` — true for every phase whose own class
-    /// overrides it: the three `AbstractDragonSittingPhase` subclasses
+    /// The dragon phase instance's is sitting — true for every phase whose own class
+    /// overrides it: the three abstract dragon sitting phase subclasses
     /// (`SittingFlaming`/`SittingScanning`/`SittingAttacking`) **and**
-    /// `DragonHoverPhase`, which overrides it separately even though it does
+    /// The dragon hover phase, which overrides it separately even though it does
     /// not extend the sitting base class. Every other phase inherits
-    /// `AbstractDragonPhaseInstance.isSitting`'s `false` default.
+    /// The abstract dragon phase instance's is sitting's `false` default.
     #[must_use]
     pub const fn is_sitting(self) -> bool {
         matches!(
@@ -141,83 +141,83 @@ pub struct TargetSighting {
 /// distance/pathfinding check vanilla performs internally.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DragonInputs {
-    /// `EnderDragonFight.aliveCrystals()` — read by holding-pattern,
+    /// The ender dragon fight's alive crystals — read by holding-pattern,
     /// strafe-retarget and takeoff to decide which arc of the node ring to
     /// aim for. This module only needs the *count*, for the RNG formulas
     /// below; the ring-arc selection itself is part of the pathfinding this
     /// module does not port.
     pub alive_crystals: i32,
-    /// Stand-in for `currentPath.isDone()` — see the module doc.
+    /// Stand-in for current path's is done — see the module doc.
     pub leg_complete: bool,
-    /// A player near the podium/egg, for `DragonHoldingPatternPhase`'s
-    /// `findNewTarget`/`DragonLandingApproachPhase`'s targeting — `None` when
+    /// A player near the podium/egg, for the dragon holding pattern phase's
+    /// `findNewTarget`/dragon landing approach phase's targeting — `None` when
     /// vanilla's `getNearestPlayer` would return `null`.
     pub player_near_egg: Option<TargetSighting>,
-    /// `egg.distToCenterSqr(playerNearestToEgg.position()) / 512.0` when a
+    /// `egg.dist_to_center_sqr(playerNearestToEgg.position()) / 512.0` when a
     /// player is near the egg, else vanilla's `64.0` fallback constant
-    /// (`DragonHoldingPatternPhase.findNewTarget`). The caller computes the
+    /// (the dragon holding pattern phase's find new target). The caller computes the
     /// division; this module only consumes the already-scaled value so it
     /// never has to know what "near the egg" means geometrically.
     pub egg_distance_scaled: f64,
     /// Whether the strafing dragon currently has line of sight to its
     /// attack target and is within `4096.0` (64²) blocks² —
-    /// `DragonStrafePlayerPhase.doServerTick`'s outer `if`.
+    /// The dragon strafe player phase's do server tick's outer `if`.
     pub strafe_in_range_and_los: bool,
     /// Whether the aim angle to the strafe target is inside vanilla's
     /// `[0.0, 10.0)` degree cone — the `angleDegs >= 0.0F && angleDegs < 10.0F`
     /// check gating the fireball launch.
     pub strafe_aim_in_cone: bool,
     /// A player within `20` blocks horizontally / `10` vertically of the
-    /// sitting dragon — `DragonSittingScanningPhase`'s `scanTargeting`. The
+    /// sitting dragon — the dragon sitting scanning phase's `scanTargeting`. The
     /// aim-cone angle vanilla computes alongside this only decides whether to
     /// **turn** toward the target (a movement concern, out of scope per the
     /// module doc) — it plays no part in the `SittingAttacking` transition,
     /// which fires on `scanningTime > 25` alone whenever a target is
     /// present.
     pub sitting_scan_target: Option<TargetSighting>,
-    /// A player within `150` blocks — `DragonSittingScanningPhase`'s
+    /// A player within `150` blocks — the dragon sitting scanning phase's
     /// `CHARGE_TARGETING`, consulted only once the 100-tick idle timer
     /// expires with no scan target.
     pub charge_target: Option<TargetSighting>,
-    /// `!egg.closerToCenterThan(dragon.position(), 10.0)` negated —
-    /// `DragonTakeoffPhase`'s abort-to-holding-pattern check. `true` means
+    /// `!egg.closer_to_center_than(dragon.position(), 10.0)` negated —
+    /// The dragon takeoff phase's abort-to-holding-pattern check. `true` means
     /// still within 10 blocks of the egg.
     pub within_10_of_egg: bool,
     /// The charge phase's arrival/collision check —
     /// `distToTarget < 100.0 || distToTarget > 22500.0 ||
     /// horizontalCollision || verticalCollision` in
-    /// `DragonChargePlayerPhase.doServerTick`.
+    /// The dragon charge player phase's do server tick.
     pub charge_arrived_or_collided: bool,
     /// The death phase's clean-flight check — the *conjunction* vanilla
     /// negates: `distToTarget` in `[100.0, 22500.0]` **and** no collision.
     /// `true` here means "still flying cleanly toward the portal", the
-    /// condition under which `DragonDeathPhase` holds health at `1.0` rather
+    /// condition under which the dragon death phase holds health at `1.0` rather
     /// than finishing the kill.
     pub dying_flying_cleanly: bool,
 }
 
 /// Persisted per-phase timer/counter state — the fields each
-/// `DragonPhaseInstance` implementor keeps as instance fields, carried here
+/// The dragon phase instance implementor keeps as instance fields, carried here
 /// instead so [`PhaseManager`] stays one small `struct` rather than eleven.
 /// `flame_count` is deliberately **not** reset by `SittingFlaming::begin`
 /// (vanilla increments it there) — only [`PhaseManager::reset_flame_count`]
 /// (called from the `Landing` transition, exactly where vanilla's
-/// `getPhase(SITTING_FLAMING).resetFlameCount()` is) clears it.
+/// get phase's reset flame count is) clears it.
 #[derive(Debug, Clone, Copy, Default)]
 struct PhaseTimers {
-    /// `DragonStrafePlayerPhase.fireballCharge`.
+    /// The dragon strafe player phase's fireball charge.
     fireball_charge: i32,
-    /// `DragonSittingScanningPhase.scanningTime`.
+    /// The dragon sitting scanning phase's scanning time.
     scanning_time: i32,
-    /// `DragonSittingFlamingPhase.flameTicks`.
+    /// The dragon sitting flaming phase's flame ticks.
     flame_ticks: i32,
-    /// `DragonSittingFlamingPhase.flameCount`.
+    /// The dragon sitting flaming phase's flame count.
     flame_count: i32,
-    /// `DragonSittingAttackingPhase.attackingTicks`.
+    /// The dragon sitting attacking phase's attacking ticks.
     attacking_ticks: i32,
-    /// `DragonChargePlayerPhase.timeSinceCharge`.
+    /// The dragon charge player phase's time since charge.
     time_since_charge: i32,
-    /// `DragonTakeoffPhase.firstTick`.
+    /// The dragon takeoff phase's first tick.
     takeoff_first_tick: bool,
     /// `EnderDragon.sittingDamageReceived` — not per-phase in vanilla (it
     /// lives on `EnderDragon` itself) but kept alongside the other timers
@@ -240,13 +240,13 @@ struct PhaseTargets {
 /// them instead of performing them, since it has no world to act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseEffect {
-    /// `DragonStrafePlayerPhase` fired a dragon fireball at its target this
+    /// The dragon strafe player phase fired a dragon fireball at its target this
     /// tick — the caller should spawn `minecraft:dragon_fireball` along the
     /// dragon's current aim.
     FireFireball,
 }
 
-/// Port of `EnderDragonPhaseManager` — owns the current phase and the timer
+/// Port of the ender dragon phase manager — owns the current phase and the timer
 /// state every phase implementor keeps, and drives transitions from
 /// [`DragonInputs`]. See the module doc for the pathfinding substitution.
 #[derive(Debug, Clone)]
@@ -264,10 +264,10 @@ impl Default for PhaseManager {
 
 impl PhaseManager {
     /// Starts in `HoldingPattern` — **not** a literal port of
-    /// `new EnderDragonPhaseManager(dragon)`, whose constructor actually sets
+    /// `new ender dragon phase manager(dragon)`, whose constructor actually sets
     /// `HOVERING` first. Every real dragon spawn immediately overwrites that
-    /// with `dragon.getPhaseManager().setPhase(EnderDragonPhase.HOLDING_PATTERN)`
-    /// right after construction (`EnderDragonFight.createNewDragon`), so this
+    /// with get phase manager's set phase
+    /// right after construction (the ender dragon fight's create new dragon), so this
     /// constructor starts where production code actually leaves a fresh
     /// dragon, skipping the one-tick `HOVERING` detour a literal port would
     /// need a follow-up call to skip anyway.
@@ -298,8 +298,8 @@ impl PhaseManager {
         self.current
     }
 
-    /// `EnderDragonPhaseManager.setPhase` — a same-phase call is a no-op
-    /// (vanilla's `target != this.currentPhase.getPhase()` guard), and a
+    /// The ender dragon phase manager's set phase — a same-phase call is a no-op
+    /// (vanilla's `target != this.currentPhase.get_phase()` guard), and a
     /// real transition calls the outgoing phase's `end()` and the incoming
     /// phase's `begin()` (folded into the per-phase `begin_*` resets below,
     /// since only `SittingFlaming::end` does anything observable — discarding
@@ -338,7 +338,7 @@ impl PhaseManager {
         }
     }
 
-    /// `DragonHoldingPatternPhase.strafePlayer`/`DragonSittingScanningPhase`'s
+    /// The dragon holding pattern phase's strafe player/dragon sitting scanning phase's
     /// charge branch both set a target **and then** call `setPhase` — done
     /// together here so a caller cannot set the phase without the target the
     /// new phase immediately needs.
@@ -351,9 +351,9 @@ impl PhaseManager {
         }
     }
 
-    /// `EnderDragonPhaseManager.getPhase(SITTING_FLAMING).resetFlameCount()` —
+    /// The ender dragon phase manager's get phase.reset_flame_count() —
     /// called from the `Landing` → `SittingScanning` transition, before the
-    /// phase change itself (`DragonLandingPhase.doServerTick`).
+    /// phase change itself (the dragon landing phase's do server tick).
     pub fn reset_flame_count(&mut self) {
         self.timers.flame_count = 0;
     }
@@ -364,7 +364,7 @@ impl PhaseManager {
     /// by a caller that has already applied `damage` to health — this
     /// function only tracks the *accumulator*, matching
     /// `sittingDamageReceived = sittingDamageReceived + healthBefore -
-    /// getHealth()` (i.e. the actual health delta, which may be less than
+    /// get_health()` (i.e. the actual health delta, which may be less than
     /// `damage` after armor/reduction — the caller passes that delta, not
     /// the raw hit).
     pub fn on_sitting_damage(&mut self, health_delta: f32, max_health: f32) -> bool {
@@ -385,7 +385,7 @@ impl PhaseManager {
     /// does not actually kill the dragon — it clamps health to `1.0` and
     /// enters `Dying`, which then plays out the death-flight sequence. A
     /// killing blow while sitting has no special handling here (vanilla's
-    /// `!isSitting()` guard), matching the vanilla surprise that a sitting
+    /// `!is_sitting()` guard), matching the vanilla surprise that a sitting
     /// dragon *can* die outright from a killing blow, one of the two
     /// `hurt`/`handleKillingBlow` code paths in the whole class that draws no
     /// distinction between sitting and standing.
@@ -402,9 +402,9 @@ impl PhaseManager {
         }
     }
 
-    /// `AbstractDragonPhaseInstance.onCrystalDestroyed` — a no-op for every
+    /// The abstract dragon phase instance's on crystal destroyed — a no-op for every
     /// phase except `HoldingPattern`
-    /// (`DragonHoldingPatternPhase.onCrystalDestroyed`), which strafes the
+    /// (the dragon holding pattern phase's on crystal destroyed), which strafes the
     /// killer if the dragon `canAttack` them. `can_attack` stands in for
     /// that check (target validity/alliance, which this module has no player
     /// registry to evaluate). Returns the transition, if any.
@@ -418,7 +418,7 @@ impl PhaseManager {
         }
     }
 
-    /// One server tick — `DragonPhaseInstance.doServerTick`'s dispatch,
+    /// One server tick — the dragon phase instance's do server tick's dispatch,
     /// folded into a single `match` on the current phase since this module
     /// has one struct instead of eleven objects. Returns any side effect the
     /// caller needs to perform (see [`PhaseEffect`]); the phase transition
@@ -426,11 +426,11 @@ impl PhaseManager {
     /// observable afterward through [`current`](Self::current).
     pub fn tick(&mut self, inputs: &DragonInputs, rng: &mut dyn DragonRng) -> Option<PhaseEffect> {
         match self.current {
-            // `DragonHoldingPatternPhase.findNewTarget`: only re-rolled once
+            // The dragon holding pattern phase's find new target: only re-rolled once
             // the current leg is done.
             Phase::HoldingPattern => {
                 if inputs.leg_complete {
-                    // `dragon.getRandom().nextInt(crystals + 3) == 0`.
+                    // `dragon.get_random().nextInt(crystals + 3) == 0`.
                     if rng.next_below((inputs.alive_crystals + 3).max(1) as u32) == 0 {
                         self.set_phase(Phase::LandingApproach);
                         return None;
@@ -449,7 +449,7 @@ impl PhaseManager {
             }
             Phase::StrafePlayer => {
                 let Some(_target) = self.targets.strafe_target else {
-                    // `LOGGER.warn(...); setPhase(HOLDING_PATTERN)`.
+                    // `LOGGER.warn(...); set_phase(HOLDING_PATTERN)`.
                     self.set_phase(Phase::HoldingPattern);
                     return None;
                 };
@@ -466,7 +466,7 @@ impl PhaseManager {
                 None
             }
             Phase::LandingApproach => {
-                // Stand-in for `currentPath.isDone()` after
+                // Stand-in for current path's is done after
                 // `findNewTarget`/`navigateToNextPathNode` — see module doc.
                 if inputs.leg_complete {
                     self.set_phase(Phase::Landing);
@@ -474,7 +474,7 @@ impl PhaseManager {
                 None
             }
             Phase::Landing => {
-                // `targetLocation.distanceToSqr(...) < 1.0` —
+                // `targetLocation.distance_to_sqr(...) < 1.0` —
                 // `inputs.leg_complete` is this module's stand-in for
                 // "arrived at the egg", reused here rather than adding a
                 // second boolean that would mean the same thing.
@@ -547,7 +547,7 @@ impl PhaseManager {
         }
     }
 
-    /// `DragonDeathPhase.doServerTick`'s health-drive clause, exposed
+    /// The dragon death phase's do server tick's health-drive clause, exposed
     /// separately because it drives `health`, not the phase itself (vanilla
     /// stays in `DYING` the whole time; only the caller's own removal logic,
     /// watching health hit `0.0`, ends the fight). Returns the health value
@@ -687,7 +687,7 @@ mod tests {
 
         // Leave the 10-block radius -> HoldingPattern. First tick after
         // set_phase is the "firstTick" no-op tick, matching
-        // `DragonTakeoffPhase.doServerTick`.
+        // The dragon takeoff phase's do server tick.
         let mut i = inputs();
         i.within_10_of_egg = false;
         pm.tick(&i, &mut rng); // first_tick, no-op

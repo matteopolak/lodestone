@@ -104,7 +104,7 @@ fn current_air_supply_bubble(current: i32, max: i32, tick_offset: i32) -> i32 {
     numerator.div_euclid(max) + i32::from(numerator.rem_euclid(max) != 0)
 }
 
-/// `Hud.getEmptyBubbleDelayDuration`: the empty-bubble edge lags one tick
+/// Hud's get empty bubble delay duration: the empty-bubble edge lags one tick
 /// behind the full/popping edge while submerged with any air left, so the
 /// last empty bubble doesn't reappear in the same frame the adjacent one pops.
 #[must_use]
@@ -113,10 +113,10 @@ fn empty_bubble_delay_duration(current: i32, is_underwater: bool) -> i32 {
 }
 
 /// Computes which sprite (if any) each of the 10 bubble slots should draw this
-/// frame — a direct port of `Hud.extractAirBubbles`'s per-slot loop.
+/// frame — a direct port of Hud's extract air bubbles's per-slot loop.
 ///
 /// `air` is clamped to `0..=max_air` internally, mirroring vanilla's own
-/// `Math.clamp(player.getAirSupply(), 0, maxAirSupplyTicks)` (call sites do not
+/// `Math.clamp(player.get_air_supply(), 0, maxAirSupplyTicks)` (call sites do not
 /// need to pre-clamp). `max_air` is floored at `1` to avoid a division by zero
 /// on a malformed `minecraft:max_air` attribute; vanilla's own default is `300`.
 ///

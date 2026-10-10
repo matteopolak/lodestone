@@ -540,7 +540,7 @@ impl<'de> Deserialize<'de> for TextureMetaDocument {
 }
 
 /// The `texture` section of a `*.png.mcmeta`, mirroring vanilla's
-/// `TextureMetadataSection` record.
+/// texture-metadata record.
 ///
 /// The two fields that matter to the block atlas are
 /// [`mipmap_strategy`](Self::mipmap_strategy) and

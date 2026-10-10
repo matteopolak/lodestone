@@ -19,7 +19,7 @@ use crate::view::NavView;
 
 /// The 0.6-block auto-step height, from
 /// [`lodestone_physics::EntityDimensions::PLAYER`] rather than a literal: 26.2's
-/// player does not override `maxUpStep()`, so it is the `STEP_HEIGHT` attribute
+/// player does not override max up step, so it is the `STEP_HEIGHT` attribute
 /// default.
 pub const STEP_HEIGHT: f64 = lodestone_physics::EntityDimensions::PLAYER.step_height as f64;
 

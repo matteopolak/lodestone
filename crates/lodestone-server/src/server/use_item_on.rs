@@ -118,7 +118,7 @@ pub(super) fn slab_doubles(clicked: StateId, held: Block, face: BlockFace, curso
 
 /// Applies a right-click placement, mirroring
 /// vanilla's own use-item-on handler's replace-vs-relative
-/// choice of placement cell (`BlockPlaceContext`'s constructor: place at the
+/// choice of placement cell (the block place context's constructor: place at the
 /// clicked block if it `canBeReplaced`, otherwise at its `face`-neighbour) —
 /// simplified per this crate's documented scope (`docs/block-edit.md`): no
 /// survival/collision validation beyond "is the target cell currently
@@ -449,7 +449,7 @@ where
         BrewingInsertOutcome::Inserted(selected) => {
             // The stand consumed an item. Tell the client's window-0 hotbar
             // slot (menu slots `36..=44` -> native `0..=8`, vanilla's
-            // `InventoryMenu`) so the held count visibly drops — the same
+            // The inventory menu) so the held count visibly drops — the same
             // server-initiated window-0 slot update vanilla broadcasts after
             // a composter click consumes one. `state_id` is `0`: this crate
             // applies a container click's own diff verbatim and never
@@ -485,7 +485,7 @@ where
                 apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, block_state)).await?;
             }
             // Tell the client's window-0 hotbar slot (menu slots `36..=44` ->
-            // native `0..=8`, vanilla's `InventoryMenu`) so the held count
+            // native `0..=8`, vanilla's inventory menu) so the held count
             // visibly drops — the same server-initiated window-0 slot update
             // vanilla broadcasts after a composter click consumes one.
             // `state_id` is `0`, as in the brewing arm above (this crate
@@ -506,14 +506,14 @@ where
         }
     }
 
-    // Bone meal on a growable block — `BoneMealItem::useOn`, the consuming half
+    // Bone meal on a growable block — the bone meal item's use on, the consuming half
     // of [`crate::bone_meal`]'s rule layer. Ahead of the placement branch for
     // the same reason the composter and brewing arms are: bone meal is not a
     // block item, but the *clicked* cell is often air-adjacent and a fall-through
     // would try to place whatever else is in hand.
     //
     // The three outcomes are not two: `ConsumedNoChange` is a real vanilla
-    // result, because `BoneMealItem` shrinks the stack *outside* the success
+    // result, because bone meal item shrinks the stack *outside* the success
     // branch — a failed sapling roll (55% of them) eats the item for nothing,
     // and treating that as a no-op would make bone meal infinitely efficient.
     // `NotModelled` deliberately consumes nothing: the grass-block and
@@ -1241,7 +1241,7 @@ where
         }
     }
     // Tell the client's window-0 hotbar slot what the server thinks is left —
-    // menu slots `36..=44` map onto native `0..=8` (vanilla's `InventoryMenu`),
+    // menu slots `36..=44` map onto native `0..=8` (vanilla's inventory menu),
     // the same server-initiated slot update the composter, brewing-stand,
     // bone-meal and spawn-egg arms above send after they consume. `state_id` is
     // `0`: this crate applies a container diff verbatim and never validates a

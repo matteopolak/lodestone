@@ -79,7 +79,7 @@ pub(crate) struct KeyGate {
     ///
     /// **Escape is excluded, and that is vanilla for our layout.** The branch
     /// above it closes the *book* on Escape only when
-    /// `!isOffsetNextToMainGUI()`, i.e. when the book overlays the main GUI. This
+    /// `!is_offset_next_to_main_gui()`, i.e. when the book overlays the main GUI. This
     /// client always draws the book beside the panel (see
     /// `container::recipe_book`'s module doc), so we are always in the offset
     /// case and Escape falls through — to `InputAction::Pause`, which closes the
@@ -304,7 +304,7 @@ pub(crate) enum KeyOutcome {
     /// producer is exactly how `ClientAction::ReleaseUseItem` stayed a
     /// serverbound island (encoded by all four protocol adapters, called by
     /// nothing in this shell) — bow, crossbow and shield are all
-    /// `useOnRelease()`-gated and cannot complete without it. See
+    /// use on release-gated and cannot complete without it. See
     /// `Sim::end_use`.
     Use(bool),
     /// Set a movement action's held state on the controller.
@@ -555,7 +555,7 @@ pub(crate) fn resolve_key(
         Some(KeyOutcome::TogglePauseOnLostFocus)
     } else if gate.debug_held && pressed && binds.is(InputAction::DebugCopyLocation, code.into()) {
         // `key.debug.copyLocation` — table-driven, as above. Vanilla additionally
-        // gates this on `!player.isReducedDebugInfo()`, a concept this client
+        // gates this on `!player.is_reduced_debug_info()`, a concept this client
         // does not model yet — see `docs/keybindings.md`'s F3 section.
         Some(KeyOutcome::CopyLocation)
     } else if binds.is(InputAction::Screenshot, code.into()) && pressed {
@@ -822,7 +822,7 @@ impl WindowApp {
 
 /// Translate one winit key press into the [`crate::menu::focus::KeyEvent`]
 /// every ported text field speaks — the GLFW key code plus the GLFW modifier
-/// bitmask vanilla's `InputWithModifiers` predicates test.
+/// bitmask vanilla's input with modifiers predicates test.
 ///
 /// # Why this exists rather than a second edit implementation
 ///
@@ -1080,7 +1080,7 @@ mod chat_editing {
 
     // ---- word boundaries ----------------------------------------------------
     //
-    // `EditBox.getWordPosition` breaks on **space and nothing else**, and it
+    // EditBox's get word position breaks on **space and nothing else**, and it
     // strips runs of spaces on the far side of the jump. Each gate below is
     // chosen so a plausible wrong implementation lands on a *different* number
     // — the assertion messages name the one it would land on, because a fixture
@@ -1201,7 +1201,7 @@ mod chat_editing {
         assert_eq!(line.text(), "");
     }
 
-    /// `EditBox.deleteWords` checks for a selection **first**, so a word-delete
+    /// EditBox's delete words checks for a selection **first**, so a word-delete
     /// over a selection removes the selection only — it does not also eat the
     /// word in front of it.
     #[test]
@@ -1301,7 +1301,7 @@ mod chat_editing {
         assert_eq!(line.text(), "XYab");
     }
 
-    /// `StringUtil.filterText` is what a paste goes through, so a multi-line
+    /// The string util's filter text is what a paste goes through, so a multi-line
     /// clipboard cannot inject a newline into a chat line, and the 256-char cap
     /// still holds.
     #[test]
@@ -1584,7 +1584,7 @@ mod menu_text_editing {
                 ..SignEditOpen::default()
             },
         );
-        // Down moves to line 1 (`AbstractSignEditScreen`'s own line cycling),
+        // Down moves to line 1 (the abstract sign edit screen's own line cycling),
         // so the caret keys below must act on `second`, not on `top`.
         press(&mut ui, &mut nav, KeyCode::ArrowDown, None, ModifiersState::empty());
         press(&mut ui, &mut nav, KeyCode::Home, None, ModifiersState::empty());

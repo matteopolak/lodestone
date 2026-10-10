@@ -82,7 +82,7 @@ pub trait MobController {
     }
 
     /// Commands the navigation to move toward `target` at `speed`. Returns
-    /// whether a path was found (vanilla's `navigation.moveTo`).
+    /// whether a path was found (vanilla's navigation's move to).
     fn move_to(&mut self, target: Vec3, speed: f64) -> bool;
 
     /// Whether the navigation has finished or has no path.
@@ -1030,7 +1030,7 @@ pub trait MobController {
     /// stops), mirroring vanilla clearing `this.partner = null`.
     fn clear_love_partner(&mut self) {}
 
-    /// Whether the mob is ignited (vanilla `Creeper::isIgnited`).
+    /// Whether the mob is ignited (vanilla Creeper's is ignited).
     /// While `true`, `Creeper::tick` forces the swell direction to
     /// climb every tick regardless of what
     /// [`FuseGoal`](crate::ai::goals::FuseGoal) would otherwise pick.
@@ -1039,7 +1039,7 @@ pub trait MobController {
         false
     }
 
-    /// The mob's current swell direction (vanilla `Creeper::getSwellDir`,
+    /// The mob's current swell direction (vanilla Creeper's get swell dir,
     /// `DATA_SWELL_DIR`). Defaults to `-1`, matching
     /// vanilla's own default (`Creeper::defineSynchedData`'s
     /// `entityData.define(DATA_SWELL_DIR, -1)`) for a mob that never sets one.
@@ -1047,14 +1047,14 @@ pub trait MobController {
         -1
     }
 
-    /// Sets the swell direction (vanilla `Creeper::setSwellDir`). A no-op for
+    /// Sets the swell direction (vanilla Creeper's set swell dir). A no-op for
     /// a mob that does not track one.
     fn set_swell_dir(&mut self, dir: i32) {
         let _ = dir;
     }
 
     /// The [`BlockCues`] of the block the mob is standing **in** — vanilla's
-    /// `level.getBlockState(mob.blockPosition())`.
+    /// `level.get_block_state(mob.block_position())`.
     ///
     /// # Why this is a query and not a per-tick feed
     ///
@@ -1064,7 +1064,7 @@ pub trait MobController {
     /// been about **three orders of magnitude** more work than the goals need:
     /// `GrazeGoal` is the only reader, and its `GrazeGoal::canUse` consults
     /// a block on roughly one tick in 500
-    /// (`random.nextInt(adjustedTickDelay(1000))`). Pushing two block lookups
+    /// (`random.nextInt(adjusted_tick_delay(1000))`). Pushing two block lookups
     /// per mob per tick to serve that multiplies by the whole mob population;
     /// pulling them costs exactly nothing on the 499 ticks nobody asks.
     ///
@@ -1081,7 +1081,7 @@ pub trait MobController {
     }
 
     /// The [`BlockCues`] of the block **below** the mob — vanilla's
-    /// `mob.blockPosition().below()`, the one a sheep grazes when it is standing
+    /// block position's block position, the one a sheep grazes when it is standing
     /// on grass rather than in it (`GrazeGoal::canUse`).
     ///
     /// Two separate methods rather than one taking an offset because these are
@@ -1100,7 +1100,7 @@ pub trait MobController {
     /// Vanilla `GrazeGoal::tick` does the mutation inline — `destroyBlock` for
     /// the block at the mob's feet, `setBlock(below, DIRT)` for the grass block
     /// under it — and then calls
-    /// `mob.ate()`, which for a sheep is `setSheared(false)` plus `ageUp(60)`
+    /// `mob.ate()`, which for a sheep is set sheared plus `ageUp(60)`
     /// (wool regrowth, `Sheep::ate`). None of that is expressible
     /// here: this crate can neither write a block nor touch entity metadata. So
     /// this is an **intent**, the same shape as [`attack`](MobController::attack)
@@ -1132,12 +1132,12 @@ pub trait MobController {
 
     /// Teleports the mob directly to `target` — vanilla `Entity::teleportTo`
     /// or, for the enderman, its
-    /// `EnderMan::teleport` / `EnderMan::teleportTowards` displacement variants.
+    /// `EnderMan::teleport` / EnderMan's teleport towards displacement variants.
     ///
     /// An **instant** relocation, not a fast path-follow: the position is
     /// rewritten immediately and any in-progress path is abandoned. The
     /// enderman's own variants pick the destination — `EnderMan::teleport` a
-    /// random point within ±32 blocks on each axis, `EnderMan::teleportTowards`
+    /// random point within ±32 blocks on each axis, EnderMan's teleport towards
     /// 16 blocks past the target in its facing direction — so the goal or
     /// host resolves *where* and this primitive resolves *that it happens*.
     ///
@@ -1154,7 +1154,7 @@ pub trait MobController {
     /// anything, returning the validated landing position (feet resting on
     /// that ground, same x/z) or `None` if no valid landing exists between
     /// `target` and the world floor — vanilla's `couldStandOn && !isWet`
-    /// followed by `level.noCollision(this) && !containsAnyLiquid(...)`,
+    /// followed by `level.noCollision(this) && !contains_any_liquid(...)`,
     /// either of which aborts the teleport entirely rather than moving to a
     /// bad spot.
     ///
@@ -1176,8 +1176,8 @@ pub trait MobController {
     }
 
     /// Records that this mob wants to damage itself by `amount` — the bee's
-    /// sting self-destruct, where `Bee::customServerAiStep` eventually calls
-    /// `this.hurtServer(level, this.damageSources().generic(), this.getHealth())`.
+    /// sting self-destruct, where Bee's custom server ai step eventually calls
+    /// `this.hurtServer(level, this.damage_sources().generic(), this.get_health())`.
     ///
     /// An **intent**, exactly like [`attack`](MobController::attack) and
     /// [`launch_projectile`](MobController::launch_projectile): health lives on
@@ -1350,9 +1350,9 @@ pub fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
 /// point `target` lies inside a viewer's acceptance cone.
 ///
 /// `viewer_eye` is the viewer's eye position and `look` its view vector
-/// (normalised internally, matching vanilla's `getViewVector(1.0F).normalize()`);
+/// (normalised internally, matching vanilla's 0F)'s get view vector);
 /// `target` is the point being stared at — for the enderman,
-/// `EnderMan::isBeingStaredBy` passes `(this.getX(), getEyeY(), this.getZ())`.
+/// EnderMan's is being stared by passes `(this.getX(), get_eye_y(), this.getZ())`.
 /// Vanilla accepts a stare when
 ///
 /// ```text
@@ -1372,7 +1372,7 @@ pub fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
 /// an approximation (the enderman passes `0.025, true`).
 ///
 /// The full vanilla test is this cone *and* line of sight
-/// (`target.hasLineOfSight(viewer, …)`, a world raycast) — the same disclosed
+/// (target's has line of sight, a world raycast) — the same disclosed
 /// gap [`find_nearest_target`](MobController::find_nearest_target) names for
 /// its own `hasLineOfSight`, omitted here rather than faked, erring permissive.
 ///

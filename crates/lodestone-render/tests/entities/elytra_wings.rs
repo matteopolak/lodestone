@@ -1,4 +1,4 @@
-//! The elytra's geometry and pose, against `ElytraModel`/`ElytraAnimationState`.
+//! The elytra's geometry and pose, against the elytra model and its animation state.
 //!
 //! # What these gates cover, and what they do not
 //!
@@ -20,7 +20,7 @@
 use glam::{Mat4, Vec3};
 use lodestone_render::{ElytraMesh, ElytraWing, elytra_target_rotations, elytra_wing_transform};
 
-/// Vanilla's elytra model's layer-creation function declares `LayerDefinition.create(mesh, 64, 32)`.
+/// Vanilla's elytra model's layer-creation function declares a layer definition of 64x32.
 ///
 /// A 64x64 assumption — the size the *player* sheet uses, and the size the
 /// cape model declares — halves every V and paints the wings with whatever
@@ -31,7 +31,7 @@ use lodestone_render::{ElytraMesh, ElytraWing, elytra_target_rotations, elytra_w
 /// on 64x64 it would be `22/64 = 0.34375`. Both hypotheses are computed here
 /// and the measurement must land on one.
 ///
-/// Inflation is deliberately not in that arithmetic: `CubeDeformation` grows
+/// Inflation is deliberately not in that arithmetic: a cube deformation grows
 /// the *geometry* and leaves the unwrap alone.
 #[test]
 fn wings_unwrap_onto_a_sixty_four_by_thirty_two_sheet() {
@@ -115,8 +115,8 @@ fn max_abs_diff(a: Mat4, b: Mat4) -> f32 {
 /// ```
 ///
 /// so `right == S * left * S` exactly, and it predicts that `xRot` is the one
-/// angle that must **not** flip. `ElytraModel.setupAnim` agrees
-/// (`rightWing.xRot = leftWing.xRot`, `yRot`/`zRot` negated), which is the
+/// angle that must **not** flip. The elytra model's animation agrees
+/// (the right wing's X rotation equals the left's, Y/Z rotations negated), which is the
 /// point: two independent derivations of the same five signs.
 ///
 /// The angles are **pairwise distinct and all non-zero** so that a
@@ -178,7 +178,7 @@ fn crouching_raises_both_wings_by_three_texels_and_nothing_else() {
     assert!(failures.is_empty(), "{failures:?}");
 }
 
-/// `ElytraAnimationState.tick`'s three-way branch.
+/// The elytra animation state's three-way tick branch.
 ///
 /// # Choosing inputs that discriminate
 ///
@@ -227,7 +227,7 @@ fn target_rotations_take_the_right_branch() {
             (true, false, Vec3::new(0.5, -0.5, 0.0)),
             (lerp(PI / 12.0, PI / 9.0), 0.0, lerp(-PI / 12.0, -PI / 2.0)),
         ),
-        // Precedence: `isFallFlying()` is the first branch, and a player can
+        // Precedence: is fall flying is the first branch, and a player can
         // be crouching and gliding at once. The expected triple is the level
         // glide's, not the crouch's, and the two share no component.
         (

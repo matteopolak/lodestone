@@ -764,7 +764,7 @@ impl<T: Transport> Driver<T> {
     ///
     /// Vanilla's own client pipeline collects every
     /// packet between an opening and closing `minecraft:bundle_delimiter`
-    /// into one `BundlePacket` and applies it as a single atomic step, most
+    /// into one bundle packet and applies it as a single atomic step, most
     /// commonly around a batch of entity add/move/remove packets on chunk
     /// load — the point is that the client's game loop never observes a tick
     /// where only some of the batch has landed. Our transport already frames
@@ -839,7 +839,7 @@ impl<T: Transport> Driver<T> {
     }
 
     /// Drops every decoded chunk, the way vanilla's own transitions do by
-    /// constructing a fresh `ClientLevel`.
+    /// constructing a fresh client level.
     ///
     /// Called from [`Self::forget_previous_dimension`] (a respawn into another
     /// dimension) and from `emit`'s `Login` arm (a join, including a **second**
@@ -1343,7 +1343,7 @@ impl<T: Transport> Driver<T> {
                 // signing with a stale key indefinitely. The keep-alive is
                 // the same periodic tick the last-seen flush immediately
                 // above already piggybacks on — vanilla's own
-                // `AccountProfileKeyPairManager` polls on a timer with no
+                // secure-chat key manager polls on a timer with no
                 // dedicated packet of its own either, so there is no "real"
                 // event to hang this off instead.
                 //
@@ -1487,7 +1487,7 @@ impl<T: Transport> Driver<T> {
 
                 // Secure chat: fetch this account's Mojang-issued signing key
                 // pair and announce the session, mirroring
-                // `AccountProfileKeyPairManager`'s own join-time timing. Only
+                // the key manager's own join-time timing. Only
                 // for an online-mode join (`authentication_intent` is offline for
                 // offline play, and this is native-only for the same reason
                 // the same reason the online session itself is — see

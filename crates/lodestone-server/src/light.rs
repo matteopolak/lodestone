@@ -17,7 +17,7 @@
 //!   `lodestone_world::compute_column_light(column, &V770LightProps)`;
 //! * that engine seeds *both* layers — sky from every cell open to the sky at
 //!   `15`, **block light from every cell whose block emits** (`lighting.rs`'s own
-//!   module doc, and `BlockLightEngine` behind it);
+//!   module doc, and the block light engine behind it);
 //! * `V770LightProps::emission` forwards straight to
 //!   [`lodestone_data::light_props::emission`], whose census carries
 //!   `minecraft:torch` at **14** and gates it in
@@ -45,7 +45,7 @@
 //! [`compute_column_light`](crate::protocol::ServerProtocol::compute_column_light),
 //! with the v770 overrides beside `encode_chunk`. So
 //! [`crate::server`]'s `resend_column_for_light` sends a real light-only packet: a
-//! few KiB of nibble arrays, no chunk batch (vanilla's `PlayerChunkSender` flow
+//! few KiB of nibble arrays, no chunk batch (vanilla's player chunk sender flow
 //! control counts chunk *batches*, and a `light_update` is not one), and none of
 //! `encode_column_body`'s palette/heightmap/NBT work.
 //!

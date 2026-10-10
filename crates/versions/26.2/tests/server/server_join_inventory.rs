@@ -21,15 +21,15 @@
 //!
 //! | claim | vanilla source |
 //! |---|---|
-//! | the packet is `container_set_content`, not `set_player_inventory` | `AbstractContainerMenu::sendAllDataToRemote` → `ServerPlayer`'s `ContainerSynchronizer::sendInitialData`, which constructs `ClientboundContainerSetContentPacket` |
-//! | window id `0` | `vanilla's own client packet listener's own handle container content`'s `containerId == 0` arm routes to `player.inventoryMenu` |
-//! | 46 slots, and which index is which | `InventoryMenu`: result `0`, 2×2 grid `1..=4`, armour `5..=8` **head→feet**, main storage `9..=35`, hotbar `36..=44`, off-hand `45` |
-//! | state id `1` on the first send | `sendInitialData` passes `container.incrementStateId()`, and `incrementStateId` is `(stateId + 1) & 32767` from a `0` start |
-//! | it is sent last on the join | `vanilla's own player list's own place new player` calls `initInventoryMenu()` after the teleport, the player-info adds and `sendLevelInfo` |
+//! | the packet is `container_set_content`, not `set_player_inventory` | the container menu's send-all-data path, via the container synchroniser's initial-data send, which constructs the container-set-content packet |
+//! | window id `0` | the client's container-content handler routes a `containerId == 0` packet to the player's inventory menu |
+//! | 46 slots, and which index is which | the player inventory menu: result `0`, 2×2 grid `1..=4`, armour `5..=8` **head→feet**, main storage `9..=35`, hotbar `36..=44`, off-hand `45` |
+//! | state id `1` on the first send | the initial-data send passes the incremented state id, which is `(stateId + 1) & 32767` from a `0` start |
+//! | it is sent last on the join | the player list's place-new-player step initialises the inventory menu after the teleport, the player-info adds and the level info |
 //!
-//! `ClientboundSetPlayerInventoryPacket` is the packet this is *not*: it is a
+//! Set-player-inventory packet is the packet this is *not*: it is a
 //! single-slot record, `(int slot, ItemStack contents)`, whose only vanilla producer
-//! is `vanilla's own inventory's own create inventory update packet` acknowledging one pickup. It carries
+//! is the inventory's update-packet creation acknowledging one pickup. It carries
 //! no slot list and no cursor, so it cannot express a snapshot at all.
 //!
 //! # Why the inventory is seeded through the real player store
@@ -67,7 +67,7 @@ use common::unique_username;
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
 
-/// `InventoryMenu`'s slot count — result + 2×2 grid + 4 armour + 27 main + 9 hotbar +
+/// The inventory menu's slot count — result + 2×2 grid + 4 armour + 27 main + 9 hotbar +
 /// off-hand. Written as the sum rather than as `46` so the arithmetic is the
 /// assertion's own justification.
 const MENU_SLOTS: usize = 1 + 4 + 4 + 27 + 9 + 1;
@@ -235,7 +235,7 @@ fn tempdir(name: &str) -> std::path::PathBuf {
 }
 
 /// A player whose saved inventory holds seven distinct stacks is sent all of them,
-/// in `InventoryMenu` order, as a window-`0` `container_set_content` on join —
+/// in inventory-menu order, as a window-`0` `container_set_content` on join —
 /// before sending a single Play packet of their own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rejoining_players_saved_inventory_arrives_as_a_window_zero_snapshot() {

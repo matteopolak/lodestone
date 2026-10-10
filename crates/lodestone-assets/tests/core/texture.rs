@@ -352,6 +352,6 @@ fn texture_section_is_parsed() {
     );
 
     // An unrecognised strategy is rejected, matching vanilla's
-    // StringRepresentable codec, rather than silently downsampling some other way.
+    // string-representable codec, rather than silently downsampling some other way.
     assert!(TextureMeta::parse(br#"{"texture":{"mipmap_strategy":"nearest"}}"#).is_err());
 }

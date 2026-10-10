@@ -30,7 +30,7 @@ fn key(name: &str) -> ResourceKey {
 fn sound_registry_bytes() -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(0x01); // holder id 1 -> registry index 0
-    bytes.push(0x00); // SoundSource ordinal 0 = Master
+    bytes.push(0x00); // sound source ordinal 0 = Master
     bytes.extend_from_slice(&8i32.to_be_bytes()); // x = 8 -> 1.0
     bytes.extend_from_slice(&(-16i32).to_be_bytes()); // y = -16 -> -2.0
     bytes.extend_from_slice(&24i32.to_be_bytes()); // z = 24 -> 3.0
@@ -73,7 +73,7 @@ fn sound_inline_definition_decodes_name_and_range() {
     bytes.extend_from_slice(name_bytes);
     bytes.push(0x01); // fixed range present
     bytes.extend_from_slice(&16.0f32.to_be_bytes()); // fixed range value
-    bytes.push(0x07); // SoundSource ordinal 7 = Player
+    bytes.push(0x07); // sound source ordinal 7 = Player
     bytes.extend_from_slice(&0i32.to_be_bytes()); // x = 0
     bytes.extend_from_slice(&0i32.to_be_bytes()); // y = 0
     bytes.extend_from_slice(&0i32.to_be_bytes()); // z = 0
@@ -146,7 +146,7 @@ fn sound_entity_decodes_with_entity_id() {
     let adapter = V770Adapter::new();
     let mut bytes = Vec::new();
     bytes.push(0x01); // holder id 1 -> registry index 0
-    bytes.push(0x06); // SoundSource ordinal 6 = Neutral
+    bytes.push(0x06); // sound source ordinal 6 = Neutral
     bytes.extend_from_slice(&[0xAC, 0x02]); // VarInt entity id 300
     bytes.extend_from_slice(&1.0f32.to_be_bytes()); // volume
     bytes.extend_from_slice(&1.5f32.to_be_bytes()); // pitch
@@ -218,9 +218,9 @@ fn level_particles_decodes_registry_particle() {
 /// `minecraft:dust` decoded a particle event with no colour at all. Registry
 /// id 21 (`PARTICLE_TYPE_NAMES[21]`, generated from the real 26.2 registry
 /// report) is `minecraft:dust`, whose payload is a packed RGB24 `i32` plus an
-/// `f32` scale (`DustParticleOptions::STREAM_CODEC`). Pairwise-distinct R/G/B
+/// `f32` scale (the dust options stream codec). Pairwise-distinct R/G/B
 /// bytes (`0x11`, `0x22`, `0x33`) so a channel transposition in the decode
-/// could not survive this test unnoticed, matching `vanilla's own argb's own red/green/blue`'s
+/// could not survive this test unnoticed, matching the ARGB red/green/blue accessors'
 /// `>> 16`/`>> 8`/plain `& 0xFF` order.
 #[test]
 fn level_particles_decodes_a_dust_payload() {
@@ -291,13 +291,13 @@ fn level_particles_bytes(particle_id: u8, options: &[u8]) -> Vec<u8> {
 /// from `PARTICLE_TYPE_NAMES` (generated from the real 26.2 registry report):
 /// 23 `effect`, 53 `instant_effect`, 28 `entity_effect`.
 ///
-/// * `SpellParticleOption::streamCodec` is
-///   `vanilla's own stream codec's own composite(vanilla's own byte buf codecs's own int, colour, vanilla's own byte buf codecs's own float,
+/// * The spell-particle option stream codec is
+///   `composite(int, colour, float,
 ///   power)` — eight bytes, and its accessors read only the three low bytes of
 ///   the word, so the top byte is **not** an alpha here.
-/// * `ColorParticleOption::streamCodec` is `vanilla's own byte buf codecs's own int` alone — four
-///   bytes, ARGB, and `vanilla's own spell particle's own mob effect provider` really does call
-///   `setAlpha(options.getAlpha())` with the top byte.
+/// * The colour-particle option stream codec is a lone `int` — four
+///   bytes, ARGB, and the spell particle's mob-effect provider really does call
+///   set-alpha with the top byte.
 ///
 /// Every byte in every colour word below is pairwise distinct, so neither a
 /// channel transposition nor an ARGB/RGB24 mix-up can survive: `0x44` as the
@@ -371,8 +371,8 @@ fn level_particles_decodes_the_potion_effect_payloads() {
     );
 }
 
-/// `sculk_charge` (registry id 45) carries a single `vanilla's own byte buf codecs's own float`
-/// roll — `SculkChargeParticleOptions::STREAM_CODEC`. The value is what makes
+/// `sculk_charge` (registry id 45) carries a single `float`
+/// roll (the sculk-charge options stream codec). The value is what makes
 /// a spreading charge's motes lie along the direction it is travelling; with
 /// the payload dropped they all shared one orientation.
 ///
@@ -394,12 +394,12 @@ fn level_particles_decodes_a_sculk_charge_roll() {
     assert_eq!(*options, ParticleOptions::SculkCharge { roll: 1.234_5 });
 }
 
-/// `dragon_breath` (registry id 15) carries a `PowerParticleOption` — one
-/// `vanilla's own byte buf codecs's own float` power and nothing else. It is a *different* option
-/// class from `effect`'s `SpellParticleOption` despite both ending in a power:
-/// `DragonBreathParticle` draws its purple out of the RNG, so there is no
+/// `dragon_breath` (registry id 15) carries a power-particle option — one
+/// `float` power and nothing else. It is a *different* option
+/// class from `effect`'s spell-particle option despite both ending in a power:
+/// the dragon-breath particle draws its purple out of the RNG, so there is no
 /// colour word in front of it and the payload is four bytes rather than eight.
-/// Reading it as a `SpellParticleOption` would consume the power as a colour
+/// Reading it as a spell-particle option would consume the power as a colour
 /// and then run off the end of the packet.
 #[test]
 fn level_particles_decodes_a_dragon_breath_power() {
@@ -416,12 +416,12 @@ fn level_particles_decodes_a_dragon_breath_power() {
     assert_eq!(*options, ParticleOptions::Power { power: 0.437_5 });
 }
 
-/// The `BlockParticleOption` family — `block` (1), `block_marker` (2),
+/// The block-particle option family — `block` (1), `block_marker` (2),
 /// `falling_dust` (36), `dust_pillar` (118) and `block_crumble` (122).
 ///
 /// One payload type across five registry entries, and the **one width
-/// discontinuity** in `decode_particle_options`: `BlockParticleOption`'s stream
-/// codec is `vanilla's own byte buf codecs's own id mapper(vanilla's own block's own block state registry)`, which is a
+/// discontinuity** in `decode_particle_options`: the block-particle option's stream
+/// codec is an id mapper over the block-state registry, which is a
 /// `VarInt`, where every other arm in that function reads a fixed-width `INT`
 /// or `FLOAT`.
 ///
@@ -525,7 +525,7 @@ fn stop_sound_decodes_neither_source_nor_name() {
 #[test]
 fn stop_sound_decodes_source_only() {
     let adapter = V770Adapter::new();
-    // flags 0x1 (source present), SoundSource ordinal 5 = Hostile.
+    // flags 0x1 (source present), sound source ordinal 5 = Hostile.
     let directives = handle(&adapter, play::clientbound::STOP_SOUND, &[0x01, 0x05]);
     assert_eq!(
         directives,
@@ -556,7 +556,7 @@ fn stop_sound_decodes_name_only() {
 #[test]
 fn stop_sound_decodes_source_and_name() {
     let adapter = V770Adapter::new();
-    let mut bytes = vec![0x03, 0x07]; // flags 0x3, SoundSource ordinal 7 = Player
+    let mut bytes = vec![0x03, 0x07]; // flags 0x3, sound source ordinal 7 = Player
     let name = "minecraft:entity.pig.ambient";
     bytes.push(u8::try_from(name.len()).unwrap());
     bytes.extend_from_slice(name.as_bytes());
@@ -595,12 +595,12 @@ fn stop_sound_rejects_truncated_source() {
     assert!(result.is_err(), "a truncated source must be rejected");
 }
 
-// ---- explode (issue: live player report, "creeper has no explosion sound") --
+// ---- explode ------------------------------------------------------------
 //
-// `ClientboundExplodePacket`'s wire order (`vanilla's own clientbound explode packet's own java`'s
-// `STREAM_CODEC.composite(...)` list): `center: Vec3` (three raw `f64`s, *not*
-// the sound packet's fixed-point ints — see `vanilla's own vec3's own java`'s own `STREAM_CODEC`),
-// `radius: f32`, `blockCount: i32` (plain 4-byte, `vanilla's own byte buf codecs's own int`),
+// Explode packet's wire order (the clientbound explode packet's composite list):
+// `center: Vec3` (three raw `f64`s, *not*
+// the sound packet's fixed-point ints — see the Vec3 stream codec),
+// `radius: f32`, `blockCount: i32` (plain 4-byte int),
 // `playerKnockback: Optional<Vec3>`, `explosionParticle: ParticleOptions`,
 // `explosionSound: Holder<SoundEvent>`, `blockParticles: WeightedList<...>`
 // (consumed whole, entry by entry). Golden bytes are hand-assembled
@@ -668,7 +668,7 @@ fn explode_decodes_the_explosion_sound_at_its_centre() {
         panic!("expected a Sound directive second, got {:?}", directives[1]);
     };
     assert_eq!(*sound, key("minecraft:entity.generic.explode"));
-    assert_eq!(*category, SoundCategory::Block, "vanilla's own sound source's own blocks");
+    assert_eq!(*category, SoundCategory::Block, "the blocks sound source");
     assert_eq!(
         *pos,
         Vec3 {
@@ -678,7 +678,7 @@ fn explode_decodes_the_explosion_sound_at_its_centre() {
         }
     );
     // `volume` (4.0) and `pitch`'s formula are client constants, never on the
-    // wire (`vanilla's own client packet listener's own handle explosion`); pitch is rolled fresh
+    // wire (the client's explosion handler); pitch is rolled fresh
     // each decode, so only its documented bound is checked, not an exact
     // value — `(1.0 ± 0.2) * 0.7` bounds to `[0.56, 0.84]`.
     assert_eq!(*volume, 4.0);
@@ -715,7 +715,7 @@ fn explode_consumes_a_populated_block_particle_list() {
 }
 
 /// The `explosion` particle (registry id 30) is the other simple particle type
-/// `vanilla's own level's own explode`'s call sites can select; it must decode exactly like
+/// The explode call sites in the level can select; it must decode exactly like
 /// `explosion_emitter` above.
 #[test]
 fn explode_accepts_the_plain_explosion_particle_too() {
@@ -738,7 +738,7 @@ fn explode_accepts_the_plain_explosion_particle_too() {
 ///
 /// **This test used to say "anything but 29/30" and pass id `5`.** The guard
 /// it describes was later widened, correctly, from the two ids we happen to
-/// draw to every `SimpleParticleType` — and `5` is `noxious_gas`, which is
+/// draw to every simple particle type — and `5` is `noxious_gas`, which is
 /// simple, so the premise expired and the gate went red without anything
 /// being wrong. The discriminating input is not "an id we do not draw", it is
 /// **an id that carries arguments**: `1` is `minecraft:block`, whose codec

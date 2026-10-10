@@ -2,8 +2,8 @@
 //!
 //! Every inventory interaction the client sends is one `container_click` packet:
 //! a slot index, a button number, and a mode. This module re-implements the
-//! server-side interpretation of those packets — vanilla
-//! `AbstractContainerMenu.doClick` — as an original, version-free predictor over
+//! server-side interpretation of those packets — vanilla's
+//! container-menu click handler — as an original, version-free predictor over
 //! a [`Menu`]. The client runs exactly this locally to predict the result of a
 //! click before the server confirms it (see [`crate::reconcile`]).
 //!
@@ -329,8 +329,8 @@ impl Menu {
         //
         // On a **result slot** this is what makes one shift-click craft a whole
         // stack — but only where something refills the result between
-        // iterations, and that is the server. A client's `CraftingMenu` is
-        // built with a null level access, so its `slotsChanged` never
+        // iterations, and that is the server. A client's crafting menu is
+        // built with a null level access, so its slot-change hook never
         // recomputes the recipe and the result slot stays empty after the first
         // take; the loop then exits after exactly one craft. That is precisely
         // what vanilla's client predicts too. The server runs this same loop
@@ -514,7 +514,7 @@ impl Menu {
         };
         if let Some(taken) = self.try_remove(index, amount, i32::MAX) {
             outcome.dropped.push(taken);
-            // `Slot.safeTake` = `tryRemove` + `onTake`; dropping the result of a
+            // Slot's safe take = `tryRemove` + `onTake`; dropping the result of a
             // craft with `Q` consumes the grid exactly like picking it up does.
             self.on_take(index);
         }
@@ -571,11 +571,11 @@ impl Menu {
         self.set_carried(Some(carried));
     }
 
-    /// Vanilla `AbstractContainerMenu.canTakeItemForPickAll`: `true` by default,
+    /// Vanilla's pick-all eligibility: `true` by default,
     /// but **every** result-bearing menu overrides it to exclude its own result
-    /// container — `CraftingMenu`, `InventoryMenu`, `SmithingMenu`,
-    /// `StonecutterMenu` and `CartographyTableMenu` all carry the identical
-    /// `target.container != this.resultSlots` line.
+    /// container — the crafting, inventory, smithing,
+    /// stonecutter and cartography menus all carry the identical
+    /// target-container-is-not-the-result check.
     ///
     /// Without it a double-click gather in a crafting screen vacuums the result
     /// slot along with everything else, which would craft an item the player
@@ -786,7 +786,7 @@ impl Menu {
     /// rather than leaving it as an argument.
     ///
     /// Reading every cell up front is equivalent to vanilla's interleaved loop
-    /// because that loop never mutates what it reads: it re-reads `getCarried()`
+    /// because that loop never mutates what it reads: it re-reads get carried
     /// per iteration (`:378`) but only calls `setCarried` *after* the loop
     /// (`:393`), and the painted set is deduplicated
     /// ([`push_quick_craft_slot`](Self::push_quick_craft_slot)) so no two
@@ -832,8 +832,8 @@ impl Menu {
     }
 
     /// What the cursor would be left holding if the drag painted onto `painted`
-    /// were released now — vanilla's `quickCraftingRemainder`
-    /// (`AbstractContainerScreen.recalculateQuickCraftRemaining`, `:248-267`).
+    /// were released now — vanilla's quick-crafting remainder
+    /// (the container screen's remaining-count recalculation).
     ///
     /// Derived from [`quick_craft_plan`](Self::quick_craft_plan) rather than
     /// recomputed, for the same reason: vanilla's third copy of the formula lives
@@ -896,10 +896,10 @@ impl Menu {
             && enough
     }
 
-    // --- Slot primitives (Slot.safeInsert / tryRemove) ---
+    // --- Slot primitives (Slot's safe insert / tryRemove) ---
 
     /// Inserts up to `increment` items from `stack` into `menu_index`, returning
-    /// the leftover cursor. Mirrors vanilla `Slot.safeInsert`.
+    /// the leftover cursor. Mirrors vanilla Slot's safe insert.
     fn safe_insert(
         &mut self,
         menu_index: usize,
@@ -932,7 +932,7 @@ impl Menu {
     }
 
     /// Removes up to `min(amount, max_take)` items from `menu_index`, honouring
-    /// the slot's modification rules. Mirrors vanilla `Slot.tryRemove`.
+    /// the slot's modification rules. Mirrors vanilla Slot's try remove.
     fn try_remove(&mut self, menu_index: usize, amount: i32, max_take: i32) -> Option<ItemStack> {
         if !self.may_pickup(menu_index) {
             return None;
@@ -1018,7 +1018,7 @@ impl Menu {
 
     /// Returns `Some(native_index)` when the native slot already holds a
     /// same-item-same-components, stackable stack with spare room for `stack`.
-    /// Mirrors vanilla `Inventory.hasRemainingSpaceForItem` (`Inventory.
+    /// Mirrors vanilla Inventory's has remaining space for item (`Inventory.
     /// java:95-100`), which is what `getSlotWithRemainingSpace` calls at each
     /// candidate slot.
     fn mergeable_native(&self, native_index: usize, stack: &ItemStack) -> Option<usize> {

@@ -74,7 +74,7 @@ pub enum Instrument {
 }
 
 impl Instrument {
-    /// `NoteBlockInstrument.worksAboveNoteBlock` (`:64-66`) — `true` for
+    /// The note block instrument's works above note block (`:64-66`) — `true` for
     /// every `MOB_HEAD`/`CUSTOM` type, `false` for every `BASE_BLOCK` type.
     /// The distinction is what `setInstrument` uses to prefer a mob head
     /// placed above a note block over the plain block underneath it.
@@ -144,7 +144,7 @@ impl Instrument {
 /// built, which is a `lodestone-data` generated-census task (the same shape as
 /// `block_items`/`entity_types`) rather than something to hand-roll in a
 /// redstone module. Every entry that *is* present here was extracted from a
-/// literal `Blocks.<NAME> = register(..., instrument(NoteBlockInstrument.X)
+/// literal `Blocks.<NAME> = register(..., instrument(the note block instrument's x)
 /// ...)` call, not guessed.
 ///
 /// Wired in from `crate::block_placement::placement`'s `minecraft:note_block`
@@ -217,14 +217,14 @@ pub fn block_instrument(state: StateId) -> Instrument {
         | Block::ShulkerBox
         | Block::HeavyCore => Instrument::Snare,
         // Vanilla's own default for a block with no `.instrument(...)` call is
-        // `NoteBlockInstrument.HARP` — see `BlockBehaviour.Properties`'s field
+        // The note block instrument's harp — see the block behaviour's properties's field
         // default. So the fallback here is correct for "genuinely unmodelled",
         // and wrong only for the BASS/BASEDRUM families named above.
         _ => Instrument::Harp,
     }
 }
 
-/// Vanilla's own `NoteBlock.setInstrument` — the block directly
+/// Vanilla's own NoteBlock's set instrument — the block directly
 /// above wins if its instrument `worksAboveNoteBlock` (a mob head sitting on
 /// top), otherwise the block below is read, with its own
 /// `worksAboveNoteBlock` guarded back to [`Instrument::Harp`] (vanilla's
@@ -256,8 +256,8 @@ pub struct NeighborReaction {
     pub play_pulse: bool,
 }
 
-/// Vanilla's own `NoteBlock.neighborChanged`. `has_signal` is
-/// vanilla's `level.hasNeighborSignal(pos)` — the caller supplies
+/// Vanilla's own NoteBlock's neighbor changed. `has_signal` is
+/// vanilla's level's has neighbor signal — the caller supplies
 /// `crate::redstone::best_neighbor_signal(lookup, pos, false) > 0`, exactly
 /// the expression `crate::random_tick`'s hopper `ENABLED` arm already
 /// computes for the identical vanilla method. `None` when `state` is not a
@@ -317,7 +317,7 @@ pub fn played_pulse_on_transition(from: StateId, to: StateId, above_is_air: bool
     instrument.works_above_note_block() || above_is_air
 }
 
-/// The `NOTE` property's 25 values (`0..=24`, `BlockStateProperties.NOTE`).
+/// The `NOTE` property's 25 values (`0..=24`, the block state properties's note).
 const NOTE_COUNT: u32 = 25;
 
 /// `BlockState.cycle(NOTE)` as vanilla's own empty-hand-use handler calls it

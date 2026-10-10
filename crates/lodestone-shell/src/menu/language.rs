@@ -1,7 +1,7 @@
 //! The Language screen — vanilla's own language-selection screen, the
 //! first of the three settings sub-screens the settings-branch plan always said would need
-//! a *different* list widget than `OptionsList` (per this screen's own
-//! selection-list-widget note) or `KeyBindsList`.
+//! a *different* list widget than the options list (per this screen's own
+//! selection-list-widget note) or the key binds list.
 //!
 //! ## Why this is the third list-widget kind, not a fold into an existing one
 //!
@@ -9,12 +9,12 @@
 //! selection-list widget, and it is
 //! shaped like neither list this tree already has:
 //!
-//! - Unlike [`super::options`]'s `OptionsList`, an entry here is not a
+//! - Unlike [`super::options`]'s options list, an entry here is not a
 //!   caption-plus-widget pair — it is one centred line of text standing for
 //!   the whole row, and the *row itself* is the click target
 //!   (vanilla's own entry click and key-press handlers both select on it),
 //!   not a button drawn inside it.
-//! - Unlike [`super::key_binds`]'s `KeyBindsList`, there is exactly one
+//! - Unlike [`super::key_binds`]'s key binds list, there is exactly one
 //!   control per row, not two right-anchored buttons plus a name label.
 //!
 //! ## The deliberate departure: rows draw as buttons
@@ -73,7 +73,7 @@
 //!   code against the current language) is always false. Nothing is
 //!   faked to look otherwise.
 //! - **Present-and-inactive**: the footer's "Font Settings..." button
-//!   (`options.font`), vanilla's own next hop to `FontOptionsScreen` — out of
+//!   (`options.font`), vanilla's own next hop to the font options screen — out of
 //!   scope for this pass (see that fix's own suggested split); it is the same
 //!   `no_screen`-shaped placeholder every other unbuilt destination in
 //!   [`super::options::SettingsPage`] uses, one screen closer than before
@@ -84,31 +84,31 @@
 //! Every number is read out of `.cache/mc/26.2/client-src`, file and line
 //! named — nothing here is measured off this crate's own output.
 //!
-//! - [`HEADER_HEIGHT`] = 36: `this.layout.setHeaderHeight((int)(12.0 + 9.0 +
+//! - [`HEADER_HEIGHT`] = 36: `this.layout.set_header_height((int)(12.0 + 9.0 +
 //!   15.0))` — **not** the generic
-//!   `OptionsSubScreen` 33 every other page uses, because this header also
+//!   The options sub screen 33 every other page uses, because this header also
 //!   carries the search box.
 //! - [`FOOTER_HEIGHT`] = 53: `this.layout.setFooterHeight(53)` (`:35`) — also
 //!   taller than the generic 33, for the warning line above the button row.
 //! - The list itself is constructed with a literal `y = 33` (`:106`), but
 //!   `repositionElements` (`:84-89`) immediately calls
-//!   `this.languageSelectionList.updateSize(this.width, this.layout)`, which
-//!   is `updateSizeAndPosition(width, layout.getContentHeight(),
-//!   layout.getHeaderHeight())` — i.e.
+//!   language selection list's update size, which
+//!   is `update size and position(width, layout.get_content_height(),
+//!   layout's get header height)` — i.e.
 //!   the constructor's `33` is overwritten with the real header height (36)
 //!   before a frame is ever drawn. [`HEADER_HEIGHT`] is the value that
 //!   survives, not the constructor literal — a vanilla quirk worth recording
 //!   (measured, not assumed) rather than "corrected".
 //! - [`ROW_H`] = 18: the same constructor's `itemHeight` parameter (`:106`).
-//! - [`ROW_WIDTH`] = 270: `getRowWidth() = super.getRowWidth() + 50` (`:136-138`);
-//!   vanilla's own abstract selection-list base's get-row-width accessor's own default is `220` (`:389-391`).
+//! - [`ROW_WIDTH`] = 270: `get_row_width() = super.get_row_width() + 50` (`:136-138`);
+//!   vanilla's abstract selection-list base's get-row-width accessor's default is `220` (`:389-391`).
 //! - Row *y*: vanilla's own abstract selection-list base's get-first-entry-y accessor `= getY() + 2` (`:104-106`)
 //!   — the same "+2" as [`super::options::LIST_TOP_INSET`] — then one
 //!   [`ROW_H`] per subsequent row.
-//! - Row *x*: `Entry.extractContent`'s `centeredText(font, text, width / 2,
+//! - Row *x*: Entry's extract content's `centered text(font, text, width / 2,
 //!   …)` (`:151`) — the row's text is centred on the **screen's** half-width,
 //!   not the row's own left edge, because the row already spans the full
-//!   `getRowWidth()` band centred there.
+//!   get row width band centred there.
 //! - The header/footer widget columns (title, search box, warning label,
 //!   button row) are a real [`super::layout::HeaderAndFooterLayout`] +
 //!   [`super::layout::LinearLayout`] tree, arranged once per canvas by
@@ -142,12 +142,12 @@ use super::widget::{LayoutElement, Widget};
 
 // -- the data ----------------------------------------------------------------
 
-/// One selectable language: vanilla's `LanguageInfo`, reduced to what this
+/// One selectable language: vanilla's language info, reduced to what this
 /// client can show (see the module docs on why there is no region/
 /// `bidirectional` metadata to carry).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LanguageEntry {
-    /// The language code, e.g. `"en_us"` (`LanguageManager`'s map key).
+    /// The language code, e.g. `"en_us"` (the language manager's map key).
     pub code: &'static str,
     /// The display name, vanilla's own language-info to-component accessor's `"{name} ({region})"`.
     pub name: &'static str,
@@ -180,22 +180,22 @@ pub fn filtered(query: &str) -> Vec<LanguageEntry> {
 
 // -- geometry, transcribed (see the module docs) -----------------------------
 
-/// `LanguageSelectScreen.<init>`'s `setHeaderHeight` (`:50`) — taller than the
-/// generic `OptionsSubScreen` 33 because this header also carries the search
+/// The language select screen.<init>'s `setHeaderHeight` (`:50`) — taller than the
+/// generic options sub screen 33 because this header also carries the search
 /// box.
 pub const HEADER_HEIGHT: f32 = 36.0;
 /// `setFooterHeight(53)` (`:35`) — taller than the generic 33 for the warning
 /// line above the button row.
 pub const FOOTER_HEIGHT: f32 = 53.0;
-/// `LanguageSelectionList`'s own `itemHeight` (`:106`).
+/// The language selection list's own `itemHeight` (`:106`).
 pub const ROW_H: f32 = 18.0;
-/// `getRowWidth() = super.getRowWidth() + 50` (`:136-138`), default `220`.
+/// `get_row_width() = super.get_row_width() + 50` (`:136-138`), default `220`.
 pub const ROW_WIDTH: f32 = 270.0;
 /// The search box's real size, `new EditBox(font, 0, 0, 200, 15, …)` (`:43`).
 pub const SEARCH_W: f32 = 200.0;
 pub const SEARCH_H: f32 = 15.0;
 
-/// `getRowLeft() = getX() + width / 2 - getRowWidth() / 2` on a full-width
+/// `get_row_left() = getX() + width / 2 - get_row_width() / 2` on a full-width
 /// list (`getX() == 0`).
 #[must_use]
 pub fn row_left(width: f32) -> f32 {
@@ -210,7 +210,7 @@ pub fn first_entry_y() -> f32 {
     HEADER_HEIGHT + options::LIST_TOP_INSET
 }
 
-/// Zero-width layout stand-in for a `StringWidget` of the given line height —
+/// Zero-width layout stand-in for a string widget of the given line height —
 /// safe for **placement** only, the same trick
 /// [`super::options::root_widget_rects`]'s own `string_widget()` uses and
 /// documents: a column centred on `width / 2` puts a zero-width child at
@@ -387,7 +387,7 @@ impl Default for LanguageNav {
 impl LanguageNav {
     /// A fresh screen: empty search, the one real entry selected — mirrors
     /// vanilla's own constructor, which calls `setSelected` on the entry
-    /// matching `languageManager.getSelected()` (`:107-114`), which for this
+    /// matching language manager's get selected (`:107-114`), which for this
     /// client is always the sole entry.
     #[must_use]
     pub fn new() -> Self {
@@ -582,8 +582,8 @@ impl LanguageNav {
         }
     }
 
-    /// Escape: leave the page — `Screen.shouldCloseOnEsc` plus
-    /// `OptionsSubScreen.onClose` (`:69-75`), same as every other settings
+    /// Escape: leave the page — Screen's should close on esc plus
+    /// The options sub screen's on close (`:69-75`), same as every other settings
     /// sub-screen.
     pub fn escape(&mut self) -> LanguageOutcome {
         LanguageOutcome::Back
@@ -591,13 +591,13 @@ impl LanguageNav {
 
     /// Routes a typed character into the search box and re-derives the
     /// selection/scroll for the new (possibly empty) filtered list — vanilla's
-    /// `EditBox.setResponder` callback (`:45-49`).
+    /// EditBox's set responder callback (`:45-49`).
     pub fn type_char(&mut self, ch: char) {
         self.search.handle_char(ch);
         self.after_filter_changed();
     }
 
-    /// Backspace in the search box — `EditBox.keyPressed`'s `deleteText(-1,
+    /// Backspace in the search box — `EditBox.keyPressed`'s `delete text(-1,
     /// ctrl)` arm, without the whole-word modifier.
     pub fn backspace(&mut self) {
         self.search.delete_chars(-1);

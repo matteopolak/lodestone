@@ -174,19 +174,19 @@ pub fn apply_firework_boost(state: &mut PlayerState) {
 /// cell and to a **boolean** result: vanilla returns the hit point
 /// (`Optional<Vec3>`), but every caller here only ever asks "did it collide" —
 /// vanilla's own "collided with shape moving from" check immediately reduces
-/// it to `.isPresent()`-shaped logic, and that is the only vanilla caller
+/// it to `.is_present()`-shaped logic, and that is the only vanilla caller
 /// relevant to the blocks this module's swept scan cares about (every
 /// stuck-multiplier and powder-snow cell presents a solid-block shape to
 /// vanilla's own "get entity-inside collision shape" query, so its own
 /// "inside block" step reduces to exactly this segment test).
 ///
 /// `from`/`to` are the entity's **box centres** at the start and end of the
-/// move — equal to vanilla's own box-collided-along-vector's own
-/// `this.getCenter()` / `from.add(vector)`, since `vector = to_pos - from_pos`
+/// move — equal to vanilla's box-collided-along-vector's
+/// this's get center / `from.add(vector)`, since `vector = to_pos - from_pos`
 /// and the box is rigidly attached to the entity position, so translating
 /// the centre by the position delta is the same point as the centre of a
 /// box built at the new position. `half` is the entity's own half-extents
-/// (`getXsize() * 0.5` etc.).
+/// (`get_xsize() * 0.5` etc.).
 ///
 /// Implemented as the standard box-slab test rather than porting vanilla's
 /// own face-by-face walk: the two compute the same boolean (intersect /
@@ -531,7 +531,7 @@ fn apply_bubble_column(
 }
 
 /// Vanilla's own bubble-column "nothing above" test:
-/// `stateAbove.getCollisionShape(…).isEmpty() && stateAbove.getFluidState().isEmpty()`.
+/// `stateAbove.getCollisionShape(…).isEmpty() && stateAbove.get_fluid_state().isEmpty()`.
 ///
 /// The fluid half is what makes the common cases fall out correctly without any
 /// special-casing: a bubble column's own fluid state is a **water source**,

@@ -29,7 +29,7 @@
 //! build that ignored the bit would pass every coverage check while drawing
 //! every rocket flat.
 //!
-//! **An attached rocket draws nothing.** `FireworkRocketEntity.shouldRender`
+//! **An attached rocket draws nothing.** firework rocket entity's should render
 //! returns false for the elytra boost, so this is not an optimisation — a
 //! rocket sprite hanging inside a gliding player is a visible defect, and it is
 //! the defect this arm would have shipped.
@@ -272,7 +272,7 @@ fn a_firework_rocket_draws_angles_with_its_bit_and_vanishes_when_attached() {
          pass every coverage check and fail exactly here."
     );
 
-    // Arm 3: the attached suppression. `FireworkRocketEntity.shouldRender`
+    // Arm 3: the attached suppression. The firework rocket entity's should render
     // returns false for the elytra boost — a rocket sprite hanging inside a
     // gliding player is the defect this arm exists to stop.
     assert_eq!(

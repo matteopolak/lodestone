@@ -5,7 +5,7 @@
 //!
 //! All six packets are flat sequences of fixed-width fields (doubles,
 //! VarLongs, VarInts) with no branching, so golden bytes are hand-built
-//! directly from `ClientboundInitializeBorderPacket` et al.'s field order, and
+//! directly from the initialize-border packet's field order, and
 //! every decode asserts zero trailing bytes.
 
 use lodestone_model::{ClientEvent, ConnectionState, Directive, VersionAdapter};

@@ -58,7 +58,7 @@
 //! | 7 (nearest) | 1.030, 0.0038 | 1.030, 0.0038 | 1.030, 0.0038 |
 //!
 //! Two things follow, and both were surprises. **Vanilla's default sampler is
-//! not the fix** — `sampleNearest` is what `TextureFilteringMethod.NONE`
+//! not the fix** — `sampleNearest` is what texture filtering method's none
 //! selects, and porting it faithfully moved the most minified band's coverage
 //! by 2% (0.401 to 0.399, i.e. nothing). Only the supersampling arm does real
 //! work there, which is why `model.wgsl` takes it unconditionally rather than
@@ -70,9 +70,9 @@
 //!
 //! `AtlasBuilder` used to blit the **raw** decoded PNG at level 0 while every
 //! level below it came from the *prepared* base (`solidify`, or
-//! `fill_empty_with_dark`). Vanilla has one image: `MipmapGenerator.
+//! `fill_empty_with_dark`). Vanilla has one image: the mipmap generator.
 //! generateMipLevels` solidifies `currentMips[0]` in place and that same
-//! `NativeImage` is what gets uploaded at level 0. The preparation never
+//! The native image is what gets uploaded at level 0. The preparation never
 //! touches alpha, so no cutout decision moved — but `block/leaf_litter.png`'s
 //! 139 transparent texels are pure **black** against opaque texels at 125-167
 //! grey, and the model sampler is `min_filter: Linear`/`mipmap_filter:

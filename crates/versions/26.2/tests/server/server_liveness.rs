@@ -225,7 +225,7 @@ async fn real_client_view_follows_player_across_chunk_boundaries() {
     // still be exactly 9 — the three claims below, unchanged. What is removed is an
     // implicit claim that a forget and a send are atomic, which was never the
     // property under test and is not one vanilla offers either
-    // (`PlayerChunkSender` paces its own sends).
+    // (the chunk sender paces its own sends).
     //
     // **Established rather than assumed**, because a gate relaxed to accommodate a
     // change is how a real defect ships looking green. The discriminator between

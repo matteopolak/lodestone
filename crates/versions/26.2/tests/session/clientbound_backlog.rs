@@ -51,7 +51,7 @@ fn var_i32(value: i32) -> Vec<u8> {
     out
 }
 
-/// Independently packs block coordinates the way vanilla `vanilla's own block pos's own as long`
+/// Independently packs block coordinates the way the reference block-position packing
 /// does: `x` in the high 26 bits, `z` in the middle 26 bits, `y` in the low 12.
 fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
     let x = (i64::from(x)) & 0x3FF_FFFF;
@@ -251,7 +251,7 @@ fn game_rule_values_decodes_pairs() {
     // 26.2 renamed game rules to snake_case registry keys (e.g.
     // `minecraft:advance_time`, `minecraft:random_tick_speed`), unlike the
     // legacy camelCase command names (`doDaylightCycle`); confirmed against
-    // `vanilla's own game rules's own java`'s `registerBoolean`/`registerInteger` call sites.
+    // the game-rule registrations' boolean and integer call sites.
     let adapter = V770Adapter::new();
     let mut payload = var_i32(2);
     payload.extend(utf("minecraft:advance_time"));
@@ -591,7 +591,7 @@ fn delete_chat_drops_unresolvable_cached_index() {
     );
 }
 
-/// A VarInt-prefixed UTF-8 string (`vanilla's own friendly byte buf's own write utf`).
+/// A VarInt-prefixed UTF-8 string (the buffer's UTF writer).
 fn mc_string(text: &str) -> Vec<u8> {
     let mut out = var_i32(text.len() as i32);
     out.extend_from_slice(text.as_bytes());
@@ -736,11 +736,11 @@ fn player_look_at_rejects_truncated_payload() {
 // `ClientEvent` variant existed to decode into. `ClientAction::
 // SetRecipeBookSettings` was already encoded, so the round trip was half-open.
 //
-// Wire form, from `vanilla's own recipe book settings's own stream codec` in the 26.2 decompile: four
-// `TypeSettings` in the fixed order crafting, furnace, blast furnace, smoker, each
+// Wire form, from the recipe-book-settings stream codec in the 26.2 decompile: four
+// type-settings in the fixed order crafting, furnace, blast furnace, smoker, each
 // `(bool open, bool filtering)`. Eight bytes, no length prefix, no discriminator.
-// That the codec is `StreamCodec<FriendlyByteBuf, _>` rather than
-// `RegistryFriendlyByteBuf` is the structural evidence nothing else is on the wire.
+// That the codec is a plain-buffer stream codec rather than
+// a registry-aware one is the structural evidence nothing else is on the wire.
 
 /// The golden vector is **asymmetric across both axes**, which is the whole point.
 ///

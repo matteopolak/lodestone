@@ -1,12 +1,12 @@
-//! Fire spread and burnout — `FireBlock`'s scheduled tick, on the block-tick
+//! Fire spread and burnout — the fire block's scheduled tick, on the block-tick
 //! queue.
 //!
 //! # What this is
 //!
-//! A port of `FireBlock` (its `tick`, `checkBurnOut`, `getIgniteOdds`,
+//! A port of fire block (its `tick`, `checkBurnOut`, `getIgniteOdds`,
 //! `isValidFireLocation`, `canSurvive`, `getStateForPlacement` and
-//! `getFireTickDelay`) plus the two `BaseFireBlock` statics it leans on
-//! (`getState`, and `SoulFireBlock::canSurviveOnBlock`), read out of the
+//! `getFireTickDelay`) plus the two the base fire block statics it leans on
+//! (`getState`, and the soul fire block's can survive on block), read out of the
 //! decompiled 26.2 tree as record definitions.
 //!
 //! Nothing about fire existed in this crate before: a `minecraft:fire` block sat
@@ -16,10 +16,10 @@
 //!
 //! # It rides the scheduled-tick queue, not the random tick
 //!
-//! `Blocks.FIRE` is registered **without** `randomTicks()`, so fire never
-//! random-ticks. It schedules itself: `FireBlock::onPlace` schedules one tick,
-//! and the first statement of `FireBlock::tick` is *always* another
-//! `scheduleTick(pos, this, getFireTickDelay(random))`. That is why
+//! `Blocks.FIRE` is registered **without** random ticks, so fire never
+//! random-ticks. It schedules itself: the fire block's on place schedules one tick,
+//! and the first statement of fire block's tick is *always* another
+//! `scheduleTick(pos, this, get_fire_tick_delay(random))`. That is why
 //! [`run_scheduled_tick`] reschedules unconditionally before it does anything
 //! else, and why a fire block that somehow loses its pending tick is inert
 //! forever — see [`ticks_after_edit`], the seeding hook that makes a fire written
@@ -75,23 +75,23 @@
 //! # What is deliberately not modelled
 //!
 //! * **`isRainingAt`'s heightmap term.** Vanilla is
-//!   `isRaining() && canSeeSky(pos) && heightmap(MOTION_BLOCKING) <= y && biome
+//!   `is_raining() && can_see_sky(pos) && heightmap(MOTION_BLOCKING) <= y && biome
 //!   precipitation == RAIN`. [`FireEnv::raining`] carries the world flag and
 //!   [`sky_exposed`] stands in for the `canSeeSky` + heightmap pair by scanning
 //!   upward for a motion-blocking block; the biome term is absent, so fire is
 //!   rained out in a desert where vanilla would not rain at all. Everything here
 //!   is gated behind `raining`, so a dry world pays for none of it.
-//! * **`SoulFireBlock`'s own tick.** [`state_at`] will place `minecraft:soul_fire`
-//!   over soul sand or soul soil, matching `BaseFireBlock::getState`, but soul
+//! * **the soul fire block's own tick.** [`state_at`] will place `minecraft:soul_fire`
+//!   over soul sand or soul soil, matching the base fire block's get state, but soul
 //!   fire does not spread or burn out in vanilla either (it has no `tick`), so
 //!   nothing further is needed.
 //! * **Neighbour notification.** A block consumed by fire does not notify its own
 //!   neighbours here, so a torch losing its support to a fire stays floating.
-//! * ~~**`TntBlock::prime`.**~~ Landed: [`check_burn_out`] now reports every
+//! * ~~**the tnt block's prime.**~~ Landed: [`check_burn_out`] now reports every
 //!   `minecraft:tnt` neighbour it consumes, and `tick::run_tick_loop`'s
-//!   `TICK_FIRE` arm spawns a real `PrimedTnt` there — see that function's
+//!   `TICK_FIRE` arm spawns a real the primed tnt there — see that function's
 //!   and [`run_scheduled_tick`]'s own doc comments for the handoff.
-//! * **Fire damage to entities.** `BaseFireBlock::entityInside` is the entity
+//! * **Fire damage to entities.** the base fire block's entity inside is the entity
 //!   domain's.
 //!
 //! # How to change it
@@ -101,7 +101,7 @@
 //! one the fluid port documents: this module reads the cell *below* whatever it
 //! inspects, so a fire on the world floor asks for `min_y - 1`, and
 //! `ChunkColumn::block_state` indexes unguarded — an unchecked read panics the
-//! world tick thread. `Level::getBlockState`'s own first line is the same guard.
+//! world tick thread. Level's get block state's own first line is the same guard.
 
 use lodestone_data::block::Block;
 use lodestone_data::block_blast;
@@ -120,7 +120,7 @@ use crate::scheduled_tick::{
 /// `tick::run_tick_loop` dispatches on that typed key.
 pub const TICK_FIRE: &str = "lodestone:fire";
 
-/// `FireBlock.MAX_AGE`.
+/// The fire block's max age.
 pub const MAX_AGE: u32 = 15;
 
 /// `getFireTickDelay`'s base — `30 + random.nextInt(10)`.
@@ -156,7 +156,7 @@ pub const SOUL_FIRE: &str = "minecraft:soul_fire";
 #[cfg(test)]
 pub const INFINIBURN_OVERWORLD: [&str; 2] = ["minecraft:netherrack", "minecraft:magma_block"];
 
-/// The blocks `SoulFireBlock::canSurviveOnBlock` accepts (`#minecraft:soul_fire_base_blocks`).
+/// The blocks the soul fire block's can survive on block accepts (`#minecraft:soul_fire_base_blocks`).
 #[cfg(test)]
 pub const SOUL_FIRE_BASE: [&str; 2] = ["minecraft:soul_sand", "minecraft:soul_soil"];
 
@@ -174,10 +174,10 @@ pub struct FireEnv {
     /// [`spread_odds`]'s `difficulty * 7` term, so a hard-difficulty world really
     /// does spread fire faster.
     pub difficulty_id: i32,
-    /// `Level::isRaining` — the world flag, not the per-position test. When
+    /// Level's is raining — the world flag, not the per-position test. When
     /// `false`, nothing here performs a sky scan at all.
     pub raining: bool,
-    /// `ServerLevel::canSpreadFireAround` reduced to its answer: in 26.2 that is
+    /// The server level's can spread fire around reduced to its answer: in 26.2 that is
     /// `fire_spread_radius_around_player == -1 || a player is within it`, so the
     /// caller (which knows where the players are) resolves it and passes the
     /// boolean. `false` freezes fire completely, exactly as the old `doFireTick`
@@ -256,7 +256,7 @@ impl FireEnv {
         self
     }
 
-    /// `LevelHeightAccessor::isInsideBuildHeight`.
+    /// The level height accessor's is inside build height.
     #[must_use]
     pub fn contains_y(self, y: i32) -> bool {
         y >= self.min_y && y < self.min_y + self.height
@@ -264,7 +264,7 @@ impl FireEnv {
 }
 
 /// The block state at `pos`, or air when `pos` is outside the dimension's build
-/// height — `Level::getBlockState`, whose own first line is the same guard.
+/// height — Level's get block state, whose own first line is the same guard.
 ///
 /// **Every world read in this module goes through here.** See the module doc for
 /// why that is load-bearing rather than tidy.
@@ -323,7 +323,7 @@ pub fn is_ordinary_fire_id(state: StateId) -> bool {
     state.block() == Block::Fire
 }
 
-/// `FireBlock.AGE` for a fire state, defaulting to `0` (the default state's
+/// The fire block's age for a fire state, defaulting to `0` (the default state's
 /// value) when the property is absent.
 #[must_use]
 #[cfg(test)]
@@ -359,7 +359,7 @@ pub fn age_of_id(state: StateId) -> u32 {
     }
 }
 
-/// `FireBlock::canBurn` — `getIgniteOdds(state) > 0`, with the
+/// The fire block's can burn — `get_ignite_odds(state) > 0`, with the
 /// `waterlogged=true` override already applied.
 #[must_use]
 #[cfg(test)]
@@ -372,9 +372,9 @@ pub fn can_burn_id(state: StateId) -> bool {
     block_blast::ignite_odds_for_state_id(state) > 0
 }
 
-/// `BlockStateBase::isFaceSturdy(level, pos, UP)`, from the committed
-/// `face_full_up` census — the same fact vanilla's `isFaceSturdy(…, UP,
-/// SupportType.FULL)` reads off the collision shape.
+/// The block state base's is face sturdy, from the committed
+/// `face_full_up` census — the same fact vanilla's `is face sturdy(…, UP,
+/// The support type's full)` reads off the collision shape.
 #[must_use]
 #[cfg(test)]
 pub fn face_sturdy_up(state: &str) -> bool {
@@ -388,7 +388,7 @@ pub fn face_sturdy_up_id(state: StateId) -> bool {
     lodestone_data::snow_support::face_full_up(state)
 }
 
-/// `BlockStateBase::blocksMotion`, for the sky scan.
+/// The block state base's blocks motion, for the sky scan.
 #[cfg(test)]
 fn blocks_motion(state: &str) -> bool {
     lodestone_data::block_states::state_id(state)
@@ -417,7 +417,7 @@ const FACE_OFFSETS: [(i32, i32, i32); 6] = [
     (1, 0, 0),
 ];
 
-/// `FireBlock::tick`'s six `checkBurnOut` calls, in the order it makes them,
+/// The fire block's tick's six `checkBurnOut` calls, in the order it makes them,
 /// with each one's `chance` denominator: **east, west, below, above, north,
 /// south**, at `300, 300, 250, 250, 300, 300`.
 ///
@@ -434,7 +434,7 @@ pub const BURN_OUT_ORDER: [((i32, i32, i32), i32); 6] = [
     ((0, 0, 1), 300),
 ];
 
-/// `FireBlock::isValidFireLocation` — any of the six face neighbours can burn.
+/// The fire block's is valid fire location — any of the six face neighbours can burn.
 #[must_use]
 #[cfg(test)]
 pub fn is_valid_fire_location<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
@@ -447,7 +447,7 @@ pub fn is_valid_fire_location<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, 
     })
 }
 
-/// `FireBlock::canSurvive` — the block below has a sturdy up face, or some
+/// The fire block's can survive — the block below has a sturdy up face, or some
 /// neighbour can burn.
 #[must_use]
 #[cfg(test)]
@@ -469,7 +469,7 @@ pub fn can_survive_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: Blo
     face_sturdy_up_id(block_at_id(world, env, below)) || is_valid_fire_location_id(world, env, pos)
 }
 
-/// `FireBlock::getIgniteOdds(LevelReader, BlockPos)` — `0` unless the cell itself
+/// The fire block's get ignite odds — `0` unless the cell itself
 /// is empty, otherwise the **maximum** ignite odds over its six face neighbours.
 #[must_use]
 #[cfg(test)]
@@ -542,7 +542,7 @@ pub fn fire_tick_delay(rng: &mut SpawnRng) -> u64 {
     TICK_DELAY_BASE + rng.next_int(TICK_DELAY_JITTER) as u64
 }
 
-/// `Level::isRainingAt` reduced to what this crate can answer: the world is
+/// Level's is raining at reduced to what this crate can answer: the world is
 /// raining and nothing motion-blocking stands above `pos`.
 ///
 /// Stands in for `canSeeSky` **and** the `MOTION_BLOCKING` heightmap term at
@@ -559,7 +559,7 @@ pub fn is_raining_at_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: B
     env.raining && sky_exposed_id(world, env, pos)
 }
 
-/// `Level::canSeeSky` plus the heightmap term — nothing motion-blocking between
+/// Level's can see sky plus the heightmap term — nothing motion-blocking between
 /// `pos` and build height.
 #[must_use]
 #[cfg(test)]
@@ -588,7 +588,7 @@ pub fn sky_exposed_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: Blo
     true
 }
 
-/// `FireBlock::isNearRain` — raining at this cell or any of its four horizontal
+/// The fire block's is near rain — raining at this cell or any of its four horizontal
 /// neighbours.
 #[must_use]
 #[cfg(test)]
@@ -615,7 +615,7 @@ pub fn is_near_rain_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: Bl
         || is_raining_at_id(world, env, BlockPos::new(pos.x, pos.y, pos.z + 1))
 }
 
-/// `FireBlock::getStateForPlacement` — the connected-face form when the cell has
+/// The fire block's get state for placement — the connected-face form when the cell has
 /// no sturdy or burnable support below it, otherwise the plain default state.
 ///
 /// The five booleans are the client's rendering input: a fire with no floor draws
@@ -674,8 +674,8 @@ pub fn state_for_placement_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, 
     Properties::state_for_block(Block::Fire, &properties).expect("generated fire state")
 }
 
-/// `BaseFireBlock::getState` — soul fire over a soul-fire base block, otherwise
-/// `FireBlock::getStateForPlacement`.
+/// The base fire block's get state — soul fire over a soul-fire base block, otherwise
+/// The fire block's get state for placement.
 #[must_use]
 #[cfg(test)]
 pub fn at_text<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> String {
@@ -696,7 +696,7 @@ pub fn state_at_id<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockP
     }
 }
 
-/// `FireBlock::getStateWithAge` — [`state_at`] with `age` written over it, but
+/// The fire block's get state with age — [`state_at`] with `age` written over it, but
 /// only when the answer really is ordinary fire (soul fire has no `age`).
 #[must_use]
 #[cfg(test)]
@@ -776,7 +776,7 @@ fn with_age(state: &str, age: u32) -> String {
 /// The fire ticks one block edit owes — this cell alone, at a **relative** delay
 /// the tick loop rebases onto its own counter.
 ///
-/// The seeding hook, standing in for `FireBlock::onPlace`. Unlike the fluid
+/// The seeding hook, standing in for the fire block's on place. Unlike the fluid
 /// equivalent it does **not** cover the six neighbours: fire is not woken by a
 /// neighbour changing (its `updateShape` only re-derives its own connected faces),
 /// so only the edited cell can owe a tick.
@@ -801,7 +801,7 @@ pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<ScheduledTickKind>> 
     pending.drain_due(u64::MAX, usize::MAX)
 }
 
-/// One fire block's scheduled tick — `FireBlock::tick`, transcribed.
+/// One fire block's scheduled tick — the fire block's tick, transcribed.
 ///
 /// Writes every change straight through `world` (as vanilla's immediate
 /// `setBlock` does, and because the spread loop reads cells it has already
@@ -816,7 +816,7 @@ pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<ScheduledTickKind>> 
 /// [`check_burn_out`] calls consumed — see that function's own doc. The
 /// caller (`tick::run_tick_loop`'s `TICK_FIRE` arm) is what owns a
 /// [`crate::mobs::MobSim`] to spawn each one into, at
-/// [`crate::mobs::tnt::random_short_fuse`]'s shortened fuse — `TntBlock.prime`
+/// [`crate::mobs::tnt::random_short_fuse`]'s shortened fuse — the tnt block's prime
 /// does not itself shorten the fuse (only `wasExploded` does), so a
 /// fire-primed TNT starts at the ordinary
 /// [`crate::mobs::tnt::DEFAULT_FUSE_TIME`].
@@ -835,7 +835,7 @@ pub fn run_scheduled_tick_id<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAcces
     if !is_ordinary_fire_id(state) {
         // Not our block any more (burnt out, replaced, or soul fire, which does
         // not tick). No reschedule and no draws — vanilla would not have
-        // dispatched `FireBlock::tick` here at all.
+        // dispatched the fire block's tick here at all.
         return;
     }
 
@@ -860,7 +860,7 @@ pub fn run_scheduled_tick_id<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAcces
         changes.push((at, new_state));
     };
 
-    // `if (!state.canSurvive(level, pos)) level.removeBlock(pos, false);` — and
+    // `if (!state.canSurvive(level, pos)) level.remove_block(pos, false);` — and
     // vanilla does **not** return here, so the rest of the tick still runs
     // against the `state` local and can write fire back.
     if !can_survive_id(world, env, pos) {
@@ -978,13 +978,13 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<S
     changes.extend(typed.into_iter().map(|(pos, state)| (pos, state.canonical_state())));
 }
 
-/// `FireBlock::checkBurnOut` — the one neighbour-consuming half.
+/// The fire block's check burn out — the one neighbour-consuming half.
 ///
 /// **Draws `nextInt(chance)` unconditionally**, before comparing against the
 /// neighbour's burn odds, so a check against stone still costs one draw. That is
 /// the single easiest thing here to "optimise" into a divergent RNG stream.
 ///
-/// `primed_tnt` is `TntBlock::prime`'s call, transcribed exactly where
+/// `primed_tnt` is the tnt block's prime's call, transcribed exactly where
 /// vanilla makes it: **after** either branch below, keyed on `oldState` (the
 /// block this call found at `pos`, before either the age-up or the
 /// `removeBlock`) — not on which branch ran. A `minecraft:tnt` neighbour is
@@ -1012,7 +1012,7 @@ fn check_burn_out<S: ChunkSource + ?Sized>(
     if !env.contains_y(pos.y) {
         return;
     }
-    // `random.nextInt(age + 10) < 5 && !level.isRainingAt(pos)` — the draw
+    // `random.nextInt(age + 10) < 5 && !level.is_raining_at(pos)` — the draw
     // happens first, the rain test only if it hits.
     if rng.next_int(age as i32 + 10) < 5 && !is_raining_at_id(world, env, pos) {
         let new_age = MAX_AGE.min(age + (rng.next_int(5) / 4) as u32);

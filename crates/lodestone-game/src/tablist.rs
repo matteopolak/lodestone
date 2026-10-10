@@ -18,9 +18,9 @@
 //! are [`Text`], the same component type a chat line or a sign uses, so a
 //! server could in principle set a `clickEvent`/`hoverEvent` on any of them.
 //! Nothing here interprets one, and that is not an omission: the decompiled
-//! overlay this list feeds (`crates/versions/26.2/.cache`'s
-//! `PlayerTabOverlay`/`Hud` sources) has no `mouseClicked`, no
-//! `handleComponentClicked` and no hover-tooltip call anywhere in either
+//! overlay this list feeds (the reference's tab-overlay and HUD sources)
+//! has no mouse-click handler, no
+//! component-click handler and no hover-tooltip call anywhere in either
 //! class — the tab overlay is drawn while the crosshair still owns the
 //! cursor, so there is no free pointer to hit-test against in the first
 //! place. `lodestone_shell::tablist::tab_list_view` accordingly flattens
@@ -315,7 +315,7 @@ impl TabList {
                 }
                 true
             }
-            // The header/footer text, from `ClientboundTabListPacket`. This was
+            // The header/footer text, from the tab-list packet. This was
             // a genuine island, and it stayed one for longer than this comment
             // used to admit. The old wording — "read downstream by `hud.rs`'s
             // snapshot" — was *literally* true and *practically* wrong, which is
@@ -790,7 +790,7 @@ mod fold_tests {
     }
 
     /// A later `TabListChanged` replaces, not merges — vanilla's
-    /// `ClientboundTabListPacket` always carries both fields, never a partial
+    /// tab-list packet always carries both fields, never a partial
     /// update (unlike `PlayerListUpdate`'s per-field `Option`s).
     #[test]
     fn tab_list_changed_replaces_previous_header_and_footer() {

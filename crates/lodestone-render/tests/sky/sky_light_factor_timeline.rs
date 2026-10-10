@@ -6,11 +6,11 @@
 //!
 //! `tests/support/sky_light_timeline_jvm.txt` was produced by
 //! `../oracle-java/SkyLightTimelineOracle.java`, which boots the real 26.2
-//! registries (`VanillaRegistries.createLookup()`, exactly the pattern
+//! registries (the registries lookup, exactly the pattern
 //! `scripts/worldgen-oracle` uses for the density/noise registries — the
 //! timeline registry is bootstrapped the same data-driven way, by
-//! `Timelines::bootstrap`) and samples `Timeline.createTrackSampler` — the
-//! real `KeyframeTrackSampler` + `AttributeModifier` machinery the client
+//! the timelines bootstrap) and samples the timeline's track sampler — the
+//! real keyframe track sampler and attribute modifier machinery the client
 //! uses — directly, once per tick. This is not a hand re-derivation of the
 //! interpolation math and not this crate's own output pasted back: per
 //! `CLAUDE.md`'s evidence standards, the expected values originate outside

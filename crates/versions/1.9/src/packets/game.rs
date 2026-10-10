@@ -585,7 +585,7 @@ pub struct Animation {
 /// Verified against minecraft-data's 1.12.2 `packet_named_sound_effect`: a
 /// string sound name, a varint sound category, then `x`/`y`/`z` as
 /// fixed-point `i32`s (real coordinate × 8, vanilla's
-/// `ClientboundSoundPacket` fixed-point convention), then `f32` volume and
+/// fixed-point convention of the sound packet), then `f32` volume and
 /// pitch.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:named_sound_effect", state = Play, bound = Client)]
@@ -719,7 +719,7 @@ pub struct SoundEffectBytePitch {
 /// Verified against minecraft-data's 1.12.2
 /// `packet_scoreboard_display_objective`: a raw `i8` slot position, then a
 /// string objective name (empty string clears the slot — vanilla's
-/// `ClientboundSetDisplayObjectivePacket` never sends a dedicated "clear"
+/// display-objective packet never sends a dedicated "clear"
 /// marker at this protocol revision).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:scoreboard_display_objective", state = Play, bound = Client)]

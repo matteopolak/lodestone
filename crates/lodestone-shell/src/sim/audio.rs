@@ -132,7 +132,7 @@ impl Sim {
     }
 
     /// Play a sound with no wire origin at all — a **local** decision, not a
-    /// server one, matching vanilla's own `Level.playLocalSound` (the same
+    /// server one, matching vanilla's own Level's play local sound (the same
     /// call [`Self::play_block_break_sound`]/[`Self::play_block_place_sound`]
     /// forward to via [`Self::play_block_surface_sound`]).
     ///
@@ -166,7 +166,7 @@ impl Sim {
     }
 
     /// Play a **head-relative** sound with no wire origin and no world
-    /// position — vanilla's `SimpleSoundInstance.forUI` shape. The UI
+    /// position — vanilla's simple sound instance's for ui shape. The UI
     /// button-click sound (`crate::app::WindowApp`) is the motivating and, for
     /// now, only caller: a menu screen has no world position to attach a click
     /// to, and vanilla does not give it one either (`Attenuation.NONE`,
@@ -607,7 +607,7 @@ impl Sim {
     ///
     /// # Why this is predicted at all
     ///
-    /// `LocalPlayer.playSound` overrides straight to `playLocalSound`
+    /// LocalPlayer's play sound overrides straight to `playLocalSound`
     ///, so every step the local player takes is
     /// client-side with no round trip. Swing and attack sounds are **not** — they
     /// go through the method vanilla names `playServerSideSound` — so this is
@@ -688,11 +688,11 @@ impl Sim {
     }
 
     /// Play a block's break sound at the centre of `block`, the half of vanilla's
-    /// `LevelEventHandler` `case 2001` this shell used to drop on the floor.
+    /// The level event handler `case 2001` this shell used to drop on the floor.
     ///
     /// `case 2001` does *two* things with the state id the event carries
     ///: `addDestroyBlockEffect` **and**
-    /// `playLocalSound(pos, soundType.getBreakSound(), SoundSource.BLOCKS, …)`.
+    /// play local sound.
     /// Only the first was wired, so every block break in the game was visually
     /// right and silent — from an event already decoded, routed and handled. See
     /// `docs/sound-playback.md`.
@@ -704,9 +704,9 @@ impl Sim {
     }
 
     /// Play a block's place sound at the centre of `block` — vanilla's
-    /// `BlockItem.place` tail, which passes the placing
+    /// The block item's place tail, which passes the placing
     /// player as the *excluded* entity, so on the acting client the sound is
-    /// **predicted** rather than received. (`ClientLevel.playSound` inverts the
+    /// **predicted** rather than received. (the client level's play sound inverts the
     /// exclusion: it plays only when `except == minecraft.player`.) Another
     /// player's placement arrives as an ordinary `SOUND` packet and is already
     /// audible through the [`NetUpdate::Sound`] arm.
@@ -718,7 +718,7 @@ impl Sim {
         self.play_block_surface_sound(block, state, lodestone_data::sound_types::place_sound_name);
     }
 
-    /// The shared body of the two above: resolve the block state's `SoundType`,
+    /// The shared body of the two above: resolve the block state's sound type,
     /// pick one of its sounds, and play it at the block's centre with vanilla's
     /// break/place scaling.
     ///
@@ -729,15 +729,15 @@ impl Sim {
     /// * the position is the **block centre** — vanilla's own local-sound-play
     ///   at a block position
     ///   forwards `pos.getX() + 0.5` and so on;
-    /// * the volume is `(soundType.getVolume() + 1.0) / 2.0` and the pitch is
-    ///   `soundType.getPitch() * 0.8`, both computed by
+    /// * the volume is `(soundType.get_volume() + 1.0) / 2.0` and the pitch is
+    ///   `soundType.get_pitch() * 0.8`, both computed by
     ///   [`lodestone_data::sound_types::BlockSoundType`] so neither multiplier is
     ///   retyped per call site;
     /// * the category is the blocks sound category.
     ///
     /// The **air guard** is vanilla's too (its own break-particle level event's
     /// own `if (!blockState.isAir())` check)
-    /// and is not redundant: air has a `SoundType` in the table — `STONE`, as it
+    /// and is not redundant: air has a sound type in the table — `STONE`, as it
     /// happens — so without it an air-state level event would play a stone break.
     fn play_block_surface_sound(
         &mut self,
@@ -811,7 +811,7 @@ fn canonical_sound_state(
 }
 
 /// The eleven `soundSource.*` slider values paired with the bus each one drives,
-/// in vanilla's `SoundSource` declaration order.
+/// in vanilla's sound source declaration order.
 ///
 /// # Why this is a free function and not inlined into the setter
 ///
@@ -825,7 +825,7 @@ fn canonical_sound_state(
 ///
 /// The pairing is by **ordinal**, not by position in the array literal, for the
 /// same reason `lodestone_sound`'s `map_category` uses one: the two enums and
-/// [`crate::config::SOUND_CATEGORY_NAMES`] all agree on `SoundSource`'s order, so
+/// [`crate::config::SOUND_CATEGORY_NAMES`] all agree on the sound source's order, so
 /// the ordinal is the single bridge rather than three parallel lists.
 ///
 /// Clamped here as well as on load, because a hand-edited `options.json` reaches

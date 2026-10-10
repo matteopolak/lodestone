@@ -1,4 +1,4 @@
-//! Filled-map presentation: vanilla's `MapColor` palette, the 128×128 RGBA
+//! Filled-map presentation: vanilla's map-colour palette, the 128×128 RGBA
 //! image a map's colour bytes resolve to, and the quads that image is drawn on.
 //!
 //! ## What it is
@@ -16,8 +16,8 @@
 //! accessor). The high
 //! six bits index the 62-entry base table below; the low two pick one of four
 //! brightness modifiers, applied as an **integer** `channel * modifier / 255`
-//! (vanilla's packed-RGB-scale helper). Id `0` is `MapColor.NONE`, whose
-//! `calculateARGBColor` short-circuits to `0` — fully *transparent*, not black,
+//! (vanilla's packed-RGB-scale helper). Id `0` is the none colour, whose
+//! ARGB calculation short-circuits to `0` — fully *transparent*, not black,
 //! which is why an unexplored map shows the frame through it rather than a black
 //! square.
 //!
@@ -56,7 +56,7 @@ pub const MAP_SIZE: u32 = 128;
 /// invert every terrain contour on the map.
 pub const MAP_BRIGHTNESS: [u32; 4] = [180, 220, 255, 135];
 
-/// Vanilla's `MapColor` base colours, indexed by id, `0xRRGGBB`.
+/// Vanilla's map base colours, indexed by id, `0xRRGGBB`.
 ///
 /// Id `0` is `NONE` and is special-cased to transparent by [`map_color_rgba`];
 /// its `0` entry here is never scaled. Transcribed verbatim from
@@ -233,7 +233,7 @@ mod tests {
         );
     }
 
-    /// `MapColor.NONE` is transparent, not black. An unexplored map must be a
+    /// The none map colour is transparent, not black. An unexplored map must be a
     /// hole: filling it with opaque black would hide whatever the map is drawn
     /// over and look like a rendering failure.
     #[test]

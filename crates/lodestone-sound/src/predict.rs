@@ -22,7 +22,7 @@
 //! | the player override | `this` | predicted, and the server leaves that player out |
 //! | the local-player override | — calls its own unconditional local-play routine | **unconditionally local**, no `except` check at all |
 //!
-//! The practical rule that falls out: **every `playSound(event, volume, pitch)` call
+//! The practical rule that falls out: **every play sound call
 //! reached with the local player as `this` is client-predicted**, because
 //! the local-player override overrides it to a straight local play. That covers footsteps
 //! (the entity step-sound routine → the override), muffled steps, and swim sounds.
@@ -70,7 +70,7 @@ pub const MOVE_DIST_SCALE: f32 = 0.6;
 pub const INITIAL_NEXT_STEP: f32 = 1.0;
 
 /// Vanilla's own play-step-sound routine's volume multiplier on the block's sound type
-/// (`soundType.getVolume() * 0.15F`).
+/// (`soundType.get_volume() * 0.15F`).
 pub const STEP_VOLUME_SCALE: f32 = 0.15;
 
 /// Vanilla's own muffled-step-sound routine's multipliers

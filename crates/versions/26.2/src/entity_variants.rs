@@ -69,7 +69,7 @@ const TEMPERATURE: &[&str] = &["minecraft:cold", "minecraft:temperate", "minecra
 /// `minecraft:zombie_nautilus_variant`: only `temperate`, `warm`.
 const ZOMBIE_NAUTILUS: &[&str] = &["minecraft:temperate", "minecraft:warm"];
 
-/// `minecraft:villager_type`, in registration order (`vanilla's own villager type's own bootstrap`).
+/// `minecraft:villager_type`, in registration order (the villager type bootstrap).
 const VILLAGER_TYPE: &[&str] = &[
     "minecraft:desert",
     "minecraft:jungle",
@@ -81,7 +81,7 @@ const VILLAGER_TYPE: &[&str] = &[
 ];
 
 /// `minecraft:villager_profession`, in registration order
-/// (`vanilla's own villager profession's own bootstrap`); `none` is id 0.
+/// (the villager profession bootstrap); `none` is id 0.
 const VILLAGER_PROFESSION: &[&str] = &[
     "minecraft:none",
     "minecraft:armorer",
@@ -105,7 +105,7 @@ const VILLAGER_PROFESSION: &[&str] = &[
 ///
 /// # The order is alphabetical, and that is measured rather than assumed
 ///
-/// It would be natural to transcribe `vanilla's own painting variants's own bootstrap`'s
+/// It would be natural to transcribe the painting variants bootstrap's
 /// registration order, and that is **wrong**: painting variants are a data-pack
 /// registry loaded from `data/minecraft/painting_variant/*.json` through the
 /// resource manager, which lists keys sorted. Decoding the repo's own captured
@@ -188,7 +188,7 @@ fn lookup(table: &[&'static str], id: i32) -> Option<&'static str> {
 /// (holder wire value minus one). Returns `None` for a non-appearance
 /// serializer or an id past the vanilla table.
 ///
-/// The serializer ids are the `EntityDataSerializers` registration order:
+/// The serializer ids are the entity-data serializer registration order:
 /// 21 cat, 23 cow, 25 wolf, 27 frog, 28 pig, 30 chicken, 32 zombie-nautilus.
 /// The interleaved odd/even neighbours (22/24/26/29/31 sound variants, 34
 /// painting, 35..=38 enum states) are not appearance variants and are not

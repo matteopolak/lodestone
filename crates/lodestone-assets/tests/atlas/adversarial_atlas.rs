@@ -4,7 +4,7 @@
 //! tidy 16x16 single-sprite atlas — 100% green over a function that died on the
 //! first realistic input. These tests deliberately feed awkward geometry and
 //! assert against *authorities not computed here*: the input pixels themselves
-//! (content round-trip), vanilla's own `SpriteLoader` mip-cap formula (derived
+//! (content round-trip), vanilla's own sprite-loader mip-cap formula (derived
 //! independently from the decompiled source, not from `atlas.rs`), and the
 //! standalone mip generator. Animation schedules are chosen so a wrong
 //! (equal-frametime) implementation is forced to diverge, not merely allowed to.
@@ -195,7 +195,7 @@ fn non_square_sprite_mip_content_matches_the_standalone_generator() {
 fn fully_transparent_cutout_mips_stay_invisible_matching_vanilla_bias() {
     // A fully transparent cutout: solidify() has no opaque seed, so it must not
     // divide by zero. But note the authority here is vanilla, not intuition:
-    // MipmapGenerator.scaleAlphaToCoverage adds `alphaCutoffBias + 0.025` to
+    // the alpha-coverage scaling adds the alpha cutoff bias plus 0.025 to
     // EVERY texel of a scaled mip, so vanilla's own output is NOT literally
     // alpha 0 above level 0 —
     // it is a small constant that is still far below the 0.5 alpha-test cutoff, so

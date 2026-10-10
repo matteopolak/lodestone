@@ -9,7 +9,7 @@
 //! framed *chests* correctly for as long as it has existed, while the frame
 //! around them drew nothing at all and every ordinary item in one drew nothing
 //! either. The frame body has no entity rig by design — vanilla resolves it
-//! through `BlockModelResolver`/`BlockStateDefinitions.getItemFrameFakeState`,
+//! through the block model resolver/block state definitions's get item frame fake state,
 //! so `entity_models.rs` deliberately omits it and `model_for_type` answers
 //! `None` — which meant nothing anywhere was its producer.
 //!
@@ -28,7 +28,7 @@
 //! | visible frame → invisible frame | the two are genuinely separate producers rather than one draw counted twice |
 //! | `item_frame` → `glow_item_frame` | the glow variant is routed, not silently folded onto the plain one |
 //!
-//! The invisible arm is the load-bearing control: `ItemFrameRenderer` clears
+//! The invisible arm is the load-bearing control: the item frame renderer clears
 //! `state.frameModel` for an invisible frame and still draws its contents, so a
 //! single producer covering both would have to report the same two counters for
 //! both — and does not.
@@ -356,8 +356,8 @@ fn an_item_frame_and_the_item_in_it_reach_pixels() {
         "a frame carrying no stack must not draw a framed item ({})",
         bare.items
     );
-    // The invisible arm: `ItemFrameRenderer` clears `state.frameModel` when
-    // `state.isInvisible`, so the body must vanish while the contents stay. This
+    // The invisible arm: the item frame renderer clears `state.frameModel` when
+    // state's is invisible, so the body must vanish while the contents stay. This
     // is what proves the two counters are two producers and not one draw counted
     // twice — a single producer could not answer differently here.
     assert_eq!(

@@ -1,6 +1,6 @@
 //! Pixel measurement: [`logical_canvas`]'s physical-to-logical conversion,
 //! the bitmap font's advance/width/clip helpers, the generic row rects, and
-//! the `ManageServerScreen` form's metrics and field rects.
+//! the manage server screen form's metrics and field rects.
 //!
 //! Split out of `menu/render.rs` verbatim: a pure move by line range.
 
@@ -73,7 +73,7 @@ fn row_height(row: &MenuRow) -> f32 {
 /// Rows and the footer share **one flat index space** and the first rect containing
 /// the cursor wins, with the footer last, so a scrolling-list row that overhangs the
 /// band would steal the footer button's clicks *and* its hover along the strip it
-/// overhangs. The guard is vanilla's: `AbstractSelectionList.getEntryAtPosition`
+/// overhangs. The guard is vanilla's: the abstract selection list's get entry at position
 /// tests the cursor against the list's own box before it walks the entries, so an
 /// entry scrolled past the bottom cannot be hit where it would have painted.
 ///
@@ -200,10 +200,10 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
 /// fill to vanilla's real `widget/text_field` nine-slice.
 pub const EDIT_BOX_H: f32 = 20.0;
 
-// -- vanilla's `ManageServerScreen` metrics ----------------------------------
+// -- vanilla's manage server screen metrics ----------------------------------
 //
 // Vanilla's own manage-server-screen class
-// — the add/edit-server form `JoinMultiplayerScreen`'s Add/Edit buttons open.
+// — the add/edit-server form join multiplayer screen's Add/Edit buttons open.
 // Every number is transcribed from there, not measured off this pipeline's
 // own output.
 
@@ -227,7 +227,7 @@ const MANAGE_SERVER_DONE_DY: f32 = 66.0;
 /// Cancel's y: `height / 4 + 138` is `+ 90` from [`Origin::TitleTop`] (`:58`).
 const MANAGE_SERVER_CANCEL_DY: f32 = 90.0;
 /// Where this screen's title is drawn: vanilla `Screen`'s own generic
-/// `drawCenteredString(title, width / 2, 20, …)` fallback — `ManageServerScreen`
+/// `drawCenteredString(title, width / 2, 20, …)` fallback — the manage server screen
 /// overrides neither `render` nor `renderBackground`/`addTitle`, so its title
 /// draws wherever the base `Screen` puts one, same as every simple dialog that
 /// does not build a `HeaderAndFooterLayout` of its own.

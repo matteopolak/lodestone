@@ -296,7 +296,7 @@ fn give_splits_a_large_count_into_whole_stacks_and_conserves_the_total() {
     assert_eq!(stacks.iter().map(|s| s.count).collect::<Vec<_>>(), [64, 36]);
     assert_eq!(stacks.iter().map(|s| s.count).sum::<u32>(), 100);
 
-    // The 100-stack cap (`GiveCommand.MAX_ALLOWED_ITEMSTACKS`) is per-item:
+    // The 100-stack cap (the give command's max allowed itemstacks) is per-item:
     // 64 × 100 for a diamond. One under passes, one over is refused.
     assert!(
         run(&commands, &rules, &players, &alice, "give bob minecraft:diamond 6400")
@@ -1950,7 +1950,7 @@ fn worldborder_add_is_relative_to_the_current_size_not_absolute() {
 }
 
 /// `center <x> <z>` — the two-double substitute for vanilla's
-/// `Vec2Argument` (see the command module's own doc for why), checked
+/// The vec2 argument (see the command module's own doc for why), checked
 /// against both axes so a transposed pair (`x` read into `z`) would fail.
 #[test]
 fn worldborder_center_moves_both_axes_independently() {
@@ -3221,7 +3221,7 @@ fn execute_store_score_result_and_success_diverge_on_a_multivalued_wrapped_comma
 
 /// A wrapped command that itself fails stores `0`, and the outer `execute`
 /// reports the failure too — matching vanilla's own catch path
-/// (`CommandResultCallback::onFailure`, `success = false, result = 0`), not a
+/// (the command result callback's on failure, `success = false, result = 0`), not a
 /// silent success with a stray write.
 #[test]
 fn execute_store_a_failing_wrapped_command_writes_zero_and_the_outer_command_refuses() {

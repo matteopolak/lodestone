@@ -44,7 +44,7 @@ fn travel_and_check_inside_blocks(
     moving_slowly: bool,
 ) {
     // The position *before* this tick's travel dispatch moves it — the "from"
-    // half of vanilla's `checkInsideBlocks(from, to, …)` segment, needed by
+    // half of vanilla's check inside blocks segment, needed by
     // [`update_stuck_multiplier`] and [`update_freezing`] to sweep the tick's
     // movement instead of sampling only where it ends. Captured here, ahead of
     // every branch below, because every one of them can write `state.position`.
@@ -71,7 +71,7 @@ fn travel_and_check_inside_blocks(
     );
     state.eye_in_water = fluid.eye_in_water;
     state.eye_in_lava = fluid.eye_in_lava;
-    // Vanilla's own player-swim-state override forces `setSwimming(false)`
+    // Vanilla's own player-swim-state override forces set swimming
     // while flying instead of delegating to the base swim-state update, so a
     // player
     // who dives, starts sprint-swimming and then takes off drops the swim pose on
@@ -112,7 +112,7 @@ fn travel_and_check_inside_blocks(
         state.fall_distance = 0.0;
     }
 
-    // Vanilla's own player travel step captures `getDeltaMovement().y`
+    // Vanilla's own player travel step captures get delta movement's get delta movement
     // *before* delegating to its base travel and then **overwrites** the
     // post-travel Y with `originalMovementY * 0.6`.
     //
@@ -285,7 +285,7 @@ fn tick_spectator(
 /// feet holding water; once swimming, it is sustained merely by sprinting while
 /// **in** water (box touching water), so you keep swimming as you break the
 /// surface. Passenger/vehicle state is not modelled here (this engine has none),
-/// matching the `!isPassenger()` guard being vacuously true.
+/// matching the `!is_passenger()` guard being vacuously true.
 ///
 /// Flying and riding callers must suppress swimming before calling this rule.
 /// It updates only the swim flag; [`update_player_pose`] applies collision-fit
@@ -408,10 +408,10 @@ pub(crate) fn friction_influenced_speed_value(
 /// accessor.
 ///
 /// ```text
-/// if (this.abilities.flying && !this.isPassenger()) {
-///    return this.isSprinting() ? this.abilities.getFlyingSpeed() * 2.0F : this.abilities.getFlyingSpeed();
+/// if (this.abilities.flying && !this's is passenger) {
+///    return this's is sprinting ? abilities's get flying speed * 2.0F : abilities's get flying speed;
 /// } else {
-///    return this.isSprinting() ? 0.025999999F : 0.02F;
+///    return this's is sprinting ? 0.025999999F : 0.02F;
 /// }
 /// ```
 ///
@@ -422,7 +422,7 @@ pub(crate) fn friction_influenced_speed_value(
 /// `0.025999999F` and not `0.026F`; see
 /// [`PhysicsProfile::airborne_sprint_speed`].
 ///
-/// `!isPassenger()` is vacuously true: this engine has no riding state (the same
+/// `!is_passenger()` is vacuously true: this engine has no riding state (the same
 /// standing argument [`PlayerState::on_ground`] makes). A driver that adds
 /// vehicles must suppress flight for a passenger itself — vanilla falls to the
 /// *non*-flying arm there, it does not merely skip the doubling.

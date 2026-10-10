@@ -919,11 +919,11 @@ pub fn armour_layer_tint_with_dye(layer: &ArmourLayer, dyed_color: Option<u32>) 
 //   minOffsetY   = -box.minY + 0.0625
 //   bob          = sin(ageInTicks / 10 + bobOffs) * 0.1 + 0.1
 //   translate(0, bob + minOffsetY, 0)
-//   rotateY(getSpin(ageInTicks, bobOffs))   // radians
+//   rotateY(get spin)   // radians
 //   // then the item is drawn under its display.ground transform
 // ```
 //
-// and `getSpin(age, bobOffs) = age / 20 + bobOffs`.
+// And `get_spin(age, bobOffs) = age / 20 + bobOffs`.
 //
 // # The winding invariant, stated for a *world* pose
 //

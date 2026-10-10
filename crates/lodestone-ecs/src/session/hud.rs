@@ -51,8 +51,8 @@ pub enum SessionPhase {
 /// # Nothing prefixes the reason
 ///
 /// The `"disconnected: "` prefix was ours, and vanilla does not do it: a
-/// `DisconnectedScreen` puts its `title` in its own `StringWidget` *above* the
-/// reason's `MultiLineTextWidget`, never glued onto it. [`SessionEndKind`] is
+/// disconnect screen puts its `title` in its own text widget *above* the
+/// reason's multi-line text widget, never glued onto it. [`SessionEndKind`] is
 /// what a screen derives that title from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEnd {

@@ -225,7 +225,7 @@ impl<'a> Builder<'a> {
 
     /// The longest prefix of `s` that fits in `max_px` at `scale`, measured
     /// with [`text_width`](Self::text_width)'s font — vanilla's
-    /// `Font.substrByWidth`.
+    /// Font's substr by width.
     pub(crate) fn substr_by_width(&self, s: &str, max_px: f32, scale: f32) -> String {
         let mut out = String::new();
         for ch in s.chars() {

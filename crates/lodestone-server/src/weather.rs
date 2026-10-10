@@ -2,10 +2,10 @@
 //! half of vanilla's rain/thunder cycle.
 //!
 //! Vanilla keeps two independent booleans — `raining` and `thundering` — in
-//! the world-global `WeatherData` SavedData (`minecraft:weather`,
+//! the world-global weather data saved data (`minecraft:weather`,
 //! vanilla's own saved-data type), each driven by its own
 //! countdown timer, plus two *interpolated* intensity levels (`rainLevel` /
-//! `thunderLevel`) on `ServerLevel` itself that the client renders. A weather
+//! `thunderLevel`) on the server level itself that the client renders. A weather
 //! cycle is a long clear spell, a rain spell, and — at an independent,
 //! longer cadence — a thunder spell that can overlap either. All of it is
 //! server-global, not per-dimension or per-connection; the client's existing
@@ -13,17 +13,17 @@
 //! particles/overlay rendering that cell feeds is a Tier-1 backlog client
 //! item, explicitly not this module.
 //!
-//! This is the exact `ServerLevel.advanceWeatherCycle` algorithm:
+//! This is the exact server level's advance weather cycle algorithm:
 //!
 //! * the two timers count **down** one per tick, and the boolean flips only
 //!   when its timer reaches zero — at which point a *fresh* duration is
-//!   sampled from vanilla's four `UniformInt` ranges (`ServerLevel.RAIN_DELAY`/
+//!   sampled from vanilla's four uniform int ranges (the server level's rain delay/
 //!   `RAIN_DURATION`/`THUNDER_DELAY`/`THUNDER_DURATION`)
 //!   so the next spell is long by construction;
 //! * `clear_weather_time` (the `/weather clear <duration>` spell) short-circuits
 //!   the whole timer block — it forces clear while it counts down;
 //! * the levels interpolate ±0.01F per tick toward 1.0 (raining/thundering)
-//!   or 0.0 (not), clamped to `[0, 1]` (`ServerLevel.advanceWeatherCycle`'s
+//!   or 0.0 (not), clamped to `[0, 1]` (the server level's advance weather cycle's
 //!   level-interpolation tail);
 //! * the caller is told, as a [`WeatherEvent`] list, exactly what changed —
 //!   which the tick loop publishes onto a [`WeatherFeed`] so a connection can
@@ -32,10 +32,10 @@
 //!
 //! # What is deliberately not here
 //!
-//! * **Persistence** — the four `WeatherData` scalars have no load/save path yet
-//!   (`world_clocks`-shaped SavedData). Until then every world opens with the
-//!   all-zero fresh state below, exactly as `WeatherData` starts, and the
-//!   `prepareWeather` level-snap (`ServerLevel.prepareWeather`) that a saved
+//! * **Persistence** — the four weather data scalars have no load/save path yet
+//!   (`world_clocks`-shaped saved data). Until then every world opens with the
+//!   all-zero fresh state below, exactly as the weather data starts, and the
+//!   `prepareWeather` level-snap (the server level's prepare weather) that a saved
 //!   *raining* world does on load is moot. Once that persistence lands, load
 //!   calls that snap and this struct gains fields from it; the cycle itself is
 //!   unchanged.
@@ -43,7 +43,7 @@
 //!   [`crate::tick::advance_weather()`], which returns the default `true`.
 //!   The tick loop does not yet read this setting from the shared world-rule
 //!   store, so it uses the fallback instead.
-//! * **The dimension gate** (`Level.canHaveWeather`) is
+//! * **The dimension gate** (Level's can have weather) is
 //!   unmodelled: this crate has only the overworld, which can have weather.
 //! * **The seed** is a fixed literal (see [`WEATHER_SEED`]): this crate has
 //!   no per-world seed store to draw a "real" one from yet, the same reason
@@ -61,13 +61,13 @@ use lodestone_worldgen::rng::{LegacyRandomSource, RandomSource};
 /// `RANDOM_TICK_BEHAVIOR_SEED`).
 const WEATHER_SEED: u64 = 0x5EED_9ABC;
 
-/// Vanilla's per-tick intensity step, from `ServerLevel.advanceWeatherCycle`'s
+/// Vanilla's per-tick intensity step, from the server level's advance weather cycle's
 /// level-interpolation tail — each tick
 /// moves `rainLevel`/`thunderLevel` this far toward the target implied by the
 /// boolean, then clamps to `[0, 1]`.
 pub(crate) const LEVEL_STEP: f32 = 0.01;
 
-// The four `UniformInt` ranges (`ServerLevel.RAIN_DELAY`/`RAIN_DURATION`/
+// The four uniform int ranges (the server level's rain delay/`RAIN_DURATION`/
 // `THUNDER_DELAY`/`THUNDER_DURATION`), inclusive both
 // ends. Rain spells are shorter than clear spells (a world is rainy ~15.8% of
 // the time) and thunder spells shorter still (~9.1%).
@@ -82,13 +82,13 @@ const THUNDER_DURATION_MAX: i32 = 15_600;
 
 /// A weather transition a connection must learn about — one element of the
 /// [`WeatherEvent::wire`] table below is exactly one
-/// `ClientboundGameEventPacket` broadcast, in the order
+/// Game-event packet broadcast, in the order
 /// `advanceWeatherCycle` sends them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WeatherEvent {
-    /// Rain just turned on (`ClientboundGameEventPacket.START_RAINING = 1`).
+    /// Rain just turned on (game-event packet.START_RAINING = 1).
     StartRaining,
-    /// Rain just turned off (`ClientboundGameEventPacket.STOP_RAINING = 2`).
+    /// Rain just turned off (game-event packet.STOP_RAINING = 2).
     StopRaining,
     /// `rainLevel` moved this tick (`RAIN_LEVEL_CHANGE = 7`, value the new
     /// level).
@@ -99,9 +99,9 @@ pub enum WeatherEvent {
 }
 
 impl WeatherEvent {
-    /// The `ClientboundGameEventPacket` event code and `param` this event
+    /// The game-event packet event code and `param` this event
     /// encodes as — `(event, param)` written as `writeByte(event)` +
-    /// `writeFloat(param)` (`ClientboundGameEventPacket.write`). Start/stop
+    /// `writeFloat(param) (game-event packet.write`). Start/stop
     /// raining carry `0.0F` exactly as vanilla's own broadcasts do.
     pub fn wire(self) -> (u8, f32) {
         match self {
@@ -159,9 +159,9 @@ pub struct WeatherState {
     pub(crate) rain_time: i32,
     /// Ticks until the thunder boolean next flips.
     pub(crate) thunder_time: i32,
-    /// Whether a thunder spell is active (`WeatherData.isThundering`).
+    /// Whether a thunder spell is active (the weather data's is thundering).
     pub(crate) thundering: bool,
-    /// Whether a rain spell is active (`WeatherData.isRaining`).
+    /// Whether a rain spell is active (the weather data's is raining).
     pub(crate) raining: bool,
     /// Interpolated rain intensity, `[0, 1]`, the value the client renders.
     pub(crate) rain_level: f32,
@@ -169,7 +169,7 @@ pub struct WeatherState {
     pub(crate) thunder_level: f32,
     /// The level's `java.util.Random`-exact generator (`LegacyRandomSource`),
     /// used for every spell-duration draw in the same order vanilla samples
-    /// them (thunder before rain, matching `ServerLevel.advanceWeatherCycle`'s
+    /// them (thunder before rain, matching server level's advance weather cycle's
     /// sampling order).
     rng: LegacyRandomSource,
 }
@@ -181,7 +181,7 @@ impl Default for WeatherState {
 }
 
 impl WeatherState {
-    /// A fresh world's weather — the all-zero initial state `WeatherData`
+    /// A fresh world's weather — the all-zero initial state weather data
     /// itself starts from (vanilla's own saved-data type): clear, levels at rest, and
     /// both timers at 0 so the *first* cycle samples a fresh delay. A new
     /// world therefore stays clear for roughly `RAIN_DELAY`'s 12k-180k ticks
@@ -199,13 +199,13 @@ impl WeatherState {
         }
     }
 
-    /// Advances the cycle one tick — `ServerLevel.advanceWeatherCycle`,
+    /// Advances the cycle one tick — the server level's advance weather cycle,
     /// translated exactly — and returns the
     /// transitions a client must hear about, in the order vanilla broadcasts
     /// them.
     ///
     /// `advance_weather` is the `GameRules.ADVANCE_WEATHER` gate read inside
-    /// `ServerLevel.advanceWeatherCycle`; it gates only the *timers* (the boolean
+    /// The server level's advance weather cycle; it gates only the *timers* (the boolean
     /// flips). The level interpolation runs regardless, exactly as vanilla's
     /// does (the level-interpolation tail sits outside the rule check) — so with
     /// the rule off, levels still converge to whatever state the world is in,
@@ -275,7 +275,7 @@ impl WeatherState {
         }
         self.rain_level = self.rain_level.clamp(0.0, 1.0);
 
-        // Broadcast order, from `ServerLevel.advanceWeatherCycle`'s tail: the two level ramps
+        // Broadcast order, from the server level's advance weather cycle's tail: the two level ramps
         // first, then — only on a rain flip — the start/stop event followed
         // by a re-sent pair of level changes (vanilla re-broadcasts them
         // there unconditionally).
@@ -299,8 +299,8 @@ impl WeatherState {
     }
 }
 
-/// Inclusive uniform draw over `[min, max]` — `UniformInt.sample`'s
-/// `Mth.randomBetweenInclusive` (vanilla's own `UniformInt`),
+/// Inclusive uniform draw over `[min, max]` — the uniform int's sample's
+/// `Mth.randomBetweenInclusive` (vanilla's own uniform int),
 /// which samples the inclusive range via `RandomSource.nextIntInclusive`.
 /// `LegacyRandomSource` is `java.util.Random`-exact, so a seeded draw is
 /// reproducible by hand (that is what the transition-tick test does).
@@ -339,7 +339,7 @@ mod tests {
     /// Set-up is a world whose timers are at 1, so tick 1 flips *both* booleans
     /// with no draw, tick 2 samples both fresh durations, and the pinned
     /// numbers after that are the hand-derived draws above — this is the gate
-    /// the plan's "expected values derived by hand from the UniformInt
+    /// the plan's "expected values derived by hand from the uniform int
     /// sampling" (a) names.
     #[test]
     fn transition_ticks_pin_the_seeded_cycle() {
@@ -482,8 +482,8 @@ mod tests {
     #[test]
     fn forced_rain_ramps_level_exactly_level_step_per_tick() {
         let mut s = WeatherState::new(WEATHER_SEED);
-        // `/weather rain <duration>`: `setRaining(true)`, `setRainTime(duration)`,
-        // `setThundering(false)` — a duration long enough that no flip can
+        // `/weather rain <duration>`: set raining, set rain time,
+        // set thundering — a duration long enough that no flip can
         // interrupt the 100-tick ramp.
         s.raining = true;
         s.thundering = false;

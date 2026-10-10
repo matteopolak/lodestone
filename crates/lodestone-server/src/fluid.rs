@@ -247,7 +247,7 @@ impl FluidState {
     /// The real "get type" query — which fluid-registry instance this state belongs
     /// to, source or flowing.
     ///
-    /// Derived from [`is_source`](Self::is_source), so `getFlowing(8, true)`
+    /// Derived from [`is_source`](Self::is_source), so get flowing
     /// answers *flowing* despite `amount == 8`. That is the whole point:
     /// [`can_hold_specific_fluid`] compares this against
     /// `FluidType::source(Water)`, so a falling column must not read as a source
@@ -976,7 +976,7 @@ type FaceRect = (f32, f32, f32, f32);
 /// side contributes its cross-section at its own `max` on the axis, but **only
 /// if that max is exactly 1.0**; the shape on the positive side contributes its
 /// cross-section at `min == 0.0`. Union the two, and the face occludes iff the
-/// union covers the whole unit square (`joinIsNotEmpty(block(), union,
+/// union covers the whole unit square (`join is not empty(block(), union,
 /// ONLY_FIRST)` is "is there any part of the full face the union misses").
 ///
 /// Because every box in the census is axis-aligned, "the cross-section at max ==

@@ -2926,7 +2926,7 @@ impl V340Adapter {
         // combat) carries nothing further; event `1` (end combat) reads a
         // VarInt duration then a raw `i32` entity id (the model's
         // `PlayerCombatEnded` has no slot for the id, so it is read and
-        // discarded — matching 26.2's own `ClientboundPlayerCombatEndPacket`,
+        // discarded — matching 26.2's own combat-end packet,
         // which dropped it too); event `2` (entity died) reads a VarInt
         // player id, a raw `i32` entity id, then a JSON death-message
         // string, both discarded except the message, matching modern

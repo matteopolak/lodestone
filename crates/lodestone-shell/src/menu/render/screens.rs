@@ -1,6 +1,6 @@
 //! The simple screens' frame builders: the title screen's corner strings,
 //! [`pause_frame`], [`death_frame`], [`command_block_frame`], and the
-//! `DisconnectedScreen` and credits screens with their metrics.
+//! The disconnected screen and credits screens with their metrics.
 //!
 //! Split out of `menu/render.rs` verbatim: a pure move by line range.
 
@@ -60,13 +60,13 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
         selected: nav.pause_index(),
         gui_scale: nav.gui_scale(),
         backdrop: MenuBackdrop::Dim,
-        // Vanilla blurs behind the pause menu — `PauseScreen` never overrides
-        // `isInGameUi()`, so `Screen::extractBackground`'s default fork
+        // Vanilla blurs behind the pause menu — the pause screen never overrides
+        // is in game ui, so Screen's extract background's default fork
         // applies (see `blur`'s module doc). Not implied by `backdrop`; see
         // `MenuFrame::blur`'s own doc.
         blur: true,
         vanilla: true,
-        // `PauseScreen.init` adds a `StringWidget` with the screen title at
+        // The pause screen's init adds a string widget with the screen title at
         // y=40 when the pause menu is showing; the
         // title itself is `menu.game` == "Game Menu".
         labels: vec![MenuLabel {
@@ -87,7 +87,7 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
 const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 
 /// Builds the death screen's overlay frame: vanilla's
-/// `DeathScreen` — the title, the server's death message, the score line, and
+/// The death screen — the title, the server's death message, the score line, and
 /// two buttons (Respawn / Title Screen) at vanilla's rects (see
 /// [`death_slot`] and [`super::nav::DeathButton`]) — reproduced from
 /// vanilla's own death-screen class.
@@ -130,7 +130,7 @@ const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 ///
 /// The backdrop is [`MenuBackdrop::DeathGradient`], not the flat
 /// [`MenuBackdrop::Dim`] [`pause_frame`] draws: vanilla's own
-/// `DeathScreen.extractDeathBackground` calls `fillGradient` with two
+/// The death screen's extract death background calls `fillGradient` with two
 /// distinct ARGB endpoints, not `Screen`'s flat
 /// `extractTransparentBackground`, so the screen reads noticeably redder
 /// toward the bottom. See [`super::DEATH_GRADIENT_TOP`]/
@@ -206,7 +206,7 @@ pub fn death_frame(
         selected: nav.death_index(),
         gui_scale: nav.gui_scale(),
         backdrop: MenuBackdrop::DeathGradient,
-        // `DeathScreen` does not override `isInGameUi()` either — same fork
+        // The death screen does not override is in game ui either — same fork
         // as `pause_frame`, see `MenuFrame::blur`'s own doc.
         blur: true,
         vanilla: true,
@@ -228,7 +228,7 @@ const DEATH_GLYPH_W: f32 = 6.0;
 /// One authored run of the death message, with the rect it draws at — the
 /// death screen's own sibling of [`super::book_view::PageRun`], centred as a
 /// **group** rather than left-aligned: vanilla draws the whole cause-of-death
-/// line with `TextAlignment.CENTER`, on the one line `DeathScreen.visitText`
+/// line with the text alignment's center, on the one line death screen's visit text
 /// gives it (no wrap), so centring each run independently would pull a
 /// multi-run message apart around the screen's centre instead of centring the
 /// line as a whole.
@@ -241,7 +241,7 @@ pub struct DeathMessageRun {
     pub slot: Slot,
 }
 
-/// Lays out the death message's runs on `DeathScreen.visitText`'s one line
+/// Lays out the death message's runs on the death screen's visit text's one line
 /// (`output.accept(CENTER, middleLine, 85, this.causeOfDeath)`), each run
 /// positioned left-to-right from a left edge computed so the **group**
 /// centres on [`Origin::ScreenTop`] — the same anchor the message line has
@@ -349,7 +349,7 @@ pub fn command_block_frame(
     ];
     // Vanilla's own guard is `!previousEdit.getValue().isEmpty()`
     //, which a freshly
-    // `setValue("-")`-ed box always passes — see
+    // set value-ed box always passes — see
     // `CommandBlockState::previous_output_text`'s own doc.
     if !state.previous_output_text().is_empty() {
         labels.push(MenuLabel {
@@ -491,7 +491,7 @@ pub fn command_block_frame(
             .iter()
             .map(|c| state.command.measure(&c.text))
             .fold(0.0_f32, f32::max);
-        // `getScreenX(range.start)`: the box's own text-x plus the fixed
+        // get screen x: the box's own text-x plus the fixed
         // advance of everything before `start` — `displayPos` is ignored,
         // matching a short, unscrolled command (see `command_block`'s module
         // doc on the fixed-advance approximation `EditBox` already makes
@@ -524,8 +524,8 @@ pub fn command_block_frame(
         hovered: state.hovered,
         backdrop: MenuBackdrop::Dim,
         // `blur` stays at its `..Default::default()` `false`: vanilla's
-        // `AbstractCommandBlockEditScreen` overrides `isInGameUi()` to
-        // `true`, the fork `Screen::extractBackground` skips the blur for —
+        // The abstract command block edit screen overrides is in game ui to
+        // `true`, the fork Screen's extract background skips the blur for —
         // see `MenuFrame::blur`'s own doc.
         vanilla: true,
         labels,
@@ -588,7 +588,7 @@ pub fn sign_edit_frame(state: &sign_edit::SignEditState) -> MenuFrame<'static> {
         hovered: state.done_hovered.then_some(nav::sign_edit_row::DONE),
         backdrop: MenuBackdrop::Dim,
         // `blur` stays `false` for `command_block_frame`'s own reason:
-        // `AbstractSignEditScreen` overrides `isInGameUi()` to `true` too.
+        // The abstract sign edit screen overrides is in game ui to `true` too.
         vanilla: true,
         labels,
         ..Default::default()
@@ -784,7 +784,7 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
 }
 
 /// Builds the signed-book reading screen's overlay frame — vanilla's
-/// `BookViewScreen`, the read-only sibling of [`book_edit_frame`]'s page
+/// The book view screen, the read-only sibling of [`book_edit_frame`]'s page
 /// layout.
 ///
 /// Deliberately the *same* page geometry as [`book_edit_frame`]'s
@@ -926,7 +926,7 @@ fn rgb_text_colour(rgb: u32) -> [f32; 4] {
 /// configuration phase runs, `multiplayer.downloadingTerrain` while the
 /// player's own chunk streams in after login.
 ///
-/// This is the bar-less variant: no vanilla `LevelLoadingScreen` chrome. See
+/// This is the bar-less variant: no vanilla level loading screen chrome. See
 /// [`loading_frame_with_progress`] for the one that also draws a bar, and
 /// `crate::menu::loading` for why the connect phases deliberately have no
 /// progress to show.
@@ -947,10 +947,10 @@ fn rgb_text_colour(rgb: u32) -> [f32; 4] {
 /// clear with a translucent quad over it and no sky at all. No vanilla path
 /// produces a flat fill:
 ///
-/// - `ConnectScreen` overrides no background at all, so it takes the base
-///   `Screen.extractBackground`: panorama (its `minecraft.level == null` gate is
+/// - The connect screen overrides no background at all, so it takes the base
+///   Screen's extract background: panorama (its `minecraft.level == null` gate is
 ///   satisfied while connecting), blur, then the wash.
-/// - `LevelLoadingScreen.extractBackground`'s `OTHER` arm — the ordinary
+/// - The level loading screen's extract background's `OTHER` arm — the ordinary
 ///   loading reason — calls `extractPanorama` with **no** `level == null` gate,
 ///   so the panorama covers even a live level. Its other two arms are the nether
 ///   and end portal animations, which we do not have and which are a separate
@@ -1063,7 +1063,7 @@ pub fn loading_frame_with_progress_and_grid(
     }
 }
 
-// -- vanilla's `DisconnectedScreen` metrics -----------------------------------
+// -- vanilla's disconnected screen metrics -----------------------------------
 
 /// Vanilla's own button builder, called with a width of 200 at every call site
 /// — not [`widget::DEFAULT_WIDTH`]'s
@@ -1077,7 +1077,7 @@ const ERROR_BUTTON_BOTTOM_MARGIN: f32 = WIDGET_H + 20.0;
 /// Where the title sits, from [`Origin::ScreenTop`].
 ///
 /// Vanilla has no fixed y here — the whole stack is centred vertically by
-/// `FrameLayout.centerInRectangle` (`:73-75`), which needs the reason text's
+/// FrameLayout's center in rectangle (`:73-75`), which needs the reason text's
 /// *wrapped line count* to size the stack, a draw-time fact `frame_for`
 /// cannot see (it runs before the canvas is known — see [`Slot`]'s docs).
 /// This anchors the title near the top instead, the same trade
@@ -1085,7 +1085,7 @@ const ERROR_BUTTON_BOTTOM_MARGIN: f32 = WIDGET_H + 20.0;
 const ERROR_TITLE_Y: f32 = 40.0;
 /// The wrap column the reason text is bounded to.
 ///
-/// Vanilla bounds its `MultiLineTextWidget` to `this.width - 50`
+/// Vanilla bounds its multi line text widget to `this.width - 50`
 ///, which is canvas-*dependent* and therefore
 /// not expressible as a fixed [`MenuNotice::w`] (the same reason
 /// [`ACCOUNTS_ROW_W`] is fixed rather than derived per-canvas). Sized off
@@ -1094,7 +1094,7 @@ const ERROR_TITLE_Y: f32 = 40.0;
 /// trade [`super::options::LIST_WINDOW_PX`] makes vertically.
 const ERROR_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
 
-/// Builds vanilla's `DisconnectedScreen` (framework epic — this
+/// Builds vanilla's disconnected screen (framework epic — this
 /// screen was still the pre-framework centred row stack, with no [`Slot`] on
 /// its row and no wrapped-text bound on its reason, until now):
 /// title, the disconnect reason wrapped and bounded exactly like
@@ -1102,7 +1102,7 @@ const ERROR_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
 /// (vanilla's own disconnected-screen class).
 ///
 /// **Two vanilla widgets are never built here.** The `gui.report_to_server`
-/// and `gui.open_report_dir` buttons only appear when a `DisconnectionDetails`
+/// and `gui.open_report_dir` buttons only appear when a disconnection details
 /// carries a bug-report link or a saved crash report (`:48-58`); nothing in
 /// this workspace produces either, so their absence is "present only when
 /// vanilla would show it", not a missing row — the same rule the
@@ -1111,28 +1111,28 @@ const ERROR_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
 ///
 /// **The button's label is vanilla's `gui.toTitle`** ("Back to Title
 /// Screen"), not the `gui.toMenu` default ("Back to Server List") a
-/// `DisconnectedScreen` shows when `allowsMultiplayer()` is true
+/// The disconnected screen shows when allows multiplayer is true
 /// (`:59-64`). [`super::UiState::dismiss_error`] always returns to
 /// [`super::Screen::MainMenu`], never to a server list — that is vanilla's
-/// `!allowsMultiplayer()` branch, reproduced honestly, rather than a label
+/// `!allows_multiplayer()` branch, reproduced honestly, rather than a label
 /// that promises a screen this client does not return to.
 ///
 /// **The title is per-case, from [`SessionEndKind`]**, which is how vanilla does
-/// it: `DisconnectedScreen` takes its `title` as a constructor argument and puts
-/// it in its own `StringWidget` *above* the reason's `MultiLineTextWidget` —
+/// it: the disconnected screen takes its `title` as a constructor argument and puts
+/// it in its own string widget *above* the reason's multi line text widget —
 /// never glued onto the reason as a prefix.
 ///
 /// | end kind | vanilla title | vanilla call site |
 /// |---|---|---|
-/// | [`SessionEndKind::Disconnected`] | `disconnect.lost` — "Connection Lost" | `ClientCommonPacketListenerImpl.onDisconnect`'s `GENERIC_DISCONNECT_MESSAGE` |
-/// | [`SessionEndKind::Failed`] | `connect.failed` — "Failed to connect to the server" | `ClientHandshakePacketListenerImpl.onDisconnect` and `ConnectScreen`'s `connectFailedTitle` |
+/// | [`SessionEndKind::Disconnected`] | `disconnect.lost` — "Connection Lost" | the client common packet listener impl's on disconnect's `GENERIC_DISCONNECT_MESSAGE` |
+/// | [`SessionEndKind::Failed`] | `connect.failed` — "Failed to connect to the server" | the client handshake packet listener impl's on disconnect and the connect screen's `connectFailedTitle` |
 /// | [`SessionEndKind::Died`] | "Connection Lost" | not a vanilla path at all — this arm only exists as the death gate's negative control |
 ///
 /// This used to pick "Connection Lost" for every case and say so, because the
 /// two causes were indistinguishable by the time they reached here: both arrived
 /// as one `format!("disconnected: {…}")` string. They are separate now.
 ///
-/// `shouldCloseOnEsc()` is `false` in vanilla (`:82-85`) — Escape does
+/// Should close on esc is `false` in vanilla (`:82-85`) — Escape does
 /// **not** dismiss this screen there, so a misclick cannot swallow a network
 /// error before it is read. This client's Escape *does* dismiss it (see
 /// `nav::MenuNav`'s `Screen::Error` arm), which is a pre-existing, separately

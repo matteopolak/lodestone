@@ -6,7 +6,7 @@
 //! `world.*` sub-phases and the section counts, and that single string is
 //! several times the logical canvas width at any real GUI scale. Right-aligning
 //! it — which is what the overlay did, faithfully porting
-//! `DebugScreenOverlay.extractLines` — places the line correctly and says
+//! The debug screen overlay's extract lines — places the line correctly and says
 //! nothing at all about whether it fits.
 //!
 //! Shortening one label would fix one line. This gate asserts the structural

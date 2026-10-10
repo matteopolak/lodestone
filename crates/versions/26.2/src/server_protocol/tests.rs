@@ -208,7 +208,7 @@ mod block_edit_tests {
     /// The two packets a game-mode change writes, byte-exact. The flags byte is
     /// the whole reason creative flight works or does not: `0x0D` is
     /// `invulnerable | can_fly | instabuild`, and `flying` is deliberately
-    /// **not** set for creative (vanilla's own game-type enum's own update player abilities sets it only
+    /// **not** set for creative (the game-type abilities update sets it only
     /// for spectator). A fully-connected wire carrying the wrong byte here looks
     /// identical to a correct one from every coverage angle.
     #[test]
@@ -2004,7 +2004,7 @@ mod block_edit_tests {
     /// uses — packed i64, VarInt type id, network NBT, `ensure_empty` — so the
     /// expectation for the *layout* comes from the reader that has to consume real
     /// server bytes, not from this encoder. The record's field names and tag types
-    /// come from vanilla's own piston moving block-entity class's own save additional and are gated in
+    /// come from the piston moving block entity's save routine and are gated in
     /// `lodestone_server::block_entities`.
     ///
     /// The two packets are asserted in the order the server's own drain emits them
@@ -2107,7 +2107,7 @@ mod block_edit_tests {
         assert_eq!(field("source"), lodestone_core::Nbt::Byte(1));
 
         // 3. And the two together resolve to the head a client draws: the record's
-        // own `blockState` must be a real state id, or `PistonHeadRenderer`'s first
+        // own block state must be a real state id, or the piston head renderer's first
         // arm never fires and nothing is drawn at all.
         assert!(
             entity.moved_state.is_some(),
@@ -2190,8 +2190,8 @@ mod block_edit_tests {
 /// `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY`/`SET_GAME_RULE` decode
 /// and their two confirmation encoders. Expected values come from
 /// `.cache/mc/26.2/src`'s own record types
-/// (`ServerboundChangeDifficultyPacket`, `ServerboundLockDifficultyPacket`,
-/// `ServerboundSetGameRulePacket`, `ClientboundChangeDifficultyPacket`), not
+/// (the serverbound change-difficulty, lock-difficulty and set-game-rule packets,
+/// and the clientbound change-difficulty packet), not
 /// from this module's own encoder — each decode test hand-builds wire bytes
 /// with the *encode* side of the same struct (a real, if self-authored,
 /// round trip through the derive macro) and each encode test independently
@@ -2274,7 +2274,7 @@ mod world_admin_tests {
 
     /// Pins `encode_change_difficulty`'s wire layout: VarInt difficulty
     /// ordinal, then a bool locked flag, nothing else
-    /// (vanilla's own clientbound change-difficulty packet's own stream codec).
+    /// (the change-difficulty packet's stream codec).
     #[test]
     fn encode_change_difficulty_wire_layout() {
         let proto = V770ServerProtocol;
@@ -2494,7 +2494,7 @@ mod inventory_decode_tests {
         );
     }
 
-    /// The clear-a-slot case: vanilla's own item-stack type's own create optional stream codec uses a
+    /// The clear-a-slot case: the optional item-stack stream codec uses a
     /// `count` of zero as the absence marker rather than a leading presence
     /// bool (see [`read_optional_item_stack`]'s doc comment), so an empty
     /// write is three bytes with no item id at all. A decoder that expected a
@@ -2509,7 +2509,7 @@ mod inventory_decode_tests {
         assert_eq!(decoded, ServerBound::CreativeModeSlotSet { slot: 45, item: None });
     }
 
-    /// Vanilla's `slotNum() < 0` "drop into the world" case, which this crate
+    /// Vanilla's `slot_num() < 0` "drop into the world" case, which this crate
     /// has no model for. The variant must still carry the raw negative slot
     /// rather than the decoder swallowing the packet, because the decision to
     /// drop it belongs to the consumer — `apply_creative_mode_slot_set`
@@ -3103,7 +3103,7 @@ mod border_wire_tests {
     }
 
     /// The join broadcast (`encode_initialize_border`), against the field
-    /// order of vanilla's own clientbound initialize-border packet's own write: two `f64` centre
+    /// order of the initialize-border packet's writer: two `f64` centre
     /// coords, `old_size`, `new_size`, then VarLong lerp time and three
     /// VarInts. A static border carries `old_size == new_size` and lerp time
     /// `0`.
@@ -3152,7 +3152,7 @@ mod border_wire_tests {
     }
 
     /// `encode_set_border_center`: two big-endian `f64` coords, nothing else
-    /// (`ClientboundSetBorderCenterPacket`).
+    /// (the set-border-center packet).
     #[test]
     fn encode_set_border_center_wire_layout() {
         let proto = V770ServerProtocol;
@@ -3179,7 +3179,7 @@ mod border_wire_tests {
     }
 
     /// `encode_set_border_size`: a single big-endian `f64`
-    /// (`ClientboundSetBorderSizePacket`).
+    /// (the set-border-size packet).
     #[test]
     fn encode_set_border_size_wire_layout() {
         let proto = V770ServerProtocol;
@@ -3218,7 +3218,7 @@ mod vehicle_wire_tests {
     use super::*;
     use lodestone_core::State;
 
-    /// vanilla's own clientbound set-passengers packet's own write — a VarInt vehicle id then
+    /// The set-passengers packet's writer — a VarInt vehicle id then
     /// `writeVarIntArray`.
     ///
     /// The ids are **pairwise distinct and none is a small ordinal** (`517`, `41`,
@@ -3228,7 +3228,7 @@ mod vehicle_wire_tests {
     /// and the visible symptom would be a boat riding a player.
     ///
     /// The length prefix is asserted separately from the elements for the same
-    /// reason: `writeVarIntArray` is not vanilla's own codec library's own var-int accessor.apply(list())`, and
+    /// reason: `writeVarIntArray` is not the var-int codec applied to a list, and
     /// the two are only accidentally the same bytes.
     #[test]
     fn set_passengers_writes_the_vehicle_then_a_varint_array() {
@@ -3271,7 +3271,7 @@ mod vehicle_wire_tests {
         r.ensure_empty().expect("no trailing bytes");
     }
 
-    /// `ServerboundMoveVehiclePacket` decodes into a real variant now that the
+    /// The serverbound move-vehicle packet decodes into a real variant now that the
     /// server has a vehicle to apply it to.
     ///
     /// Every field value is distinct and none is a round number, because the packet
@@ -3559,9 +3559,9 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
     /// **The two layouts differ, and neither variant sets the other's bit.**
     ///
     /// This is the arm that would have caught one shared "tamed" variant. Note the
-    /// direction of the failure it guards: `0x04` is not in `AbstractHorse`'s flag
-    /// set at all (`FLAG_TAME` is `2`, `FLAG_BRED` is `8`) and `0x02` is not in
-    /// `TamableAnimal`'s, so a shared variant does not set a *wrong* named flag — it
+    /// direction of the failure it guards: `0x04` is not in the horse base's flag
+    /// set at all (tame is `2`, bred is `8`) and `0x02` is not in
+    /// the tameable animal's, so a shared variant does not set a *wrong* named flag — it
     /// sets an unnamed bit and the animal reads as **untamed**, with a
     /// perfectly-formed packet on the wire and nothing visibly wrong to chase.
     ///
@@ -3631,7 +3631,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
         assert_eq!(r.u8().expect("metadata index"), 18);
         assert_eq!(r.var_i32().expect("serializer id"), METADATA_SER_BYTE);
         let byte = r.i8().expect("flag byte") as u8;
-        // The terminator vanilla's `SynchedEntityData` writes after the last entry.
+        // The terminator the synched entity data writes after the last entry.
         assert_eq!(r.u8().expect("terminator"), 0xFF);
         assert!(r.ensure_empty().is_ok(), "no trailing bytes");
         byte
@@ -3748,7 +3748,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
     }
 
     /// The three real baby accessors the producer-side species switch relies
-    /// on — `AgeableMob` for the breedable-animal family, and `Zombie`
+    /// on — the ageable mob for the breedable-animal family, and the zombie
     /// (inherited by husk/zombie_villager/drowned/zombified_piglin) and
     /// `Zoglin` declaring their own — all land at [`METADATA_IDX_BABY`] under
     /// the `BOOLEAN` serializer. Collected rather than asserted per-row so a
@@ -4079,7 +4079,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
 }
 
 /// `BOSS_EVENT`'s three operations this crate emits, checked against
-/// vanilla's own clientbound boss-event packet's own `write` method
+/// the boss-event packet's `write` method
 /// (confirmed against the decompiled 26.2 source)
 /// rather than its constructors — see `encode_boss_event_add`'s own doc for
 /// why the field order there differs from a naive transcription.
@@ -4172,7 +4172,7 @@ mod play_ping_request_tests {
     use super::V770ServerProtocol;
     use crate::packet_ids::play;
 
-    /// `ServerboundPingRequestPacket`: a single big-endian `i64`. Bytes are
+    /// The ping-request packet: a single big-endian `i64`. Bytes are
     /// hand-built rather than round-tripped through this crate's own encoder — a
     /// symmetric transposition/endianness bug would otherwise pass against
     /// itself — and the value is non-zero/non-palindromic so a byte-order

@@ -84,7 +84,7 @@ pub struct ConsumeState {
     pub item: Item,
     /// The item's `minecraft:consumable` component.
     pub consumable: Consumable,
-    /// Ticks elapsed since the use began, vanilla's `getTicksUsingItem()`.
+    /// Ticks elapsed since the use began, vanilla's get ticks using item.
     /// Always strictly less than `consumable.consume_ticks`.
     pub ticks_used: u32,
 }
@@ -208,7 +208,7 @@ pub fn emit_consume_effects(
         .player_native(slot.0)
         .map(|stack| stack.item().to_string());
     // `!crate::hud::can_hurt_player`, not a second creative/spectator check —
-    // vanilla's `abilities.invulnerable` and `MultiPlayerGameMode.
+    // vanilla's `abilities.invulnerable` and the multi player game mode.
     // canHurtPlayer()` agree on exactly the same two game modes.
     let invulnerable = !crate::hud::can_hurt_player(game_mode.0);
     let Some(consume) =
@@ -315,7 +315,7 @@ mod tests {
         // gate derives from the interval and the start fraction.
         assert_eq!(bursts("minecraft:carrot", 32), 6);
         assert_eq!(bursts("minecraft:dried_kelp", 16), 3);
-        // Every drink: `hasConsumeParticles(false)`. A potion that throws crumbs
+        // Every drink: has consume particles. A potion that throws crumbs
         // passes any presence check, which is why this is asserted at zero rather
         // than left to the flag.
         assert_eq!(bursts("minecraft:potion", 32), 0);

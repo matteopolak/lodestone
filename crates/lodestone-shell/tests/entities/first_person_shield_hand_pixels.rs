@@ -5,7 +5,7 @@
 //! # What this surface actually shows, and why that is not the GUI's answer
 //!
 //! `assets/minecraft/items/shield.json` carries its `"transformation"` (the
-//! `scale [1, -1, -1]`, vanilla's `ShieldSpecialRenderer` flip hoisted into
+//! `scale [1, -1, -1]`, vanilla's shield special renderer flip hoisted into
 //! data) on the enclosing `minecraft:condition` node; `lodestone_assets
 //! ::item_model` used to read that field only on `minecraft:special` nodes, so
 //! the flip never applied and every shield rendered back-to-front.
@@ -198,7 +198,7 @@ fn a_held_shield_shows_its_back_so_every_dye_renders_identically() {
 
     // --- Control 2: a dyed shield really does produce a named pattern layer. ---
     //
-    // `ShieldSpecialRenderer.submit`'s `base` layer, with no stored patterns at
+    // The shield special renderer's submit's `base` layer, with no stored patterns at
     // all. If this list were empty the identity below would hold for the boring
     // reason that nothing extra was ever submitted.
     for dye in ["red", "light_blue"] {

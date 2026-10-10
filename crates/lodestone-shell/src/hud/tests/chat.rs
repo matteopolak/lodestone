@@ -388,8 +388,8 @@ fn no_stray_prompt_prefix_and_caret_blinks() {
 /// from the width of the whole line rather than of the text before the
 /// caret, and its **shape** was the appended `_` unconditionally where
 /// vanilla switches to a 1 px insert bar the moment the caret is not at the
-/// end (`EditBox.extractWidgetRenderState`'s `insert` predicate choosing
-/// between `TextCursorUtils.extractInsertCursor` and `extractAppendCursor`).
+/// end (EditBox's extract widget render state's `insert` predicate choosing
+/// between text cursor utils's extract insert cursor and `extractAppendCursor`).
 ///
 /// The input and cursor are chosen so the two hypotheses disagree on both
 /// axes: `"abcd"` with the caret at 2 is neither position 0 (where an empty
@@ -667,7 +667,7 @@ fn suggestion_ghost_sits_at_cursor_x_minus_one_not_after_the_caret() {
 /// which is wrong." Established by direct comparison against
 /// `crates/lodestone-shell/src/menu/edit_box.rs`'s `draw_state_with`,
 /// which already carries vanilla's `+ 1.0`
-/// (`EditBox.extractWidgetRenderState`'s `drawX += font.width
+/// (EditBox's extract widget render state's `drawX += font.width
 /// (charSequence) + 1;`) — this draw site did not.
 ///
 /// **Why the assertion is against the text's own right edge, not the
@@ -683,7 +683,7 @@ fn suggestion_ghost_sits_at_cursor_x_minus_one_not_after_the_caret() {
 /// text's right edge (overlapping the last glyph, `font.width(value) - 1`
 /// instead of vanilla's `(font.width(value) + 1) - 1 ==
 /// font.width(value)`); after it, `ghost_x` sits flush with the text's
-/// right edge, matching vanilla's own edit-box widget's own cancellation exactly — not a
+/// right edge, matching vanilla's edit-box widget's cancellation exactly — not a
 /// visible pixel of daylight, but no longer overlapping into the glyph
 /// either, which is the actual "touches" the report named.
 #[test]
@@ -1212,7 +1212,7 @@ fn chat_text_opacity_sets_the_exact_glyph_alpha() {
 }
 
 /// As the two magnitude gates above, for `chat_options.width_pct`, via
-/// vanilla's own `ChatComponent.getWidth` algebra
+/// vanilla's own chat component's get width algebra
 /// (`pct * 280.0 + 40.0`, floored) computed independently here rather
 /// than by calling [`chat_width_px`] — so a bug shared between the two
 /// could not cancel out.

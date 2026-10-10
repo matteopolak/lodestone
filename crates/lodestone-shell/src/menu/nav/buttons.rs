@@ -300,7 +300,7 @@ pub enum PauseButton {
     /// Vanilla's `menu.reportBugs` icon button. Present and disabled: it opens
     /// an external Mojang bug tracker through a link-confirmation screen.
     ReportBugs,
-    /// Vanilla's `menu.sendFeedback` icon button. Present and disabled: same,
+    /// Vanilla's menu's send feedback icon button. Present and disabled: same,
     /// an external Mojang link.
     Feedback,
     /// Vanilla's friends icon button. It opens the credential-safe Friends
@@ -339,7 +339,7 @@ pub enum PauseButton {
     /// Open the settings screen (reuses [`super::Screen::Settings`] — see
     /// [`super::UiState::open_settings_from_pause`]).
     Options,
-    /// Vanilla's `menu.multiplayerOptions.button`, whose `en_us` value really is
+    /// Vanilla's `menu.multiplayer_options.button`, whose `en_us` value really is
     /// **"Open to LAN"** — the half-width sibling of [`Self::Options`] that
     /// The pause grid includes this half-width action only when an integrated
     /// server is available.
@@ -555,7 +555,7 @@ impl ServerListButton {
 
     /// The server-list selection rule: Join, Edit and
     /// Delete all start `false`, a selection enables Join, and only an
-    /// `OnlineServerEntry` also enables Edit and Delete.
+    /// The online server entry also enables Edit and Delete.
     ///
     /// **Two deviations, both because this shell's list is narrower than
     /// vanilla's, not because the rule was simplified:**
@@ -569,8 +569,8 @@ impl ServerListButton {
     ///   list rather than by a fresh one.
     /// - Vanilla's Edit/Delete are inactive for a **LAN** entry, which is neither
     ///   editable nor deletable. There is no LAN discovery here
-    ///   (`LanServerDetection` has no port), so every row is the equivalent of an
-    ///   `OnlineServerEntry` and the two conditions collapse into one. If LAN
+    ///   (the lan server detection has no port), so every row is the equivalent of an
+    ///   The online server entry and the two conditions collapse into one. If LAN
     ///   rows ever land, this is the function that has to split them apart again.
     #[must_use]
     pub fn enabled(self, has_selection: bool) -> bool {

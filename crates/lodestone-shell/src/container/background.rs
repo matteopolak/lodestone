@@ -128,7 +128,7 @@ pub struct ContainerBackground {
     /// `BACKGROUND_TILE_WIDTH`.
     advancements_tiles: Vec<(&'static str, ResourceLocation)>,
     /// The status-effect icons, keyed by the sprite id
-    /// `Hud.getMobEffectSprite` builds (`mob_effect/<path>`).
+    /// Hud's get mob effect sprite builds (`mob_effect/<path>`).
     ///
     /// These are **not** `gui/sprites/**` art, which is why nothing here found
     /// them before: `assets/minecraft/atlases/gui.json` declares a *second*
@@ -555,7 +555,7 @@ impl ContainerBackground {
     }
 
     /// The creative screen's own background blit —
-    /// `graphics.blit(..., selectedTab.getBackgroundTexture(), leftPos, topPos,
+    /// `graphics.blit(..., selectedTab.get_background_texture(), leftPos, topPos,
     /// 0, 0, imageWidth, imageHeight, 256, 256)`
     ///, i.e. the top-left
     /// `195 x 136` window of a `256 x 256` sheet.
@@ -632,7 +632,7 @@ impl ContainerBackground {
     }
 
     /// One status-effect icon (`mob_effect/<path>`, as
-    /// `Hud.getMobEffectSprite` builds it) as a quad at `(x, y)` sized
+    /// Hud's get mob effect sprite builds it) as a quad at `(x, y)` sized
     /// `w`x`h`.
     ///
     /// `None` when the pack has no icon for that effect, which is vanilla's

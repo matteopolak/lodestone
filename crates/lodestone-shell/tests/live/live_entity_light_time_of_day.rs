@@ -9,7 +9,7 @@
 //! **The claim under test**: a server's sky-light array is time-*invariant*. It
 //! encodes how much sky reaches a block, not how bright the sky currently is.
 //! Vanilla darkens at night purely client-side, in `LightTexture`, by scaling
-//! the sky contribution by `Level.getSkyDarken(partialTick)`. If that is true,
+//! the sky contribution by Level's get sky darken. If that is true,
 //! then `entity.wgsl`'s light term is **1.0 at midnight exactly as at noon**, and
 //! no amount of correct sampling or correct shader plumbing can darken a mob —
 //! the input never changes. (That was true of the retired `0.2 + 0.8 * max(sky,

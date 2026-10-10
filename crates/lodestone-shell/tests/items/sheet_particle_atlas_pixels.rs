@@ -711,7 +711,7 @@ fn campfire_smoke_reaches_pixels_through_the_translucent_particle_pass() {
 /// The instance colour every flame in this burst carries, asserted uniform.
 ///
 /// Read out of the uploaded bytes rather than assumed to be `[1, 1, 1]`:
-/// `predict` multiplies by it, so a `FlameParticle` that ever grew a tint or a
+/// `predict` multiplies by it, so a flame particle that ever grew a tint or a
 /// shade would silently invalidate the whole prediction. `ParticleInstance` is
 /// `Pod` with layout `centre_size[0..4] uv[4..8] colour[8..12] roll[12..16]
 /// atlas[16]`.

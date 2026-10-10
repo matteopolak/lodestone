@@ -2,7 +2,7 @@ use super::*;
 
 
 /// The loading screen's progress bar reaches geometry, at vanilla's
-/// `LevelLoadingScreen` rect, and its **green fill tracks the real fraction**.
+/// The level loading screen rect, and its **green fill tracks the real fraction**.
 ///
 /// The fill width is the assertion, not the bar's presence: a bar that drew at a
 /// fixed width would pass a presence check while telling the player nothing. The

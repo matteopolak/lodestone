@@ -2,7 +2,7 @@
 //!
 //! [`entity_anim_pixels`](./entity_anim_pixels.rs) proves that *rotating* a joint
 //! moves the drawn silhouette. The swell is a different kind of animation —
-//! vanilla's `CreeperRenderer.scale` grows the whole model rather than bending
+//! vanilla's creeper renderer scale grows the whole model rather than bending
 //! it — and it travels a different code path here
 //! ([`Skeleton::pose_swelling`]'s root transform, not `setup_anim`), so it needs
 //! its own gate. A leg-swing gate passes unchanged on a build where the creeper
@@ -66,7 +66,7 @@ const BODY_YAW: f32 = 90.0;
 /// exclude this value, or the gate is vacuous.
 const UNFIXED_AREA_RATIO: f32 = 1.0;
 
-/// What the ported `CreeperRenderer.scale` predicts under a *flat* projection:
+/// What the ported creeper renderer scale predicts under a *flat* projection:
 /// horizontal ~1.415 and vertical ~1.11 at [`MAX_SWELL`], so a broadside
 /// silhouette grows with roughly their product.
 ///

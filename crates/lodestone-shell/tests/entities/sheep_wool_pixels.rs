@@ -230,7 +230,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
     // `sheep_wool_model`'s own body inflation: `+1.75` model units
     // (`cube(...).grown(1.75)` in `entity_models.rs`), the largest of the
     // four wool parts (head `+0.6`, legs `+0.5`) and therefore the safest
-    // single-part lower bound. `CubeDeformation` grows a box symmetrically in
+    // single-part lower bound. The cube deformation grows a box symmetrically in
     // all three local axes, not just the two the camera happens to see as
     // "width"/"height" — the sheep body part carries its own 90° pivot
     // rotation (`PartPose::offset_and_rotation(.., PI / 2.0, 0.0, 0.0)`), so

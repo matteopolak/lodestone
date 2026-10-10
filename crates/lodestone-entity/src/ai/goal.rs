@@ -160,8 +160,8 @@ pub const fn reduced_tick_delay(ticks: i32) -> i32 {
 ///
 /// Returned by [`GoalSelector::add`] and consumed by
 /// [`GoalSelector::remove`]. It exists because vanilla identifies a goal for
-/// removal by *object identity* — `removeGoal(this.bowGoal)`
-/// (`GoalSelector.removeGoal`, which delegates to `GoalSelector.removeAllGoals`)
+/// removal by *object identity* — remove goal
+/// (GoalSelector's remove goal, which delegates to GoalSelector's remove all goals)
 /// — and a `Box<dyn Goal>` moved into the selector has no identity the caller
 /// can still name. A positional index will not do either: [`remove`] shifts
 /// every later index down, so an index captured before a removal silently names
@@ -247,8 +247,8 @@ impl GoalSelector {
 
     /// Removes the goal `id` names, stopping it first if it is running.
     ///
-    /// Returns whether a goal was found. Mirrors vanilla `GoalSelector.removeGoal`,
-    /// which delegates to `GoalSelector.removeAllGoals` — note that vanilla stops
+    /// Returns whether a goal was found. Mirrors vanilla GoalSelector's remove goal,
+    /// which delegates to GoalSelector's remove all goals — note that vanilla stops
     /// a *running* match **before** dropping it, so the goal's `stop` hook always
     /// runs and the flag it held is released. That is why this takes a `mob`:
     /// our `Goal::stop` needs the controller vanilla's parameterless `Goal::stop`
@@ -719,7 +719,7 @@ mod tests {
 
     /// The other half: the removed goal must stop *running* — its `tick` is
     /// never invoked again and its `stop` hook fired exactly once, as vanilla's
-    /// `GoalSelector.removeAllGoals` guarantees. Counters live outside the box
+    /// GoalSelector's remove all goals guarantees. Counters live outside the box
     /// so they survive the drop.
     #[test]
     fn remove_stops_the_goal_and_never_ticks_it_again() {

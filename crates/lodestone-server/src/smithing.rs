@@ -3,8 +3,8 @@
 //!
 //! # What it is
 //!
-//! A port of `SmithingTransformRecipe`/`TransmuteRecipe.createWithOriginalComponents`
-//! (netherite upgrade) and `SmithingTrimRecipe`/`applyTrim` (trim), both from
+//! A port of the smithing transform recipe/transmute recipe's create with original components
+//! (netherite upgrade) and the smithing trim recipe/`applyTrim` (trim), both from
 //! vanilla's own crafting-recipe types. The template slot
 //! decides *which* family a given input set can even match — a netherite
 //! upgrade always uses `minecraft:netherite_upgrade_smithing_template`, a trim
@@ -19,7 +19,7 @@
 //! upgradeable items (`.cache/mc/26.2/src/data/minecraft/recipe/netherite_*_smithing.json`):
 //! base `diamond_<x>` + addition `minecraft:netherite_ingot` + the one
 //! template → result `netherite_<x>`, carrying the base's **entire component
-//! patch verbatim** onto the new item (`TransmuteRecipe.createWithOriginalComponents`
+//! patch verbatim** onto the new item (the transmute recipe's create with original components
 //! — the raw `damage` value transfers unchanged, which is *not* the same as
 //! preserving the damage *fraction*: a diamond pickaxe at 1000/1561 becomes a
 //! netherite one at 1000/2031, a materially higher fraction remaining. Do not
@@ -34,7 +34,7 @@
 //! addition stack's own `minecraft:provides_trim_material` prototype
 //! component, which this build does not carry per-item, so the table here is
 //! the direct substitute. It is **visual-only**: no stat, durability or
-//! enchantment change, matching `SmithingTrimRecipe.applyTrim`.
+//! enchantment change, matching smithing trim recipe's apply trim.
 //!
 //! # How to change it
 //!
@@ -99,7 +99,7 @@ fn is_trimmable_armor(item: &str) -> bool {
         || item == "minecraft:turtle_helmet"
 }
 
-/// `SmithingTransformRecipe.assemble` via `TransmuteRecipe.createWithOriginalComponents`:
+/// The smithing transform recipe's assemble via the transmute recipe's create with original components:
 /// the base's full component patch carries onto the netherite item verbatim,
 /// then `max_damage`/`max_stack_size`/`equippable` are re-resolved for the
 /// *new* item (they are effective, prototype-folded fields — see
@@ -129,7 +129,7 @@ pub fn netherite_upgrade(template: &ItemStack, base: &ItemStack, addition: &Item
     Some(result)
 }
 
-/// `SmithingTrimRecipe.assemble`/`applyTrim`: visual-only, refuses a no-op
+/// The smithing trim recipe's assemble/`applyTrim`: visual-only, refuses a no-op
 /// (the base already carrying the exact same trim).
 #[must_use]
 pub fn apply_trim(template: &ItemStack, base: &ItemStack, addition: &ItemStack) -> Option<ItemStack> {
@@ -188,7 +188,7 @@ pub fn compute(template: Option<&ItemStack>, base: Option<&ItemStack>, addition:
 // ---------------------------------------------------------------------------
 // Input-slot `mayPlace` predicates, for `container_click`'s
 // `MenuKind::ItemCombiner { station: Station::Smithing, .. }`. Approximates
-// vanilla's per-slot `RecipePropertySet` tests (`SmithingMenu.createInputSlotDefinitions`)
+// vanilla's per-slot recipe property set tests (the smithing menu's create input slot definitions)
 // with the same recipe data this module already carries, rather than a second
 // ingredient table.
 // ---------------------------------------------------------------------------

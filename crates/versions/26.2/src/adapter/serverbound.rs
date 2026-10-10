@@ -269,7 +269,7 @@ fn encode_set_beacon(
 
 /// Encodes the serverbound `spectator_action` packet body
 /// (vanilla's own serverbound spectator-action packet): a single VarInt using
-/// `vanilla's own byte buf codecs's own var int`'s offset encoding, **not** the common
+/// the VarInt codec's offset encoding, **not** the common
 /// bool-then-value optional shape — `0` means "not spectating an entity"
 /// and a present id `i` is written as `i + 1`. This must be hand-written
 /// rather than a derived `Option<i32>` field, since a naive bool-prefixed
@@ -304,7 +304,7 @@ fn encode_seen_advancements(tab: Option<&ResourceKey>) -> Result<Vec<u8>, Adapte
 //
 // Thirteen packets a vanilla client can send that this adapter could not encode
 // at all. Every layout below was read off the record definition in
-// `.cache/mc/26.2/src` — the `write` method or the `StreamCodec` composition, not
+// `.cache/mc/26.2/src` — the packet's writer or stream-codec composition, not
 // a summary — because there is no encoder of ours to round-trip against and
 // `decode(encode(x)) == x` would be satisfied by two symmetric misunderstandings.
 //
@@ -418,7 +418,7 @@ fn encode_set_structure_block(
 /// Encodes the serverbound `set_jigsaw_block` body
 /// (vanilla's own jigsaw-block packet writer).
 ///
-/// The trap is `joint`: vanilla writes `joint.getSerializedName()`, a UTF string,
+/// The trap is `joint`: vanilla writes joint's get serialized name, a UTF string,
 /// and falls back to `ALIGNED` for anything it cannot parse. An encoder that
 /// wrote a VarInt ordinal here — the shape every other enum field in this packet
 /// family uses — would produce a packet the server silently reads as a
@@ -524,7 +524,7 @@ fn encode_debug_subscription_request(
 /// (vanilla's own custom-click-action packet).
 ///
 /// **Double-framed.** The codec is
-/// `optionalTagCodec(...).apply(lengthPrefixed(65536))`: an outer VarInt *byte
+/// )'s optional tag codec: an outer VarInt *byte
 /// length*, and inside it the optional-NBT body. `payload` is already that inner
 /// body (a leading present/absent byte and, if present, the NBT), so this only
 /// adds the length prefix — writing the NBT with no prefix, or prefixing an
@@ -544,7 +544,7 @@ fn encode_custom_click_action(id: &ResourceKey, payload: &[u8]) -> Result<Vec<u8
     Ok(w.into_vec())
 }
 
-/// Maps a [`ResourcePackResponseKind`] to `vanilla's own serverbound resource pack packet's own action`'s
+/// Maps a [`ResourcePackResponseKind`] to the resource-pack packet's action
 /// ordinal, matching its declared enum order.
 fn resource_pack_response_ordinal(kind: ResourcePackResponseKind) -> i32 {
     match kind {
@@ -559,7 +559,7 @@ fn resource_pack_response_ordinal(kind: ResourcePackResponseKind) -> i32 {
     }
 }
 
-/// Maps a [`CommandBlockMode`] to `vanilla's own command block entity's own mode`'s ordinal
+/// Maps a [`CommandBlockMode`] to the command-block entity mode's ordinal
 /// (`0` sequence, `1` auto, `2` redstone).
 fn command_block_mode_ordinal(mode: CommandBlockMode) -> i32 {
     match mode {
@@ -570,7 +570,7 @@ fn command_block_mode_ordinal(mode: CommandBlockMode) -> i32 {
 }
 
 /// Packs [`DisplayedSkinParts`] into vanilla's `client_information`
-/// model-customisation bitmask (`PlayerModelPart`'s bit order): cape `0x01`,
+/// model-customisation bitmask (the player-model-part bit order): cape `0x01`,
 /// jacket `0x02`, left sleeve `0x04`, right sleeve `0x08`, left pants leg
 /// `0x10`, right pants leg `0x20`, hat `0x40`.
 fn skin_parts_bitmask(parts: DisplayedSkinParts) -> u8 {
@@ -970,8 +970,8 @@ impl V770Adapter {
             // built-in instance of. `custom_payload`'s wire body is just
             // channel + raw bytes (vanilla's own clientbound custom-payload
             // packet's
-            // `DiscardedPayload`, mirrored on the serverbound side), so this
-            // needs no dedicated packet struct — `BrandPayload`'s two-string
+            // discarded payload, mirrored on the serverbound side), so this
+            // needs no dedicated packet struct — the brand payload's two-string
             // shape doesn't fit arbitrary bytes, but `send` only needs an
             // `Encode` body, and a `(String, Vec<u8>)`-shaped write is exactly
             // what `custom_payload` is on every channel that isn't `brand`.
@@ -1288,7 +1288,7 @@ impl V770Adapter {
                 )))
             }
             // `cookie_response` exists in Login, Configuration and
-            // Play alike (`ServerCookiePacketListener` is common to all
+            // Play alike (the cookie listener is common to all
             // three), so this is one arm with a per-state packet id rather
             // than three separate ones.
             ClientAction::CookieResponse { key, payload } => {
@@ -1466,7 +1466,7 @@ impl V770Adapter {
                 )))
             }
             // Present in Configuration and Play alike: `custom_click_action` is a
-            // `ServerCommonPacketListener` packet, like `custom_payload` itself,
+            // a common-listener packet, like `custom_payload` itself,
             // because `show_dialog` can be sent in either state.
             ClientAction::CustomClickAction { id, payload } => {
                 let packet_id = match state {

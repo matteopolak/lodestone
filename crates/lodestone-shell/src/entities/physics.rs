@@ -3,7 +3,7 @@
 use super::*;
 
 /// A dropped item's collision hitbox: vanilla's own item entity type is
-/// sized 0.25×0.25, and `ItemEntity` (not a `LivingEntity`) never overrides
+/// sized 0.25×0.25, and the item entity (not a living entity) never overrides
 /// vanilla's own max-up-step accessor, whose base implementation returns `0.0F` — items do
 /// not auto-step at all.
 const ITEM_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.25, 0.25, 0.0);
@@ -76,7 +76,7 @@ pub(crate) fn step_item_physics(
     };
     // The shared collision core, not a second one — `MoveContext::default()`
     // matches an item: never Slow Falling, never bounce-suppressing (that
-    // flag is the sneaking-player case, `LivingEntity`-only).
+    // flag is the sneaking-player case, the living entity-only).
     move_entity(
         &mut motion,
         ITEM_DIMENSIONS,

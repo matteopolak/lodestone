@@ -92,7 +92,7 @@ pub struct ServerBrand {
 impl PluginChannel for ServerBrand {
     const CHANNEL: &'static str = "minecraft:brand";
 
-    /// Vanilla's `BrandPayload` is a single `FriendlyByteBuf::readUtf` — a VarInt
+    /// The game's brand payload is a single UTF-8 string read — a VarInt
     /// byte length then that many UTF-8 bytes — and nothing else.
     ///
     /// Rejects (returns `None`) on a truncated VarInt, a length that overruns the

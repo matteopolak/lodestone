@@ -429,7 +429,7 @@ mod tests {
     }
 
     /// A relative block-pos component reads a **double** while an absolute one
-    /// reads an int (vanilla's own world-coordinate int reader's own asymmetry).
+    /// reads an int (vanilla's world-coordinate int reader's asymmetry).
     #[test]
     fn a_relative_block_pos_component_may_be_fractional_but_an_absolute_one_may_not() {
         assert_eq!(block_pos("~1.5 ~ ~").x, Coordinate::relative(1.5));

@@ -21,7 +21,7 @@
 //! ## Spawn point
 //!
 //! [`SpawnPoint`] is a straight record of the last
-//! `ClientboundSetDefaultSpawnPositionPacket`. Every legacy family's packet
+//! default-spawn-position packet. Every legacy family's packet
 //! struct documents this as "setting the client's **compass target**", and that
 //! is the consumer: `lodestone_render::item_render` lists `minecraft:compass`
 //! among the item-model range properties that are *deliberately unsourced*
@@ -117,7 +117,7 @@ pub mod rules {
 
 /// The world's default spawn point, as the server last reported it.
 ///
-/// `None` until `ClientboundSetDefaultSpawnPositionPacket` arrives. See the
+/// `None` until the default-spawn-position packet arrives. See the
 /// module docs for why that is not defaulted to the origin.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpawnPoint(pub Option<SpawnPointRecord>);

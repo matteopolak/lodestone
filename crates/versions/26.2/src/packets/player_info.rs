@@ -5,7 +5,7 @@
 //! then carries exactly the fields for the set bits, read in **Action ordinal
 //! order**. This conditional-field shape cannot be expressed with the derive
 //! macros, so the decoder is hand-written against the wire format of
-//! `ClientboundPlayerInfoUpdatePacket` (behavioural reference only).
+//! the player-info-update packet (behavioural reference only).
 //!
 //! The `EnumSet` is serialised as a fixed bit set of `ceil(N/8)` bytes; with
 //! the eight actions below that is a single byte, bit `i` (LSB-first)

@@ -6,7 +6,7 @@
 //!
 //! The dump (`shape_java.txt`, ~5.7 MB, gitignored like `.cache/mc`) is produced
 //! by `impl-physics`'s `ShapeOracle.java`, which boots the real 26.2 server and
-//! dumps `getCollisionShape(...).toAabbs()` for every one of the 32,366 states.
+//! dumps )'s to aabbs for every one of the 32,366 states.
 //! We own the *data*; physics owns the oracle and the consuming `CollisionView`.
 //!
 //! Regenerate the committed table after a data bump with:

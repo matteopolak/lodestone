@@ -5,14 +5,14 @@
 //! `f64::to_be_bytes` / `f32::to_be_bytes` (authoritative IEEE-754 big-endian),
 //! never from the adapter's own encoder, so a symmetric bug cannot pass.
 //! `move_player_pos_rot` and `swing` layouts are verified against 26.2's
-//! `vanilla's own serverbound move player packet's own pos rot` and `ServerboundSwingPacket`.
+//! move-player pos+rot packet and the swing packet.
 //!
 //! The `move` tests here exercise a freshly constructed adapter, i.e. the
 //! very first `Move` a connection ever sends. Vanilla's own send-tracking
-//! state (`vanilla's own local player's own x last`/`yLast`/`zLast`/`yRotLast`/`xRotLast`/
+//! state (the local player's last-sent x/y/z/yRot/xRot and position reminder)
 //! `positionReminder`) zero-initializes exactly like a fresh
 //! `V770Adapter::new()`, so the first movement after join is (almost) always
-//! a full `PosRot` — both position and rotation read as maximally "dirty"
+//! a full position+rotation move — both position and rotation read as maximally "dirty"
 //! against the zeroed baseline. The full move/rot/status-only/nothing
 //! selection rule that governs every *subsequent* tick is covered separately
 //! in `movement_selection.rs`.

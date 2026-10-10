@@ -189,7 +189,7 @@ pub fn firefly(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, ya: f64) {
     p.yd *= f64::from(0.8_f32);
     p.xd *= f64::from(0.8_f32);
     p.zd *= f64::from(0.8_f32);
-    // `random.nextIntBetweenInclusive(200, 300)`.
+    // random's next int between inclusive.
     p.lifetime = 200 + engine.rng().next_i32_bound(101);
     p.scale(1.5);
     // The provider's own `setAlpha(0.0F)`: a firefly is invisible on the tick

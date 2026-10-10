@@ -713,9 +713,9 @@ pub struct RendererClaim {
 /// `lodestone_assets::entity_models()` plus the two rules in
 /// `lodestone-render`'s `entity` module, and covers the large majority of the
 /// registry. What is left is the handful of types vanilla draws with a
-/// dedicated renderer rather than a `ModelPart` rig.
+/// dedicated renderer rather than a model part rig.
 const ENTITY_RENDERERS: &[RendererClaim] = &[
-    // `ThrownItemRenderer`: an item billboard, not a rig. The table inside the
+    // The thrown item renderer: an item billboard, not a rig. The table inside the
     // function is the complete 26.2 registration list.
     RendererClaim {
         name: "thrown item billboard",
@@ -738,7 +738,7 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "boat_model_name",
         rule: ClaimRule::SuffixLiteralsInSymbol,
     },
-    // `ItemEntityRenderer`: the dropped stack's own baked item model, bob and
+    // The item entity renderer: the dropped stack's own baked item model, bob and
     // spin included. Keyed off `EntityDraw::item`, not off a rig.
     RendererClaim {
         name: "dropped item model",
@@ -746,28 +746,28 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "prepare_item_geometry",
         rule: ClaimRule::Explicit(&["item"]),
     },
-    // `ExperienceOrbRenderer`: one camera-facing quad off a standalone sheet.
+    // The experience orb renderer: one camera-facing quad off a standalone sheet.
     RendererClaim {
         name: "experience orb sprite",
         file: "crates/lodestone-shell/src/gpu/entity_passes.rs",
         symbol: "prepare_orbs",
         rule: ClaimRule::Explicit(&["experience_orb"]),
     },
-    // `FallingBlockRenderer`/`TntRenderer`: a block model at the entity's pose.
+    // The falling block renderer/tnt renderer: a block model at the entity's pose.
     RendererClaim {
         name: "moving block model",
         file: "crates/lodestone-shell/src/gpu/moving_blocks.rs",
         symbol: "prepare_moving_blocks",
         rule: ClaimRule::Explicit(&["falling_block", "tnt"]),
     },
-    // `DisplayRenderer.TextDisplayRenderer`.
+    // The display renderer's text display renderer.
     RendererClaim {
         name: "text display glyphs",
         file: "crates/lodestone-shell/src/gpu/display_text.rs",
         symbol: "push_text_display_quads",
         rule: ClaimRule::Explicit(&["text_display"]),
     },
-    // `DisplayRenderer.BlockDisplayRenderer`: the imitated block state's own
+    // The display renderer's block display renderer: the imitated block state's own
     // baked quads, posed by the display's billboard + `Transformation`. Its own
     // claim rather than a second id on the moving-block one above, because the
     // anchor check is the point: `merge_block_displays` disappearing must fail
@@ -779,7 +779,7 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "merge_block_displays",
         rule: ClaimRule::Explicit(&["block_display"]),
     },
-    // `DisplayRenderer.ItemDisplayRenderer`: the stack's own item model, posed
+    // The display renderer's item display renderer: the stack's own item model, posed
     // the same way. Separate from the dropped-item claim for the same
     // anchor-check reason as the block one.
     RendererClaim {
@@ -797,9 +797,9 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "LIGHTNING_BOLT_TYPE_PATH",
         rule: ClaimRule::Explicit(&["lightning_bolt"]),
     },
-    // `FireworkEntityRenderer`: a billboarded item model, deliberately *not* a
+    // The firework entity renderer: a billboarded item model, deliberately *not* a
     // `thrown_item_for` row — that table means "registered to
-    // `ThrownItemRenderer`" and a firework is not, so it gets its own claim
+    // The thrown item renderer" and a firework is not, so it gets its own claim
     // exactly as the display renderers do.
     RendererClaim {
         name: "firework rocket billboard",
@@ -807,7 +807,7 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "merge_firework_rocket",
         rule: ClaimRule::Explicit(&["firework_rocket"]),
     },
-    // `DragonFireballRenderer`/`FishingHookRenderer`: one camera-facing quad
+    // The dragon fireball renderer/fishing hook renderer: one camera-facing quad
     // each, off their own standalone sheets. One anchor for both because one
     // pass draws both — the same shape as the moving-block claim above, and
     // unlike the display renderers, which are three separate functions.
@@ -823,7 +823,7 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "prepare_entity_sprites",
         rule: ClaimRule::Explicit(&["dragon_fireball", "fishing_bobber"]),
     },
-    // `OminousItemSpawnerRenderer`: the contained stack's own item model, grown
+    // The ominous item spawner renderer: the contained stack's own item model, grown
     // in over 50 ticks and spun at 40 degrees a tick. Its own claim rather than
     // a second id on the dropped-item one, for the same anchor-check reason the
     // display renderers give: `merge_ominous_spawner_item` disappearing must
@@ -834,7 +834,7 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "merge_ominous_spawner_item",
         rule: ClaimRule::Explicit(&["ominous_item_spawner"]),
     },
-    // `PaintingRenderer`: a flat slab of `width x height` blocks, its front
+    // The painting renderer: a flat slab of `width x height` blocks, its front
     // face the variant's own sprite and its back and edges a shared tile.
     // Neither a rig nor a billboard, so it has its own pass rather than a
     // corpus entry.
@@ -844,7 +844,7 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "prepare_paintings",
         rule: ClaimRule::Explicit(&["painting"]),
     },
-    // `ItemFrameRenderer`'s `frameModel` branch — the frame's own body (border
+    // The item frame renderer's `frameModel` branch — the frame's own body (border
     // and back plate), a block-model draw with no `state_id` rather than a rig;
     // see `moving_blocks.rs`'s `merge_item_frames` doc for why it lives there
     // instead of in the entity model corpus.

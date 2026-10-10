@@ -127,14 +127,14 @@ fn terrain_origin_vertex_layout(stride: wgpu::BufferAddress) -> wgpu::VertexBuff
     }
 }
 
-/// Vanilla `RenderPipelines.CUTOUT_TERRAIN`'s
-/// `withShaderDefine("ALPHA_CUTOUT", 0.5F)`. Also the shader's declared
+/// Vanilla's cutout-terrain pipeline's
+/// `ALPHA_CUTOUT` shader define of 0.5. Also the shader's declared
 /// default, and the value the opaque pass uses — that pass carries solid and
 /// cutout geometry in one mesh, so it must take the stricter of the two.
 const ALPHA_CUTOUT_CUTOUT: f32 = 0.5;
 
-/// Vanilla `RenderPipelines.TRANSLUCENT_TERRAIN`'s
-/// `withShaderDefine("ALPHA_CUTOUT", 0.1F)` — five times looser than the
+/// Vanilla's translucent-terrain pipeline's
+/// `ALPHA_CUTOUT` shader define of 0.1 — five times looser than the
 /// cutout pass, and the whole reason this is a per-pipeline value: real
 /// stained glass is a partial alpha in the low 0.4s, which a `0.5` test
 /// deletes outright.
@@ -146,7 +146,7 @@ const ALPHA_CUTOUT_TRANSLUCENT: f32 = 0.1;
 const USE_RGSS_OVERRIDE: &str = "use_rgss";
 
 /// Which of `terrain.fsh`'s sampling paths the terrain pipelines take, i.e.
-/// vanilla's `TextureFilteringMethod` reduced to the part this renderer
+/// Vanilla's texture-filtering method reduced to the part this renderer
 /// implements.
 ///
 /// Vanilla's shipped default is `NONE`, and so is this one. It used to be
@@ -163,10 +163,10 @@ const USE_RGSS_OVERRIDE: &str = "use_rgss";
 /// the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextureFiltering {
-    /// `TextureFilteringMethod.NONE` — `sample_nearest` only. Vanilla's default.
+    /// Filtering method NONE — `sample_nearest` only. Vanilla's default.
     #[default]
     None,
-    /// `TextureFilteringMethod.RGSS` — `sample_rgss`.
+    /// Filtering method RGSS — `sample_rgss`.
     Rgss,
 }
 
@@ -687,9 +687,9 @@ impl ModelPipeline {
                     depth.write && (!translucent || translucent_depth_write),
                 ),
                 // Vanilla's terrain pipelines all inherit
-                // `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, true)`
-                // (26.2 `RenderPipelines.TERRAIN_SNIPPET` →
-                // `GENERIC_BLOCKS_SNIPPET.withDepthStencilState(DEFAULT)`), and
+                // the default depth-stencil state `(GREATER_THAN_OR_EQUAL, true)`
+                // (26.2's terrain snippet, built on the generic-blocks snippet
+                // with the default depth-stencil state), and
                 // that comparison *includes* equality. Our depth is reversed-Z
                 // like vanilla's, so the faithful port is
                 // `DEPTH_COMPARE_NEARER_OR_EQUAL` and no sign is flipped.
@@ -965,7 +965,7 @@ pub struct ModelCameraUniform {
 /// `RenderState::render_inner` rewriting a *whole* per-section camera uniform
 /// (view_proj bytes included) via `queue.write_buffer` once per section, every
 /// frame — up to ~4000 calls/frame at the measured `sections=3880`, and 52.9%
-/// of main-thread CPU (mostly `StagingBuffer::new` → `create_buffer`). Only
+/// of main-thread CPU (mostly the staging-buffer creation path). Only
 /// `view_proj`/fog actually change frame to frame; `section_origin` is the
 /// section's fixed world position and is constant for its whole lifetime. This
 /// struct is written **once per frame**, not once per section.
@@ -979,8 +979,8 @@ pub struct ModelSharedCameraUniform {
     pub fog: crate::fog::FogUniform,
 }
 
-/// Vanilla's `chunkSectionFadeInTime` default (`Options`'s own decompiled source's
-/// `OptionInstance<Double>` of that name: range `0.0..=2.0` seconds, shipped
+/// Vanilla's chunk-section fade-in time default (the options class's
+/// double option of that name: range `0.0..=2.0` seconds, shipped
 /// default `0.75`). This client has no video-settings UI to expose the option
 /// yet, so it is hardcoded exactly like `model.wgsl`'s own `BRIGHTNESS_FACTOR`
 /// — see that shader's matching constant, which must move with this one.
@@ -997,7 +997,7 @@ pub const SECTION_FADE_DURATION_SECS: f32 = 0.75;
 pub const SECTION_FADE_ALREADY_VISIBLE: f32 = -1.0e6;
 
 /// Byte-for-byte the mix `model.wgsl`/`fluid.wgsl` compute per section:
-/// vanilla's `SectionRenderDispatcher.RenderSection.getVisibility` —
+/// vanilla's render-section visibility —
 /// `elapsed >= duration ? 1.0 : elapsed / duration`, written here as an
 /// equivalent clamp so the CPU-side prediction in this crate's tests and the
 /// shader's own arithmetic can be checked against the same formula.
@@ -1007,9 +1007,9 @@ pub fn section_visibility(now_secs: f32, build_time_secs: f32) -> f32 {
     (elapsed / SECTION_FADE_DURATION_SECS).clamp(0.0, 1.0)
 }
 
-/// Vanilla's `isNearby` test from `LevelRenderer.compileSections`
-/// (`double distSqr = center.distSqr(cameraPosition); boolean isNearby =
-/// distSqr < 768.0;`) — a section within this squared-distance of the camera
+/// Vanilla's is-nearby test from the level renderer's section compile
+/// (squared distance from the section centre to the camera, nearby
+/// when `< 768.0`) — a section within this squared-distance of the camera
 /// never fades, regardless of whether it is a genuinely new build.
 ///
 /// `768.0` is a squared block distance (not a radius), so the true cutoff is
@@ -1375,7 +1375,7 @@ mod tests {
     }
 
     /// [`section_is_nearby`] against vanilla's own boundary
-    /// (`LevelRenderer.compileSections`'s `distSqr < 768.0`), predicted
+    /// (the level renderer's section-compile `distSqr < 768.0`), predicted
     /// exactly rather than merely signed: `sqrt(768)` is irrational
     /// (`≈27.712...`), so the discriminating pair here is chosen on the
     /// **squared** distance directly — `767` (just inside) and `768` (exactly
@@ -1550,7 +1550,7 @@ mod tests {
             "model.wgsl's cutout discard must test against `{ALPHA_CUTOUT_OVERRIDE}`, not against \
              a literal — a literal is how this was wrong for the translucent pass"
         );
-        // Vanilla `RenderPipelines`: CUTOUT_TERRAIN 0.5F, TRANSLUCENT_TERRAIN
+        // Vanilla's pipelines: cutout terrain 0.5, translucent terrain
         // 0.1F. Transcribed from the 26.2 source, not from each other.
         assert_eq!(ALPHA_CUTOUT_CUTOUT, 0.5);
         assert_eq!(ALPHA_CUTOUT_TRANSLUCENT, 0.1);
@@ -1577,9 +1577,9 @@ mod tests {
 
     /// The same drift guard for the sampling-path selector, plus the two facts
     /// that make the default vanilla's: the shader's declared default and this
-    /// file's enum default must both be `NONE`, because `Options`'
-    /// `textureFiltering` ships `TextureFilteringMethod.NONE` and
-    /// `OptionsRenderState` initialises its field to it.
+    /// file's enum default must both be `NONE`, because the options'
+    /// texture-filtering option ships `NONE` and
+    /// the options render state initialises its field to it.
     #[test]
     fn the_model_shader_declares_the_use_rgss_override_this_file_binds() {
         let src = MODEL_WGSL;

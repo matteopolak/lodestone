@@ -42,7 +42,7 @@ const ORB_MAX_FOLLOW_DIST: f64 = 8.0;
 /// nothing; it needs more than 40.
 const ORB_GROUPS_PER_AREA: i32 = 40;
 
-/// `ExperienceOrb.getDefaultGravity` — `0.03`, **not** the item entity's `0.04`.
+/// ExperienceOrb's get default gravity — `0.03`, **not** the item entity's `0.04`.
 const ORB_GRAVITY: f64 = 0.03;
 
 /// `ExperienceOrb.getAirDrag`. Applied to all three components, unlike
@@ -59,10 +59,10 @@ const ORB_FOLLOW_PULL: f64 = 0.1;
 
 /// `EntityType.EXPERIENCE_ORB`'s hitbox, `0.5 × 0.5`, with no auto-step for
 /// [`ITEM_DIMENSIONS`]' reason: `ExperienceOrb` extends `Entity` directly and never
-/// overrides `maxUpStep()`.
+/// overrides max up step.
 const ORB_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.5, 0.5, 0.0);
 
-/// Reach of `scanForMerges`' search, per axis: `getBoundingBox().inflate(0.5)` against
+/// Reach of `scanForMerges`' search, per axis: get bounding box's get bounding box against
 /// another orb's own box, so `0.25 + 0.5 + 0.25`.
 ///
 /// **Isotropic**, unlike [`ITEM_MERGE_REACH_XZ`]/[`ITEM_MERGE_REACH_Y`]: `inflate(0.5)`
@@ -71,7 +71,7 @@ const ORB_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.5, 0.5, 0.0);
 /// *do* merge; two items never do.
 const ORB_MERGE_REACH: f64 = 0.25 + 0.5 + 0.25;
 
-/// Reach of `tryMergeToExisting`' search, per axis: `AABB.ofSize(pos, 1, 1, 1)` is a
+/// Reach of `tryMergeToExisting`' search, per axis: AABB's of size is a
 /// unit cube centred on the spawn point (half-extent `0.5`) against the candidate's own
 /// box, so `0.5 + 0.25`.
 const ORB_SPAWN_MERGE_REACH: f64 = 0.5 + 0.25;
@@ -167,7 +167,7 @@ impl<'w> MobSim<'w> {
     // `ExperienceOrb`
     // -----------------------------------------------------------------------
 
-    /// `ExperienceOrb.awardWithDirection`: turns `amount` points into orbs at
+    /// ExperienceOrb's award with direction: turns `amount` points into orbs at
     /// `position`, merging into an existing orb where vanilla would.
     ///
     /// Returns the ids of the orbs actually *spawned* — shorter than
@@ -199,12 +199,12 @@ impl<'w> MobSim<'w> {
         spawned
     }
 
-    /// `ExperienceOrb.tryMergeToExisting`: hands `value` to an orb already sitting at
+    /// ExperienceOrb's try merge to existing: hands `value` to an orb already sitting at
     /// `position` rather than spawning a new one, if the `nextInt(40)` draw picks a
     /// congruence class one of them is in.
     ///
     /// The draw is made **whether or not a candidate exists**, matching vanilla's own
-    /// order (`level.getRandom().nextInt(40)` precedes the entity query), so the roll
+    /// order (get random's get random precedes the entity query), so the roll
     /// stream does not depend on how many orbs happen to be nearby.
     fn try_merge_to_existing(&mut self, position: Vec3, value: i32) -> bool {
         let id = self.orb_rng.next_int(ORB_GROUPS_PER_AREA);
@@ -258,7 +258,7 @@ impl<'w> MobSim<'w> {
             if dot < 0.0 {
                 impulse = Vec3::new(-impulse.x, -impulse.y, -impulse.z);
             }
-            // `getBoundingBox().getSize()` is the box's average edge length, which for
+            // get bounding box's get bounding box is the box's average edge length, which for
             // the orb's cube is just its width; the offset is half of it.
             let len = bias_len_sqr.sqrt();
             let scale = f64::from(ORB_DIMENSIONS.width) * 0.5 / len;
@@ -580,10 +580,10 @@ impl<'w> MobSim<'w> {
         self.applied_orb_owner_plan = plan;
     }
 
-    /// `Level.getNearestPlayer(this, 8.0)`, filtered as `followNearbyPlayer` filters
+    /// Level's get nearest player, filtered as `followNearbyPlayer` filters
     /// it, returning the point the pull aims at.
     ///
-    /// Vanilla aims at `player.getY() + player.getEyeHeight() / 2.0`, i.e. the player's
+    /// Vanilla aims at `player.getY() + player.get_eye_height() / 2.0`, i.e. the player's
     /// *waist*, not their feet and not their eyes. Aiming at the feet makes orbs skim
     /// the floor and get stuck on a block edge; aiming at the eyes makes them arc over
     /// the player's head.
@@ -609,7 +609,7 @@ impl<'w> MobSim<'w> {
         best.map(|(_, target)| target)
     }
 
-    /// `ExperienceOrb.scanForMerges`: orbs of equal value whose ids are congruent mod
+    /// ExperienceOrb's scan for merges: orbs of equal value whose ids are congruent mod
     /// [`ORB_GROUPS_PER_AREA`] and which have drifted within [`ORB_MERGE_REACH`] become
     /// one entity.
     ///
@@ -647,7 +647,7 @@ impl<'w> MobSim<'w> {
     /// `(entity id, value)` and lowest id first.
     ///
     /// The range test is [`crate::block_drops::is_within_pickup_range`], the same
-    /// inflated-AABB intersection `Player.aiStep` uses for items — an orb has no
+    /// inflated-AABB intersection Player's ai step uses for items — an orb has no
     /// pickup delay of its own (`ExperienceOrb` defines none), so unlike an item it
     /// *is* absorbable on the tick it spawns. What limits the rate is the **player's**
     /// `takeXpDelay`, which lives on the connection, not here.
@@ -667,7 +667,7 @@ impl<'w> MobSim<'w> {
         collectable
     }
 
-    /// `ExperienceOrb.playerTouch`'s absorption: pays out **one** `value` and drops the
+    /// ExperienceOrb's player touch's absorption: pays out **one** `value` and drops the
     /// orb's count by one, discarding the entity at zero.
     ///
     /// Returns the points awarded, or `None` if no orb is tracked under `id`. A merged

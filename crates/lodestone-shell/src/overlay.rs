@@ -186,7 +186,7 @@ pub struct BossBarView {
     pub overlay: BossBarOverlay,
 }
 
-/// Vanilla's own discrete-lerp helper `lerpDiscrete(alpha, p0, p1)`:
+/// Vanilla's own discrete-lerp helper lerp discrete:
 /// an integer interpolation between `p0` and `p1` that is `0` only at
 /// `alpha == 0.0` and `p1` only at `alpha >= 1.0`, otherwise
 /// `p0 + floor(alpha * (p1 - p0 - 1)) + 1`. Vanilla's own boss-health-overlay

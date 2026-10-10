@@ -43,7 +43,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     registrar.require_level(summon_node, SUMMON_LEVEL);
 
     let (entity_node, entity_key) = registrar.arg(summon_node, "entity", EntityTypeArg);
-    // Bare `/summon <entity>` — the caller's own position, `getPosition()`.
+    // Bare `/summon <entity>` — the caller's own position, get position.
     registrar.exec(entity_node, move |ctx| {
         let entity = ctx.get(entity_key).clone();
         let pos = ctx.source.position;

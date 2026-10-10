@@ -3,14 +3,14 @@
 //! ## What it is
 //!
 //! The trade list the server sends when a merchant screen opens, from
-//! `ClientboundMerchantOffersPacket`. One slot: a merchant screen is modal, so a
+//! merchant-offers packet. One slot: a merchant screen is modal, so a
 //! new packet replaces the previous list entirely.
 //!
 //! ## How it works
 //!
 //! [`TradeOffers::apply`] stores the offers plus the merchant's level, xp and
 //! restock flag. Costs are `(item registry id, count)` pairs rather than
-//! `ItemStack`s: an `ItemCost` on the wire is an id, a count and a component
+//! item stacks: an item cost on the wire is an id, a count and a component
 //! *predicate*, not a stack, and inventing a stack from it would imply component
 //! data the packet does not carry.
 //!

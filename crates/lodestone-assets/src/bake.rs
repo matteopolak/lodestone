@@ -8,7 +8,7 @@
 //! index and shade flag. The renderer never walks JSON, resolves parents, or
 //! touches the atlas layout — everything is precomputed here.
 //!
-//! The geometry math is a faithful port of vanilla's `FaceBakery`: default UV
+//! The geometry math is a faithful port of vanilla's face baker: default UV
 //! derivation from the element box, the per-face corner winding, element
 //! rotation (with the classic single-axis rescale), block model `x`/`y`
 //! rotation about the block centre, face-`rotation` UV shifting, and `uvlock`
@@ -131,11 +131,11 @@ pub struct BakedModel {
     /// **first** model resolved for this state.
     ///
     /// Mirrors vanilla's own model-block-renderer "tesselate block" step, which reads
-    /// `this.parts.getFirst().useAmbientOcclusion()` — a multipart block (e.g. a
+    /// get first's use ambient occlusion — a multipart block (e.g. a
     /// fence with several part models) is gated by its first part only, the same
     /// "first resolved model wins" rule [`particle_uv`](Self::particle_uv)
     /// already follows. This is **half** of vanilla's AO gate; the other half,
-    /// `blockState.getLightEmission() == 0`, is a block-state property this
+    /// `blockState.get_light_emission() == 0`, is a block-state property this
     /// crate has no source for yet (not in `blocks.json` — see `CLAUDE.md`'s
     /// data-sources note — and not read by any oracle dump in the repo), so it
     /// is not applied. A light-emitting full-cube model (e.g. `sea_lantern`)
@@ -264,7 +264,7 @@ pub fn bake_model(
     Ok(quads)
 }
 
-/// Bakes a single face into a quad, following `FaceBakery::bakeQuad`.
+/// Bakes a single face into a quad, following the game's face baker.
 fn bake_face(
     model: &ResolvedModel,
     atlas: &Atlas,
@@ -365,7 +365,7 @@ fn default_uv(dir: Direction, from: [f32; 3], to: [f32; 3]) -> [f32; 4] {
     }
 }
 
-/// Vanilla `FaceBakery::setupShape`: `[min_y, max_y, min_z, max_z, min_x, max_x]`
+/// Vanilla's face-shape setup: `[min_y, max_y, min_z, max_z, min_x, max_x]`
 /// in block units, indexed by [`Direction::index3d`]-style face constants.
 fn setup_shape(from: [f32; 3], to: [f32; 3]) -> [f32; 6] {
     [
@@ -395,7 +395,7 @@ const FACE_INFO: [[(usize, usize, usize); 4]; 6] = [
     [(5, 1, 3), (5, 0, 3), (5, 0, 2), (5, 1, 2)],
 ];
 
-/// Vanilla `FaceBakery::applyElementRotation`: rotate a vertex about the
+/// Vanilla's element rotation: rotate a vertex about the
 /// element's rotation origin. The classic single-axis form uses the rescale
 /// trick; the Euler form (hanging signs) applies the three angles in order
 /// without rescale (those models render as block entities, so exact parity is
@@ -441,7 +441,7 @@ fn apply_element_rotation(v: &mut [f32; 3], rot: Option<&ElementRotation>) {
     }
 }
 
-/// Vanilla `FaceBakery::applyModelRotation`: rotate a vertex about the block
+/// Vanilla's model rotation: rotate a vertex about the block
 /// centre `(0.5, 0.5, 0.5)` with no rescale.
 fn apply_model_rotation(v: &mut [f32; 3], model_rot: &Affine) {
     if model_rot.is_identity() {
@@ -450,7 +450,7 @@ fn apply_model_rotation(v: &mut [f32; 3], model_rot: &Affine) {
     rotate_vertex_by(v, [0.5, 0.5, 0.5], model_rot, [1.0, 1.0, 1.0]);
 }
 
-/// Vanilla `FaceBakery::rotateVertexBy`: translate to `origin`, apply the
+/// Vanilla's vertex rotation: translate to `origin`, apply the
 /// rotation, scale by `rescale`, translate back.
 fn rotate_vertex_by(v: &mut [f32; 3], origin: [f32; 3], mat: &Affine, rescale: [f32; 3]) {
     let local = [v[0] - origin[0], v[1] - origin[1], v[2] - origin[2]];
@@ -460,7 +460,7 @@ fn rotate_vertex_by(v: &mut [f32; 3], origin: [f32; 3], mat: &Affine, rescale: [
     v[2] = r[2] * rescale[2] + origin[2];
 }
 
-/// Vanilla `FaceBakery::calculateFacing`: the axis direction most aligned with
+/// Vanilla's facing calculation: the axis direction most aligned with
 /// the quad's geometric normal.
 fn calculate_facing(positions: &[[f32; 3]; 4]) -> Direction {
     let a = sub(positions[0], positions[1]);
@@ -481,7 +481,7 @@ fn calculate_facing(positions: &[[f32; 3]; 4]) -> Direction {
     best
 }
 
-/// Vanilla `FaceBakery::recalculateWinding`: re-canonicalise vertex order (and
+/// Vanilla's winding recalculation: re-canonicalise vertex order (and
 /// carry each vertex's UV with it) to match `facing`'s corner layout. Only run
 /// when the element has no rotation.
 fn recalculate_winding(positions: &mut [[f32; 3]; 4], uvs: &mut [[f32; 2]; 4], facing: Direction) {
@@ -550,7 +550,7 @@ impl FaceUv {
     }
 }
 
-/// Vanilla `FaceBakery::recomputeUVs`: transform the face UV rect through the
+/// Vanilla's UV recomputation: transform the face UV rect through the
 /// uvlock transform so it stays world-aligned under the model rotation.
 fn recompute_uvs(face_uv: &FaceUv, dir: Direction, model_rot: &Affine) -> FaceUv {
     let lock = uv_lock_transform(model_rot, dir);
@@ -589,7 +589,7 @@ fn recompute_uvs(face_uv: &FaceUv, dir: Direction, model_rot: &Affine) -> FaceUv
     }
 }
 
-/// Vanilla `BlockMath::getUVLockTransform`.
+/// Vanilla's UV-lock transform.
 fn uv_lock_transform(model_rot: &Affine, dir: Direction) -> Affine {
     let rotated = rotate_direction(model_rot, dir);
     let inv = model_rot.inverse_rigid();
@@ -618,7 +618,7 @@ fn uv_global_to_local(dir: Direction) -> Affine {
     uv_local_to_global(dir).inverse_rigid()
 }
 
-/// `BlockMath::blockCenterToCorner`: `T(+0.5) * transform * T(-0.5)`.
+/// Block-centre-to-corner conjugation: `T(+0.5) * transform * T(-0.5)`.
 fn block_center_to_corner(t: &Affine) -> Affine {
     Affine::translation([0.5, 0.5, 0.5])
         .mul(t)
@@ -740,8 +740,8 @@ fn mat3_rot_z(a: f32) -> Mat3 {
     }
 }
 
-/// The block model rotation `Ry(-y) * Rx(-x)` (vanilla `BlockModelRotation`
-/// builds `rotateYXZ(-y, -x, 0)`).
+/// The block model rotation `Ry(-y) * Rx(-x)` (vanilla builds it as a
+/// YXZ rotation of `(-y, -x, 0)`).
 fn model_rotation(x_deg: i32, y_deg: i32) -> Affine {
     let rx = mat3_rot_x(-(x_deg as f32).to_radians());
     let ry = mat3_rot_y(-(y_deg as f32).to_radians());

@@ -243,12 +243,12 @@ impl MapRenderCache {
 pub const FILLED_MAP_ITEM: &str = "filled_map";
 
 /// The two entity types that hang an item on a wall. Neither has a renderer of
-/// its own (both are `HangingEntity`, out of that fix's block-entity scope), so
+/// its own (both are the hanging entity, out of that fix's block-entity scope), so
 /// a framed map draws its picture with no surrounding frame border — the picture
 /// is the part a player is looking at.
 pub const ITEM_FRAME_TYPES: [&str; 2] = ["item_frame", "glow_item_frame"];
 
-/// `EntityTypes.GLOW_ITEM_FRAME`'s registry path, as [`EntityDraw::type_path`]
+/// The entity types's glow item frame's registry path, as [`EntityDraw::type_path`]
 /// carries it. The wire distinguishes the two frame types and three things
 /// downstream depend on which one this is: the `#back` sprite
 /// (`block/glow_item_frame`), the block-light floor of 5 on the frame's own body,
@@ -340,15 +340,15 @@ fn framed_map_in_frustum(
     frustum.intersects_aabb(min, max)
 }
 
-/// `ItemFrameRenderer` scales map coordinates by `1 / 128`; its final
-/// `translate(0, 0, -1)` and `MapRenderer`'s `MAP_Z_OFFSET (-.01)` therefore
+/// The item frame renderer scales map coordinates by `1 / 128`; its final
+/// `translate(0, 0, -1)` and the map renderer's `MAP_Z_OFFSET (-.01)` therefore
 /// put the image plane `1.01 / 128` in front of the content origin.
 const MAP_RENDERER_DEPTH: f32 = 1.01 / 128.0;
 
 /// Extra outward clearance for a framed map's picture, in blocks, read once
 /// from `LODESTONE_MAP_LIFT_PROBE` at process start. `0.0` — the default and
 /// the only value any non-diagnostic run ever uses — leaves the pose exactly
-/// where `ItemFrameRenderer`/`MapRenderer` put it.
+/// where the item frame renderer/map renderer put it.
 ///
 /// # This is a ruler, not a setting
 ///
@@ -953,7 +953,7 @@ pub(super) fn note_framed_map_draw(
     );
 }
 
-/// Vanilla's `renderMap` scale (`ItemInHandRenderer.renderMap`: `scale(0.38f)`
+/// Vanilla's `renderMap` scale (ItemInHandRenderer's render map: `scale(0.38f)`
 /// around a `[-0.5, -0.5]`-centred unit quad).
 const HELD_MAP_SCALE: f32 = 0.38;
 
@@ -966,7 +966,7 @@ const HELD_MAP_OFFSET: Vec3 = Vec3::new(0.0, -0.1, -0.72);
 /// pipeline.
 ///
 /// `mip_level_count` is 1 and the sampler is `Nearest`: a map is a 128-pixel image
-/// blown up to hand-size, and vanilla's `DynamicTexture` is nearest-filtered too,
+/// blown up to hand-size, and vanilla's dynamic texture is nearest-filtered too,
 /// so a linear filter would smear terrain edges that are one pixel wide by design.
 #[must_use]
 pub(super) fn map_texture_bind_group(
@@ -1086,7 +1086,7 @@ const fn framed_map_light(frame_light: u8, glow: bool) -> u8 {
 /// `Ry(yaw)` applied to the quad's local `+z` gives `(sin yaw, 0, cos yaw)`; the
 /// frame's real facing is `(-sin yaw, 0, cos yaw)`
 /// ([`lodestone_render::entity::item_frame_facing_step`], derived from
-/// `ItemFrame.setDirection`). The two **agree at yaw 0 and 180 and are opposite
+/// ItemFrame's set direction). The two **agree at yaw 0 and 180 and are opposite
 /// at 90 and 270**, so a pose built from `Ry(yaw)` puts the picture's front face
 /// *into* the wall on every east- and west-facing frame — and the model
 /// pipeline culls back faces, so the picture drew **zero pixels** there while
@@ -1145,7 +1145,7 @@ fn framed_map_pose_with_extra_lift(
     extra_lift: f32,
 ) -> Mat4 {
     let quarter_turns = f32::from(rotation % 4) * 90.0;
-    // This is ItemFrameRenderer's content branch. `map_quad_mesh` has already
+    // This is the item frame renderer's content branch. `map_quad_mesh` has already
     // absorbed Java's 1/128 XY scale and (-64, -64) centring translation. The
     // final positive local depth is intentional: our Ry(180) compatibility
     // turn flips it to Java's negative map depth while preserving the front
@@ -1179,7 +1179,7 @@ pub(super) enum MapSkip {
     /// ordinary state on the demo world and a real defect on a join.
     NoSource,
     /// A source is installed and answered nothing: no `MAP_ITEM_DATA` has been
-    /// folded for this map yet. On a vanilla server `ServerEntity.sendChanges`
+    /// folded for this map yet. On a vanilla server server entity's send changes
     /// pushes a framed map's contents every ten ticks to every player in the
     /// level, so this should clear within half a second of the frame coming into
     /// view — and never clearing means the packet is not arriving or not
@@ -1308,7 +1308,7 @@ impl RenderState {
                     && draw.item.as_ref().is_some_and(|id| id.path() == FILLED_MAP_ITEM)
             })
             .collect();
-        // This is vanilla `EntityRenderer.shouldRender`'s broad phase. Keep it
+        // This is vanilla EntityRenderer's should render's broad phase. Keep it
         // separate from the diagnostic selection below so a true frustum-edge
         // transition names the candidate that was culled.
         let in_frustum = |draw: &EntityDraw| {
@@ -1793,7 +1793,7 @@ mod tests {
 
     /// Item-frame spawn packets carry the integer attachment block position.
     /// With vanilla's invisible `.5` content lift, the map plane reaches that
-    /// block's wall face, then `MapRenderer` moves it outward by `1.01 / 128`.
+    /// block's wall face, then the map renderer moves it outward by `1.01 / 128`.
     #[test]
     fn invisible_framed_map_sits_just_outside_the_packet_anchors_wall() {
         let anchor = Vec3::new(4.0, 65.0, -9.0);
@@ -1830,9 +1830,9 @@ mod tests {
     /// invert together and every one of those gates would still pass, while the
     /// picture sat on the wrong side of its wall. The expectation here comes
     /// from `Direction`'s own definition instead — `get2DDataValue` orders
-    /// south, west, north, east, and `ItemFrame.setDirection` writes
+    /// south, west, north, east, and ItemFrame's set direction writes
     /// `2D * 90` into the entity's `yRot` with `xRot` zero, or `yRot` zero and
-    /// `xRot = -90 * axisDirection.getStep()` for the two vertical ones — so
+    /// `xRot = -90 * axisDirection.get_step()` for the two vertical ones — so
     /// the two sources share no code.
     ///
     /// # What the number means
@@ -1840,7 +1840,7 @@ mod tests {
     /// A hanging entity's attachment block is the one it *occupies*; the wall is
     /// the neighbour at `-direction`, so the surface the picture contests is the
     /// plane `0.5` back along the facing from the block centre. An invisible
-    /// frame's content lift lands exactly on that plane and `MapRenderer`'s own
+    /// frame's content lift lands exactly on that plane and the map renderer's own
     /// `-1.01` (after `scale(1/128)`) pulls it back out, so the clearance must be
     /// `+MAP_RENDERER_DEPTH` — **positive, meaning toward the room**. This is the
     /// quantity a live report of the picture losing to its wall is a claim
@@ -1898,15 +1898,15 @@ mod tests {
             // this test did exactly that, and its neuter printed six negative
             // clearances and still reported `ok`. The number below is vanilla's
             // own chain instead: `translate(0, 0, -1)` after `scale(1/128)`,
-            // plus `MapRenderer`'s `-0.01` vertex z at that same scale, along a
-            // frame-local `+z` that `Axis.YP.rotationDegrees(180 - toYRot)`
+            // plus map renderer's `-0.01` vertex z at that same scale, along a
+            // frame-local `+z` that YP's rotation degrees
             // points into the wall.
             let vanilla_map_plane = 1.01 / 128.0;
             for (kind, invisible, expected) in [
                 ("invisible", true, vanilla_map_plane),
                 // A visible frame's picture stands its own body's front plate
                 // clear of the wall as well: vanilla's `0.4375` content lift is
-                // `1/16` short of the face, and `MapRenderer` adds its own step.
+                // `1/16` short of the face, and the map renderer adds its own step.
                 ("visible", false, vanilla_map_plane + 1.0 / 16.0),
             ] {
                 let picture = framed_map_pose_with_extra_lift(block, yaw, pitch, 0, invisible, 0.0)
@@ -2157,7 +2157,7 @@ mod tests {
 
         // The map's plane must sit ahead of `template_item_frame_map`'s
         // room-facing plate at every orientation. The source-derived depth is
-        // MapRenderer's 1.01/128 plane bias plus the model's 0.001/16 gap
+        // The map renderer's 1.01/128 plane bias plus the model's 0.001/16 gap
         // between its local 15.001/16 plate (minus the body's half-block
         // origin) and vanilla's .4375 content origin.
         for (yaw, pitch) in [
@@ -2218,7 +2218,7 @@ mod tests {
 
         // --- the in-plane quarter turn ---------------------------------------
         //
-        // `ItemFrameRenderer`'s map branch is `rotation % 4 * 2` eighths, so a
+        // The item frame renderer's map branch is `rotation % 4 * 2` eighths, so a
         // map only ever hangs at a right angle and the odd half-steps fold onto
         // the even ones. Asserted as a *pair* of claims a wrong reading would
         // separate: rotation 1 must move the picture's own `+x` corner, and

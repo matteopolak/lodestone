@@ -49,7 +49,7 @@ use super::*;
     /// This is the property the previous one-shot emitter could not have: it
     /// spawned whichever phase the packet named, with a hardcoded lifetime, and
     /// removed it. A cave ceiling grew drips that hung and blinked out. The
-    /// chain lives in vanilla's own drip particle's own tick step, not in any
+    /// chain lives in vanilla's drip particle's tick step, not in any
     /// spawn site, so nothing upstream could have supplied it.
     ///
     /// The three counts asserted here are the discriminating ones: a hang that
@@ -129,7 +129,7 @@ use super::*;
     /// Vanilla's own cooling-drip-hang particle is two constants — `g = 16 / (elapsed + 16)`
     /// and `b = 4 / (elapsed + 8)` — and the check that they are transcribed
     /// right is that after 40 ticks they arrive on vanilla's own drip-particle
-    /// lava-fall provider's **independently specified** `setColor(1.0F, 0.2857143F, 0.083333336F)`.
+    /// lava-fall provider's **independently specified** set color.
     /// That is an outside expectation rather than a restatement: nothing in the
     /// cooling formula mentions the falling phase's colour, and two different
     /// vanilla methods have to agree for this to hold.

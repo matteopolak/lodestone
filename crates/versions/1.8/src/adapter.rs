@@ -660,7 +660,7 @@ fn slot_to_item_stack(slot: &Slot) -> Option<ItemStack> {
 /// data rather than guessed:
 ///
 /// * `"minecraft:chest"`/`"minecraft:container"` and `"EntityHorse"` have no
-///   fixed modern menu — vanilla's own `ChestMenu`/`ChestType` picks
+///   fixed modern menu — the game's chest menu picks
 ///   `generic_9x{rows}` from the container's slot count, and 26.2 has no
 ///   dedicated horse menu type at all (`MENU_NAMES` has no horse entry; the
 ///   horse GUI became a normal generic-shaped container upstream). Both are
@@ -2418,8 +2418,8 @@ impl V47Adapter {
             // Action-multiplexed, verified field-by-field against
             // minecraft-data's 1.8 `packet_combat_event` (identical shape
             // at 1.12.2). Event `2` (entity died) is only ever sent to the
-            // dying player about their own death (vanilla's
-            // `EntityPlayerMP`-scoped `CombatTracker`), so `playerId` is
+            // dying player about their own death (the server player's combat
+            // tracker), so `playerId` is
             // always this connection's own entity id and is read-and-discarded
             // exactly as `lodestone-v1-9` documents for the same packet.
             let mut reader = Reader::new(payload);

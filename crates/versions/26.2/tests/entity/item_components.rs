@@ -1,7 +1,7 @@
 //! Hermetic tests for protocol 776 item-stack **data-component** decoding.
 //!
-//! The wire shape of a non-empty stack (26.2 `vanilla's own item stack's own optional stream codec`)
-//! is `count VarInt`, `item id VarInt`, then a `DataComponentPatch`:
+//! The wire shape of a non-empty stack (26.2 optional item-stack stream codec)
+//! is `count VarInt`, `item id VarInt`, then a data-component patch:
 //! `added VarInt`, `removed VarInt`, then the added components as
 //! `(type id VarInt, payload)` pairs and the removed components as bare
 //! `type id VarInt`s. The added components are **not** length-prefixed, so an
@@ -14,7 +14,7 @@
 //! attached (see `replays_the_captured_*` below).
 //!
 //! Hand-built bytes alone are not enough, and this file is the proof: the
-//! `minecraft:tool` test and the decoder both wrote a `HolderSet`'s direct
+//! `minecraft:tool` test and the decoder both wrote a holder set's direct
 //! holders as `registry id + 1`, and the pair round-tripped green while the
 //! server's actual encoding is the bare id. Only the capture caught it. Any new
 //! component whose shape is inferred rather than observed should get a captured
@@ -63,11 +63,11 @@ fn item_id(name: &str) -> Option<i32> {
 /// backlog modeled it along with every other component that is genuinely
 /// skippable byte-accurately.
 ///
-/// `minecraft:can_place_on` is the third: its `DataComponentMatchers`
+/// `minecraft:can_place_on` is the third: its component-matchers
 /// payload dispatches through a *second*, independent registry
 /// (`data_component_predicate_type`) whose entries can themselves recurse
 /// into an item/collection predicate that embeds another
-/// `DataComponentMatchers` — a general-purpose predicate interpreter, not
+/// component matchers — a general-purpose predicate interpreter, not
 /// "one more component reader" — so it is a genuine decode cliff rather than
 /// an oversight, and one this crate does not expect to close casually. See
 /// `read_component_patch`'s own `can_place_on`/`can_break` arm.
@@ -215,7 +215,7 @@ fn decodes_modeled_components() {
     assert!(!item.components.has_unmodeled);
 }
 
-/// `vanilla's own custom model data's own stream codec` starts with its numeric float list. A current
+/// The custom-model-data stream codec starts with its numeric float list. A current
 /// server pack's `minecraft:range_dispatch` reads index zero of that list, so a
 /// metadata-tagged diamond sword must preserve the number rather than merely
 /// consume the component for wire alignment.
@@ -317,12 +317,12 @@ fn tolerates_an_unmodeled_component() {
 }
 
 /// A `minecraft:tool` on the wire decodes rule-for-rule, in order, including
-/// both `HolderSet<Block>` shapes and the independently-optional speed and
+/// both holder-set shapes and the independently-optional speed and
 /// correct-for-drops fields.
 ///
-/// Wire shape (26.2 `vanilla's own tool's own stream codec`): a VarInt-counted rule list, then an
+/// Wire shape (26.2 tool stream codec): a VarInt-counted rule list, then an
 /// f32 default speed, a VarInt damage-per-block, and a bool
-/// can-destroy-in-creative. Each rule is a `HolderSet<Block>` — VarInt `0` then
+/// can-destroy-in-creative. Each rule is a block holder set — VarInt `0` then
 /// an identifier for a tag, else `n + 1` followed by `n` **bare** VarInt registry
 /// ids — then `optional(f32)` and `optional(bool)`, each a present-flag byte
 /// followed by the value.
@@ -330,8 +330,8 @@ fn tolerates_an_unmodeled_component() {
 /// # Only the set size is offset by one
 ///
 /// This test first wrote each holder as `registry id + 1`, by analogy with
-/// `vanilla's own byte buf codecs's own holder`, and passed — because the decoder had made the same
-/// assumption and the two cancelled. `holderSet` uses `holderRegistry` instead,
+/// the plain holder codec, and passed — because the decoder had made the same
+/// assumption and the two cancelled. the holder-set codec uses the registry-aware one instead,
 /// which writes the id **as-is**; the captured
 /// `tests/fixtures/tool_component_explicit.hex` spells `minecraft:stone`
 /// (registry 1) as `01`, not `02`. The bytes below are now the server's shape,
@@ -347,15 +347,15 @@ fn decodes_a_tool_component() {
     patch.var_i32(2); // two rules
 
     // Rule 1: a tag-backed set that denies drops and supplies no speed —
-    // vanilla's `#incorrect_for_<material>_tool` shape.
-    patch.var_i32(0); // HolderSet discriminator 0 = named tag
+    // the `#incorrect_for_<material>_tool` shape.
+    patch.var_i32(0); // holder-set discriminator 0 = named tag
     patch.string("minecraft:incorrect_for_diamond_tool");
     patch.bool(false); // no speed
     patch.bool(true); // has correct_for_drops...
     patch.bool(false); // ...and it is false
 
     // Rule 2: an explicit two-block set that supplies a speed and no verdict.
-    patch.var_i32(2 + 1); // HolderSet discriminator = size + 1 (the *only* +1 here)
+    patch.var_i32(2 + 1); // holder-set discriminator = size + 1 (the *only* +1 here)
     patch.var_i32(1); // block registry id 1 (minecraft:stone), written as-is
     patch.var_i32(193); // block registry id 193 (minecraft:obsidian), as-is
     patch.bool(true);
@@ -566,8 +566,8 @@ fn replays_the_captured_potion_contents_fixture() {
 
 /// `minecraft:pot_decorations` decodes its four sherds into the right four faces.
 ///
-/// Wire shape (26.2 `vanilla's own pot decorations's own stream codec` =
-/// `vanilla's own byte buf codecs's own registry(vanilla's own registries's own item).apply(vanilla's own byte buf codecs's own list(4))`): a
+/// Wire shape (26.2 pot-decorations stream codec =
+/// a registry-id codec over the item registry, as a list capped at 4): a
 /// VarInt element count then that many **bare** item registry ids. The record's
 /// field order is `back`, `left`, `right`, `front`.
 ///
@@ -584,14 +584,14 @@ fn decodes_pot_decorations_into_the_right_four_faces() {
     patch.var_i32(1); // one added component
     patch.var_i32(0); // none removed
     patch.var_i32(component_id("minecraft:pot_decorations"));
-    patch.var_i32(4); // vanilla's own byte buf codecs's own list(4) element count
+    patch.var_i32(4); // list(4) element count
     for sherd in [
         "minecraft:angler_pottery_sherd",  // back
         "minecraft:blade_pottery_sherd",   // left
         "minecraft:howl_pottery_sherd",    // right
         "minecraft:snort_pottery_sherd",   // front
     ] {
-        // `vanilla's own byte buf codecs's own registry` is `idMapper`: the bare id, no `+1` and no
+        // The registry codec is an id mapper: the bare id, no `+1` and no
         // `0` sentinel. `minecraft:trim`'s holders two arms over *are* offset,
         // which is exactly the confusion this spells out.
         patch.var_i32(item_id(sherd).expect("known sherd item"));
@@ -636,13 +636,13 @@ fn decodes_pot_decorations_into_the_right_four_faces() {
     );
 }
 
-/// Appends `minecraft:profile`'s wire payload (`vanilla's own resolvable profile's own stream codec`)
+/// Appends `minecraft:profile`'s wire payload (the resolvable-profile stream codec)
 /// to `patch`: the identity half — either a full `GameProfile` (`name`/`id`
 /// both `Some`) or a `Partial` (either independently `None`) — followed by an
-/// always-present, four-field `vanilla's own player skin's own patch` tail.
+/// always-present, four-field player-skin patch tail.
 ///
 /// `model_slim` is `None` for "no model override" and `Some(slim)` for one —
-/// exercising the double-optional trap (`vanilla's own player model type's own stream codec's own apply
+/// exercising the double-optional trap (the player-model-type stream codec
 /// (optional)`, a presence bool wrapping another bool) at least once, since
 /// getting that one wrong misaligns nothing *inside* this component (there is
 /// nothing after it to misread within the same field) but would misread the
@@ -691,7 +691,7 @@ fn write_profile(
             None => patch.bool(false),
         }
     }
-    // vanilla's own player skin's own patch: body/cape/elytra optional Identifiers, then an
+    // player-skin patch: body/cape/elytra optional Identifiers, then an
     // optional PlayerModelType.
     match body_texture {
         Some(t) => {
@@ -831,8 +831,8 @@ fn a_player_head_with_a_profile_no_longer_truncates_the_container() {
 /// `minecraft:brick` on a face means an *undecorated* face, and a short list's
 /// missing tail means the same.
 ///
-/// Both are `PotDecorations::getItem`: `item == vanilla's own items's own brick ?
-/// an empty optional() : a present optional(item)`, and `i >= sherds.size()` for the tail.
+/// Both are the pot decorations' per-slot read: `item == brick ?
+/// An empty optional : a present optional(item)`, and `i >= sherds.size()` for the tail.
 /// A vanilla server always writes four elements (`ordered()` builds a
 /// four-element list unconditionally), so the short form is the case only a
 /// hand-built payload reaches — which is why it is pinned here rather than left
@@ -903,7 +903,7 @@ fn a_brick_face_and_a_short_list_both_decode_as_undecorated() {
 /// reader is still correctly aligned — the general risk with any component whose
 /// payload is not length-prefixed.
 ///
-/// Wire shape (`vanilla's own potion contents's own stream codec`): `Optional<Holder<Potion>>`,
+/// Wire shape (potion-contents stream codec): `Optional<Holder<Potion>>`,
 /// `Optional<Integer>`, `List<MobEffectInstance>`, `Optional<String>`. Stack id
 /// 13 is `minecraft:swiftness` in the 26.2 registry report. Its expected
 /// colour is the independently recorded speed-effect colour, not a value encoded
@@ -967,8 +967,8 @@ fn decodes_potion_contents_into_the_registry_id_and_mixed_colour_and_stays_align
     );
 }
 
-/// A `custom_color` always wins over any effect list — `PotionContents
-/// .getColorOr`'s first branch — and a `customEffects` list with one entry
+/// A `custom_color` always wins over any effect list — the potion colour's
+/// first branch — and a custom-effects list with one entry
 /// carrying a present `hiddenEffect` (the codec's one recursive field) must
 /// still leave the reader aligned even though `custom_color` makes the mixed
 /// value itself irrelevant to the outcome.
@@ -1049,8 +1049,8 @@ fn custom_color_wins_and_a_recursive_hidden_effect_does_not_misalign_the_reader(
 /// The advancement in question is real — vanilla ships
 /// `adventure/craft_decorated_pot_using_only_sherds` with exactly this icon — so
 /// any server that has sent an advancement tree hits this. The icon is an
-/// `ItemStackTemplate`, whose fields are item-then-count (the reverse of
-/// `vanilla's own item stack's own optional stream codec`) and which turns an incomplete patch into a
+/// an item-stack template, whose fields are item-then-count (the reverse of
+/// the optional item-stack stream codec) and which turns an incomplete patch into a
 /// **fatal** decode error rather than a partial stack, so before this component
 /// was modeled the whole packet was dropped.
 ///
@@ -1086,7 +1086,7 @@ fn an_advancement_icon_may_be_a_decorated_pot() {
 
 /// The control for [`an_advancement_icon_may_be_a_decorated_pot`]: the same
 /// packet with an icon carrying a component this build still does not model must
-/// still be a fatal decode error, because an `ItemStackTemplate` cannot degrade
+/// still be a fatal decode error, because an item-stack template cannot degrade
 /// to a partial stack — everything after it in the packet is unreadable.
 ///
 /// This is what proves the test above is measuring the new component arm rather
@@ -1132,10 +1132,10 @@ fn pot_decorations_patch() -> Vec<u8> {
 /// display icon is a `minecraft:decorated_pot` with `patch` as its component
 /// patch.
 ///
-/// `DisplayInfo`'s wire order is title, description, icon, frame ordinal, then a
-/// **raw big-endian `int`** flag word (`writeInt`, not a byte), then the
+/// The display info's wire order is title, description, icon, frame ordinal, then a
+/// **raw big-endian `int`** flag word (not a byte), then the
 /// background identifier only when bit 0 is set, then x and y as floats — see
-/// the adapter's own note on `serializeToNetwork` for why that differs from the
+/// the adapter's own note on the display-info serialisation for why that differs from the
 /// datapack schema.
 fn advancement_with_icon_patch(patch: &[u8]) -> Vec<u8> {
     let mut w = Writer::default();
@@ -1146,7 +1146,7 @@ fn advancement_with_icon_patch(patch: &[u8]) -> Vec<u8> {
     w.bool(true); // has display info
     write_network_nbt(&mut w, &Nbt::String("Careful Restoration".to_owned())).unwrap();
     write_network_nbt(&mut w, &Nbt::String("Make a Decorated Pot".to_owned())).unwrap();
-    // The icon is an `ItemStackTemplate`: item id first, then count.
+    // The icon is an item-stack template: item id first, then count.
     w.var_i32(item_id("minecraft:decorated_pot").expect("known item"));
     w.var_i32(1);
     w.bytes(patch);
@@ -1194,7 +1194,7 @@ fn retains_modeled_components_before_an_unmodeled_one() {
 // `minecraft:repairable` / `minecraft:equippable`
 // ---------------------------------------------------------------------------
 
-/// `minecraft:repairable` is one `HolderSet<Item>` (`vanilla's own repairable's own stream codec`).
+/// `minecraft:repairable` is one item holder set (a registry-aware holder-set stream codec).
 /// Its direct form has the usual `count + 1` discriminator but **bare** item
 /// ids; the following custom name is the alignment witness. Before this reader
 /// consumed repairable, an enchanted-golden-apple-like patch stopped at id 33
@@ -1206,7 +1206,7 @@ fn repairable_direct_holder_set_keeps_the_following_component_aligned() {
     patch.var_i32(0); // no removals
 
     patch.var_i32(component_id("minecraft:repairable"));
-    patch.var_i32(2 + 1); // direct HolderSet with two entries
+    patch.var_i32(2 + 1); // direct holder set with two entries
     patch.var_i32(item_id("minecraft:iron_ingot").expect("known repair item"));
     patch.var_i32(item_id("minecraft:gold_ingot").expect("known repair item"));
 
@@ -1237,11 +1237,11 @@ fn repairable_direct_holder_set_keeps_the_following_component_aligned() {
 /// prototype `Body` slot with `OffHand`, then leaves both a modeled component
 /// in its own patch and a pairwise-distinct trailing stack readable.
 ///
-/// `vanilla's own equippable's own stream codec` is deliberately exercised field-for-field:
+/// The equippable stream codec is deliberately exercised field-for-field:
 /// `EquipmentSlot`'s idMapper id 5 (`OffHand`, distinct from enum ordinal 1),
 /// a direct `equipSound` with a fixed range, present asset and overlay ids, a
-/// present tag-backed entity HolderSet, five non-uniform booleans, and a
-/// referenced `shearingSound` holder. If any field is omitted, reordered, or
+/// present tag-backed entity holder set, five non-uniform booleans, and a
+/// referenced shearing-sound holder. If any field is omitted, reordered, or
 /// decoded as the wrong holder shape, the custom name or sword entry fails to
 /// decode and this test goes red.
 #[test]
@@ -1266,7 +1266,7 @@ fn equippable_patch_overrides_slot_and_consumes_all_wire_fields() {
     patch.string("minecraft:textures/misc/horse_armor.png");
 
     patch.bool(true); // allowedEntities present
-    patch.var_i32(0); // HolderSet tag arm
+    patch.var_i32(0); // holder-set tag arm
     patch.string("minecraft:can_wear_horse_armor");
 
     patch.bool(true); // dispensable
@@ -1276,7 +1276,7 @@ fn equippable_patch_overrides_slot_and_consumes_all_wire_fields() {
     patch.bool(true); // canBeSheared
 
     // shearingSound: Holder<SoundEvent> reference arm. A reference to registry
-    // id 16 is encoded as 17 because vanilla's own byte buf codecs's own holder reserves 0 for direct.
+    // id 16 is encoded as 17 because the holder codec reserves 0 for direct.
     patch.var_i32(17);
 
     patch.var_i32(component_id("minecraft:custom_name"));
@@ -1323,8 +1323,8 @@ fn equippable_patch_overrides_slot_and_consumes_all_wire_fields() {
 // `minecraft:bundle_contents`
 // ---------------------------------------------------------------------------
 
-/// Writes one `ItemStackTemplate` (`item_id`, `count`, then an *empty* nested
-/// `DataComponentPatch`) — the shape `vanilla's own bundle contents's own stream codec`'s per-entry
+/// Writes one item-stack template (`item_id`, `count`, then an *empty* nested
+/// data-component patch) — the shape the bundle contents' per-entry
 /// codec expects for a contained stack with no components of its own.
 fn write_item_stack_template(w: &mut Writer, item: &str, count: i32) {
     w.var_i32(item_id(item).expect("known item"));
@@ -1394,8 +1394,8 @@ fn decodes_bundle_contents_including_a_nested_bundle() {
 }
 
 /// An unmodeled component inside a *contained* stack is exactly as
-/// unrecoverable as one at the top level — `vanilla's own item stack template's own stream codec`'s
-/// nested `DataComponentPatch` carries no length prefix either — so it stops
+/// unrecoverable as one at the top level — the item-stack template codec's
+/// nested data-component patch carries no length prefix either — so it stops
 /// the bundle list, flags the outer stack `has_unmodeled`, and (like every
 /// other unmodeled-component case in this file) drops the rest of the packet
 /// rather than hard-failing the whole connection.
@@ -1458,7 +1458,7 @@ fn an_unmodeled_component_inside_a_bundled_item_degrades_gracefully() {
 /// and the expected bytes are written out by hand here rather than taken from
 /// our own writer: root tag id `0x0a`, then a `TAG_Int` field named `"id"`, then
 /// `TAG_End`. The nameless root is the property worth pinning — the derived
-/// stream codec is `vanilla's own friendly byte buf's own write nbt`, which writes no root name, so a
+/// stream codec is the buffer's NBT writer, which writes no root name, so a
 /// reader expecting the *named* form would consume the `0x00 0x02` length of the
 /// first field's name as a root name and misalign everything after it.
 #[test]
@@ -1624,7 +1624,7 @@ fn merchant_offers_abandons_the_packet_instead_of_reading_past_a_partial_result(
         w.var_i32(9); // window id
         w.var_i32(3); // three offers
         for (index, (item, count)) in results.iter().enumerate() {
-            // cost_a: item id, count, empty DataComponentExactPredicate.
+            // cost_a: item id, count, empty exact component predicate.
             w.var_i32(2 + i32::try_from(index).unwrap());
             w.var_i32(1);
             w.var_i32(0);
@@ -1865,7 +1865,7 @@ fn consumable_does_not_truncate_a_component_after_it() {
 
     patch.var_i32(component_id("minecraft:consumable"));
     patch.f32(1.6); // consumeSeconds
-    patch.var_i32(2); // ItemUseAnimation ordinal
+    patch.var_i32(2); // use-animation ordinal
     patch.var_i32(5 + 1); // Holder<SoundEvent> reference form: registry id 5
     patch.bool(true); // hasConsumeParticles
     patch.var_i32(3); // three ConsumeEffect entries

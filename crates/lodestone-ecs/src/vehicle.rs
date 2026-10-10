@@ -52,10 +52,10 @@
 //!
 //! # What the correction actually is
 //!
-//! `ClientboundMoveVehiclePacket` is **not** a periodic sync. The server sends it
-//! from exactly two places in `ServerGamePacketListenerImpl.handleMoveVehicle` —
+//! The move-vehicle packet is **not** a periodic sync. The server sends it
+//! from exactly two places in its move-vehicle handler —
 //! a "moved too quickly" rejection and a "moved wrongly / collided with something
-//! new" rejection — and both are followed by `vehicle.absSnapTo(old…)`. So
+//! new" rejection — and both snap the vehicle back to its old position. So
 //! receiving one means *our prediction was refused*, and the right response is to
 //! discard the local motion and restart from the server's position, which is what
 //! [`apply_vehicle_moved`] does.
@@ -79,7 +79,7 @@ use crate::player::{
 use crate::session::{Riding, ServerEntityId};
 
 /// The canonical id of vanilla's `jump_strength` attribute — a mount's
-/// `Attributes.JUMP_STRENGTH`, which `AbstractHorse.getJumpPower` multiplies by
+/// jump-strength attribute, which the horse jump-power rule multiplies by
 /// the charge scale.
 fn jump_strength_key() -> lodestone_model::Identifier {
     use std::str::FromStr as _;
@@ -143,7 +143,7 @@ impl VehicleFamily {
 #[must_use]
 pub fn mount_rule(path: &str) -> Option<MountRule> {
     match path {
-        // `AbstractHorse` itself, unoverridden. Llamas are not player-rideable in
+        // the horse base class itself, unoverridden. Llamas are not player-rideable in
         // vanilla, but a caravan makes one a vehicle, and being wrong about a type
         // we can never be seated on costs nothing while being *silent* about it
         // would leave a hole if that ever changed.
@@ -291,7 +291,7 @@ pub struct RidingJumpCharge {
 /// saddle (it is entity metadata we do not decode for equines), so the gate here
 /// is the weaker "we control a land mount". The consequence is a
 /// `START_RIDING_JUMP` sent for an unsaddled mount, which the server's
-/// `AbstractHorse.onPlayerJump` discards under its own `isSaddled()` check — the
+/// horse jump handler discards under its own saddled check — the
 /// safe direction, and named here rather than left as a silent divergence.
 pub fn charge_riding_jump(
     egress: Res<Egress>,
@@ -496,7 +496,7 @@ pub fn tick_controlled_vehicle(
                 let value = attribute_value(&attrs.0, &jump_strength_key());
                 // `attribute_value`'s no-snapshot fallback for an unmodelled key is
                 // `0.0`, which would silently disable jumping. The declared default
-                // is `AbstractHorse`'s own `0.7`.
+                // is the horse base class's own `0.7`.
                 if value > 0.0 {
                     value
                 } else {
@@ -555,7 +555,7 @@ pub fn tick_controlled_vehicle(
 ///
 /// `None` when the server has reported no snapshot for the key, and that is
 /// deliberate rather than a fallback waiting to be filled in. A horse's speed is
-/// generated per instance (`AbstractHorse.generateSpeed`, roughly `0.1125..0.3375`)
+/// generated per instance (the horse speed roll, roughly `0.1125..0.3375`)
 /// so there is no correct default to guess, and `attribute_value`'s own
 /// no-snapshot answer is the **generic mob** `0.7` — three times the fastest real
 /// horse. Declining leaves the mount to the server, which is visible and
@@ -700,7 +700,7 @@ mod tests {
         }
         // The negative control this pairs with: a minecart is rail-following and
         // server-broadcast, so simulating it as a land mount would fight
-        // `ClientboundMoveMinecartPacket` with plain gravity.
+        // the minecart move packet with plain gravity.
         assert_eq!(VehicleFamily::for_type_path("minecart"), None);
         assert_eq!(VehicleFamily::for_type_path("chest_minecart"), None);
         assert_eq!(VehicleFamily::for_type_path("cow"), None);

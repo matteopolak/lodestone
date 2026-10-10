@@ -87,7 +87,7 @@
 //! **Sub-90° roll about the shaft**, for the same symmetry reason: the fletching
 //! planes sit at 45° and 135°, a set that maps to itself under a 90° roll.
 //!
-//! **A wrong `arrow_tipped` selection.** `TippableArrowRenderer` picks a second
+//! **A wrong `arrow_tipped` selection.** The tippable arrow renderer picks a second
 //! sheet when `state.isTipped`; that bit is not decoded, so there is nothing to
 //! test.
 //!
@@ -152,7 +152,7 @@ const NEAR_FRAMING: f32 = 2.6;
 /// * the placement comparison has to fit **two** arrows 1.5 blocks apart (at
 ///   [`NEAR_FRAMING`] the mob-placed control was frustum-*culled* — arguably even
 ///   better evidence that the placements differ, but it produces no box to compare);
-/// * the trident is nearly **2 blocks** long (`TridentModel`'s pole spans 31
+/// * the trident is nearly **2 blocks** long (the trident model's pole spans 31
 ///   texels) and hangs off its tip rather than its centre, so at [`NEAR_FRAMING`]
 ///   it ran off the right edge and [`assert_not_clipped`] caught it.
 const WIDE_FRAMING: f32 = 5.0;

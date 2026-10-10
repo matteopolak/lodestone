@@ -81,7 +81,7 @@ const MASK: i64 = (1 << 48) - 1;
 
 /// A bit-exact `java.util.Random`: a 48-bit truncated linear congruential
 /// generator, transcribed from the Java specification (`java.util.Random`,
-/// mirrored by 26.2's `LegacyRandomSource`/`BitRandomSource`).
+/// mirrored by 26.2's legacy and bit random sources).
 ///
 /// Every method here is defined precisely by that specification; adding a new
 /// one is fine, guessing at its semantics from the name is not.

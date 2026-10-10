@@ -662,8 +662,8 @@ pub fn terrain_mag_filter_from(value: Option<&str>) -> wgpu::FilterMode {
 /// RGB mean, cutout `solidify`, alpha-coverage preservation, and a gutter
 /// re-extruded from each sprite's own edge at every level), so they are
 /// returned verbatim. An atlas that carries no pyramid uploads a **single**
-/// level, which is vanilla's own arithmetic: `TextureAtlas.createTexture` asks
-/// for `mipLevel + 1` levels, so `mipmapLevels = 0` is one level and no mip
+/// level, which is vanilla's own arithmetic: the atlas texture creation asks
+/// for `mip_level + 1` levels, so `mipmap_levels = 0` is one level and no mip
 /// chain at all.
 ///
 /// This used to fall back to [`generate_isolated_mips`] over the *stitched*

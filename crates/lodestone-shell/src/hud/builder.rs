@@ -97,8 +97,8 @@ impl<'a> Builder<'a> {
     /// `max_width_px` at `scale`, measured with whichever metrics
     /// [`Builder::legacy_width`] reports — real vanilla proportional glyph
     /// advances when a [`VanillaFont`] is attached, the fixed 5×7 advance
-    /// otherwise. Mirrors vanilla's own reflow in shape (`GuiMessage.splitLines`,
-    /// invoked from `ChatComponent.addMessageToDisplayQueue`,
+    /// otherwise. Mirrors vanilla's own reflow in shape (the gui message's split lines,
+    /// invoked from the chat component's add message to display queue,
     /// vanilla's own chat-component rendering): break on a space when the next word
     /// would overflow, and hard-break a single word that alone exceeds the
     /// width so nothing can escape the box. A `§` colour/format code seen
@@ -259,8 +259,8 @@ impl<'a> Builder<'a> {
     }
 
     /// Emit a string with **no** drop shadow, the string's top-left at
-    /// `(x, y)`. `ContextualBar.extractExperienceLevel`
-    /// (vanilla's own hud rendering/vanilla's own contextual-bar rendering) builds the XP level number's
+    /// `(x, y)`. The contextual bar's extract experience level
+    /// (vanilla's hud rendering/vanilla's contextual-bar rendering) builds the XP level number's
     /// outline out of four unshadowed offset copies plus one unshadowed centre
     /// copy — passing `shadow = false` to `graphics.text` every time — so a
     /// caller reproducing that outline must use this, not [`text`](Self::text):

@@ -36,7 +36,7 @@ fn resolve(block: &str, placed: PlacedState) -> Option<u32> {
 /// The resolver must hit the block's own placement state exactly — including
 /// the two properties the census cannot default (`waterlogged`, a chest's
 /// `type`), because "lowest state id for this block" gets **both** wrong:
-/// `BooleanProperty`'s value order is `{true, false}`, so the lowest chest id
+/// The boolean property's value order is `{true, false}`, so the lowest chest id
 /// is a *waterlogged* chest and the lowest slab id is a *top* slab.
 #[test]
 fn placement_states_resolve_to_the_jar_oracle() {

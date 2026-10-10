@@ -204,7 +204,7 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 /// DPI scale. Vanilla's real hit-outline draw — its own submit-block-outline
 /// path's non-debug submit-hit-outline branch (**not**
 /// the F3-style collision/occlusion/interaction shape dump at `:740-758`, which
-/// is gated behind `SharedConstants.DEBUG_SHAPES` and is a different draw
+/// is gated behind shared constants's debug shapes and is a different draw
 /// entirely) — passes an explicit `width` argument down to
 /// its own submit-shape-outline call, sourced from
 /// vanilla's own game-render-state's window-render-state's appropriate-line-width

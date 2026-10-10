@@ -5,7 +5,7 @@
 //!
 //! # Why this cannot be a unit test
 //!
-//! `ClientboundAnimatePacket` decoded cleanly into `ClientEvent::EntityAnimation`
+//! Animate packet decoded cleanly into `ClientEvent::EntityAnimation`
 //! long before this fix, with a green protocol-layer test
 //! (`v26-2/tests/entity_events.rs`) and a component (`Skeleton::pose`'s
 //! `attack_anim`) that was itself unit-tested and correct. Neither of those

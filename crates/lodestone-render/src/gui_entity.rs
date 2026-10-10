@@ -29,7 +29,7 @@
 //! **`bodyRot` and `yRot` are not the same kind of number, and reading them as
 //! two absolute yaws 180° apart is the trap.** Vanilla's living-entity render-state
 //! extraction function
-//! fills the render state with `state.yRot = wrapDegrees(headRot - state.bodyRot)`
+//! fills the render state with `state.yRot = wrap_degrees(headRot - state.bodyRot)`
 //! — `yRot` is the head yaw *relative to the body* (vanilla's `netHeadYaw`),
 //! `bodyRot` is absolute. So the assignment above puts the body at `180 + a` and
 //! the head at `180 + 2a` in absolute terms: **the head really does track twice
@@ -130,7 +130,7 @@ pub struct GuiEntityLook {
     /// Head yaw **relative to the body**, in degrees — vanilla's
     /// living-entity render state's y-rotation field, which
     /// vanilla's living-entity render-state extraction function defines as
-    /// `wrapDegrees(headRot - bodyRot)`. Feeds [`AnimInput::head_yaw_deg`]
+    /// wrap degrees. Feeds [`AnimInput::head_yaw_deg`]
     /// directly, same convention, same sign.
     pub head_yaw_deg: f32,
     /// Head pitch in degrees, positive looking **down** — vanilla's
@@ -194,9 +194,9 @@ pub fn gui_entity_look(rect_px: [f32; 4], mouse_px: [f32; 2], fall_flying: bool)
 /// ```
 ///
 /// Read right to left that is vanilla's stack order: its GUI-entity-renderer's
-/// `translate(translation)` then `mulPose(rotation)` sit *inside*
+/// `translate(translation)` then mul pose sit *inside*
 /// its picture-in-picture renderer base class's `translate(w/2, h/2, 0)` then
-/// `scale(s, s, -s)`, and a `PoseStack` right-multiplies.
+/// `scale(s, s, -s)`, and a pose stack right-multiplies.
 ///
 /// Separate from [`gui_entity_pose`] so a caller can pose something that is not
 /// placed by [`entity_model_matrix`] (a block-entity rig, a bare model

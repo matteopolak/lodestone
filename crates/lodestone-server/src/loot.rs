@@ -1614,7 +1614,7 @@ impl BonusFormula {
         }
     }
 
-    /// `Formula.calculateNewCount`. Integer arithmetic throughout — a float
+    /// Formula's calculate new count. Integer arithmetic throughout — a float
     /// transliteration of `count * (bonus + 1)` would be host-libm dependent at
     /// the rounding boundary.
     fn calculate(&self, rng: &mut SpawnRng, count: i32, level: i32) -> i32 {

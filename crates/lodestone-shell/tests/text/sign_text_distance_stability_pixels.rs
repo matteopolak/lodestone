@@ -20,7 +20,7 @@
 //! blocks away. So the whole sign corpus shares two coincidences: every
 //! camera is **close**, and every measurement is a **single** frame. The
 //! admitted range is 64 blocks (`block_entities::VIEW_DISTANCE`, which is
-//! vanilla's own `BlockEntityRenderer.getViewDistance` default — no sign
+//! vanilla's own BlockEntityRenderer's get view distance default — no sign
 //! renderer overrides it), so the corpus was covering under a fifth of it.
 //!
 //! # What the two arms found

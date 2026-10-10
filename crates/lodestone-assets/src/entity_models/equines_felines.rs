@@ -9,7 +9,7 @@ use super::*;
 /// deformation is hardcoded in vanilla regardless of the mesh's own `g`
 /// parameter (only used here with `g = NONE`, so it doesn't matter yet, but
 /// transcribed as vanilla wrote it in case a future caller passes non-zero
-/// `g`, e.g. for `HORSE_ARMOR`'s `CubeDeformation(0.1)`). Sheet 64×64.
+/// `g`, e.g. for horse armour's grow of 0.1). Sheet 64×64.
 pub(super) fn equine_base_root() -> PartDef {
     let head = PartDef::new(PartPose::ZERO)
         .with_cube(cube([-3.0, -11.0, -2.0], [6.0, 5.0, 7.0], [0.0, 13.0]))
@@ -147,7 +147,7 @@ pub(super) fn horse_color_texture(v: EntityVariant) -> &'static str {
 /// `DONKEY_TRANSFORMER` applied — `left_ear`/`right_ear` under `head` replaced
 /// with larger, rotated donkey ears, and `left_chest`/`right_chest` boxes
 /// added under `body` (vanilla toggles their visibility per-instance via
-/// `state.hasChest`; that's a runtime concern, so they're baked in
+/// state's has chest; that's a runtime concern, so they're baked in
 /// unconditionally here, matching this port's existing llama/pig-saddle
 /// precedent of not modelling equipment-visibility toggles). Then baked at
 /// `scaling(DONKEY_SCALE = 0.87)`. Fixed texture, no variant.
@@ -240,7 +240,7 @@ pub fn mule_model() -> EntityModelDef {
 }
 
 /// Vanilla's own llama-model body-layer construction: head (with neck and two ears), body, two
-/// chest boxes (vanilla toggles visibility via `state.hasChest`; baked in
+/// chest boxes (vanilla toggles visibility via state's has chest; baked in
 /// unconditionally, see the donkey chest note above), and four legs — all
 /// direct root children, no deeper nesting. Sheet 128×64 (llama is the only
 /// model in this corpus wider than 64px). `trader_llama` reuses this exact
@@ -328,13 +328,13 @@ pub(super) fn llama_color_texture(v: EntityVariant) -> &'static str {
 
 /// vanilla's own adult feline model's body-mesh construction: the body mesh shared by cat and ocelot.
 /// `head` carries `main`/`nose`/`ear1`/`ear2` as *unnamed sibling boxes on one
-/// part* in vanilla (`CubeListBuilder` with four `addBox` calls, no child
+/// part* in vanilla (one cube-list builder with four box calls, no child
 /// parts) — modelled here as four cubes on the same `head` part rather than
 /// four separate named children, matching vanilla's actual structure (only
-/// `body`/`tail1`/`tail2`/the four legs are independent `PartDefinition`s).
-/// `tail2` uses its own `CubeDeformation(-0.02)`, distinct from the other
+/// `body`/`tail1`/`tail2`/the four legs are independent part definitions).
+/// `tail2` uses its own grow of -0.02, distinct from the other
 /// parts' shared `g`. Sheet 64×32. Ocelot uses this mesh unscaled
-/// (`ModelLayers.OCELOT` = `felineBodyLayer` with no transformer).
+/// (the ocelot layer is the feline body layer with no transformer).
 fn feline_base_model() -> EntityModelDef {
     let head = PartDef::new(PartPose::offset(0.0, 15.0, -9.0))
         .with_cube(cube([-2.5, -2.0, -3.0], [5.0, 4.0, 5.0], [0.0, 0.0]))
@@ -423,7 +423,7 @@ pub(super) fn cat_coat_texture(v: EntityVariant) -> &'static str {
 /// `real_head` child with four boxes (main head, two identically-textured
 /// ear boxes placed by origin sign rather than mirroring, and a snout); `body`
 /// and `upper_body` are independent, both rotated `PI/2`; four legs share two
-/// `CubeListBuilder`s (`leftLeg`/`rightLeg`, the latter `.mirror()`ed) reused
+/// cube-list builders (`leftLeg`/`rightLeg`, the latter mirrored) reused
 /// across hind and front pairs, exactly like vanilla's own blaze model's ring reuse; `tail`
 /// (empty, pivot-only) holds a `real_tail` child. Sheet 64×32, unscaled
 /// (vanilla's own layer-definitions table's wolf body layer has no mesh transformer).

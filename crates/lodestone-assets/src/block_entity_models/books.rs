@@ -21,16 +21,16 @@ use super::{BOOK_SHEET, CubeDef, EntityModelDef, PartDef, PartPose};
 ///   are 0.005 texels wide. A mesher that culled near-degenerate cubes would eat
 ///   the covers and the turning pages and leave only the two page blocks, which
 ///   still reads as a book.
-/// * **`flip_page1` and `flip_page2` share one `CubeListBuilder`** in the jar, so
+/// * **`flip_page1` and `flip_page2` share one cube-list builder** in the jar, so
 ///   their UVs are identical by construction. They differ only in the per-frame
-///   `yRot` `setupAnim` gives them.
-/// * **`seam` is the only part with a rest *rotation*** (`PartPose.rotation`, no
-///   offset), and `BookModel.setupAnim` never poses it — so the spine's quarter
+///   per-frame Y rotation the animation gives them.
+/// * **`seam` is the only part with a rest *rotation*** (a part-pose rotation, no
+///   offset), and the book animation never poses it — so the spine's quarter
 ///   turn must survive as a rest pose rather than being folded into a caller's
 ///   override list.
 ///
 /// Shared by two registrations, and the *work* is not shared: a lectern's
-/// `BookModel.State` is a compile-time constant (see
+/// book state is a compile-time constant (see
 /// `lodestone_render::block_entity`'s `LECTERN_BOOK_OPENNESS`), while
 /// vanilla's own enchant-table renderer's is a client-simulated animation state machine with
 /// its own per-frame `open`/`flip`/`rot` counters. One mesh, two very different
@@ -41,7 +41,7 @@ use super::{BOOK_SHEET, CubeDef, EntityModelDef, PartDef, PartPose};
 /// its own skull-block renderer), so origins and poses add with no sign flip.
 #[must_use]
 pub fn book_model() -> EntityModelDef {
-    // Vanilla builds both flip pages from one `CubeListBuilder`; one `CubeDef`
+    // Vanilla builds both flip pages from one cube-list builder; one `CubeDef`
     // value cloned into both children is the same statement in Rust.
     let flip_page = CubeDef::new([0.0, -4.0, 0.0], [5.0, 8.0, 0.005], [24.0, 10.0]);
     let root = PartDef::new(PartPose::ZERO)

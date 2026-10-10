@@ -353,7 +353,7 @@ fn a_repeater_scheduled_tick_produces_the_powered_state_the_live_server_showed()
 fn only_a_powered_diode_facing_the_right_way_locks_a_repeater() {
     // The main repeater faces west, so its side positions are north (z-1) and
     // south (z+1); a diode at the south position must have facing=south to be
-    // seen, because DiodeBlock.getSignal only answers for its own FACING.
+    // seen, because diode block's get signal only answers for its own FACING.
     let cases: &[(&str, Option<StateId>, bool)] = &[
         ("nothing", None, false),
         (

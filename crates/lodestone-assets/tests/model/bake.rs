@@ -2,7 +2,7 @@
 //!
 //! The pure-geometry tests use a single 16x16 sprite atlas (so atlas UVs equal
 //! the sprite-local UVs) and full-cube elements whose baked vertices are
-//! computed by hand from vanilla's `FaceBakery` algorithm.
+//! computed by hand from vanilla's face-baker algorithm.
 
 use std::collections::{BTreeMap, HashMap};
 

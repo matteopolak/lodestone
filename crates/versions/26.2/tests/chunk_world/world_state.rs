@@ -2,7 +2,7 @@
 //! `set_time`.
 //!
 //! Clientbound golden byte vectors are hand-built from the wire specification
-//! (`ClientboundRespawnPacket` / `ClientboundSetTimePacket`, behavioural
+//! (the respawn and set-time packets, behavioural
 //! reference only), so a symmetric encode/decode bug cannot pass silently.
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
@@ -198,7 +198,7 @@ fn set_time_golden() -> Vec<u8> {
 }
 
 /// A `set_time` body with `game_time` and **no** clock updates — the shape
-/// `MinecraftServer::forceGameTimeSynchronization` broadcasts roughly once a
+/// the server's forced game-time synchronisation broadcasts roughly once a
 /// second, forever, and therefore the shape that dominates a real session.
 fn set_time_sync_only(game_time: i64) -> Vec<u8> {
     let mut bytes = game_time.to_be_bytes().to_vec();
@@ -346,7 +346,7 @@ fn an_empty_clock_map_does_not_overwrite_the_held_day_time() {
 }
 
 /// `/gamerule advanceTime false` and a paused clock both arrive as `rate = 0.0`
-/// (`ClockInstance::packNetworkState`), so a frozen sun must stay frozen even as
+/// (the clock's packed network state), so a frozen sun must stay frozen even as
 /// the world age keeps climbing.
 #[test]
 fn a_paused_clock_does_not_advance_with_the_world_age() {
@@ -428,7 +428,7 @@ fn respawn_into(holder_id: u8, dimension: &str) -> Vec<u8> {
 }
 
 /// A `registry_data` body with data-less entries, for `minecraft:world_clock`
-/// (whose real entries *are* contentless — `record WorldClock()`).
+/// (whose real entries *are* contentless — an empty record).
 fn world_clock_registry(entries: &[&str]) -> Vec<u8> {
     let mut w = Writer::default();
     w.string("minecraft:world_clock");
@@ -577,7 +577,7 @@ fn a_clock_update_for_another_dimension_does_not_re_anchor_us() {
 /// The discriminating arm for that field, and it needs its own fixture: every
 /// other respawn fixture in this file sets the byte to `0`, so an adapter that
 /// hardcoded `false` would pass all of them. `is_flat` is what a client's
-/// `voidDarknessOnsetRange()` reads — `1.0` when flat against `32.0` otherwise
+/// void darkness onset range reads — `1.0` when flat against `32.0` otherwise
 /// — so getting it stuck at one value is a whole-sky difference in a superflat
 /// world, with nothing red anywhere.
 #[test]

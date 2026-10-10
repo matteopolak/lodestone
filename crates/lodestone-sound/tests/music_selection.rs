@@ -481,7 +481,7 @@ fn a_fresh_manager_waits_exactly_starting_delay_ticks_before_the_first_track() {
 
     assert_eq!(mgr.next_song_delay(), STARTING_DELAY);
 
-    // Vanilla's own tick routine's `min(nextSongDelay, music.maxDelay())` clamps to
+    // Vanilla's own tick routine's `min(nextSongDelay, music.max_delay())` clamps to
     // max_delay (24000) which is larger, so the countdown is the starting 100. Its
     // trailing `--nextSongDelay` pre-decrements, so the 100th tick is the one that fires.
     for tick in 1..STARTING_DELAY {

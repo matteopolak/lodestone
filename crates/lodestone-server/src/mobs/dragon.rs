@@ -9,7 +9,7 @@
 //!
 //! # What is a real port and what is a named simplification
 //!
-//! * **Health, max health (`200.0`, `EnderDragon.createMobAttributes`),
+//! * **Health, max health (`200.0`, EnderDragon's create mob attributes),
 //!   phase transitions, and the crystal heal amount/interval are real
 //!   ports** — driven through [`crate::dragon::phase::PhaseManager::tick`]
 //!   and [`crate::dragon::crystal::crystal_heal_tick`] exactly as
@@ -108,7 +108,7 @@ enum DragonTickAction {
     },
 }
 
-/// `EnderDragon.createMobAttributes`'s `Attributes.MAX_HEALTH` value.
+/// EnderDragon's create mob attributes's `Attributes.MAX_HEALTH` value.
 pub const MAX_HEALTH: f32 = 200.0;
 
 /// The simplified orbit's radius, in blocks — not a vanilla constant (there
@@ -522,7 +522,7 @@ fn ticked_dragon(
         if let Some((pid, _, dist)) = nearest_player {
             let sighting = phase::TargetSighting { id: pid };
             inputs.player_near_egg = Some(sighting);
-            // `egg.distToCenterSqr(...) / 512.0` — the real formula, fed the
+            // `egg.dist_to_center_sqr(...) / 512.0` — the real formula, fed the
             // real distance computed above.
             inputs.egg_distance_scaled = dist / 512.0;
             inputs.sitting_scan_target = Some(sighting);

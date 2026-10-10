@@ -1,9 +1,9 @@
-//! The Telemetry Data screen — vanilla's `TelemetryInfoScreen`.
+//! The Telemetry Data screen — vanilla's telemetry info screen.
 //!
 //! ## Why this is a prose screen, honestly
 //!
 //! Vanilla's real screen has four parts: a title, a description, two
-//! external-link buttons, a live scrollable `TelemetryEventWidget` (the
+//! external-link buttons, a live scrollable telemetry event widget (the
 //! pending-events log), an opt-in checkbox, and two more buttons. This
 //! client **collects no telemetry at all** — there is no
 //! `TelemetryManager`, no event log, no opt-in state anywhere in the
@@ -13,7 +13,7 @@
 //! unrelated). So the honest shape here is not "the event list, empty for
 //! now" — it is **no event list**, because nothing in this client could ever
 //! populate one. Vanilla's own conditional makes this an easier call than it
-//! looks: `TelemetryInfoScreen.EXTRA_TELEMETRY_AVAILABLE` is what gates the
+//! looks: the telemetry info screen's extra telemetry available is what gates the
 //! opt-in checkbox's existence in the *real* game too
 //! (vanilla's own client entry point's extra-telemetry-available check), and this client is always on
 //! that screen's "false" branch — vanilla itself draws no checkbox then, so
@@ -47,7 +47,7 @@
 //!   tree, asked rather than restated.
 //!
 //! **Declared departure**: the description draws as its two `\n`-separated
-//! lines, each unwrapped, rather than vanilla's `MultiLineTextWidget`, which
+//! lines, each unwrapped, rather than vanilla's multi line text widget, which
 //! additionally soft-wraps each paragraph at narrow widths. Both lines fit
 //! comfortably inside `MIN_SCALED_WIDTH` in `en_us`, so the two are visually
 //! identical down to the floor this client supports; a much longer
@@ -59,13 +59,13 @@
 //! - **Wired**: reaching the screen (the root grid's "Telemetry Data..."
 //!   button is now live) and back (Escape/Done → Root), and — genuinely,
 //!   not just present — **Give Feedback**: opens the real vanilla URL
-//!   (`CommonLinks.RELEASE_FEEDBACK`, transcribed byte-for-byte) in the
+//!   (the common links's release feedback, transcribed byte-for-byte) in the
 //!   system browser through [`super::accounts::open_in_browser`], the same
 //!   best-effort, no-new-dependency OS handoff the account screen's
 //!   device-code sign-in already uses. It needs no telemetry state to
 //!   exist — a link is not a data path.
 //! - **Deliberately dropped, not a gap**: vanilla's other header button,
-//!   **Privacy Statement**, linked `CommonLinks.PRIVACY_STATEMENT`
+//!   **Privacy Statement**, linked common links's privacy statement
 //!   (`go.microsoft.com/fwlink/?LinkId=521839`) — Microsoft's own general
 //!   privacy statement, disclosed here only because vanilla's telemetry
 //!   pipeline sends data covered by it. This client has no telemetry
@@ -75,7 +75,7 @@
 //!   (non-existent) data collection were governed by Microsoft's policy.
 //!   Dropped along with its URL constant rather than kept as dead weight.
 //! - **Present-and-inactive**: **View My Data**
-//!   (`minecraft.getTelemetryManager().getLogDirectory()`) — there is no
+//!   (get telemetry manager's get log directory) — there is no
 //!   telemetry manager and so no directory to open.
 //! - **Correctly absent, not decorative**: the opt-in checkbox and the
 //!   event list — see the module docs above for why neither is a gap.
@@ -104,7 +104,7 @@ use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
 use super::widget::{LayoutElement, Widget};
 use super::layout::{self, HeaderAndFooterLayout, LayoutSettings, LinearLayout};
 
-/// `CommonLinks.RELEASE_FEEDBACK` — transcribed verbatim.
+/// The common links's release feedback — transcribed verbatim.
 pub const RELEASE_FEEDBACK_URL: &str = "https://aka.ms/javafeedback?ref=game";
 
 /// Lodestone's own description of its (lack of) telemetry — not a

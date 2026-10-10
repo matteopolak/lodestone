@@ -754,7 +754,7 @@ impl PlayerVitals {
             self.health = (self.health + heal).min(self.max_health);
         }
         if let Some(starve) = out.starve {
-            // `hurtServer(damageSources().starve(), 1.0F)`. `minecraft:starve` is
+            // `hurtServer(damage_sources().starve(), 1.0F)`. `minecraft:starve` is
             // `bypasses_armor`-tagged, so the raw subtraction and the reduction
             // pipeline agree — the same premise `DROWN_DAMAGE` rests on, and pinned
             // by `starve_bypasses_armor_like_drowning_does` below.

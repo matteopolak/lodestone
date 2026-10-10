@@ -175,7 +175,7 @@ async fn a_payload_on_a_registered_channel_reaches_the_servers_handler() {
 /// **The negative control for the issue's second requirement.** A payload on a
 /// channel the server registered no interest in must be dropped — not crash
 /// the connection, not surface an error, and not reach any handler — exactly
-/// vanilla's `DiscardedPayload` fallback. The assertion of absence is paired
+/// the discarded-payload fallback. The assertion of absence is paired
 /// with a control proving the detector fires: the *same* handler then receives
 /// a payload on the registered channel, so an empty record is an empty record
 /// because the channel was dropped, not because the handler never fires.

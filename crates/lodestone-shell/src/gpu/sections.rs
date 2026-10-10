@@ -351,7 +351,7 @@ impl RenderState {
         if let Some(model) = self.model.as_mut() {
             // A genuine unload: forget this coord was ever seen, so a later
             // re-arrival (walking back into range) fades in again exactly
-            // like a real vanilla `RenderSection` slot recycled onto a
+            // like a real vanilla render section slot recycled onto a
             // different chunk address — see `ModelRenderer::seen`'s doc.
             model.seen.remove(key);
             if let Some(old) = model.sections.remove(key) {

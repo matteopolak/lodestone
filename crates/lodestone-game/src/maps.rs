@@ -2,7 +2,7 @@
 //!
 //! ## What it is
 //!
-//! The client-side mirror of vanilla's `MapItemSavedData`: for every map id the
+//! The client-side mirror of vanilla's map saved data: for every map id the
 //! server has told us about, a 128×128 grid of map-palette colour indices plus
 //! the icons drawn over it. [`MapStore::apply`] folds
 //! [`ClientEvent::MapItemData`] into it and nothing else.
@@ -22,7 +22,7 @@
 //!
 //! ## How to change it
 //!
-//! Colour indices are raw vanilla `MapColor` bytes (`index * 4 + shade`); this
+//! Colour indices are raw vanilla map-colour bytes (`index * 4 + shade`); this
 //! crate deliberately does not resolve them to RGB, because the palette is
 //! presentation and belongs to the renderer. If you need a lookup, put it beside
 //! the drawing code.
@@ -31,7 +31,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use lodestone_model::event::{ClientEvent, MapDecoration, MapPatch};
 
-/// Side length of a map's colour grid, vanilla's `MapItemSavedData` 128×128.
+/// Side length of a map's colour grid, vanilla's 128×128.
 pub const MAP_SIZE: usize = 128;
 
 /// A persisted filled-map identity.

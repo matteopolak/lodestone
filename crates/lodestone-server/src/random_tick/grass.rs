@@ -32,7 +32,7 @@ pub enum GrassOutcome {
 /// including `minecraft:short_grass`, which vanilla's own vegetation step
 /// places on top of grass blocks. The predicate below preserves that distinction.
 ///
-/// **`can_stay_alive` still doubles as the `getMaxLocalRawBrightness(pos.above())
+/// **`can_stay_alive` still doubles as the `get max local raw brightness(pos.above())
 /// >= 9` gate**, which is a *different* simplification from the one removed
 /// and remains: this crate's random-tick driver holds a `ChunkColumn`, not a light
 /// map, so the exact brightness is unavailable rather than approximated. The

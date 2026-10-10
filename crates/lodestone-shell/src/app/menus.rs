@@ -901,7 +901,7 @@ impl WindowApp {
                 // completes — `ChatInput::tab` offers nothing rather than an
                 // empty list.
                 //
-                // `shift_held` is `event.hasShiftDown()`: Shift+Tab walks the
+                // `shift_held` is event's has shift down: Shift+Tab walks the
                 // candidate list backwards.
                 KeyCode::Tab => {
                     let tree = self.command_tree();
@@ -1064,7 +1064,7 @@ impl WindowApp {
     /// it echoes the server's own "unknown command" reply; a clipboard write
     /// touches nothing but the OS clipboard). `open_url`/`open_file` are the
     /// opposite: vanilla itself gates `open_url` behind a confirmation
-    /// screen (`ConfirmLinkScreen`) precisely because a chat message is
+    /// screen (the confirm link screen) precisely because a chat message is
     /// server-supplied, untrusted content, so `open_url` enters the existing
     /// confirmation overlay and opens only after an explicit Yes. `open_file`
     /// remains unsupported and never receives an OS handoff.

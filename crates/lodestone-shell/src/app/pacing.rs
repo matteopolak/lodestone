@@ -272,7 +272,7 @@ impl FramePacer {
     }
 
     /// Record real key/mouse input — vanilla's `onInputReceived`, called from
-    /// `KeyboardHandler`/`MouseHandler`, never from raw pointer motion. Resets
+    /// The keyboard handler/mouse handler, never from raw pointer motion. Resets
     /// the AFK clock [`effective_target_fps`] reads through [`Self::idle_secs`].
     pub(crate) fn record_input(&mut self, now: Instant) {
         self.last_input = now;

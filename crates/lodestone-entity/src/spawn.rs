@@ -123,7 +123,7 @@ impl MobCategory {
 pub const MOB_CAP_CHUNK_AREA: i32 = 17 * 17;
 
 /// The global per-category mob cap for a given number of spawnable chunks,
-/// matching `NaturalSpawner.canSpawnForCategoryGlobal`:
+/// matching NaturalSpawner's can spawn for category global:
 /// `maxInstancesPerChunk * spawnableChunks / 289`.
 ///
 /// Returns `None` for an uncapped category (`Misc`).

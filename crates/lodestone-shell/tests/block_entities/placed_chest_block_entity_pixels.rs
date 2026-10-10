@@ -560,10 +560,10 @@ fn a_chest_set_by_a_block_update_reaches_pixels_and_stops_when_removed() {
 /// The state it draws is the one the **resolver** picked, not one this file chose:
 /// [`lodestone::sim::predicted_placement_state`] is the same call the click makes.
 /// That matters because "a chest" is not one state — `minecraft:chest` has 24, and
-/// the *lowest id* among them is a **waterlogged** chest (`BooleanProperty` orders
+/// the *lowest id* among them is a **waterlogged** chest (the boolean property orders
 /// its values `{true, false}`), which would render as a plausible chest while being
 /// the wrong block. So the properties of the resolved state are asserted against
-/// `ChestBlock.getStateForPlacement` before any pixel is measured, and the frame is
+/// The chest block's get state for placement before any pixel is measured, and the frame is
 /// then required to be identical to the same state delivered by `BLOCK_UPDATE` —
 /// which proves the two write paths agree, the resolution itself being pinned to
 /// `blocks.json` by `sim.rs`'s `placement_states_resolve_to_the_jar_oracle`.
@@ -737,9 +737,9 @@ fn a_locally_predicted_chest_reaches_pixels_with_no_server_packet() {
 /// a chest in empty air.
 ///
 /// That fix asks what happens when the server disagrees, and the answer is that no new
-/// mechanism is needed: vanilla's server sends a `ClientboundBlockUpdatePacket` for
+/// mechanism is needed: vanilla's server sends a block-update packet for
 /// **both** the clicked position and the adjacent one after *every* `use_item_on`,
-/// whatever it decided (`ServerGamePacketListenerImpl`'s own decompiled source) — so the
+/// whatever it decided (the server game packet listener impl's own decompiled source) — so the
 /// predicted cell is always overwritten within one round trip, and since that fix that
 /// write calls `sync_block_entity`, which removes the record.
 ///

@@ -6,11 +6,11 @@ use super::*;
 /// body-yaw field, run locally because nothing ever sends it.
 ///
 /// A player's own `Rotation`/`HeadYaw` arrive over the wire **equal**:
-/// vanilla's own entity-changes broadcast packs the entity's own yaw accessor
+/// vanilla's entity-changes broadcast packs the entity's yaw accessor
 /// as the move/rotation packet's angle and its own head-yaw accessor
 /// as the head packet's, and vanilla's own player AI-step forces `this.yHeadRot =
-/// this.getYRot()` every tick — a player has no second, independently-aimed
-/// value the way a `Mob`'s `LookControl` gives its head. So feeding the
+/// this.get_y_rot()` every tick — a player has no second, independently-aimed
+/// value the way a `Mob`'s look control gives its head. So feeding the
 /// reported [`Rotation`] yaw straight into [`EntityFacts::yaw`], which is
 /// exactly right for a mob (whose body and AI-aimed head genuinely diverge
 /// on the wire already), makes a *player's* body and head numerically
@@ -18,7 +18,7 @@ use super::*;
 /// report this component exists to fix.
 ///
 /// Real vanilla clients never receive a body yaw for another player either:
-/// every receiving client's own `RemotePlayer` puppet runs
+/// every receiving client's own remote player puppet runs
 /// vanilla's own living-entity tick's generic head-turn lag **locally**, deriving
 /// its rendered body yaw from the received look yaw and that puppet's own
 /// per-tick movement. [`tick_remote_body_yaw`] is that same simulation,
@@ -52,7 +52,7 @@ pub struct BodyYawState {
 /// lazy-insert half) rather than one `Option<&mut BodyYawState>` query,
 /// because a fresh player needs [`Commands`] to gain the component at all —
 /// initialised to its own reported yaw, matching vanilla's spawn-time
-/// `this.yBodyRot = this.getYRot()`, so a fresh join starts rigid for
+/// `this.yBodyRot = this.get_y_rot()`, so a fresh join starts rigid for
 /// exactly the one tick nothing has told it otherwise yet, not eased in from
 /// a guessed value.
 ///

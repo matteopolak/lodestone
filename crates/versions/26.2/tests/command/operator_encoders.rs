@@ -8,7 +8,7 @@
 //! (`server_protocol.rs` routes them to `ServerBound::Ignored`), so
 //! `decode(encode(x)) == x` is not merely weak evidence here — it is not
 //! available. Every `expected` slice below was written out from the Java
-//! `write` method or `StreamCodec` composition, field by field, which is
+//! write method or stream-codec composition, field by field, which is
 //! `CLAUDE.md`'s "hand-decoded spec example".
 //!
 //! # The three that a transliterating encoder gets wrong
@@ -18,7 +18,7 @@
 //! | packet | trap |
 //! |---|---|
 //! | `set_structure_block` | offset/size are six **signed bytes**, not two `Vec3i`s of VarInts, and the flags byte is **last**, after `seed` |
-//! | `set_jigsaw_block` | `joint` is `getSerializedName()`, a **string** — every other enum field in the family is a VarInt ordinal |
+//! | `set_jigsaw_block` | `joint` is get serialized name, a **string** — every other enum field in the family is a VarInt ordinal |
 //! | `custom_click_action` | **double-framed**: an outer VarInt *byte* length wrapping the optional-NBT body |
 //!
 //! Each has an assertion that fails under the plausible wrong encoding, not
@@ -47,7 +47,7 @@ fn key(name: &str) -> ResourceKey {
 fn query_block_entity_tag_is_transaction_then_packed_pos() {
     let (id, body) = encode(&ClientAction::QueryBlockEntityTag {
         transaction_id: 7,
-        // BlockPos::asLong packs x:26 | y:12 | z:26. (1, 2, 3) is a value the
+        // BlockPos's as long packs x:26 | y:12 | z:26. (1, 2, 3) is a value the
         // pack helper is already independently gated on elsewhere, so this
         // asserts only the *framing* around it.
         pos: lodestone_model::BlockPos { x: 1, y: 2, z: 3 },
@@ -70,7 +70,7 @@ fn query_entity_tag_is_two_var_ints() {
 
 #[test]
 fn change_difficulty_writes_the_registry_id_not_the_declaration_index_of_our_enum() {
-    // `vanilla's own difficulty's own get id()` is PEACEFUL=0, EASY=1, NORMAL=2, HARD=3 — the same
+    // The difficulty id is PEACEFUL=0, EASY=1, NORMAL=2, HARD=3 — the same
     // order as ours, which is exactly why this needs asserting rather than
     // assuming: if our enum is ever reordered the ids must not move with it.
     for (difficulty, expected) in [
@@ -163,8 +163,8 @@ fn set_structure_block_writes_signed_bytes_and_puts_flags_last() {
 
     let expected: Vec<u8> = [
         &0i64.to_be_bytes()[..],       // packed pos
-        &[0x02],                       // UpdateType::LOAD_AREA
-        &[0x01],                       // StructureMode::LOAD
+        &[0x02],                       // update type LOAD_AREA
+        &[0x01],                       // structure mode LOAD
         &[0x01, b't'],                 // name
         &[0xFDu8, 0x04, 0xFB],         // offset: -3, 4, -5 as *bytes*
         &[0x06, 0x07, 0x08],           // size

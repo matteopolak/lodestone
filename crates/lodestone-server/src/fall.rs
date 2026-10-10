@@ -270,7 +270,7 @@ impl FallSample {
 /// step) adds to the running distance, and landing (`on_ground`) both
 /// computes damage from whatever distance is outstanding and resets it —
 /// unconditionally, whether or not it produced positive damage, exactly like
-/// vanilla's `resetFallDistance()` sitting outside the `dmg > 0` check.
+/// vanilla's reset fall distance sitting outside the `dmg > 0` check.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FallTracker {
     fall_distance: f64,
@@ -342,7 +342,7 @@ impl FallTracker {
         damage
     }
 
-    /// Vanilla's `resetFallDistance()` proper: zero the accumulated distance and
+    /// Vanilla's reset fall distance proper: zero the accumulated distance and
     /// **keep** the position reference.
     ///
     /// The distinction from [`reset`](Self::reset) is not cosmetic. `cancel` is
@@ -450,7 +450,7 @@ mod tests {
 
     /// Landing resets fall distance to zero even when it produced no damage
     /// (a sub-safe-distance fall) — matching vanilla's unconditional
-    /// `resetFallDistance()` outside the `dmg > 0` gate. This is the control
+    /// reset fall distance outside the `dmg > 0` gate. This is the control
     /// that proves the reset is unconditional: a wrong implementation that
     /// only reset on `dmg > 0` would leave residual distance here.
     #[test]
@@ -601,7 +601,7 @@ mod tests {
     }
 
     /// Water suppresses accumulation *while submerged*, so descending inside water
-    /// never builds distance at all — vanilla's `!isInWater()` guard.
+    /// never builds distance at all — vanilla's `!is_in_water()` guard.
     ///
     /// Distinct from the cancellation above and worth its own gate: a tracker that
     /// only cancelled on *entering* water would still charge a player who sank
@@ -625,7 +625,7 @@ mod tests {
         assert_eq!(out, None, "touching the seabed must not hurt");
     }
 
-    /// **Lava does not cancel.** Vanilla's guard is `isInWater()` and
+    /// **Lava does not cancel.** Vanilla's guard is is in water and
     /// The real fluid-interaction-update rule resets only when in water.
     ///
     /// The control that pins the *narrowness* of the water rule: an

@@ -1,6 +1,6 @@
 //! [`PlayerPreview`] — the GPU half of the inventory avatar: the player rig
 //! drawn into the inventory panel's recess, head tracking the cursor
-//! (vanilla's `InventoryScreen.extractEntityInInventoryFollowsMouse`).
+//! (vanilla's inventory screen's extract entity in inventory follows mouse).
 //!
 //! ## What it is
 //!
@@ -76,13 +76,13 @@ use super::layout::Rect;
 /// the dimensions table is keyed by network type id, which this module (which
 /// never sees a packet) has no honest way to obtain. `EntityType.PLAYER` is
 /// `0.6 × 1.8` and has been since 1.0; a crouching or swimming player has a
-/// shorter box, but vanilla's inventory screen never shows one — `InventoryScreen`
+/// shorter box, but vanilla's inventory screen never shows one — the inventory screen
 /// is unreachable while `Pose` is anything but `STANDING`, because opening the
 /// inventory releases the crouch.
 const PLAYER_BB_HEIGHT: f32 = 1.8;
 
 /// The rig to draw when nothing declares one — vanilla's own fallback, since
-/// `PlayerModelType::byLegacyServicesName` resolves every absent or
+/// PlayerModelType's by legacy services name resolves every absent or
 /// unrecognised declaration to `WIDE` (see
 /// [`lodestone_assets::PlayerModelType`]).
 ///
@@ -98,7 +98,7 @@ const DEFAULT_MODEL: PlayerModelType = PlayerModelType::Wide;
 const CREATIVE_RECT_OFFSET: [f32; 2] = [73.0, 6.0];
 /// `105 - 73` by `49 - 6`.
 const CREATIVE_RECT_SIZE: [f32; 2] = [32.0, 43.0];
-/// The creative call's `scale` argument, against `InventoryScreen`'s 30.
+/// The creative call's `scale` argument, against the inventory screen's 30.
 const CREATIVE_SIZE: f32 = 20.0;
 
 /// The avatar's rect and the cursor that aims it, in **logical GUI pixels** —
@@ -118,7 +118,7 @@ pub struct PlayerAvatar {
     pub mouse: [f32; 2],
     /// The **live pose** to draw over, before the two look angles are folded in.
     ///
-    /// Vanilla poses the *live* render state — `InventoryScreen` hands
+    /// Vanilla poses the *live* render state — the inventory screen hands
     /// `extractEntityInInventoryFollowsMouse` the real player entity, so a
     /// sprinting player's inventory avatar really does have its arms mid-swing.
     /// [`AnimInput::REST`] is the honest default for a caller with no `Sim`
@@ -138,8 +138,8 @@ pub struct PlayerAvatar {
     /// [`rect`](Self::rect).
     ///
     /// Carried rather than taken from [`INVENTORY_SIZE`] at draw time because the two
-    /// screens that show an avatar do **not** agree on it: `InventoryScreen` passes
-    /// `30`, and `CreativeModeInventoryScreen`'s inventory tab passes `20` into a
+    /// screens that show an avatar do **not** agree on it: the inventory screen passes
+    /// `30`, and the creative mode inventory screen's inventory tab passes `20` into a
     /// smaller recess. Reading the constant would draw the creative avatar at the
     /// survival size and it would overflow its well.
     pub size: f32,
@@ -171,9 +171,9 @@ impl PlayerAvatar {
 
     /// The avatar rect the **creative** screen's inventory tab uses.
     ///
-    /// `CreativeModeInventoryScreen.extractBackground`'s own call, on the
+    /// The creative mode inventory screen's extract background's own call, on the
     /// `Type.INVENTORY` branch only:
-    /// `extractEntityInInventoryFollowsMouse(g, leftPos + 73, topPos + 6, leftPos + 105,
+    /// `extract entity in inventory follows mouse(g, leftPos + 73, topPos + 6, leftPos + 105,
     /// topPos + 49, 20, 0.0625F, mouseX, mouseY, player)`. So a 32×43 recess at
     /// `(+73, +6)` at scale 20 — a different rect *and* a different scale from
     /// [`new`](Self::new)'s 49×70 at `(+26, +8)`, scale 30. Neither number is shared,
@@ -296,8 +296,8 @@ impl PlayerPreview {
 
         // Fog disabled, which also leaves the sky-darken lane at its negative
         // sentinel — read back as `1.0`. That is vanilla:
-        // `GuiEntityRenderer.renderToTexture` sets up `Lighting.Entry.ENTITY_IN_UI`
-        // and `GuiGraphicsExtractor.entity` forces `lightCoords = 15728880`
+        // The gui entity renderer's render to texture sets up `Lighting.Entry.ENTITY_IN_UI`
+        // and the gui graphics extractor's entity forces `lightCoords = 15728880`
         // (full bright), so the inventory avatar does **not** dim at night the way
         // the mob standing next to you does.
         let cam_buffer = entity_camera_buffer(
@@ -684,7 +684,7 @@ fn load_skin(model: &str) -> Option<lodestone_assets::Image> {
     None
 }
 
-/// Resolve one of `DefaultPlayerSkin`'s exact sheet references through the
+/// Resolve one of the default player skin's exact sheet references through the
 /// active pack stack. Unlike `load_skin`, this preserves the UUID-selected
 /// identity (`ari`, `efe`, …) instead of collapsing it to generic Steve/Alex.
 fn load_skin_reference(reference: &str) -> Option<lodestone_assets::Image> {
@@ -873,7 +873,7 @@ mod tests {
     }
 
     /// Project a mesh point through a `mesh → clip` matrix back to logical GUI
-    /// pixels, so failures print numbers comparable with `InventoryScreen`'s own.
+    /// pixels, so failures print numbers comparable with the inventory screen's own.
     fn to_gui_px(m: Mat4, p: Vec3) -> [f32; 2] {
         let c = m * p.extend(1.0);
         let ndc = c.truncate() / c.w;
@@ -1196,7 +1196,7 @@ mod tests {
 
         let rest = at(AnimInput::REST);
         // **`0.5`, not `1.0`.** `attack_anim` is the *phase* of the swing and
-        // `HumanoidModel.setupAttackAnimation` drives it through sines, so the
+        // The humanoid model's setup attack animation drives it through sines, so the
         // endpoint `1.0` is the rest pose again — the first version of this test
         // used `1.0`, measured a delta of `1.7e-8`, and read as "the pose is not
         // reaching the draw" when the pose was arriving perfectly and the value

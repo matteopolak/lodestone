@@ -114,7 +114,7 @@ fn the_spawn_wandering_traders_rule_off_spawns_nothing() {
 }
 
 /// A world with no connected players must decline quietly — vanilla's
-/// `getRandomPlayer() == null` arm — rather than panic on an empty player
+/// `get_random_player() == null` arm — rather than panic on an empty player
 /// list or spawn a trader anchored to nothing.
 #[test]
 fn no_players_spawns_nothing_and_does_not_panic() {
@@ -148,8 +148,8 @@ fn a_call_before_either_countdown_elapses_spawns_nothing() {
 }
 
 /// A declined roll must leave the climbing `spawn_chance` in place for next
-/// time (vanilla's `data.setSpawnChance(newSpawnChance)`, unconditional,
-/// versus the `setSpawnChance(25)` reset that only follows an actual spawn).
+/// time (vanilla's data's set spawn chance, unconditional,
+/// versus the set spawn chance reset that only follows an actual spawn).
 ///
 /// One continuous `trader_rng` stream drives both cycles (never reseeded
 /// between them, unlike every other gate here), so the second cycle's draw

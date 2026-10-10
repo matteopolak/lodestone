@@ -98,7 +98,7 @@ fn item_geometry_covers_every_model_item() {
 
     // Two populations now: ~752 items whose icon is a real 3-D model, plus the
     // flat `builtin/generated` majority, extruded into vanilla's thin slab by
-    // `ItemModelGenerator`. See `tests/sprite_drop_pixels.rs` for why the second
+    // the item model generator. See `tests/sprite_drop_pixels.rs` for why the second
     // group has to exist at all — without it every tool, ingot, gem and food drew
     // zero pixels when dropped.
     assert!(

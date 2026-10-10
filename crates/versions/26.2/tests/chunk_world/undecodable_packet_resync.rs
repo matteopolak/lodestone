@@ -252,14 +252,14 @@ fn big_undecodable_advancements(component_name: &str, filler: usize) -> Vec<u8> 
     w.into_vec()
 }
 
-/// Writes one `AdvancementHolder`.
+/// Writes one advancement holder.
 ///
-/// `DisplayInfo`'s wire order is the packet's, not the datapack schema's: title,
+/// The display info's wire order is the packet's, not the datapack schema's: title,
 /// description, icon, frame ordinal, then a **raw big-endian `int`** flag word
 /// (`serializeToNetwork` uses `writeInt`, not a byte), then the background
 /// identifier only when bit 0 is set, then x and y as floats. The icon is an
-/// `ItemStackTemplate`, whose fields are item-then-count — the reverse of
-/// `vanilla's own item stack's own optional stream codec`.
+/// an item-stack template, whose fields are item-then-count — the reverse of
+/// the optional item-stack stream codec.
 fn write_advancement(w: &mut Writer, id: &str, title: &str, icon_component: Option<&str>) {
     w.string(id);
     w.bool(false); // no parent

@@ -4,7 +4,7 @@ use super::*;
 pub(super) const CHAT_TOOLTIP_PAD: f32 = 3.0;
 /// Max wrap width for [`ChatHoverTooltip`]'s body — vanilla's tooltip has
 /// both an explicit per-component line break and its own wrap width
-/// (`ClientTooltipComponent`/`Screen.getTooltipFromItem`), and a hover body
+/// (the client tooltip component/Screen's get tooltip from item), and a hover body
 /// that never breaks would run off the edge of the canvas for anything
 /// longer than a couple of words.
 pub(super) const CHAT_TOOLTIP_MAX_WIDTH: f32 = 200.0;
@@ -171,7 +171,7 @@ pub(super) fn chat_hover_tooltip_layout(
 /// Draws [`HudFrame::chat_hover_tooltip`], vanilla's `GuiGraphics.
 /// renderTooltip` narrowed to placement and text — the same deliberate
 /// cosmetic narrowing [`SuggestionLayer::Tooltip`] above already documents
-/// for the identical shape (`TooltipRenderUtil`'s border gradient is not
+/// for the identical shape (the tooltip render util's border gradient is not
 /// modelled; this is a flat panel).
 pub(super) fn draw_chat_hover_tooltip(b: &mut Builder, tooltip: &ChatHoverTooltip) {
     const LINE_H: f32 = font::GLYPH_H as f32 + 1.0;

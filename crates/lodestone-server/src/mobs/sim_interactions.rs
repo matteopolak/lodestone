@@ -92,7 +92,7 @@ impl<'w> MobSim<'w> {
     /// comment for why, and for what that costs a real client (no visible
     /// knot to render or right-click).
     ///
-    /// **Simplified from vanilla's own scan**: vanilla's own "bind player
+    /// **Simplified from vanilla's scan**: vanilla's "bind player
     /// mobs" call only
     /// re-parents mobs within a 32-block radius of `fence_pos`; this moves
     /// every mob leashed to `holder` regardless of distance from the fence.
@@ -117,7 +117,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// Spawns a wandering trader at `pos` with 1–2 leashed llama escorts —
-    /// the entity-spawn half of vanilla's own wandering-trader spawner's own
+    /// the entity-spawn half of vanilla's wandering-trader spawner's
     /// spawn call.
     /// Returns the trader's id and every llama actually spawned.
     ///
@@ -283,7 +283,7 @@ impl<'w> MobSim<'w> {
         // another case inside it.
         //
         // See `InteractOutcome::AllayDuplicated`'s own doc for the disclosed
-        // `isDancing()` substitution the duplication arm makes.
+        // is dancing substitution the duplication arm makes.
         //
         // **Not modelled here**: taking the item back (an empty-hand
         // right-click on a carrying allay).
@@ -596,8 +596,8 @@ impl<'w> MobSim<'w> {
             Some(mob) => mob,
             None => return InteractOutcome::Pass,
         };
-        // `if (temper > 0 && (itemUsed || !isTamed()) && getTemper() <
-        // getMaxTemper())`. `hay_block` has `temper == 0` and so raises nothing,
+        // `if (temper > 0 && (itemUsed || !is_tamed()) && get_temper() <
+        // get max temper)`. `hay_block` has `temper == 0` and so raises nothing,
         // however much of it you feed — the trap `horse_temper_gain` documents.
         if gain > 0 && mob.temper() < max_temper {
             let raised = (mob.temper() + gain).clamp(0, max_temper);
@@ -710,7 +710,7 @@ impl<'w> MobSim<'w> {
     /// # The one disclosed deviation, and why it is not silent
     ///
     /// Vanilla reaches this roll from a **goal** that runs while a player is a
-    /// passenger, gated on its own `random.nextInt(adjustedTickDelay(50)) == 0`
+    /// passenger, gated on its own `random.nextInt(adjusted_tick_delay(50)) == 0`
     /// — so a rider gets roughly one attempt every 25 ticks until the horse
     /// yields. This server has no passenger model at all, so there is nothing to
     /// stay mounted on and no goal to tick. The attempt is therefore made **once

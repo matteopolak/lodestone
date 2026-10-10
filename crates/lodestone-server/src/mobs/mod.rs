@@ -1894,7 +1894,7 @@ pub struct SimMob<'w> {
     /// toggles it is a host event, not a goal.
     ordered_to_sit: bool,
     /// Vanilla's own horse-family temper field — how close a horse family member is to accepting
-    /// a rider, `0..=getMaxTemper()`. Raised by feeding
+    /// a rider, `0..=get_max_temper()`. Raised by feeding
     /// ([`horse_temper_gain`]); read by the tame roll
     /// ([`MobSim::attempt_horse_tame`]).
     ///
@@ -3135,7 +3135,7 @@ pub struct ReinforcementCall {
     pub entity_type: ResourceKey,
     /// Who the reinforcement should target on arrival — the caller's own
     /// current attack target if it has one, else the attacker that just hit
-    /// it (vanilla's own hurt-handler's own "no live target" fallback).
+    /// it (vanilla's hurt-handler's "no live target" fallback).
     pub target_id: i32,
 }
 
@@ -3192,7 +3192,7 @@ pub const ELDER_GUARDIAN_EFFECT_AMPLIFIER: u32 = 2;
 ///
 /// For each returned identity, whose gamemode the driver — not this sim,
 /// which tracks no gamemode — must confirm is survival (or adventure;
-/// vanilla's own "is survival" check's own definition) before doing either of the
+/// vanilla's "is survival" check's definition) before doing either of the
 /// following, per vanilla's own "add effect to players around" helper:
 ///
 /// * Call `ActiveEffects::apply("minecraft:mining_fatigue",
@@ -3451,8 +3451,8 @@ fn push_impulse(p_i: Vec3, p_j: Vec3, touch: f64) -> Option<(Vec3, Vec3)> {
 /// to an axis-aligned box of `(horizontal, vertical)` half-extents.
 ///
 /// This is vanilla's two-step shape, kept as two steps on purpose: every
-/// perception search in `ai/goal/` filters by a *box* (`getEntitiesOfClass(…,
-/// getBoundingBox().inflate(dx, dy, dz))`) and only then picks the nearest by
+/// perception search in `ai/goal/` filters by a *box* (`get entities of class(…,
+/// get bounding box.inflate(dx, dy, dz))`) and only then picks the nearest by
 /// squared distance (`getNearestEntity`). Collapsing it into a single radius
 /// test would be wrong in the corners — most visibly for
 /// [`AVOID_RANGE_Y`](AVOID_RANGE_Y), where vanilla's vertical extent is a flat
@@ -3485,7 +3485,7 @@ fn nearest_by<T>(
 /// A `nearest_by`-shaped query that cannot reuse [`nearest_by`] itself: the
 /// distance test there is against the *same* field the function returns, but
 /// here the distance test is against a candidate's **position** (vanilla's
-/// `getBoundingBox().inflate(16.0)`) while the value a follower actually wants
+/// get bounding box's get bounding box) while the value a follower actually wants
 /// back is that candidate's **patrol target** — a different field. See
 /// [`MobController::patrol_group_target`](lodestone_entity::ai::MobController::patrol_group_target)
 /// for why a follower needs this at all rather than running its own census.

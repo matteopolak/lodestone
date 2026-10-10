@@ -10,7 +10,7 @@
 //!
 //! Vanilla splits its own end-portal and end-gateway render pipelines into two
 //! pipelines sharing one shader snippet, differing only in a
-//! `withShaderDefine("PORTAL_LAYERS", 15 | 16)` — a compile-time unroll
+//! with shader define — a compile-time unroll
 //! count, not a behavioural difference `wgpu` needs two pipeline objects to
 //! express. `end_portal.wgsl` instead always runs a statically-bounded
 //! 16-iteration loop and masks the 16th term's contribution by a per-vertex
@@ -32,7 +32,7 @@
 //!
 //! The real jar's end-portal render-pipeline snippet sets no explicit cull state (vanilla
 //! defaults to back-face culling), but this pass disables culling outright.
-//! [`lodestone_render::end_portal`]'s `FaceInfo`-derived winding was
+//! [`lodestone_render::end_portal`]'s face info-derived winding was
 //! transcribed rather than independently re-derived, and getting a
 //! direction's four corners backwards would make that face's triangles wind
 //! the wrong way — with back-face culling on, that reads as "this face

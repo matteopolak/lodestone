@@ -691,7 +691,7 @@ fn bundle_try_insert(contents: &mut Vec<ItemStack>, adding: &ItemStack) -> u32 {
     amount
 }
 
-/// `BundleContents.Mutable::removeOne` — pops the selected index (or the
+/// The bundle contents's mutable::remove_one — pops the selected index (or the
 /// front item, `0`, when nothing is validly selected — vanilla's
 /// `indexIsOutsideAllowedBounds`).
 fn bundle_remove_one(contents: &mut Vec<ItemStack>, selected: Option<usize>) -> Option<ItemStack> {
@@ -1449,7 +1449,7 @@ fn quick_move(
             return;
         }
         // Vanilla's `while`: the grid refilled the result with the same item, so
-        // craft again. `ItemStack.isSameItem` — item type only, not
+        // craft again. ItemStack's is same item — item type only, not
         // `isSameItemSameComponents` (see [`same_item`]'s own doc for why the
         // distinction is load-bearing here).
         match slots[index].as_ref() {
@@ -1459,7 +1459,7 @@ fn quick_move(
     }
 }
 
-/// `moveItemStackTo(stack, start, end, backwards)` — merge pass then place pass.
+/// move item stack to — merge pass then place pass.
 #[allow(clippy::too_many_arguments)]
 fn move_stack_to(
     layout: &MenuLayout,
@@ -2148,7 +2148,7 @@ mod tests {
     }
 
     /// Right-click-on-empty-cursor against a bundle pops the front item —
-    /// `BundleContents.Mutable::removeOne`'s `-1`/no-selection fallback.
+    /// The bundle contents's mutable::remove_one's `-1`/no-selection fallback.
     #[test]
     fn right_click_extracts_the_front_item_with_no_selection() {
         let layout = MenuLayout::container(27);

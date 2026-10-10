@@ -312,7 +312,7 @@ async fn registry_data_from_a_real_server_decodes_and_matches_mojangs_own_data()
 
     // --- The registry set itself ------------------------------------------
     //
-    // 30 synchronized registries in 26.2 (`RegistryDataLoader::SYNCHRONIZED_REGISTRIES`).
+    // 30 synchronized registries in 26.2.
     // Asserting a floor rather than the exact number: a data pack can add a
     // registry, and the count is not what this gate is about.
     println!("captured {} registries", captured.len());
@@ -402,7 +402,7 @@ async fn registry_data_from_a_real_server_decodes_and_matches_mojangs_own_data()
 /// Mojang's own biome JSONs.
 ///
 /// Joins the same oracle as the gate above and reads
-/// `minecraft:worldgen/biome` — **not** `minecraft:biome`; `vanilla's own registries's own biome`'s
+/// `minecraft:worldgen/biome` — **not** `minecraft:biome`; the biome registry's
 /// key carries the `worldgen/` prefix, and a lookup by the short name silently
 /// finds nothing.
 ///
@@ -698,7 +698,7 @@ async fn biome_climates_from_a_real_server_match_mojangs_own_biome_files() {
     // running can still sanity-check this gate's shape: desert has no
     // precipitation and is warm; frozen_peaks has precipitation and is cold
     // enough to snow. Both read straight from the same JSON files above.
-    // `vanilla's own biome's own warm enough to rain`'s threshold (`vanilla's own biome's own java`), inlined
+    // The biome warm-enough-to-rain threshold, inlined
     // rather than a cross-crate import: this protocol crate must not depend on
     // `lodestone-render` for one constant, and `lodestone_render::
     // WARM_ENOUGH_TO_RAIN` already pins the same `0.15` from the same source.
@@ -724,7 +724,7 @@ async fn biome_climates_from_a_real_server_match_mojangs_own_biome_files() {
 
 /// `has_precipitation`/`temperature`/`downfall` as Mojang's own biome file
 /// declares them (top-level fields, siblings of `attributes` — see
-/// `vanilla's own biome's own climate settings's own codec`, `vanilla's own biome's own java`), or `None` if any of
+/// the biome climate-settings codec), or `None` if any of
 /// the three required fields is absent from the file.
 fn mojang_biome_climate(short_name: &str) -> Option<lodestone_v26_2::packets::registry::BiomeClimate> {
     let path = lodestone_mc_cache::pinned_26_2_root()

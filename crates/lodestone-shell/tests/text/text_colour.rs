@@ -45,14 +45,14 @@
 //! `decode(encode(x))` — satisfied by any self-consistent misunderstanding,
 //! including the one where all sixteen values are wrong together.
 //!
-//! Note the jar's `ChatFormatting` is **not** the source: in 26.2 that enum
+//! Note the jar's chat formatting is **not** the source: in 26.2 that enum
 //! carries only the `§` code character and no colour at all.
 //!
 //! # The hypotheses this discriminates
 //!
 //! Vanilla is not colour-managed: a text colour is written to the framebuffer as
 //! the sRGB byte it is, and the drop shadow is `ARGB.scaleRGB(color, 0.25F)` — a
-//! quarter taken in **gamma** space (`Font.PreparedTextBuilder.getShadowColor`,
+//! quarter taken in **gamma** space (the font's prepared text builder's get shadow color,
 //! `ARGB`'s own decompiled source). The plausible-but-wrong implementation converts to
 //! linear first. Both hypotheses are computed below and the measurement is
 //! required to land on the right one; see [`gold_is_written_in_gamma_space`] and

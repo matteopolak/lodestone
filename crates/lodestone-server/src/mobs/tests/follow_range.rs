@@ -903,7 +903,7 @@ fn camel_dash_cannot_retrigger_until_the_full_cooldown_elapses() {
 }
 
 /// **Controls**: a baby camel refuses to mount at all
-/// (vanilla's own camel interaction override's own "is not a baby" gate), and a species that
+/// (vanilla's camel interaction override's "is not a baby" gate), and a species that
 /// bypasses `MobSim::interact` entirely — mounted directly through the
 /// low-level, species-blind `mount_mob` — still never dashes, proving
 /// `trigger_camel_dash`'s own species check is real and not merely

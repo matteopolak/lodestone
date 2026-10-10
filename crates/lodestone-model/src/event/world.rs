@@ -190,10 +190,10 @@ pub enum ParticleDistribution {
 /// A `minecraft:particle_type` registry entry's type-specific payload —
 /// [`ClientEvent::Particles`]'s `options`.
 ///
-/// Most vanilla particle types are a bare `SimpleParticleType` with no
+/// Most vanilla particle types are a bare simple particle type with no
 /// payload at all ([`Self::None`], the common case); a handful carry extra
-/// fields read immediately after the registry id (`DustParticleOptions`,
-/// `BlockParticleOption`, `ItemParticleOption`, …). Adding a variant here
+/// fields read immediately after the registry id (dust, block, item,
+/// …). Adding a variant here
 /// does not by itself decode anything — the adapter's `LEVEL_PARTICLES` arm
 /// (`crates/versions/26.2/src/adapter/chunk.rs`) is what parses a payload out
 /// of the wire bytes based on the resolved particle name, and only for the
@@ -204,15 +204,15 @@ pub enum ParticleOptions {
     /// No type-specific payload.
     #[default]
     None,
-    /// `minecraft:dust` (`DustParticleOptions`).
+    /// `minecraft:dust`.
     Dust {
         /// Colour, unpacked from the wire's packed RGB24 `i32` to `[0, 1]`
-        /// components (`ARGB.vector3fFromRGB24`).
+        /// components (ARGB's vector 3f from rgb 24).
         color: [f32; 3],
-        /// Size multiplier (`ScalableParticleOptionsBase::getScale`).
+        /// Size multiplier.
         scale: f32,
     },
-    /// `minecraft:dust_color_transition` (`DustColorTransitionOptions`) — the
+    /// `minecraft:dust_color_transition` — the
     /// sculk-to-redstone sibling of [`Self::Dust`] that lerps colour over its
     /// life instead of holding one fixed.
     DustColorTransition {
@@ -224,7 +224,7 @@ pub enum ParticleOptions {
         scale: f32,
     },
     /// `minecraft:effect` and `minecraft:instant_effect`
-    /// (`SpellParticleOption`) — the potion-effect motes trailing an entity
+    /// — the potion-effect motes trailing an entity
     /// under a status effect, and a splash potion's instant burst.
     Spell {
         /// Tint, unpacked from the wire's packed RGB24 `i32` the same way
@@ -233,16 +233,16 @@ pub enum ParticleOptions {
         /// the top byte of the wire word is not an alpha here — that is
         /// [`Self::Color`]'s field, on a different option type.
         color: [f32; 3],
-        /// Velocity multiplier (`SpellParticleOption::getPower`, applied by
-        /// the provider through `Particle.setPower`). Defaults to `1.0` in the
+        /// Velocity multiplier (applied by
+        /// the provider's set-power call). Defaults to `1.0` in the
         /// data codec but is unconditional on the wire.
         power: f32,
     },
-    /// `minecraft:entity_effect` (`ColorParticleOption`) — the ambient motes a
+    /// `minecraft:entity_effect` — the ambient motes a
     /// mob under a status effect, or a lingering potion's cloud, gives off.
     ///
     /// Distinct from [`Self::Spell`] despite both driving the same
-    /// `SpellParticle` class: this one is a **four**-component ARGB word with
+    /// spell particle class: this one is a **four**-component ARGB word with
     /// no power field, and the two are not interchangeable on the wire (8
     /// bytes against 4).
     Color {
@@ -253,31 +253,31 @@ pub enum ParticleOptions {
         /// dropping it makes every ambient effect mote fully opaque.
         color: [f32; 4],
     },
-    /// `minecraft:dragon_breath` (`PowerParticleOption`) — a bare velocity
+    /// `minecraft:dragon_breath` — a bare velocity
     /// multiplier and nothing else.
     ///
     /// Its own variant rather than a reuse of [`Self::Spell`]'s `power`: this
-    /// option class carries no colour at all (`DragonBreathParticle` draws its
+    /// option class carries no colour at all (the dragon-breath particle draws its
     /// purple out of the RNG), so the wire payload is four bytes against
-    /// `SpellParticleOption`'s eight and the two are not interchangeable.
+    /// the spell option's eight and the two are not interchangeable.
     Power {
-        /// Velocity multiplier (`PowerParticleOption::getPower`, applied by
-        /// the provider through `Particle.setPower`).
+        /// Velocity multiplier (applied by
+        /// the provider's set-power call).
         power: f32,
     },
-    /// `minecraft:sculk_charge` (`SculkChargeParticleOptions`).
+    /// `minecraft:sculk_charge`.
     SculkCharge {
         /// Roll about the view axis, in radians — the one thing that makes a
         /// sculk charge's motes lie along the direction the charge is
         /// spreading rather than all sharing one orientation.
         roll: f32,
     },
-    /// The `BlockParticleOption` family — `minecraft:block`,
+    /// The block-particle option family — `minecraft:block`,
     /// `minecraft:block_marker`, `minecraft:block_crumble`,
     /// `minecraft:dust_pillar` and `minecraft:falling_dust`.
     ///
     /// One payload type shared by five registry entries whose *providers* have
-    /// nothing else in common: three build a `TerrainParticle` (with different
+    /// nothing else in common: three build a terrain particle (with different
     /// speeds and lifetimes), one builds a physics-free marker quad and one
     /// builds a sheet-textured falling mote tinted from the block. The wire
     /// payload is identical for all five, so they share this variant and the

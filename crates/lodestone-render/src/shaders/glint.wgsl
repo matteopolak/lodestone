@@ -1,7 +1,7 @@
 // Enchantment glint: the scrolling foil shimmer over an item's own geometry.
 //
-// A faithful port of vanilla 26.2's `core/glint` pair plus `RenderPipelines.GLINT`
-// (vanilla's own glint pipeline). Its vertex shader is four lines and
+// A faithful port of vanilla 26.2's `core/glint` shader pair plus the glint pipeline
+// definition. Its vertex shader is four lines and
 // the fragment four more; the interesting content is entirely in the constants,
 // which live on the Rust side in `crate::glint` so they can be unit-gated against
 // the jar.
@@ -11,7 +11,7 @@
 // First, it re-rasterises *the item's own quads*, not a flat overlay quad. Vanilla
 // runs the glint as a second pass over the same submit list
 // (vanilla's item-feature pass) and its pipeline uses depth compare EQUAL with
-// zero depth bias (`DepthStencilState(CompareOp.EQUAL, false)`), which only works
+// zero depth bias (depth compare EQUAL, no write), which only works
 // if the two passes rasterise byte-identical clip positions. So the vertex stage
 // here computes `clip` exactly as `model.wgsl` does — same uniform, same
 // `section_origin` add, same order of operations. Any divergence z-fails the whole
@@ -21,7 +21,7 @@
 // Our depth is reversed-Z [0,1] like vanilla's, so a ported
 // `GREATER_THAN_OR_EQUAL` transcribes unflipped and so does a positive depth
 // bias -- and equality is orientation-independent either way, so
-// `CompareOp.EQUAL` ports across as `CompareFunction::Equal` unchanged.
+// the EQUAL compare op ports across as `CompareFunction::Equal` unchanged.
 //
 // The UV transform arrives already composed as a mat4 (`glint.tex_matrix`) rather
 // than as time + constants, so there is exactly one implementation of the scroll
@@ -68,7 +68,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip = glint.view_proj * vec4<f32>(world, 1.0);
     // `texCoord0 = (TextureMat * vec4(UV0, 0.0, 1.0)).xy`, the last line of
     // vanilla's `glint.vsh`. The incoming UV is the *item atlas sprite* UV for
-    // `FoilType.STANDARD`, fed straight in.
+    // standard foil type, fed straight in.
     out.uv = (glint.tex_matrix * vec4<f32>(in.uv, 0.0, 1.0)).xy;
     return out;
 }
