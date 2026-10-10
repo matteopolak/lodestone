@@ -53,6 +53,7 @@ use lodestone_model::{BlockPos, ItemStack};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use crate::beehive::Beehive;
 use crate::brewing::BrewingStand;
 use crate::composter::Composter;
 use crate::furnace::{Furnace, FurnaceKind};
@@ -71,6 +72,7 @@ pub enum BlockEntityKind {
     EndGateway,
     Comparator,
     Composter,
+    Beehive,
     Furnace,
     Smoker,
     BlastFurnace,
@@ -100,6 +102,7 @@ impl BlockEntityKind {
             "minecraft:end_gateway" => Self::EndGateway,
             "minecraft:comparator" => Self::Comparator,
             "minecraft:composter" => Self::Composter,
+            "minecraft:beehive" => Self::Beehive,
             "minecraft:furnace" => Self::Furnace,
             "minecraft:smoker" => Self::Smoker,
             "minecraft:blast_furnace" => Self::BlastFurnace,
@@ -159,6 +162,7 @@ impl BlockEntityKind {
             Self::EndGateway => "minecraft:end_gateway",
             Self::Comparator => "minecraft:comparator",
             Self::Composter => "minecraft:composter",
+            Self::Beehive => "minecraft:beehive",
             Self::Furnace => "minecraft:furnace",
             Self::Smoker => "minecraft:smoker",
             Self::BlastFurnace => "minecraft:blast_furnace",
@@ -250,6 +254,8 @@ pub enum BlockEntity {
     Comparator { output: u8 },
     /// `minecraft:composter`.
     Composter(Composter),
+    /// `minecraft:beehive` (a beehive or a bee nest): the bees inside.
+    Beehive(Beehive),
     /// `minecraft:furnace`/`minecraft:smoker`/`minecraft:blast_furnace`
     /// (the [`FurnaceKind`] inside [`Furnace`] distinguishes them).
     Furnace(Furnace),
@@ -588,6 +594,7 @@ impl BlockEntity {
             BlockEntity::EndGateway { .. } => BlockEntityKind::EndGateway,
             BlockEntity::Comparator { .. } => BlockEntityKind::Comparator,
             BlockEntity::Composter(_) => BlockEntityKind::Composter,
+            BlockEntity::Beehive(_) => BlockEntityKind::Beehive,
             BlockEntity::Furnace(f) => match f.kind() {
                 FurnaceKind::Furnace => BlockEntityKind::Furnace,
                 FurnaceKind::Smoker => BlockEntityKind::Smoker,
@@ -626,7 +633,7 @@ impl BlockEntity {
             // dispenser/dropper's `Container` — hopper adjacency into one
             // works the identical way.
             BlockEntity::Crafter { slots, .. } => Some(slots.as_mut_slice()),
-            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) | BlockEntity::Lectern(_) => {
                 None
@@ -682,7 +689,7 @@ impl BlockEntity {
             } else {
                 "minecraft:generic_9x3"
             }),
-            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             // A command block opens its own dedicated GUI
             // (`Player.openCommandBlock`), not an `AbstractContainerMenu` —
             // there is no vanilla menu identifier for it at all.
@@ -720,7 +727,7 @@ impl BlockEntity {
             // `CrafterMenu.addSlots`'s own `x + y * 3` order — already this
             // array's own indexing.
             BlockEntity::Crafter { slots, .. } => slots.to_vec(),
-            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => Vec::new(),
         }
     }
@@ -793,7 +800,7 @@ impl BlockEntity {
                     *cell = item;
                 }
             }
-            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
         }
     }
@@ -806,7 +813,7 @@ impl BlockEntity {
             BlockEntity::Beacon(_) => 1,
             BlockEntity::Lectern(_) => 1,
             BlockEntity::Crafter { slots, .. } => slots.len(),
-            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => 0,
         }
     }
@@ -884,7 +891,7 @@ impl BlockEntity {
                 props.push(0);
                 props
             }
-            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
+            BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Lectern(_) => {
                 Vec::new()
@@ -947,7 +954,9 @@ impl BlockEntity {
             // own doc comment for why the trigger itself is out of scope.
             BlockEntity::Crafter { .. } | BlockEntity::Lectern(_) => None,
             BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
-            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => None,
+            // A hive needs the sky, the block in front of it and the live bee
+            // population, so `BlockEntityRegistry::tick_hives` drives it.
+            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) | BlockEntity::Beehive(_) => None,
         }
     }
 }
@@ -1031,6 +1040,7 @@ enum PlacedBlockEntity {
     Crafter,
     /// An empty spawner: it ticks but spawns nothing until given an entity.
     Spawner,
+    Beehive,
     Sign { hanging: bool },
 }
 
@@ -1053,6 +1063,7 @@ impl PlacedBlockEntity {
             PlacedBlockEntity::Lectern => BlockEntity::lectern(),
             PlacedBlockEntity::Crafter => BlockEntity::crafter(),
             PlacedBlockEntity::Spawner => BlockEntity::Spawner(crate::mob_spawner::SpawnerState::default()),
+            PlacedBlockEntity::Beehive => BlockEntity::Beehive(Beehive::default()),
             PlacedBlockEntity::Sign { hanging } => BlockEntity::Sign(SignData {
                 hanging,
                 ..SignData::default()
@@ -1107,6 +1118,8 @@ fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlock
         "minecraft:lectern" => ("minecraft:lectern", PlacedBlockEntity::Lectern),
         "minecraft:crafter" => ("minecraft:crafter", PlacedBlockEntity::Crafter),
         "minecraft:spawner" => ("minecraft:spawner", PlacedBlockEntity::Spawner),
+        "minecraft:beehive" => ("minecraft:beehive", PlacedBlockEntity::Beehive),
+        "minecraft:bee_nest" => ("minecraft:bee_nest", PlacedBlockEntity::Beehive),
         "minecraft:command_block" => ("minecraft:command_block", PlacedBlockEntity::CommandBlock),
         "minecraft:chain_command_block" => (
             "minecraft:chain_command_block",
@@ -1504,6 +1517,51 @@ impl BlockEntityRegistry {
     /// A mutable view of the entity at `pos`, if any.
     pub fn get_mut(&mut self, pos: BlockPos) -> Option<&mut BlockEntity> {
         self.entities.get_mut(&pos)
+    }
+
+    /// Every hive's bee count, keyed by block cell.
+    #[must_use]
+    pub fn hive_occupancy(&self) -> HashMap<(i32, i32, i32), u8> {
+        self.entities
+            .iter()
+            .filter_map(|(pos, entity)| match entity {
+                BlockEntity::Beehive(hive) => {
+                    Some(((pos.x, pos.y, pos.z), hive.occupants().len() as u8))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Takes a bee into the hive at `pos`. `false` when there is no hive or it
+    /// is full.
+    pub fn enter_hive(&mut self, pos: BlockPos, occupant: crate::beehive::Occupant, bee_flower: Option<BlockPos>, coin: bool) -> bool {
+        let Some(BlockEntity::Beehive(hive)) = self.entities.get_mut(&pos) else { return false };
+        hive.add(occupant, bee_flower, coin)
+    }
+
+    /// Advances every hive one tick and returns the bees that leave, with the
+    /// hive's remembered bloom. `front_blocked` answers for a hive whether its
+    /// face is obstructed, or `None` when its chunk is not resident, which
+    /// skips the hive.
+    pub fn tick_hives(
+        &mut self,
+        stay_in: bool,
+        front_blocked: &dyn Fn(BlockPos) -> Option<bool>,
+    ) -> Vec<(BlockPos, Option<BlockPos>, Vec<crate::beehive::Released>)> {
+        let mut out = Vec::new();
+        for (&pos, entity) in &mut self.entities {
+            let BlockEntity::Beehive(hive) = entity else { continue };
+            if hive.occupants().is_empty() {
+                continue;
+            }
+            let Some(blocked) = front_blocked(pos) else { continue };
+            let released = hive.tick(stay_in, blocked);
+            if !released.is_empty() {
+                out.push((pos, hive.flower(), released));
+            }
+        }
+        out
     }
 
     #[must_use]

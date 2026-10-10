@@ -425,6 +425,7 @@ pub mod villager;
 // to descendant simulation modules without adding an external API path.
 mod species;
 mod puffer;
+pub(crate) mod bees;
 mod flock;
 mod sunlight;
 mod sim_mob;
@@ -2492,6 +2493,15 @@ pub struct MobSim<'w> {
     /// `Below` is one down. Storing the mob's cell keeps the arithmetic with the
     /// consumer that knows what each variant means.
     pending_grazes: Vec<(BlockPos, EatenBlock)>,
+    /// Bees per hive, fed each tick from the block-entity registry. Bees read it
+    /// through their path world to find a hive with room.
+    hives: std::sync::Arc<HashMap<(i32, i32, i32), u8>>,
+    /// Bees that went into a hive this tick, awaiting the driver's write into
+    /// the hive's block entity. Drained by [`take_hive_entries`](Self::take_hive_entries).
+    pending_hive_entries: Vec<bees::HiveEntry>,
+    /// Crop states bees grew this tick, awaiting the driver's block write.
+    /// Drained by [`take_crop_growths`](Self::take_crop_growths).
+    pending_crop_growths: Vec<(BlockPos, lodestone_data::block_states::StateId)>,
     /// Players struck by a hostile mob's melee attack this tick, awaiting the
     /// driver's `PlayerVitals::apply_damage` call — the same
     /// handoff shape as [`pending_detonations`](Self::pending_detonations)

@@ -479,6 +479,14 @@ pub struct MobBody {
     nest: Option<Vec3>,
     /// Whether the mob is walking back to its nest.
     going_home: bool,
+    /// What a bee remembers; inert for every other species.
+    bee: crate::ai::bee::BeeState,
+    /// Where a hovering flier is steered this tick, with the speed requested.
+    air_hover: Option<(Vec3, f64)>,
+    /// Scales the node budget of new path searches.
+    path_effort: f32,
+    /// The longest path a search may return, at least the follow range.
+    required_path_length: f64,
     /// Host-fed, schooling fish only: the leader's position when following.
     flock_leader: Option<Vec3>,
     /// Host-fed: whether other fish follow this one.
@@ -870,6 +878,10 @@ impl<'w> NavigatingMob<'w> {
             scary_near: false,
             nest: None,
             going_home: false,
+            bee: crate::ai::bee::BeeState::default(),
+            air_hover: None,
+            path_effort: 1.0,
+            required_path_length: MIN_PATH_LENGTH,
             flock_leader: None,
             flock_followers: false,
             flock_left: false,
@@ -1416,6 +1428,43 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
+    /// Makes this mob a bee that waits `first_flower_cooldown` ticks before its
+    /// first bloom search.
+    pub fn enable_bee(&mut self, first_flower_cooldown: i32) -> &mut Self {
+        self.bee = crate::ai::bee::BeeState::new(first_flower_cooldown);
+        self.required_path_length = 48.0;
+        self
+    }
+
+    /// The bee state (inert unless [`enable_bee`](Self::enable_bee) ran).
+    #[must_use]
+    pub fn bee_state(&self) -> &crate::ai::bee::BeeState {
+        &self.bee
+    }
+
+    /// The bee state, mutably, for the host to restore saved fields.
+    pub fn bee_state_mut(&mut self) -> &mut crate::ai::bee::BeeState {
+        &mut self.bee
+    }
+
+    /// Host injection point: what the sky and the sting say about this bee.
+    pub fn set_bee_inputs(&mut self, stays_in_hive: bool, raining: bool, has_stung: bool) -> &mut Self {
+        self.bee.stays_in_hive = stays_in_hive;
+        self.bee.raining = raining;
+        self.bee.has_stung = has_stung;
+        self
+    }
+
+    /// Drains the hive this bee just entered, if any.
+    pub fn take_hive_entry(&mut self) -> Option<(i32, i32, i32)> {
+        self.bee.entering.take()
+    }
+
+    /// Drains the crop states this bee grew.
+    pub fn take_crop_growths(&mut self) -> Vec<((i32, i32, i32), lodestone_data::block_states::StateId)> {
+        std::mem::take(&mut self.bee.grown)
+    }
+
     /// Whether the puff goal is running.
     #[must_use]
     pub fn is_inflating(&self) -> bool {
@@ -1904,6 +1953,22 @@ impl<'w> NavigatingMob<'w> {
     /// caller running its own goal loop can drive movement explicitly.
     pub fn advance(&mut self) {
         self.tick_count += 1;
+        if self.bee.active {
+            self.bee.tick();
+            if self.tick_count % 20 == 0
+                && let Some(hive) = self.bee.hive
+            {
+                let (dx, dy, dz) = (
+                    f64::from(hive.0) - self.pos.x.floor(),
+                    f64::from(hive.1) - self.pos.y.floor(),
+                    f64::from(hive.2) - self.pos.z.floor(),
+                );
+                let far = dx * dx + dy * dy + dz * dz >= 48.0 * 48.0;
+                if far || self.world.hive_at(hive.0, hive.1, hive.2).is_none() {
+                    self.bee.hive = None;
+                }
+            }
+        }
         // Vanilla `Animal::aiStep`/`AgeableMob::aiStep`: love mode and the age
         // timer both age unconditionally every tick — not gated on whether any
         // goal ran this tick, and not reset by anything below.
@@ -1967,7 +2032,9 @@ impl<'w> NavigatingMob<'w> {
         }
         let old = self.pos;
         let pos = self.pos;
-        let mut waypoint = self.navigator.tick(pos);
+        // A pollinating bee steers straight at its hover point; its path, kept
+        // only to prove the bloom reachable, is not followed.
+        let mut waypoint = if self.bee.pollinating { None } else { self.navigator.tick(pos) };
         let mut heading_only = false;
         if self.shape.can_climb && waypoint.is_none() {
             waypoint = self.climb_waypoint();
@@ -2126,6 +2193,11 @@ impl<'w> NavigatingMob<'w> {
         const AIR_DRAG: f64 = 0.91;
         const MAX_TURN: f32 = 90.0;
         let mut input = (0.0, 0.0);
+        let hover = self.air_hover.take();
+        let (waypoint, requested) = match (waypoint, hover) {
+            (None, Some((target, speed))) => (Some(target), speed),
+            (waypoint, _) => (waypoint, self.navigator.speed()),
+        };
         if let Some(w) = waypoint {
             self.air_ready = true;
             let (xd, yd, zd) = (w.x - self.pos.x, w.y - self.pos.y, w.z - self.pos.z);
@@ -2133,7 +2205,7 @@ impl<'w> NavigatingMob<'w> {
                 let target = movement_yaw(xd, zd);
                 let turn = wrap_degrees(target - self.body_yaw).clamp(-MAX_TURN, MAX_TURN);
                 self.body_yaw = wrap_degrees(self.body_yaw + turn);
-                let modifier = if self.movement_speed > 0.0 { self.navigator.speed() / self.movement_speed } else { 0.0 };
+                let modifier = if self.movement_speed > 0.0 { requested / self.movement_speed } else { 0.0 };
                 let speed = modifier * self.flying_speed;
                 let flat = xd.hypot(zd);
                 let vertical = if yd.abs() > 1e-5 || flat > 1e-5 { if yd > 0.0 { speed } else { -speed } } else { 0.0 };
@@ -2162,13 +2234,19 @@ impl<'w> NavigatingMob<'w> {
     /// water or a pathing penalty; if ten tries fail, up to eight out and four
     /// vertically, two below its level, lifted clear of solid only.
     fn air_wander_target(&mut self) -> Option<Vec3> {
+        self.air_wander_toward(None)
+    }
+
+    /// [`air_wander_target`](Self::air_wander_target) leaning along `direction`
+    /// (a vector from the mob) instead of the heading.
+    fn air_wander_toward(&mut self, direction: Option<Vec3>) -> Option<Vec3> {
         const TRIES: u32 = 10;
         let heading = f64::from(self.body_yaw).to_radians();
-        let (dir_x, dir_z) = (-heading.sin(), heading.cos());
+        let (dir_x, dir_z) = direction.map_or((-heading.sin(), heading.cos()), |d| (d.x, d.z));
         let solid = |w: &dyn PathWorld, x: i32, y: i32, z: i32| w.collision_top(x, y, z) > 0.0;
         for (vertical, flying_height, hover) in [(7, 0, true), (4, -2, false)] {
             for _ in 0..TRIES {
-                let Some((xt, yt, zt)) = self.random_direction(8.0, vertical, flying_height, dir_x, dir_z) else {
+                let Some((xt, yt, zt)) = self.random_direction(8.0, vertical, flying_height, dir_x, dir_z, std::f64::consts::FRAC_PI_2) else {
                     continue;
                 };
                 let x = (f64::from(xt.floor() as i32) + self.pos.x).floor() as i32;
@@ -2198,12 +2276,64 @@ impl<'w> NavigatingMob<'w> {
         None
     }
 
+    /// The best of ten random flight points up to `horizontal` blocks out and
+    /// `vertical` up or down (shifted by `fly_height`), within `max_angle` of
+    /// the direction to `towards`: lifted clear of solid blocks, never in water
+    /// or on a penalty, preferring open air.
+    fn air_point_towards(
+        &mut self,
+        horizontal: i32,
+        vertical: i32,
+        fly_height: i32,
+        towards: Vec3,
+        max_angle: f64,
+    ) -> Option<Vec3> {
+        const TRIES: u32 = 10;
+        let (dir_x, dir_z) = (towards.x - self.pos.x, towards.z - self.pos.z);
+        let solid = |w: &dyn PathWorld, x: i32, y: i32, z: i32| w.collision_top(x, y, z) > 0.0;
+        let mut best: Option<(i32, (i32, i32, i32))> = None;
+        for _ in 0..TRIES {
+            let Some((xt, yt, zt)) =
+                self.random_direction(f64::from(horizontal), vertical, fly_height, dir_x, dir_z, max_angle)
+            else {
+                continue;
+            };
+            let x = (f64::from(xt.floor() as i32) + self.pos.x).floor() as i32;
+            let mut y = (f64::from(yt) + self.pos.y).floor() as i32;
+            let z = (f64::from(zt.floor() as i32) + self.pos.z).floor() as i32;
+            if y < self.world.min_y() {
+                continue;
+            }
+            let ceiling = self.world.min_y() + 4096;
+            while y < ceiling && solid(self.world, x, y, z) {
+                y += 1;
+            }
+            let kind = self.world.base_path_type(x, y, z);
+            if kind == PathType::Water || self.shape.malus(kind) != 0.0 {
+                continue;
+            }
+            let weight = if kind == PathType::Open { 10 } else { 0 };
+            if best.is_none_or(|(w, _)| weight > w) {
+                best = Some((weight, (x, y, z)));
+            }
+        }
+        best.map(|(_, (x, y, z))| Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5))
+    }
+
     /// A random offset up to `reach` blocks horizontally within a quarter turn
     /// either side of the direction (`dir_x`, `dir_z`), and `vertical` blocks
     /// up or down shifted by `flying_height`.
-    fn random_direction(&mut self, reach: f64, vertical: i32, flying_height: i32, dir_x: f64, dir_z: f64) -> Option<(f64, i32, f64)> {
+    fn random_direction(
+        &mut self,
+        reach: f64,
+        vertical: i32,
+        flying_height: i32,
+        dir_x: f64,
+        dir_z: f64,
+        max_angle: f64,
+    ) -> Option<(f64, i32, f64)> {
         let centre = dir_z.atan2(dir_x) - std::f64::consts::FRAC_PI_2;
-        let angle = centre + (2.0 * f64::from(MobController::next_f32(self)) - 1.0) * std::f64::consts::FRAC_PI_2;
+        let angle = centre + (2.0 * f64::from(MobController::next_f32(self)) - 1.0) * max_angle;
         let dist = MobController::next_f64(self).sqrt() * reach * std::f64::consts::SQRT_2;
         let (xt, zt) = (-dist * angle.sin(), dist * angle.cos());
         if xt.abs() > reach || zt.abs() > reach {
@@ -2835,9 +2965,9 @@ impl NavigatingMob<'_> {
         self.active_target_block = Some(block);
         let start = PathStart::grounded(self.pos.x, self.pos.y, self.pos.z);
         let params = PathParams {
-            max_path_length: self.follow_range.max(MIN_PATH_LENGTH) as f32,
+            max_path_length: self.follow_range.max(self.required_path_length) as f32,
             reach_range: reach,
-            visited_multiplier: 1.0,
+            visited_multiplier: self.path_effort,
         };
         match self
             .finder
@@ -3018,6 +3148,88 @@ impl MobController for NavigatingMob<'_> {
     fn scary_near(&self) -> bool {
         self.scary_near
     }
+
+    fn bee(&mut self) -> Option<&mut crate::ai::bee::BeeState> {
+        self.bee.active.then_some(&mut self.bee)
+    }
+
+    fn hive_view(&self, cell: (i32, i32, i32)) -> Option<crate::pathfinding::HiveView> {
+        self.world.hive_at(cell.0, cell.1, cell.2)
+    }
+
+    fn hives_near(&self, range: i32) -> Vec<(i32, i32, i32)> {
+        let (x, y, z) = self.feet_block();
+        self.world.hives_within(x, y, z, range)
+    }
+
+    fn attracts_bees_at(&self, cell: (i32, i32, i32)) -> bool {
+        self.world.attracts_bees(cell.0, cell.1, cell.2)
+    }
+
+    fn bee_growth_at(&self, cell: (i32, i32, i32)) -> Option<lodestone_data::block_states::StateId> {
+        self.world.bee_growth(cell.0, cell.1, cell.2)
+    }
+
+    fn is_cell_loaded(&self, cell: (i32, i32, i32)) -> bool {
+        self.world.is_loaded(cell.0, cell.1, cell.2)
+    }
+
+    fn path_reaches_block(&mut self, cell: (i32, i32, i32), reach: i32) -> bool {
+        let start = PathStart::grounded(self.pos.x, self.pos.y, self.pos.z);
+        let params = PathParams {
+            max_path_length: self.follow_range.max(self.required_path_length) as f32,
+            reach_range: reach,
+            visited_multiplier: self.path_effort,
+        };
+        self.finder
+            .find_path(self.world, &self.shape, start, &[BlockPos::new(cell.0, cell.1, cell.2)], params)
+            .is_some_and(|path| path.reached())
+    }
+
+    fn move_to_within(&mut self, target: Vec3, speed: f64, reach: i32) -> bool {
+        NavigatingMob::move_to_within(self, target, speed, reach)
+    }
+
+    fn path_reaches_target(&self) -> bool {
+        self.navigator.path().is_some_and(crate::pathfinding::Path::reached)
+    }
+
+    fn path_ended_at(&self, cell: (i32, i32, i32)) -> bool {
+        self.navigator.path().is_some_and(|path| {
+            path.target() == BlockPos::new(cell.0, cell.1, cell.2) && path.reached() && path.is_done()
+        })
+    }
+
+    fn path_signature(&self) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let path = self.navigator.path()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for node in path.nodes() {
+            (node.x, node.y, node.z).hash(&mut hasher);
+        }
+        Some(hasher.finish())
+    }
+
+    fn set_path_effort(&mut self, multiplier: f32) {
+        self.path_effort = multiplier;
+    }
+
+    fn hover_to(&mut self, target: Vec3, speed: f64) {
+        self.air_hover = Some((target, self.goal_speed(speed)));
+    }
+
+    fn air_point_towards(&mut self, horizontal: i32, vertical: i32, fly_height: i32, towards: Vec3, max_angle: f64) -> Option<Vec3> {
+        NavigatingMob::air_point_towards(self, horizontal, vertical, fly_height, towards, max_angle)
+    }
+
+    fn air_wander_position(&mut self, direction: Option<Vec3>) -> Option<Vec3> {
+        if self.shape.nav_mode == NavMode::Air {
+            self.air_wander_toward(direction)
+        } else {
+            self.random_stroll_target()
+        }
+    }
+
 
     fn set_inflating(&mut self, inflating: bool) {
         self.inflating = inflating;

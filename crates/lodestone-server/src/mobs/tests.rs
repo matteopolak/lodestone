@@ -169,3 +169,8 @@ mod projectile_persistence_tests;
 #[cfg(test)]
 #[path = "tests/locomotion.rs"]
 mod locomotion_tests;
+
+/// Bees: pollination, hive entry and release, crop tending, persistence.
+#[cfg(test)]
+#[path = "tests/bees.rs"]
+mod bees_tests;

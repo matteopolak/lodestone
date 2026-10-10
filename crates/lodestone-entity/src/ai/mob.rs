@@ -202,6 +202,97 @@ pub trait MobController {
     /// Sets whether the mob is walking back to its nest.
     fn set_going_home(&mut self, _going_home: bool) {}
 
+    /// The bee state of this mob, or `None` for any other species.
+    fn bee(&mut self) -> Option<&mut crate::ai::bee::BeeState> {
+        None
+    }
+
+    /// The hive or bee nest at `cell`, if the world has one.
+    fn hive_view(&self, cell: (i32, i32, i32)) -> Option<crate::pathfinding::HiveView> {
+        let _ = cell;
+        None
+    }
+
+    /// Every hive within `range` blocks of the mob.
+    fn hives_near(&self, range: i32) -> Vec<(i32, i32, i32)> {
+        let _ = range;
+        Vec::new()
+    }
+
+    /// Whether the cell holds a bloom a bee pollinates.
+    fn attracts_bees_at(&self, cell: (i32, i32, i32)) -> bool {
+        let _ = cell;
+        false
+    }
+
+    /// The state a bee tending the crop at `cell` would grow it to.
+    fn bee_growth_at(&self, cell: (i32, i32, i32)) -> Option<lodestone_data::block_states::StateId> {
+        let _ = cell;
+        None
+    }
+
+    /// Whether the cell's chunk is loaded.
+    fn is_cell_loaded(&self, cell: (i32, i32, i32)) -> bool {
+        let _ = cell;
+        true
+    }
+
+    /// Whether a path from the mob reaches within `reach` blocks (Manhattan) of
+    /// `cell`, without following it.
+    fn path_reaches_block(&mut self, cell: (i32, i32, i32), reach: i32) -> bool {
+        let _ = (cell, reach);
+        false
+    }
+
+    /// Paths to `target` and follows, stopping within `reach` blocks (Manhattan).
+    fn move_to_within(&mut self, target: Vec3, speed: f64, reach: i32) -> bool {
+        let _ = reach;
+        self.move_to(target, speed)
+    }
+
+    /// Whether the path being followed reaches its target rather than only
+    /// getting close.
+    fn path_reaches_target(&self) -> bool {
+        false
+    }
+
+    /// Whether the finished path ended at `cell` and reached it.
+    fn path_ended_at(&self, cell: (i32, i32, i32)) -> bool {
+        let _ = cell;
+        false
+    }
+
+    /// A fingerprint of the path being followed, for noticing a stuck mob.
+    fn path_signature(&self) -> Option<u64> {
+        None
+    }
+
+    /// Scales the node budget of the next path searches (a long flight gets
+    /// less, a close approach more).
+    fn set_path_effort(&mut self, multiplier: f32) {
+        let _ = multiplier;
+    }
+
+    /// Steers a flier straight at `target` this tick at `speed`, with no path.
+    fn hover_to(&mut self, target: Vec3, speed: f64) {
+        let _ = (target, speed);
+    }
+
+    /// A random flight point up to `horizontal` blocks out and `vertical`
+    /// blocks up or down (shifted by `fly_height`), within `max_angle` radians
+    /// of the direction to `towards`.
+    fn air_point_towards(&mut self, horizontal: i32, vertical: i32, fly_height: i32, towards: Vec3, max_angle: f64) -> Option<Vec3> {
+        let _ = (horizontal, vertical, fly_height, towards, max_angle);
+        None
+    }
+
+    /// A wander point for a flier, leaning along `direction` (a vector from the
+    /// mob) or its heading when `None`.
+    fn air_wander_position(&mut self, direction: Option<Vec3>) -> Option<Vec3> {
+        let _ = direction;
+        self.random_stroll_target()
+    }
+
     /// Whether something a pufferfish fears is within 2 blocks (host-fed for
     /// pufferfish only).
     fn scary_near(&self) -> bool {

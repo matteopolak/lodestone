@@ -158,6 +158,27 @@ impl Footing {
     pub const DEFAULT: Self = Self { friction: 0.6, speed_factor: 1.0 };
 }
 
+/// A beehive or bee nest as a bee sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HiveView {
+    /// Bees currently inside.
+    pub occupants: u8,
+    /// Whether fire burns within one block of it, which drives bees out and
+    /// keeps them from entering.
+    pub fire_nearby: bool,
+}
+
+impl HiveView {
+    /// Most bees a hive holds.
+    pub const CAPACITY: u8 = 3;
+
+    /// Whether another bee fits.
+    #[must_use]
+    pub const fn is_full(self) -> bool {
+        self.occupants >= Self::CAPACITY
+    }
+}
+
 /// The pathfinder's read-only view of the world.
 ///
 /// Coordinates are block coordinates. Only [`base_path_type`](PathWorld::base_path_type)
@@ -225,6 +246,37 @@ pub trait PathWorld: Send + Sync {
     fn is_roost(&self, x: i32, y: i32, z: i32) -> bool {
         let _ = (x, y, z);
         false
+    }
+
+    /// Whether the cell holds a bloom a bee pollinates.
+    fn attracts_bees(&self, x: i32, y: i32, z: i32) -> bool {
+        let _ = (x, y, z);
+        false
+    }
+
+    /// The state a crop, stem, berry bush or cave vine at this cell grows to
+    /// when a bee tends it, or `None` if it is not growable or fully grown.
+    fn bee_growth(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
+        let _ = (x, y, z);
+        None
+    }
+
+    /// The beehive or bee nest at this cell, if the world has one.
+    fn hive_at(&self, x: i32, y: i32, z: i32) -> Option<HiveView> {
+        let _ = (x, y, z);
+        None
+    }
+
+    /// Every hive within `range` blocks (Euclidean) of the cell.
+    fn hives_within(&self, x: i32, y: i32, z: i32, range: i32) -> Vec<(i32, i32, i32)> {
+        let _ = (x, y, z, range);
+        Vec::new()
+    }
+
+    /// Whether the cell's chunk is loaded.
+    fn is_loaded(&self, x: i32, y: i32, z: i32) -> bool {
+        let _ = (x, y, z);
+        true
     }
 
     /// The block-identity [`BlockCues`] at this position — the goal-facing

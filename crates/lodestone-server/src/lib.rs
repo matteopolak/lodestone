@@ -165,6 +165,7 @@ mod command_block;
 /// captured vanilla tree, which this crate cannot reach), so `ServerCommands` and
 /// its projection have to be nameable from outside the crate.
 pub mod commands;
+mod beehive;
 mod composter;
 /// The ender dragon fight — phase state machine, crystal healing and the
 /// `EndDragonFight` controller (`docs/dragon-fight.md`). Public so a future

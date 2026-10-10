@@ -449,9 +449,18 @@ where
         }
     }
     let drops_elapsed = started.elapsed();
-    block_entities.with(|reg| {
-        reg.remove(pos);
-    });
+    let removed = block_entities.with(|reg| reg.remove(pos));
+    // A broken hive lets every bee out at once, at the hive's own cell.
+    if let Some(crate::block_entities::BlockEntity::Beehive(mut hive)) = removed {
+        let flower = hive.flower();
+        let facing = crate::mobs::bees::hive_facing(broken);
+        let released = hive.release_all();
+        mobs.with(|sim| {
+            for bee in &released {
+                sim.release_bee(pos, facing, true, bee, flower, false);
+            }
+        });
+    }
     if open_container.as_ref().is_some_and(|open| open.pos == pos) {
         *open_container = None;
         *container_sync = ContainerSync::default();

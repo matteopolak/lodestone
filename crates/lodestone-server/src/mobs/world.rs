@@ -342,11 +342,27 @@ impl PathWorld for UnloadedWorld {
 pub(super) struct LivePathWorld<'a> {
     terrain: &'a super::collision::TerrainRead<'a>,
     min_y: i32,
+    hives: &'a HashMap<(i32, i32, i32), u8>,
 }
 
 impl<'a> LivePathWorld<'a> {
-    pub(super) fn new(terrain: &'a super::collision::TerrainRead<'a>, min_y: i32) -> Self {
-        Self { terrain, min_y }
+    pub(super) fn new(
+        terrain: &'a super::collision::TerrainRead<'a>,
+        min_y: i32,
+        hives: &'a HashMap<(i32, i32, i32), u8>,
+    ) -> Self {
+        Self { terrain, min_y, hives }
+    }
+
+    /// Whether a fire burns in the 3 by 3 by 3 block around the cell.
+    fn fire_around(&self, (x, y, z): (i32, i32, i32)) -> bool {
+        (-1..=1).any(|dx| {
+            (-1..=1).any(|dy| {
+                (-1..=1).any(|dz| {
+                    (self.terrain)(x + dx, y + dy, z + dz).is_some_and(|state| state.block() == Block::Fire)
+                })
+            })
+        })
     }
 }
 
@@ -375,6 +391,35 @@ impl PathWorld for LivePathWorld<'_> {
 
     fn is_roost(&self, x: i32, y: i32, z: i32) -> bool {
         (self.terrain)(x, y, z).is_some_and(lodestone_data::redstone_conductor::conducts)
+    }
+
+    fn attracts_bees(&self, x: i32, y: i32, z: i32) -> bool {
+        (self.terrain)(x, y, z).is_some_and(lodestone_entity::ai::bee::attracts_bees)
+    }
+
+    fn bee_growth(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
+        (self.terrain)(x, y, z).and_then(lodestone_entity::ai::bee::grown_state)
+    }
+
+    fn hive_at(&self, x: i32, y: i32, z: i32) -> Option<lodestone_entity::pathfinding::HiveView> {
+        let occupants = *self.hives.get(&(x, y, z))?;
+        Some(lodestone_entity::pathfinding::HiveView { occupants, fire_nearby: self.fire_around((x, y, z)) })
+    }
+
+    fn hives_within(&self, x: i32, y: i32, z: i32, range: i32) -> Vec<(i32, i32, i32)> {
+        let limit = i64::from(range) * i64::from(range);
+        self.hives
+            .keys()
+            .copied()
+            .filter(|&(hx, hy, hz)| {
+                let (dx, dy, dz) = (i64::from(hx - x), i64::from(hy - y), i64::from(hz - z));
+                dx * dx + dy * dy + dz * dz <= limit
+            })
+            .collect()
+    }
+
+    fn is_loaded(&self, x: i32, y: i32, z: i32) -> bool {
+        (self.terrain)(x, y, z).is_some()
     }
 
     fn collides(&self, aabb: Aabb) -> bool {

@@ -88,6 +88,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `MovementIntent`/`LookIntent` output. It is an opt-in plugin for bot authors,
   separate from server-side mob AI ([Mob AI](./mob-ai.md)) and not wired into the
   shipped client.
+- [Bees and hives](./bees.md) — Bees find blooms, carry nectar to a hive, live
+  inside it, and tend crops on the way. The behaviour is `lodestone_entity::ai::bee`;
+  the hive is a block entity (`lodestone_server::beehive`), and the bridge between
+  them is `lodestone_server::mobs::bees` plus one pass in `tick::run_tick_loop`.
 - [Benchmark regression gate](./benchmark-regression-gate.md) — The committed half
   of the benchmark harness. `bench-baselines/*.json` holds what each deterministic
   benchmark metric should be, `scripts/bench-gate.py` fails on drift in either

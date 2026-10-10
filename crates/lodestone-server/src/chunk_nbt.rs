@@ -1359,10 +1359,9 @@ const RECIPES_USED_FIELD: &str = "lodestone:recipes_used";
 /// Turns one [`GeneratedBlockEntity`] into the `(position, block entity)` pair
 /// [`ChunkColumn`] carries in its chunk extras.
 ///
-/// The generator's typed enum becomes a [`BlockEntity::Opaque`] holding the full
-/// save-form compound: this crate has no beehive *simulation* to put the
-/// occupants into, and `Opaque` is exactly the variant for "a real block entity
-/// we preserve verbatim but do not tick". The region writer
+/// The generator's typed enum becomes a simulated [`BlockEntity::Beehive`], or
+/// a [`BlockEntity::Opaque`] holding the full save-form compound for a kind
+/// this crate preserves verbatim but does not tick. The region writer
 /// ([`block_entity_to_nbt`], which returns an `Opaque`'s tree unchanged) needs
 /// that full tree. The chunk packet uses [`block_entity_update_nbt`] instead,
 /// because its NBT field is the update-tag view and does not carry save
@@ -1395,29 +1394,23 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
     ];
     match entity {
         GeneratedBlockEntity::Beehive { bees, .. } => {
-            fields.push((
-                "bees".to_owned(),
-                nbt_list(
-                    bees.iter()
-                        .map(|bee| {
-                            Nbt::Compound(vec![
-                                (
-                                    "entity_data".to_owned(),
-                                    Nbt::Compound(vec![(
-                                        "id".to_owned(),
-                                        Nbt::String("minecraft:bee".to_owned()),
-                                    )]),
-                                ),
-                                ("ticks_in_hive".to_owned(), Nbt::Int(bee.ticks_in_hive)),
-                                (
-                                    "min_ticks_in_hive".to_owned(),
-                                    Nbt::Int(bee.min_ticks_in_hive),
-                                ),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ));
+            // Each occupant's entity compound is just its `id`, which is
+            // everything a generated nest writes.
+            let occupants = bees
+                .iter()
+                .map(|bee| crate::beehive::Occupant {
+                    entity_data: Nbt::Compound(vec![(
+                        "id".to_owned(),
+                        Nbt::String("minecraft:bee".to_owned()),
+                    )]),
+                    ticks_in_hive: bee.ticks_in_hive,
+                    min_ticks_in_hive: bee.min_ticks_in_hive,
+                })
+                .collect();
+            return (
+                BlockPos::new(x, y, z),
+                BlockEntity::Beehive(crate::beehive::Beehive::restore(occupants, None)),
+            );
         }
         GeneratedBlockEntity::DungeonChest {
             loot_table,
@@ -1545,6 +1538,7 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
         BlockEntity::Container { id, slots } => {
             (id.as_str(), vec![("Items".to_owned(), items_to_nbt(slots))])
         }
+        BlockEntity::Beehive(hive) => ("minecraft:beehive", hive.to_nbt_fields()),
         BlockEntity::Composter(c) => (
             COMPOSTER_ID,
             vec![
@@ -1844,6 +1838,7 @@ pub fn block_entity_update_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
         | BlockEntity::Hopper(_)
         | BlockEntity::BrewingStand(_)
         | BlockEntity::Composter(_)
+        | BlockEntity::Beehive(_)
         | BlockEntity::CommandBlock(_)
         | BlockEntity::Crafter { .. } => Nbt::Compound(Vec::new()),
     };
@@ -2035,6 +2030,7 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
                 int_field(nbt, "TransferCooldown").unwrap_or(0),
             ))
         }
+        "minecraft:beehive" => BlockEntity::Beehive(crate::beehive::Beehive::from_nbt(nbt)),
         COMPOSTER_ID => {
             let level = int_field(nbt, "level").unwrap_or(0).clamp(0, 8) as u8;
             let until = match int_field(nbt, "ticks_until_ready") {

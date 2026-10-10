@@ -21,26 +21,8 @@ impl<'w> MobSim<'w> {
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn saved_entities(&self) -> Vec<crate::entity_storage::SavedEntity> {
-        let mut out: Vec<crate::entity_storage::SavedEntity> = self
-            .mobs
-            .iter()
-            .map(|mob| crate::entity_storage::SavedEntity {
-                id: mob.entity_type.clone(),
-                uuid: mob.uuid,
-                pos: mob.position(),
-                motion: mob.velocity(),
-                rotation: mob.rotation(),
-                health: Some(mob.health),
-                item: None,
-                age: None,
-                pickup_delay: None,
-                extra: {
-                    let mut fields = growth_fields(mob);
-                    fields.extend(self.mob_state_fields(mob));
-                    fields
-                },
-            })
-            .collect();
+        let mut out: Vec<crate::entity_storage::SavedEntity> =
+            self.mobs.iter().map(|mob| self.saved_mob(mob)).collect();
         for (&id, state) in &self.item_state {
             let lifecycle = self.items.get(id).copied().unwrap_or_default();
             out.push(crate::entity_storage::SavedEntity {
@@ -58,6 +40,27 @@ impl<'w> MobSim<'w> {
         }
         out.extend(self.saved_projectiles());
         out
+    }
+
+    /// One mob as the record [`crate::entity_storage`] persists.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn saved_mob(&self, mob: &SimMob<'_>) -> crate::entity_storage::SavedEntity {
+        crate::entity_storage::SavedEntity {
+            id: mob.entity_type.clone(),
+            uuid: mob.uuid,
+            pos: mob.position(),
+            motion: mob.velocity(),
+            rotation: mob.rotation(),
+            health: Some(mob.health),
+            item: None,
+            age: None,
+            pickup_delay: None,
+            extra: {
+                let mut fields = growth_fields(mob);
+                fields.extend(self.mob_state_fields(mob));
+                fields
+            },
+        }
     }
 
     /// Snapshots the live population into the native typed vocabulary. This

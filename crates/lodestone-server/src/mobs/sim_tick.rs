@@ -281,7 +281,8 @@ impl<'w> MobSim<'w> {
         let block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync) =
             &loaded_block_state;
         let floor_y = self.world.min_y;
-        let path_world = world::LivePathWorld::new(terrain, floor_y);
+        let hives = std::sync::Arc::clone(&self.hives);
+        let path_world = world::LivePathWorld::new(terrain, floor_y, &hives);
         let difficulty = self.difficulty;
         let live_collision = LiveBlockCollision {
             block_state,
@@ -372,6 +373,8 @@ impl<'w> MobSim<'w> {
         // mutably borrowed by `&mut self.mobs` for the whole loop, exactly as it
         // is for `hits`/`detonations`/`bred`.
         let mut grazes: Vec<(BlockPos, EatenBlock)> = Vec::new();
+        let mut hive_entries: Vec<(i32, (i32, i32, i32))> = Vec::new();
+        let mut crop_growths: Vec<(BlockPos, lodestone_data::block_states::StateId)> = Vec::new();
         let mut launches: Vec<(i32, ProjectileLaunch)> = Vec::new();
         // Self-inflicted damage requests are drained per mob and resolved
         // below, after `hits`.
@@ -441,6 +444,13 @@ impl<'w> MobSim<'w> {
             if m.rider.is_none() && column_loaded {
                 let helmeted = m.equipment.head.is_some();
                 m.mob.set_sea_level(sea_level);
+                if m.mob.bee_state().active {
+                    m.mob.set_bee_inputs(
+                        sky.bees_stay_in_hive(self.day_time),
+                        sky.raining(),
+                        m.stung_at.is_some(),
+                    );
+                }
                 m.rained_on = sky.raining() && {
                     let at = m.position();
                     let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
@@ -607,6 +617,12 @@ impl<'w> MobSim<'w> {
             // Drain the breeding flag. The mob controller records the event;
             // this driver resolves it into a child because it owns the entity
             // registry and the partner-independent spawn decision.
+            if let Some(cell) = m.mob.take_hive_entry() {
+                hive_entries.push((m.id, cell));
+            }
+            crop_growths.extend(
+                m.mob.take_crop_growths().into_iter().map(|((x, y, z), state)| (BlockPos::new(x, y, z), state)),
+            );
             if m.mob.take_bred() {
                 bred.push((m.id, m.position(), m.entity_type().clone()));
             }
@@ -737,6 +753,8 @@ impl<'w> MobSim<'w> {
         }
         self.push_entities();
         self.pending_grazes.extend(grazes);
+        self.pending_crop_growths.extend(crop_growths);
+        self.resolve_hive_entries(hive_entries);
         self.pending_ambient_sounds.extend(
             ambient_sounds.into_iter().map(|(source, effect)| PendingEntityTickEffect {
                 owner: entity_tick_owner(source),

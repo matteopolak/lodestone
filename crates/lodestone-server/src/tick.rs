@@ -1943,6 +1943,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     // `Zombie.hurtServer`'s reinforcement placement search — the 50-candidate
     // `Mth.nextInt(random, 7, 40) * Mth.nextInt(random, -1, 1)` offset draws.
     // On its own stream, the same reason every other spawn-time RNG here is.
+    let mut hive_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x4245_4553);
     let mut reinforcement_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x5245_494E);
     // The world border ticks first each loop. `border` is the shared handle passed
     // in — see this function's own parameter comment.
@@ -2518,6 +2519,69 @@ async fn run_tick_loop_with_weather_impl<W>(
                 break;
             }
             block_tick_out.publish_change(target.x, target.y, target.z, broken, state);
+        }
+        // Bees go into and come out of hives, and nectar carriers tend crops.
+        // `MobSim` holds the world immutably, so it records both as intents; the
+        // block-entity registry and the block writes live here.
+        {
+            let entries = mobs.with(MobSim::take_hive_entries);
+            let stay_in = mobs.with(|sim| sim.bees_stay_in_hive());
+            let mut leaving = block_entities.with(|registry| {
+                let mut refused = Vec::new();
+                for entry in entries {
+                    let coin = hive_rng.next_int(2) == 0;
+                    let bee = entry.occupant.clone();
+                    if !registry.enter_hive(entry.pos, entry.occupant, entry.flower, coin) {
+                        refused.push((
+                            entry.pos,
+                            None,
+                            vec![crate::beehive::Released { occupant: bee, honey_delivered: false }],
+                        ));
+                    }
+                }
+                let mut out = registry.tick_hives(stay_in, &|pos| {
+                    let state = resident_tick_state_id(&*world, pos.x, pos.y, pos.z)?;
+                    let (fx, fz) = crate::mobs::bees::hive_facing(state);
+                    let front = resident_tick_state_id(&*world, pos.x + fx, pos.y, pos.z + fz)?;
+                    Some(!crate::spawn_egg::collision_boxes_for_id(front).is_empty())
+                });
+                out.extend(refused);
+                out
+            });
+            for (pos, hive_flower, released) in leaving.drain(..) {
+                let Some(state) = resident_tick_state_id(&*world, pos.x, pos.y, pos.z) else { continue };
+                let facing = crate::mobs::bees::hive_facing(state);
+                let front = resident_tick_state_id(&*world, pos.x + facing.0, pos.y, pos.z + facing.1);
+                let front_blocked = front.is_some_and(|s| !crate::spawn_egg::collision_boxes_for_id(s).is_empty());
+                let mut state = state;
+                for bee in released {
+                    if bee.honey_delivered
+                        && let Some(level) = crate::mobs::bees::honey_level(state)
+                    {
+                        let next = crate::beehive::honey_after_delivery(level, hive_rng.next_int(100) as u32);
+                        if next != level
+                            && let Some(new_state) = crate::mobs::bees::with_honey_level(state, next)
+                            && resident_tick_set_block(&*world, pos.x, pos.y, pos.z, new_state)
+                        {
+                            block_tick_out.publish_change(pos.x, pos.y, pos.z, state, new_state);
+                            state = new_state;
+                        }
+                    }
+                    let adopt = hive_rng.next_int(10) < 9;
+                    mobs.with(|sim| sim.release_bee(pos, facing, front_blocked, &bee, hive_flower, adopt));
+                }
+            }
+            let hives = block_entities.with(|registry| registry.hive_occupancy());
+            mobs.with(|sim| sim.set_hives(hives));
+            for (pos, grown) in mobs.with(MobSim::take_crop_growths) {
+                let Some(old) = resident_tick_state_id(&*world, pos.x, pos.y, pos.z) else { continue };
+                if lodestone_entity::ai::bee::grown_state(old) != Some(grown) {
+                    continue;
+                }
+                if resident_tick_set_block(&*world, pos.x, pos.y, pos.z, grown) {
+                    block_tick_out.publish_change(pos.x, pos.y, pos.z, old, grown);
+                }
+            }
         }
         // Mob hurt and death sounds. `MobSim::apply_damage` already
         // damaged and killed mobs with no audible result at all — the sim records
@@ -5635,6 +5699,88 @@ mod tests {
         }
         let edits = recorded.lock().expect("poisoned").clone();
         (edits, published)
+    }
+
+    /// Runs the real loop over a south-facing bee nest holding one nectar-laden
+    /// bee that has spent `ticks_in_hive` of its 2400 inside, and returns the
+    /// nest's published block changes, the bees afloat in the world and the
+    /// bees still inside after `ticks` ticks.
+    async fn run_hive(ticks_in_hive: i32, ticks: usize) -> (Vec<(i32, i32, i32, StateId)>, usize, usize) {
+        let mut world = grass_world(false);
+        let nest = StateId::from_state_str("minecraft:bee_nest[facing=south,honey_level=0]").unwrap();
+        world.set_block_id(3, 0, 0, nest);
+        let mobs = MobHandle::new(world.clone());
+        let entity_data = crate::entity_storage::SavedEntity {
+            id: lodestone_model::ResourceKey::from_str("minecraft:bee").expect("static key"),
+            uuid: uuid::Uuid::from_u128(0xBEE),
+            pos: lodestone_model::Vec3::new(3.5, 0.5, 0.5),
+            motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            rotation: lodestone_model::Rotation::new(0.0, 0.0),
+            health: Some(10.0),
+            item: None,
+            age: None,
+            pickup_delay: None,
+            extra: vec![("HasNectar".to_owned(), lodestone_core::Nbt::Byte(1))],
+        }
+        .to_nbt();
+        let block_entities = BlockEntityHandle::default();
+        block_entities.with(|registry| {
+            let occupant = crate::beehive::Occupant {
+                entity_data,
+                ticks_in_hive,
+                min_ticks_in_hive: crate::beehive::MIN_STAY_WITH_NECTAR,
+            };
+            registry.insert(
+                BlockPos::new(3, 0, 0),
+                crate::block_entities::BlockEntity::Beehive(crate::beehive::Beehive::restore(vec![occupant], None)),
+            );
+        });
+        let source = Arc::new(RecordingWorld {
+            edits: Arc::new(Mutex::new(Vec::new())),
+            terrain: Mutex::new(world),
+        });
+        let feed = BlockTickFeed::default();
+        tokio::spawn(run_tick_loop(
+            mobs.clone(),
+            LiveMobSource::default(),
+            block_entities.clone(),
+            Arc::new(TickClock::new()),
+            source,
+            feed.clone(),
+            (-2..=2, -2..=2),
+            ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+        let mut published = Vec::new();
+        for _ in 0..ticks {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+            published.extend(feed.drain_all().into_iter().map(|c| (c.x, c.y, c.z, c.state)));
+        }
+        let afloat = mobs.with(|sim| sim.saved_entities().len());
+        let inside = block_entities.with(|registry| match registry.get(BlockPos::new(3, 0, 0)) {
+            Some(crate::block_entities::BlockEntity::Beehive(hive)) => hive.occupants().len(),
+            _ => usize::MAX,
+        });
+        (published, afloat, inside)
+    }
+
+    /// A bee whose stay is over leaves the nest through the real loop, delivers
+    /// its nectar (honey level 0 to 1, published on the wire) and is a live mob
+    /// again. The control, a bee one stay short of due, stays inside and the
+    /// level does not change.
+    #[tokio::test(start_paused = true)]
+    async fn a_due_bee_leaves_its_nest_and_raises_the_honey_level() {
+        let honey_one = StateId::from_state_str("minecraft:bee_nest[facing=south,honey_level=1]").unwrap();
+        let (published, afloat, inside) = run_hive(2401, 6).await;
+        assert!(published.contains(&(3, 0, 0, honey_one)), "{published:?}");
+        assert_eq!((afloat, inside), (1, 0));
+
+        let (published, afloat, inside) = run_hive(0, 6).await;
+        assert!(!published.iter().any(|&(x, y, z, _)| (x, y, z) == (3, 0, 0)), "{published:?}");
+        assert_eq!((afloat, inside), (0, 1));
     }
 
     /// A source that records which chunk columns the loop asked for, so a gate can

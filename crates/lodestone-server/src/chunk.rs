@@ -790,6 +790,7 @@ impl ChunkColumn {
             let id = BlockEntityKind::from_registry_type(id);
             let entity = match id {
                 BlockEntityKind::Comparator => BlockEntity::Comparator { output: 0 },
+                BlockEntityKind::Beehive => BlockEntity::Beehive(crate::beehive::Beehive::default()),
                 BlockEntityKind::MobSpawner => {
                     BlockEntity::Spawner(crate::mob_spawner::SpawnerState::default())
                 }
@@ -4549,12 +4550,8 @@ mod tests {
         assert_eq!(converted.len(), entities.len());
         assert!(matches!(
             &converted[0],
-            (BlockPos { x: 1, y: 65, z: 2 }, BlockEntity::Opaque { id, nbt })
-                if id.name() == "minecraft:beehive"
-                    && matches!(nbt, lodestone_core::Nbt::Compound(fields)
-                        if fields.iter().any(|(key, value)| key == "bees"
-                            && matches!(value, lodestone_core::Nbt::List { elements, .. }
-                                if elements.len() == 1)))
+            (BlockPos { x: 1, y: 65, z: 2 }, BlockEntity::Beehive(hive))
+                if hive.occupants().len() == 1
         ));
         assert!(matches!(
             &converted[1],

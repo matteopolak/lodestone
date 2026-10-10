@@ -151,10 +151,14 @@
 //!   and the piglin's own override of that search uses the same shape.
 //!   Collapsing it to one radius is wrong in the corners in both directions.
 
+use crate::ai::bee::{
+    BeeWanderGoal, EnterHiveGoal, GoToHiveGoal, GoToKnownFlowerGoal, GrowCropGoal, LocateHiveGoal, PollinateGoal,
+    ValidateFlowerGoal, ValidateHiveGoal,
+};
 use crate::ai::goal::Goal;
 use crate::ai::goals::{
     EndermanFreezeWhenLookedAt, EndermanLookForPlayerGoal, FollowOwnerGoal, FollowParentGoal,
-    MeleeAttackGoal, NearestAttackableTargetGoal, PanicGoal, RandomStrollGoal, TemptGoal,
+    MeleeAttackGoal, NearestAttackableTargetGoal, PanicGoal, TemptGoal,
 };
 
 use super::{
@@ -336,7 +340,8 @@ pub static ZOMBIFIED_PIGLIN: &[Registration] = &[
 
 /// Vanilla's own bee goal-registration method.
 ///
-/// Seventeen registrations, of which this repo builds seven. Note that
+/// Seventeen registrations, of which this repo builds sixteen (the hive, bloom, pollination and crop
+/// goals live in `ai::bee`). Note that
 /// vanilla's own pollinate/go-to-hive/go-to-flower rows are
 /// field assignments rather than
 /// goal registrations in that method — a line-count transcription of that block gets twenty
@@ -385,7 +390,7 @@ pub static BEE: &[Registration] = &[
     // tick and `MeleeAttackGoal.can_continue_to_use` (which requires a live
     // target) stops the same way.
     Registration::goal(0, "Bee.BeeAttackGoal", bee_attack),
-    Registration::missing(Selector::Goal, 1, "Bee.BeeEnterHiveGoal"),
+    Registration::goal(1, "Bee.BeeEnterHiveGoal", bee_enter_hive),
     Registration::goal(2, "BreedGoal", breed_1_0),
     // Vanilla's own tempt goal for this species, gated on the bee-food tag.
     // The goal is
@@ -393,14 +398,14 @@ pub static BEE: &[Registration] = &[
     // interim `tempt_food` has no `bee` arm yet — a generated tag
     // table would fix that for every species at once.
     Registration::goal(3, "TemptGoal(BEE_FOOD)", tempt_1_25),
-    Registration::missing(Selector::Goal, 3, "Bee.ValidateHiveGoal"),
-    Registration::missing(Selector::Goal, 3, "Bee.ValidateFlowerGoal"),
-    Registration::missing(Selector::Goal, 4, "Bee.BeePollinateGoal"),
+    Registration::goal(3, "Bee.ValidateHiveGoal", bee_validate_hive),
+    Registration::goal(3, "Bee.ValidateFlowerGoal", bee_validate_flower),
+    Registration::goal(4, "Bee.BeePollinateGoal", bee_pollinate),
     Registration::goal(5, "FollowParentGoal", follow_parent_1_25),
-    Registration::missing(Selector::Goal, 5, "Bee.BeeLocateHiveGoal"),
-    Registration::missing(Selector::Goal, 5, "Bee.BeeGoToHiveGoal"),
-    Registration::missing(Selector::Goal, 6, "Bee.BeeGoToKnownFlowerGoal"),
-    Registration::missing(Selector::Goal, 7, "Bee.BeeGrowCropGoal"),
+    Registration::goal(5, "Bee.BeeLocateHiveGoal", bee_locate_hive),
+    Registration::goal(5, "Bee.BeeGoToHiveGoal", bee_go_to_hive),
+    Registration::goal(6, "Bee.BeeGoToKnownFlowerGoal", bee_go_to_flower),
+    Registration::goal(7, "Bee.BeeGrowCropGoal", bee_grow_crop),
     Registration::goal(8, "Bee.BeeWanderGoal", bee_wander),
     Registration::goal(9, "FloatGoal", float_goal),
     // Vanilla's own bee retaliation goal extends
@@ -588,7 +593,39 @@ fn anger_gated_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// Picks a destination in flight about once in ten goal ticks and flies there at
 /// the species speed.
 fn bee_wander(ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(RandomStrollGoal::new(ctx.speed).with_interval(10))
+    Box::new(BeeWanderGoal::new(ctx.speed))
+}
+
+fn bee_enter_hive(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(EnterHiveGoal)
+}
+
+fn bee_validate_hive(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(ValidateHiveGoal::default())
+}
+
+fn bee_validate_flower(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(ValidateFlowerGoal::default())
+}
+
+fn bee_pollinate(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(PollinateGoal::new(ctx.speed))
+}
+
+fn bee_locate_hive(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(LocateHiveGoal)
+}
+
+fn bee_go_to_hive(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(GoToHiveGoal::new(ctx.speed))
+}
+
+fn bee_go_to_flower(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(GoToKnownFlowerGoal::new(ctx.speed))
+}
+
+fn bee_grow_crop(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(GrowCropGoal)
 }
 
 /// The bee's melee speed multiplier, from vanilla's own bee goal-registration method.

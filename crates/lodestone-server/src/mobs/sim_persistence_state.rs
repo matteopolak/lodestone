@@ -40,6 +40,13 @@ pub(super) const OWNED_FIELDS: &[&str] = &[
     "LastRestock",
     "RestocksToday",
     "VillagerDataFinalized",
+    "HasNectar",
+    "HasStung",
+    "hive_pos",
+    "flower_pos",
+    "TicksSincePollination",
+    "CannotEnterHiveTicks",
+    "CropsGrownSincePollination",
 ];
 
 /// Species with a persistent grudge: the ones whose saves carry
@@ -209,6 +216,19 @@ impl<'w> MobSim<'w> {
 
         if species == "villager" {
             self.villager_fields(mob, &mut fields);
+        }
+        if species == "bee" {
+            let bee = mob.mob.bee_state();
+            fields.push(("HasNectar".to_owned(), byte(bee.has_nectar)));
+            fields.push(("HasStung".to_owned(), byte(mob.stung_at.is_some())));
+            fields.push(("TicksSincePollination".to_owned(), Nbt::Int(bee.ticks_without_nectar)));
+            fields.push(("CannotEnterHiveTicks".to_owned(), Nbt::Int(bee.stay_out_ticks)));
+            fields.push(("CropsGrownSincePollination".to_owned(), Nbt::Int(bee.crops_grown)));
+            for (name, cell) in [("hive_pos", bee.hive), ("flower_pos", bee.flower)] {
+                if let Some((x, y, z)) = cell {
+                    fields.push((name.to_owned(), int_array_pos(BlockPos::new(x, y, z))));
+                }
+            }
         }
 
         for (name, value) in &mob.passthrough {
@@ -432,6 +452,21 @@ impl<'w> MobSim<'w> {
             }
         }
         pending.owner = read_uuid(get("Owner"));
+
+        if species == "bee" {
+            let cell = |name: &str| read_pos(get(name)).map(|p| (p.x, p.y, p.z));
+            let mob = &mut self.mobs[index];
+            if flag_of(get("HasStung")) {
+                mob.stung_at = Some(restock_clock as u64);
+            }
+            let bee = mob.mob.bee_state_mut();
+            bee.has_nectar = flag_of(get("HasNectar"));
+            bee.ticks_without_nectar = int_of(get("TicksSincePollination")).unwrap_or(0).max(0);
+            bee.stay_out_ticks = int_of(get("CannotEnterHiveTicks")).unwrap_or(0).max(0);
+            bee.crops_grown = int_of(get("CropsGrownSincePollination")).unwrap_or(0).max(0);
+            bee.hive = cell("hive_pos");
+            bee.flower = cell("flower_pos");
+        }
 
         if species == "villager" {
             self.restore_villager(index, extra, world, restock_clock);

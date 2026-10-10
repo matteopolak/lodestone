@@ -49,6 +49,9 @@ impl<'w> MobSim<'w> {
             item_probe_count: 0,
             pending_detonations: Vec::new(),
             pending_grazes: Vec::new(),
+            hives: std::sync::Arc::default(),
+            pending_hive_entries: Vec::new(),
+            pending_crop_growths: Vec::new(),
             pending_player_hits: Vec::new(),
             pending_mining_fatigue: Vec::new(),
             pending_vocalisations: Vec::new(),
@@ -746,6 +749,10 @@ impl<'w> MobSim<'w> {
             attack_damage_from_attributes(&attrs)
         };
         mob.knockback_resistance = knockback_resistance_from_attributes(&attrs);
+        if mob.entity_type().path() == "bee" {
+            let first_search = 20 + lodestone_entity::ai::MobController::next_i32(&mut mob.mob, 41);
+            mob.mob.enable_bee(first_search);
+        }
         if mob.entity_type().path() == "turtle" {
             mob.mob.set_nest(Some(Vec3::new(pos.x.floor() + 0.5, pos.y.floor(), pos.z.floor() + 0.5)));
         }

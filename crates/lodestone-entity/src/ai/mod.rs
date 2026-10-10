@@ -7,6 +7,7 @@
 //! goals ([`goals`]). Goals act on the mob through the [`MobController`] seam so
 //! the AI layer stays free of world and physics dependencies.
 
+pub mod bee;
 pub mod goal;
 pub mod goals;
 pub mod locomotion;

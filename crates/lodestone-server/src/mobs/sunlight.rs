@@ -62,6 +62,13 @@ impl Sky {
     pub(super) fn raining(self) -> bool {
         self.rain_level > 0.2
     }
+
+    /// Whether bees stay in their hives: any rain at all, or the overworld
+    /// night from tick 12542 up to 23460.
+    pub(super) fn bees_stay_in_hive(self, day_time: i32) -> bool {
+        let night = self.dimension == Dimension::Overworld && (12542..23460).contains(&day_time.rem_euclid(24_000));
+        night || self.rain_level > 0.0 || self.thunder_level > 0.0
+    }
 }
 
 /// The per-tick chance of catching fire under open sky at this sky darkening.
@@ -87,6 +94,21 @@ mod tests {
         assert!((ignite_chance(3) - 0.006_667).abs() < 1e-5);
         assert_eq!(ignite_chance(4), 0.0);
         assert_eq!(ignite_chance(11), 0.0);
+    }
+
+    /// The attribute turns on at 12542 and off at 23460 (a day is 24000 ticks), so
+    /// the tick before each edge is outside and the edge itself is inside the
+    /// night, and any rain keeps bees in at noon.
+    #[test]
+    fn bees_stay_in_from_tick_12542_to_23459_and_whenever_it_rains() {
+        let clear = Sky::clear();
+        for (tick, stays) in [(0, false), (12541, false), (12542, true), (18000, true), (23459, true), (23460, false), (24000 + 12542, true)] {
+            assert_eq!(clear.bees_stay_in_hive(tick), stays, "tick {tick}");
+        }
+        let drizzle = Sky { rain_level: 0.05, ..Sky::clear() };
+        assert!(drizzle.bees_stay_in_hive(6000));
+        let nether = Sky { dimension: Dimension::Nether, ..Sky::clear() };
+        assert!(!nether.bees_stay_in_hive(18000), "only the overworld has the night");
     }
 
     #[test]
