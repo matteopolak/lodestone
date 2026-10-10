@@ -49,7 +49,7 @@ impl Goal for Counter {
 
 fn ticks_over(phase: u64, every_tick: bool, run: usize) -> u32 {
     let counted = Arc::new(AtomicU32::new(0));
-    let mut mob = NavigatingMob::new(&Void, MobShape::land(0.6, 1.95), Vec3::new(0.5, 0.0, 0.5), 0.2, 64, 1);
+    let mut mob = NavigatingMob::new(&Void, MobShape::land(0.6, 1.95), Vec3::new(0.5, 0.0, 0.5), 0.2, 64, 1, 63);
     mob.set_ai_phase(phase);
     let mut ai = GoalSelector::new();
     ai.add(1, Box::new(Counter { ticks: counted.clone(), every_tick }));

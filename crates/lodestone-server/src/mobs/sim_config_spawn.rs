@@ -485,7 +485,7 @@ impl<'w> MobSim<'w> {
             id,
             mob: {
                 let mut mob =
-                    NavigatingMob::new(&world::UNLOADED, shape, pos, movement_speed, visited_budget, id as u64);
+                    NavigatingMob::new(&world::UNLOADED, shape, pos, movement_speed, visited_budget, id as u64, self.sky.dimension.sea_level());
                 mob.set_ai_phase(id as u64);
                 mob
             },

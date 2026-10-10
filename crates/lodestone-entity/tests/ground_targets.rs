@@ -40,7 +40,7 @@ impl PathWorld for Plateau {
 /// and candidates over the missing floor are refused.
 #[test]
 fn stroll_targets_stand_on_ground_and_never_inside_it() {
-    let mut mob = NavigatingMob::new(&Plateau, MobShape::land(0.6, 1.95), Vec3::new(0.5, 0.0, 0.5), 0.2, 64, 7);
+    let mut mob = NavigatingMob::new(&Plateau, MobShape::land(0.6, 1.95), Vec3::new(0.5, 0.0, 0.5), 0.2, 64, 7, 63);
     let mut lifted = 0;
     let mut chosen = 0;
     for _ in 0..400 {
@@ -63,7 +63,7 @@ fn stroll_targets_stand_on_ground_and_never_inside_it() {
 #[test]
 fn ground_destinations_snap_to_the_surface() {
     for (label, y) in [("in the air", 9.0), ("inside the floor", -3.0)] {
-        let mut mob = NavigatingMob::new(&Plateau, MobShape::land(0.6, 1.95), Vec3::new(0.5, 0.0, 0.5), 0.2, 64, 7);
+        let mut mob = NavigatingMob::new(&Plateau, MobShape::land(0.6, 1.95), Vec3::new(0.5, 0.0, 0.5), 0.2, 64, 7, 63);
         assert!(mob.move_to(Vec3::new(1.5, y, 0.5), 1.0), "no path to a target {label}");
         assert!(mob.path_reaches_target(), "a target {label} was searched for as written, not snapped");
         let end = mob.path_end().expect("a path was started");
@@ -86,7 +86,7 @@ fn a_melee_chase_repaths_on_its_countdown_not_every_tick() {
     use lodestone_entity::ai::goals::MeleeAttackGoal;
 
     // Slow enough not to arrive within the run.
-    let mut mob = NavigatingMob::new(&Plateau, MobShape::land(0.6, 1.95), Vec3::new(-2.5, 0.0, 0.5), 0.05, 64, 7);
+    let mut mob = NavigatingMob::new(&Plateau, MobShape::land(0.6, 1.95), Vec3::new(-2.5, 0.0, 0.5), 0.05, 64, 7, 63);
     let mut ai = GoalSelector::new();
     ai.add(1, Box::new(MeleeAttackGoal::new(0.05, 1.0)));
     for tick in 0..120 {

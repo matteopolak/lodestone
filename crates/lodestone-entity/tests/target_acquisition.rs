@@ -166,6 +166,7 @@ fn run_in(
         // `lodestone_server::mobs::MobSim::spawn_species` uses.
         (follow_range * 16.0).floor() as i32,
         0,
+    63,
     );
     mob.set_follow_range(follow_range);
 
@@ -322,6 +323,7 @@ fn the_range_cut_is_the_jars_and_not_a_rounded_guess() {
                 0.25,
                 256,
                 0,
+            63,
             );
             mob.set_follow_range(follow_range);
             mob.set_nearest_player(Some(Vec3::new(0.5 + d, 0.0, 0.5)));
@@ -356,6 +358,7 @@ fn a_pursued_player_is_tracked_while_in_range_and_released_when_it_leaves() {
         0.25,
         256,
         0,
+    63,
     );
     mob.set_follow_range(DEFAULT_FOLLOW_RANGE);
     let mut ai = GoalSelector::new();
@@ -481,6 +484,7 @@ fn an_anger_gated_registration_targets_only_the_grudge_holder() {
             0.25,
             256,
             0,
+        63,
         );
         mob.set_follow_range(DEFAULT_FOLLOW_RANGE);
         mob.set_nearest_player(Some(nearby_player));

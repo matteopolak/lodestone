@@ -862,6 +862,7 @@ mod tests {
             // Vanilla's `floor(followRange * 16)` at the zombie's 35.0.
             560,
             0,
+            63,
         );
         mob.set_attack_target(Some(at));
 

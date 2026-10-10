@@ -841,3 +841,27 @@ fn a_frog_in_a_pond_floats_near_the_surface() {
     let mean = sum / 300.0;
     assert!(mean >= 4.4, "mean height {mean}");
 }
+
+/// Two sims built the same way must trace bit-identical paths: a mob's
+/// randomness comes from its id, never from its uuid, a hasher or a clock.
+#[test]
+fn a_mob_trajectory_is_a_pure_function_of_its_spawn() {
+    let trace = || {
+        let world = pond_world();
+        let mut sim = MobSim::new(&world);
+        let ids: Vec<i32> = ["minecraft:frog", "minecraft:axolotl", "minecraft:turtle"]
+            .iter()
+            .map(|k| sim.spawn_species(k.parse().expect("valid key"), Vec3::new(32.5, 1.5, 32.5)).id())
+            .collect();
+        let mut out = Vec::new();
+        for _ in 0..400 {
+            sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+            for &id in &ids {
+                let p = sim.get(id).expect("alive").position();
+                out.push((p.x.to_bits(), p.y.to_bits(), p.z.to_bits()));
+            }
+        }
+        out
+    };
+    assert!(trace() == trace(), "identical spawns diverged");
+}

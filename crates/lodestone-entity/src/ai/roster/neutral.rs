@@ -857,6 +857,7 @@ mod tests {
                 WOLF_SPEED,
                 560,
                 1,
+                63,
             );
             if vanilla == "OwnerHurtByTargetGoal" {
                 with_record.set_owner_hurt_by(Some(fed));
@@ -882,6 +883,7 @@ mod tests {
                 WOLF_SPEED,
                 560,
                 1,
+                63,
             );
             assert!(
                 !build(&ctx).can_use(&mut without_record),
@@ -926,6 +928,7 @@ mod tests {
             ENDERMAN_SPEED,
             560,
             1,
+            63,
         );
         watched.set_attack_target(Some(target));
         watched.set_stared_at(true);
@@ -941,6 +944,7 @@ mod tests {
             ENDERMAN_SPEED,
             560,
             1,
+            63,
         );
         unwatched.set_attack_target(Some(target));
         unwatched.set_stared_at(false);
@@ -986,6 +990,7 @@ mod tests {
                 ENDERMAN_SPEED,
                 560,
                 0xB4_2333,
+                63,
             );
             let mut ai = GoalSelector::new();
             for (priority, goal) in goals_for("enderman", &ctx) {
@@ -1047,6 +1052,7 @@ mod tests {
             ENDERMAN_SPEED,
             560,
             1,
+            63,
         );
         watched.set_nearest_player(Some(Vec3::new(5.0, 0.0, 0.0)));
         watched.set_stared_at(true);
@@ -1062,6 +1068,7 @@ mod tests {
             ENDERMAN_SPEED,
             560,
             1,
+            63,
         );
         unwatched.set_nearest_player(Some(Vec3::new(5.0, 0.0, 0.0)));
         unwatched.set_stared_at(false);
@@ -1093,6 +1100,7 @@ mod tests {
             ENDERMAN_SPEED,
             560,
             2,
+            63,
         );
         mob.set_nearest_player(Some(candidate));
         mob.set_stared_at(true);
@@ -1155,6 +1163,7 @@ mod tests {
             ENDERMAN_SPEED,
             560,
             3,
+            63,
         );
         mob.set_follow_range(64.0); // EnderMan.createAttributes' real FOLLOW_RANGE
         mob.set_nearest_player(Some(far_target));
@@ -1254,6 +1263,7 @@ mod tests {
             ENDERMAN_SPEED,
             560,
             4,
+            63,
         );
         mob.set_follow_range(64.0);
         mob.set_nearest_player(Some(close_target));
@@ -1286,6 +1296,7 @@ mod tests {
             ENDERMAN_SPEED,
             560,
             5,
+            63,
         );
         control.set_follow_range(64.0);
         control.set_nearest_player(Some(close_target));
@@ -1357,6 +1368,7 @@ mod tests {
                     0.3,
                     900,
                     (checked as u64) * 2 + 1,
+                    63,
                 );
                 calm.set_nearest_player(Some(Vec3::new(3.0, 0.0, 0.0)));
                 calm.set_angry_target(None);
@@ -1378,6 +1390,7 @@ mod tests {
                     0.3,
                     900,
                     (checked as u64) * 2 + 2,
+                    63,
                 );
                 angry.set_nearest_player(Some(Vec3::new(80.0, 0.0, 0.0)));
                 angry.set_angry_target(Some(Vec3::new(3.0, 0.0, 0.0)));
@@ -1606,6 +1619,7 @@ mod tests {
             speed,
             560,
             0xB4_2333,
+            63,
         );
 
         let mut ai = GoalSelector::new();

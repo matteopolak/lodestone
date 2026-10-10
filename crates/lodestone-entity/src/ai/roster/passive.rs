@@ -922,6 +922,7 @@ mod tests {
             WALK,
             560,
             0,
+            63,
         );
         let mut ai = GoalSelector::new();
         for (p, g) in super::super::goals_for("cat", &SpeciesContext::new(WALK)) {
@@ -1031,6 +1032,7 @@ mod tests {
             WALK,
             560,
             0,
+            63,
         );
         let mut ai = GoalSelector::new();
         if let Some(s) = species {
@@ -1159,6 +1161,7 @@ mod tests {
             WALK,
             256,
             0,
+            63,
         );
         mob.set_age(crate::ai::navigating_mob::BABY_START_AGE);
 

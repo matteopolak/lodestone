@@ -65,10 +65,9 @@
 //!   alternative — falling back to "no restrictions" — spawns guardians on land.
 //!   [`spawn_rule`] returning `None` is why a Nether-only species in an overworld
 //!   biome list is inert rather than wrong.
-//! * **Sea level is [`SEA_LEVEL`], a constant.** The tick loop holds a
-//!   [`ChunkSource`](crate::chunk::ChunkSource), not a generator, so there is
-//!   nothing to ask. It is right for every overworld preset; a custom
-//!   `sea_level` would shift the water-animal bands.
+//! * **Sea level is the dimension's default.** Rule bands are offsets from
+//!   [`Dimension::sea_level`]; a custom generator `sea_level` would shift the
+//!   water-animal bands.
 //! * **Environment inputs come from the tick owner.** Difficulty refuses
 //!   forbidden species before placement; dimension and weather determine the
 //!   monster light thresholds. Animal brightness remains un-darkened skylight.
@@ -92,10 +91,6 @@ use crate::dimension::Dimension;
 use crate::generation_population::PlacementDecision;
 use crate::mob_spawn::{MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng};
 use crate::mobs::ChunkWorld;
-
-/// Vanilla's overworld sea level, the anchor for every water-animal Y band. See
-/// the module doc for why this is a constant.
-pub const SEA_LEVEL: i32 = 63;
 
 /// How many columns [`NaturalSpawner`] will light in one spawn cycle before
 /// giving up on the rest until the next. See the module doc.
@@ -219,8 +214,9 @@ pub struct SpawnRule {
     pub light: LightRule,
     /// What the predicate demands below the position.
     pub ground: Ground,
-    /// Inclusive world-Y band, when the predicate names one.
-    pub y_range: (i32, i32),
+    /// Inclusive Y band relative to the dimension's sea level, when the
+    /// predicate names one; `None` leaves that side open.
+    pub sea_band: (Option<i32>, Option<i32>),
     /// Whether the position must see the sky (`checkSurfaceMonstersSpawnRules`).
     pub needs_sky: bool,
     /// The predicate's own `nextInt` gate.
@@ -241,7 +237,7 @@ impl SpawnRule {
             placement: Placement::OnGround,
             light: LightRule::Any,
             ground: Ground::ValidSpawn,
-            y_range: (i32::MIN, i32::MAX),
+            sea_band: (None, None),
             needs_sky: false,
             chance: Chance::Always,
             water_above: false,
@@ -289,7 +285,7 @@ impl SpawnRule {
         Self {
             placement: Placement::InWater,
             ground: Ground::Water,
-            y_range: (SEA_LEVEL - 13, SEA_LEVEL),
+            sea_band: (Some(-13), Some(0)),
             water_above: true,
             ..Self::base()
         }
@@ -436,7 +432,7 @@ static SPAWN_RULES: &[(&str, SpawnRule)] = &[
             placement: Placement::InWater,
             light: LightRule::Zero,
             ground: Ground::Any,
-            y_range: (i32::MIN, SEA_LEVEL - 33),
+            sea_band: (None, Some(-33)),
             ..SpawnRule::base()
         }
     }),
@@ -450,7 +446,7 @@ static SPAWN_RULES: &[(&str, SpawnRule)] = &[
     ("nautilus", {
         // A deeper band than the surface animals: `[sea - 25, sea - 5]`.
         SpawnRule {
-            y_range: (SEA_LEVEL - 25, SEA_LEVEL - 5),
+            sea_band: (Some(-25), Some(-5)),
             ..SpawnRule::surface_water()
         }
     }),
@@ -507,7 +503,7 @@ static SPAWN_RULES: &[(&str, SpawnRule)] = &[
     ("sulfur_cube", SpawnRule::any_light_monster()),
     ("tropical_fish", {
         SpawnRule {
-            y_range: (i32::MIN, i32::MAX),
+            sea_band: (None, None),
             special: Special::TropicalFish,
             ..SpawnRule::surface_water()
         }
@@ -516,7 +512,7 @@ static SPAWN_RULES: &[(&str, SpawnRule)] = &[
         SpawnRule {
             light: LightRule::Bright,
             ground: Ground::OneOf(&[Block::Sand, Block::RedSand]),
-            y_range: (i32::MIN, SEA_LEVEL + 3),
+            sea_band: (None, Some(3)),
             ..SpawnRule::base()
         }
     }),
@@ -932,7 +928,9 @@ impl NaturalSpawner {
 
     #[allow(clippy::too_many_lines)]
     fn placement_permits(&mut self, rule: &SpawnRule, x: i32, y: i32, z: i32) -> Option<bool> {
-        if y < rule.y_range.0 || y > rule.y_range.1 {
+        let sea_level = self.dimension.sea_level();
+        let (low, high) = rule.sea_band;
+        if low.is_some_and(|low| y < sea_level + low) || high.is_some_and(|high| y > sea_level + high) {
             return Some(false);
         }
         let world = self.world.clone()?;
@@ -1055,7 +1053,7 @@ impl NaturalSpawner {
                     .as_ref()
                     .and_then(|w| w.biome_at(x, y, z))
                     .is_some_and(|b| b == "minecraft:lush_caves");
-                if !any_height && !(SEA_LEVEL - 13..=SEA_LEVEL).contains(&y) {
+                if !any_height && !(sea_level - 13..=sea_level).contains(&y) {
                     return Some(false);
                 }
             }
@@ -1140,7 +1138,7 @@ impl NaturalSpawner {
         if river {
             self.rng.next_int(15) == 0
         } else {
-            self.rng.next_int(40) == 0 && y < SEA_LEVEL - 5
+            self.rng.next_int(40) == 0 && y < self.dimension.sea_level() - 5
         }
     }
 
@@ -1695,7 +1693,7 @@ mod tests {
 
         let cod = spawn_rule("cod").expect("registered");
         assert_eq!(cod.placement, Placement::InWater);
-        assert_eq!(cod.y_range, (SEA_LEVEL - 13, SEA_LEVEL));
+        assert_eq!(cod.sea_band, (Some(-13), Some(0)));
 
         // A guardian appears in no bundled biome list, so it must be absent here
         // rather than fall back to "anywhere".
@@ -1710,8 +1708,8 @@ mod tests {
         let slime = spawn_rule("slime").expect("registered");
         assert_eq!(slime.special, Special::Slime);
         assert_eq!(
-            slime.y_range,
-            (i32::MIN, i32::MAX),
+            slime.sea_band,
+            (None, None),
             "a Y band on the row would gate both arms; each arm owns its own"
         );
         assert_eq!(

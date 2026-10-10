@@ -120,8 +120,6 @@ pub const PANIC_DAMAGE_TICKS: i32 = 40;
 /// real per-species value with [`set_follow_range`](NavigatingMob::set_follow_range).
 pub const DEFAULT_FOLLOW_RANGE: f64 = 16.0;
 
-/// The sea level a mob starts with, until its host sets its dimension's.
-const OVERWORLD_SEA_LEVEL: i32 = 63;
 
 /// The floor vanilla puts under the target-acquisition range, in blocks:
 /// its own targeting-conditions test takes the larger of the follow range
@@ -742,6 +740,9 @@ impl<'w> NavigatingMob<'w> {
     /// seed replayed produces byte-identical mob behaviour. Vanilla seeds
     /// its own per-entity random source the same way; this is our
     /// equivalent, minus the non-determinism.
+    ///
+    /// `sea_level` is the sea level of the mob's dimension; the host refreshes
+    /// it with [`set_sea_level`](Self::set_sea_level).
     #[must_use]
     pub fn new(
         world: &'w dyn PathWorld,
@@ -750,6 +751,7 @@ impl<'w> NavigatingMob<'w> {
         movement_speed: f64,
         visited_budget: i32,
         seed: u64,
+        sea_level: i32,
     ) -> Self {
         let width = shape.width;
         let swims = shape.nav_mode == NavMode::Swim;
@@ -821,7 +823,7 @@ impl<'w> NavigatingMob<'w> {
             swoop_anchored: false,
             climb_goal: None,
             sun: (false, false, false),
-            sea_level: OVERWORLD_SEA_LEVEL,
+            sea_level,
             against_wall: false,
             climbed: false,
             on_ground: false,
@@ -3561,7 +3563,7 @@ mod tests {
 
     fn run_to_target(world: &dyn PathWorld, target: Vec3) -> (bool, f64, Vec<Vec3>) {
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0);
+        let mut mob = NavigatingMob::new(world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0, 63);
         mob.set_attack_target(Some(target));
 
         let mut ai = GoalSelector::new();
@@ -3629,7 +3631,7 @@ mod tests {
         let world = fence_wall();
         let shape = MobShape::land(0.6, 1.95);
         let target = Vec3::new(10.5, 0.0, 0.5);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0, 63);
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
         ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
@@ -3683,7 +3685,7 @@ mod tests {
         let world = Arena { walls };
         let shape = MobShape::land(0.6, 1.95);
         let target = Vec3::new(10.5, 0.0, 0.5);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 3000, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 3000, 0, 63);
         mob.set_attack_target(Some(target));
 
         // move_to yields a (partial) path, matching vanilla best-effort behaviour.
@@ -3772,6 +3774,7 @@ mod tests {
             0.25,
             600,
             0,
+            63,
         );
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
@@ -3827,6 +3830,7 @@ mod tests {
             0.25,
             800,
             0,
+            63,
         );
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
@@ -3897,8 +3901,8 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
-        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400, 0);
+        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0, 63);
+        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400, 0, 63);
         a.set_in_love();
         b.set_in_love();
 
@@ -3947,8 +3951,8 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
-        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400, 0);
+        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0, 63);
+        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400, 0, 63);
         a.set_in_love();
         b.set_in_love();
         let mut ai_a = GoalSelector::new();
@@ -3975,7 +3979,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0, 63);
         mob.set_in_love();
         assert_eq!(mob.love_time(), LOVE_TICKS);
         for _ in 0..LOVE_TICKS {
@@ -4010,7 +4014,7 @@ mod tests {
         let shape = MobShape::land(0.6, 1.95);
 
         // Control: unlocked, same starting age, ages normally over 50 ticks.
-        let mut control = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
+        let mut control = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0, 63);
         control.set_age(-10);
         for _ in 0..50 {
             control.advance();
@@ -4022,7 +4026,7 @@ mod tests {
         );
 
         // Subject: locked, identical starting age, must not move at all.
-        let mut locked = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
+        let mut locked = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0, 63);
         locked.set_age(-10);
         locked.set_age_locked(true);
         for _ in 0..50 {
@@ -4054,7 +4058,7 @@ mod tests {
         let shape = MobShape::land(0.6, 1.95);
         let baby_start = Vec3::new(0.0, 0.0, 0.0);
         let parent_pos = Vec3::new(10.0, 0.0, 0.0);
-        let mut baby = NavigatingMob::new(&world, shape, baby_start, 0.25, 8000, 0);
+        let mut baby = NavigatingMob::new(&world, shape, baby_start, 0.25, 8000, 0, 63);
         baby.set_age(-10); // is_baby() == true, far from BABY_START_AGE so it
         // does not grow up mid-test.
         baby.set_parent_candidate(Some(parent_pos));
@@ -4091,7 +4095,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let start = Vec3::new(5.0, 0.0, 5.0);
-        let mut mob = NavigatingMob::new(&world, MobShape::land(0.6, 1.95), start, 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, MobShape::land(0.6, 1.95), start, 0.25, 400, 0, 63);
         mob.apply_knockback(Vec3::new(-0.6, 0.0, 0.2));
 
         // Stone retains 0.6 * 0.91 of the velocity each tick.
@@ -4349,6 +4353,7 @@ mod tests {
             0.25,
             400,
             0,
+            63,
         );
         let from_y = mob.position().y as i32;
         mob.navigator.start(
@@ -4504,7 +4509,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0, 63);
         // Establish a real path first, then teleport away from it.
         assert!(
             crate::ai::mob::MobController::move_to(&mut mob, Vec3::new(10.5, 0.0, 0.5), 1.0),
@@ -4537,7 +4542,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0, 63);
         mob.damage_self(5.0);
         mob.damage_self(3.0);
         assert_eq!(
@@ -4557,7 +4562,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0, 63);
         assert!(
             !mob.is_being_stared_at(),
             "a mob nobody has fed must read not-stared-at"
@@ -4574,7 +4579,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0, 63);
         assert_eq!(mob.owner_position(), None, "a wild mob has no owner");
         let owner = Vec3::new(4.0, 0.0, 4.0);
         mob.set_owner(Some(owner));
@@ -4593,7 +4598,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0, 63);
         mob.ignite();
 
         for expected in 1..MAX_SWELL {
@@ -4628,7 +4633,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0, 63);
 
         for _ in 0..500 {
             mob.advance();
@@ -4647,7 +4652,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0, 63);
         mob.set_attack_target(Some(Vec3::new(1.0, 0.0, 0.0))); // distSqr 1 < 9
 
         let mut ai = GoalSelector::new();
@@ -4676,7 +4681,7 @@ mod tests {
         let walls: HashSet<_> = (0..=2).map(|y| (1, y, 0)).collect();
         let world = Arena { walls };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0, 63);
         mob.set_attack_target(Some(Vec3::new(2.0, 0.0, 0.0)));
         let mut ai = GoalSelector::new();
         ai.add(0, Box::new(SwellGoal::new()));
@@ -4696,7 +4701,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0, 63);
         mob.set_attack_target(Some(Vec3::new(20.0, 0.0, 0.0))); // distSqr 400
 
         let mut ai = GoalSelector::new();
@@ -4778,7 +4783,7 @@ mod tests {
     }
 
     fn perception_mob<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
-        let mut mob = NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, 0.25, 400, 0, 63);
         mob.sense_fluids();
         mob
     }
@@ -5131,9 +5136,9 @@ mod tests {
         let pos = Vec3::new(0.5, 0.0, 0.5);
 
         let mut mob_a =
-            NavigatingMob::new(&world, shape.clone(), pos, 0.25, 400, 0xAAAA_AAAA_AAAA_AAAA);
+            NavigatingMob::new(&world, shape.clone(), pos, 0.25, 400, 0xAAAA_AAAA_AAAA_AAAA, 63);
         let mut mob_b =
-            NavigatingMob::new(&world, shape, pos, 0.25, 400, 0xBBBB_BBBB_BBBB_BBBB);
+            NavigatingMob::new(&world, shape, pos, 0.25, 400, 0xBBBB_BBBB_BBBB_BBBB, 63);
 
         let target_a = mob_a.random_stroll_target();
         let target_b = mob_b.random_stroll_target();
@@ -5157,9 +5162,9 @@ mod tests {
         let pos = Vec3::new(0.5, 0.0, 0.5);
 
         let mut mob_a =
-            NavigatingMob::new(&world, shape.clone(), pos, 0.25, 400, 0xC0DE_C0DE_C0DE_C0DE);
+            NavigatingMob::new(&world, shape.clone(), pos, 0.25, 400, 0xC0DE_C0DE_C0DE_C0DE, 63);
         let mut mob_b =
-            NavigatingMob::new(&world, shape, pos, 0.25, 400, 0xC0DE_C0DE_C0DE_C0DE);
+            NavigatingMob::new(&world, shape, pos, 0.25, 400, 0xC0DE_C0DE_C0DE_C0DE, 63);
 
         assert_eq!(
             mob_a.random_stroll_target(),
@@ -5192,9 +5197,9 @@ mod tests {
         let shared = 0x1234_5678_9ABC_DEF0;
 
         let mut mob_a =
-            NavigatingMob::new(&world, shape.clone(), pos_a, 0.25, 400, shared);
+            NavigatingMob::new(&world, shape.clone(), pos_a, 0.25, 400, shared, 63);
         let mut mob_b =
-            NavigatingMob::new(&world, shape, pos_b, 0.25, 400, shared);
+            NavigatingMob::new(&world, shape, pos_b, 0.25, 400, shared, 63);
 
         let target_a = mob_a.random_stroll_target().unwrap();
         let target_b = mob_b.random_stroll_target().unwrap();
@@ -5270,7 +5275,7 @@ mod tests {
 
     fn teleport_mob(pos: Vec3) -> NavigatingMob<'static> {
         let world: &'static TeleportWorld = &TeleportWorld;
-        NavigatingMob::new(world, MobShape::land(0.6, 1.95), pos, 0.2, 32, 1)
+        NavigatingMob::new(world, MobShape::land(0.6, 1.95), pos, 0.2, 32, 1, 63)
     }
 
     /// The positive case: a candidate whose column has solid, dry ground
@@ -5370,7 +5375,7 @@ mod tests {
         // the body is at rest; from k = 16 (3.2 > pi) it keeps 0.9 per tick.
         let world = Sea;
         let mut mob =
-            NavigatingMob::new(&world, MobShape::drifter(0.8, 0.8), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0);
+            NavigatingMob::new(&world, MobShape::drifter(0.8, 0.8), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0, 63);
         mob.pulse_rate = 0.2;
         mob.drift_vector = Vec3::new(0.2, 0.0, 0.0);
         let mut ai = GoalSelector::new();
@@ -5393,7 +5398,7 @@ mod tests {
         // follows (v - 0.08) * 0.98: -0.0784, then (-0.0784 - 0.08) * 0.98.
         let world = FluidArena::dry();
         let mut mob =
-            NavigatingMob::new(&world, MobShape::drifter(0.8, 0.8), Vec3::new(0.5, 10.0, 0.5), 0.0, 100, 0);
+            NavigatingMob::new(&world, MobShape::drifter(0.8, 0.8), Vec3::new(0.5, 10.0, 0.5), 0.0, 100, 0, 63);
         mob.drift_vector = Vec3::new(0.2, 0.1, 0.0);
         let mut ai = GoalSelector::new();
         mob.tick(&mut ai);
@@ -5406,7 +5411,7 @@ mod tests {
         use crate::ai::goals::DriftFleeGoal;
         let world = Sea;
         let mut mob =
-            NavigatingMob::new(&world, MobShape::drifter(0.8, 0.8), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0);
+            NavigatingMob::new(&world, MobShape::drifter(0.8, 0.8), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0, 63);
         mob.note_hurt(Some(Vec3::new(attacker_x, 20.0, 0.5)));
         let mut ai = GoalSelector::new();
         ai.add(1, Box::new(DriftFleeGoal::new()));
@@ -5425,7 +5430,7 @@ mod tests {
     }
 
     fn floater<'w>(world: &'w dyn PathWorld) -> NavigatingMob<'w> {
-        let mut mob = NavigatingMob::new(world, MobShape::flier(NavMode::Fly, 4.0, 4.0), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0);
+        let mut mob = NavigatingMob::new(world, MobShape::flier(NavMode::Fly, 4.0, 4.0), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0, 63);
         mob.set_flying_speed(0.06);
         mob
     }
@@ -5457,7 +5462,7 @@ mod tests {
     }
 
     fn bee<'w>(world: &'w dyn PathWorld, mode: NavMode) -> NavigatingMob<'w> {
-        let mut mob = NavigatingMob::new(world, MobShape::flier(mode, 0.7, 0.6), Vec3::new(0.5, 5.0, 0.5), 0.3, 4000, 0);
+        let mut mob = NavigatingMob::new(world, MobShape::flier(mode, 0.7, 0.6), Vec3::new(0.5, 5.0, 0.5), 0.3, 4000, 0, 63);
         mob.set_flying_speed(0.6);
         mob
     }
@@ -5496,7 +5501,7 @@ mod tests {
     }
 
     fn bat<'w>(world: &'w dyn PathWorld) -> NavigatingMob<'w> {
-        NavigatingMob::new(world, MobShape::flier(NavMode::Flutter, 0.5, 0.9), Vec3::new(0.5, 10.0, 0.5), 0.0, 100, 0)
+        NavigatingMob::new(world, MobShape::flier(NavMode::Flutter, 0.5, 0.9), Vec3::new(0.5, 10.0, 0.5), 0.0, 100, 0, 63)
     }
 
     #[test]
@@ -5520,7 +5525,7 @@ mod tests {
     }
 
     fn phantom<'w>(world: &'w dyn PathWorld) -> NavigatingMob<'w> {
-        NavigatingMob::new(world, MobShape::flier(NavMode::Swoop, 0.9, 0.5), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0)
+        NavigatingMob::new(world, MobShape::flier(NavMode::Swoop, 0.9, 0.5), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0, 63)
     }
 
     #[test]
@@ -5590,7 +5595,7 @@ mod tests {
 
     fn axolotl<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
         let shape = MobShape::amphibian(SwimRule::Smooth { in_water: 0.1, on_land: 0.5, buoyant: false }, 0.75, 0.42);
-        NavigatingMob::new(world, shape, at, 1.0, 4000, 0)
+        NavigatingMob::new(world, shape, at, 1.0, 4000, 0, 63)
     }
 
     #[test]
@@ -5627,7 +5632,7 @@ mod tests {
     #[test]
     fn a_water_only_swimmer_stays_behind_the_shore() {
         let shape = MobShape::flier(NavMode::Swim, 0.75, 0.42);
-        let mut mob = NavigatingMob::new(&Shore, shape, Vec3::new(1.5, -4.0, 0.5), 1.0, 4000, 0);
+        let mut mob = NavigatingMob::new(&Shore, shape, Vec3::new(1.5, -4.0, 0.5), 1.0, 4000, 0, 63);
         mob.body_yaw = -90.0;
         mob.set_follow_range(32.0);
         MobController::move_to(&mut mob, Vec3::new(14.5, 0.0, 0.5), 0.3);
@@ -5641,7 +5646,7 @@ mod tests {
     fn drowned<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
         let mut shape = MobShape::amphibian(SwimRule::Drowned, 0.6, 1.95);
         shape.max_up_step = 1.0;
-        let mut mob = NavigatingMob::new(world, shape, at, 1.0, 4000, 0);
+        let mut mob = NavigatingMob::new(world, shape, at, 1.0, 4000, 0, 63);
         mob.set_follow_range(32.0);
         mob
     }
@@ -5651,7 +5656,7 @@ mod tests {
     fn turtle<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
         let mut shape = MobShape::amphibian(SwimRule::Turtle, 0.9, 0.4);
         shape.max_up_step = 1.0;
-        let mut mob = NavigatingMob::new(world, shape, at, 1.0, 4000, 0);
+        let mut mob = NavigatingMob::new(world, shape, at, 1.0, 4000, 0, 63);
         mob.set_follow_range(48.0);
         mob
     }
@@ -5751,7 +5756,7 @@ mod tests {
         // land factor of 0.5 quarters the first step.
         let first_step = |on_land: f64| {
             let shape = MobShape::amphibian(SwimRule::Smooth { in_water: 0.1, on_land, buoyant: false }, 0.75, 0.42);
-            let mut mob = NavigatingMob::new(&Shore, shape, Vec3::new(12.5, 0.0, 0.5), 1.0, 4000, 0);
+            let mut mob = NavigatingMob::new(&Shore, shape, Vec3::new(12.5, 0.0, 0.5), 1.0, 4000, 0, 63);
             mob.tick(&mut GoalSelector::new());
             MobController::move_to(&mut mob, Vec3::new(20.5, 0.0, 0.5), 0.2);
             let before = mob.position().x;

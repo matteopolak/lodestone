@@ -62,7 +62,7 @@ impl PathWorld for Tank {
 /// next waypoint.
 #[test]
 fn a_swimmer_goes_around_the_divider_at_the_swim_cruise() {
-    let mut mob = NavigatingMob::new(&Tank, MobShape::swimmer(0.5, 0.3), Vec3::new(3.5, 3.0, 1.5), 0.7, 256, 3);
+    let mut mob = NavigatingMob::new(&Tank, MobShape::swimmer(0.5, 0.3), Vec3::new(3.5, 3.0, 1.5), 0.7, 256, 3, 63);
     mob.set_follow_range(32.0);
     assert!(mob.move_to(Vec3::new(7.5, 3.0, 1.5), 0.7), "no swim path across the tank");
     let mut ai = GoalSelector::new();

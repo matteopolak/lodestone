@@ -234,6 +234,7 @@ fn graze(world: &GrassWorld, baby: bool, ticks: usize, deplete: bool) -> Graze {
         step,
         256,
         0x1234_5678_9ABC_DEF0,
+        63,
     );
     if baby {
         mob.set_age(BABY_START_AGE);
@@ -470,6 +471,7 @@ fn a_world_that_classifies_no_blocks_leaves_grazing_inert() {
         0.23,
         256,
         0,
+        63,
     );
     let mut ai = GoalSelector::new();
     for (priority, goal) in goals_for("sheep", &ctx) {

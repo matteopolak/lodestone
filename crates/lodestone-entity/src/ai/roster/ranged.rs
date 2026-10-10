@@ -1070,7 +1070,7 @@ mod tests {
     /// constant-false `can_use` in production, and the only thing that
     /// separates the two is the *type* under the `&mut dyn MobController`.
     fn real_mob<'w>(world: &'w dyn PathWorld, at: Vec3, speed: f64) -> NavigatingMob<'w> {
-        NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, speed, 400, 0)
+        NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, speed, 400, 0, 63)
     }
 
     // -- the seam itself -----------------------------------------------------

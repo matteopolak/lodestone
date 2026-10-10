@@ -637,6 +637,7 @@ mod tests {
             speed,
             160,
             0,
+            63,
         );
         let mut ai = GoalSelector::new();
         for (priority, goal) in goals_for(species, &ctx) {
