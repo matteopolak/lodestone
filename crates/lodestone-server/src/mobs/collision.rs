@@ -106,6 +106,45 @@ impl CollisionView for LiveBlockCollision<'_> {
     }
 }
 
+/// Entity types that stand on top of powder snow instead of sinking into it.
+pub(super) fn walks_on_powder_snow(entity_type: &str) -> bool {
+    matches!(entity_type, "rabbit" | "fox" | "endermite" | "silverfish")
+}
+
+/// The terrain as a powder-snow walker sees it: a powder snow cell the walker's
+/// feet are at or above is a full cube; any other powder snow cell has no collision.
+pub(super) struct PowderSnowWalker<'a> {
+    pub(super) base: &'a LiveBlockCollision<'a>,
+    pub(super) feet_y: f64,
+}
+
+impl CollisionView for PowderSnowWalker<'_> {
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
+        self.base.collision_boxes(x, y, z, out);
+        let state = (self.base.block_state)(x, y, z);
+        if self.feet_y >= f64::from(y) + 1.0 - 1.0e-5 && state.block().name() == "minecraft:powder_snow" {
+            let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
+            out.push(lodestone_physics::Aabb::new(bx, by, bz, bx + 1.0, by + 1.0, bz + 1.0));
+        }
+    }
+}
+
+/// [`settle_mob`] for a simulated mob, serving powder snow as ground to the
+/// species that walk on it.
+pub(super) fn settle_sim_mob(
+    live: &LiveBlockCollision<'_>,
+    mob: &mut SimMob<'_>,
+    before: Vec3,
+    allow_live_fall: bool,
+) {
+    if walks_on_powder_snow(mob.entity_type().path()) {
+        let walker = PowderSnowWalker { base: live, feet_y: before.y };
+        settle_mob(&walker, &mut mob.mob, before, allow_live_fall);
+    } else {
+        settle_mob(live, &mut mob.mob, before, allow_live_fall);
+    }
+}
+
 /// Resolves one item's collision with the terrain after [`ItemMotion::tick`] has
 /// already moved it, and records whether it is resting.
 ///

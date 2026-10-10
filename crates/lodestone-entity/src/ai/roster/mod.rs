@@ -306,6 +306,11 @@ pub fn look_at_player_8(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(WatchPlayerGoal::new(8.0, LOOK_PROBABILITY))
 }
 
+/// The look distance `3.0` — the vindicator's registration.
+pub fn look_at_player_3(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(WatchPlayerGoal::new(3.0, LOOK_PROBABILITY))
+}
+
 /// The look distance `6.0` — every farm-animal registration
 /// uses it (the cow, sheep, pig and chicken families all register it this
 /// way).

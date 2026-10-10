@@ -26,4 +26,35 @@ pub struct BlockEdit {
     pub expect: BlockExpect,
     /// The state to write; `None` removes the block.
     pub set: Option<StateId>,
+    /// Whether the host reports back whether the edit landed
+    /// ([`MobController::take_edit_result`](super::mob::MobController::take_edit_result)).
+    pub ack: bool,
+    /// Whether the host also requires the cell to be a legal place to put the
+    /// state: a full solid block that is not bedrock below it, the state able to
+    /// stand there, and no creature in the cell.
+    pub checked_placement: bool,
+    /// The mob that asked, stamped by the host when it drains the edit.
+    pub requester: Option<i32>,
+}
+
+impl BlockEdit {
+    /// An edit with no acknowledgement and no placement check.
+    #[must_use]
+    pub fn new(cell: (i32, i32, i32), expect: BlockExpect, set: Option<StateId>) -> Self {
+        Self { cell, expect, set, ack: false, checked_placement: false, requester: None }
+    }
+
+    /// Asks the host to report whether the edit landed.
+    #[must_use]
+    pub fn acknowledged(mut self) -> Self {
+        self.ack = true;
+        self
+    }
+
+    /// Asks the host to validate the cell as a placement site.
+    #[must_use]
+    pub fn checked_placement(mut self) -> Self {
+        self.checked_placement = true;
+        self
+    }
 }

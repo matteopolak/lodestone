@@ -105,6 +105,10 @@ pub trait MobController {
     /// Requests the jump control to jump this tick.
     fn set_jumping(&mut self, jumping: bool);
 
+    /// Launches the mob upward with the jump impulse on its next step if it is
+    /// standing on something.
+    fn hop(&mut self) {}
+
     /// Points the look control at a world position.
     fn look_at(&mut self, target: Vec3);
 
@@ -291,10 +295,124 @@ pub trait MobController {
         let _ = edit;
     }
 
+    /// Like [`request_block_edit`](Self::request_block_edit), but acknowledged,
+    /// and once the host reports the edit landed the mob's carried block becomes
+    /// `carried`. A rejected edit leaves the carried block as it was.
+    fn request_carry_edit(&mut self, edit: crate::ai::BlockEdit, carried: Option<lodestone_data::block_states::StateId>) {
+        let _ = (edit, carried);
+    }
+
+    /// Whether an acknowledged edit is still waiting for the host's answer.
+    fn edit_pending(&self) -> bool {
+        false
+    }
+
+    /// The block this mob carries, if any.
+    fn carried_block(&self) -> Option<lodestone_data::block_states::StateId> {
+        None
+    }
+
+    /// Claimed beds near a raider (host-fed for raiders only).
+    fn home_pois(&self) -> &[Vec3] {
+        &[]
+    }
+
+    /// Whether the raid this raider belonged to ended in the village's loss.
+    fn raid_lost(&self) -> bool {
+        false
+    }
+
+    /// Where the ominous banner this raider may fetch lies, when its raid has no
+    /// living leader for its wave and it may lead (host-fed).
+    fn banner_target(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Asks the host to hand this raider the banner it stands beside.
+    fn request_banner_pickup(&mut self) {}
+
+    /// Whether the mob is attacking, as opposed to merely holding a target.
+    fn is_aggressive(&self) -> bool {
+        false
+    }
+
+    /// Sets [`is_aggressive`](Self::is_aggressive).
+    fn set_aggressive(&mut self, _aggressive: bool) {}
+
+    /// Whether the mob is celebrating a lost village (streamed as metadata).
+    fn is_celebrating(&self) -> bool {
+        false
+    }
+
+    /// Sets [`is_celebrating`](Self::is_celebrating).
+    fn set_celebrating(&mut self, _celebrating: bool) {}
+
+    /// Whether the player, rather than another mob, last hurt this mob.
+    fn last_hurt_by_was_player(&self) -> bool {
+        false
+    }
+
+    /// Asks the host to give every other raider within 8 blocks this mob's
+    /// target, and also make them aggressive when `aggressive`.
+    fn shout_to_raiders(&mut self, _aggressive: bool) {}
+
+    /// Whether this mob was named Johnny (host-fed, vindicators only).
+    fn is_johnny(&self) -> bool {
+        false
+    }
+
+    /// Ticks left before a witch may choose another raider to heal.
+    fn heal_cooldown(&self) -> i32 {
+        0
+    }
+
+    /// Sets [`heal_cooldown`](Self::heal_cooldown).
+    fn set_heal_cooldown(&mut self, _ticks: i32) {}
+
+    /// Resets the idle counter that makes a mob eligible to despawn.
+    fn reset_no_action_time(&mut self) {}
+
+    /// Claimed village points of interest near the mob (host-fed for the
+    /// species that walk villages).
+    fn village_pois(&self) -> &[Vec3] {
+        &[]
+    }
+
     /// The centre of the raid this mob belongs to while that raid is ongoing.
     fn raid_center(&self) -> Option<Vec3> {
         None
     }
+
+    /// Raises the held item for use, as when a spear is levelled for a charge.
+    fn start_using_item(&mut self) {}
+
+    /// Lowers the held item.
+    fn stop_using_item(&mut self) {}
+
+    /// Whether the mob is using its held item.
+    fn is_using_item(&self) -> bool {
+        false
+    }
+
+    /// Ticks the held item has been in use, or `None` when it is not.
+    fn item_use_ticks(&self) -> Option<i32> {
+        None
+    }
+
+    /// A random reachable position between `min` and `max` blocks from `threat`
+    /// on the far side of the mob, or `None`.
+    fn position_away(&mut self, threat: Vec3, min: f64, max: f64) -> Option<Vec3> {
+        let _ = (threat, min, max);
+        None
+    }
+
+    /// Whether a rider is aboard.
+    fn is_ridden(&self) -> bool {
+        false
+    }
+
+    /// Tells the host this untamed mount tried to throw its rider this tick.
+    fn request_buck(&mut self) {}
 
     /// Whether a rabbit is hungry enough to raid a crop.
     fn wants_more_food(&self) -> bool {

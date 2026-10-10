@@ -349,7 +349,7 @@ fn an_edible_block_at_the_mobs_feet_is_eaten_in_place_and_wins_over_the_floor() 
 
 /// The sheep stands still while it eats. Vanilla stops the navigation in
 /// `GrazeGoal.start` and the goal claims MOVE, LOOK and JUMP in its
-/// constructor's `setFlags` call so `WaterAvoidingRandomStrollGoal` at the
+/// constructor's `setFlags` call so the water-avoiding stroll at the
 /// next priority down cannot preempt it.
 ///
 /// This is the assertion that would fail if the goal were given the wrong flag

@@ -1,9 +1,9 @@
 //! `MobSim`'s raid slice — wave escalation, a raid boss bar, and the
 //! captain-marker data model. Raid state is distinct from patrols, which have
-//! their own spawn cycle in `mobs::mod` and `docs/pillager-patrols.md`.
+//! their own spawn cycle in `mobs::mod` and `docs/raids.md`.
 //! Wave-size tables and omen-level constants are stored here as measured data.
 //!
-//! See `docs/raids-and-patrols.md` for what reaches the screen, the disclosed
+//! See `docs/raids.md` for what reaches the screen, the disclosed
 //! gaps (village-entry trigger, the ominous-banner visual, ravager/evoker/
 //! witch waves) and how to change it.
 
@@ -12,6 +12,8 @@ use uuid::Uuid;
 
 use crate::mob_spawn::SpawnRng;
 
+use lodestone_entity::ai::MobController;
+
 use super::MobSim;
 
 /// Seed for [`MobSim::raid_rng`] — its own stream, [`super::dragon::MobSim`]'s
@@ -19,32 +21,73 @@ use super::MobSim;
 /// sim.
 pub(super) const RAID_ROLL_SEED: u64 = 0x5241_4944_5F52_4F4C;
 
-/// `Raid.getMaxRaidOmenLevel` — the clamp ceiling both the pre-raid omen
+/// The clamp ceiling both the pre-raid omen
 /// absorption and a started raid's own level obey.
 pub const MAX_RAID_OMEN_LEVEL: i32 = 5;
 
-/// `Raid.RaidStatus`, the three states this port reaches (`STOPPED` is
-/// "no longer in the map" here rather than a fourth variant — see
-/// [`MobSim::tick_raids`]'s own doc for why removal stands in for it).
+/// The raid states this sim reaches; a stopped raid is "no longer in the
+/// map" rather than a variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RaidStatus {
     Ongoing,
     Victory,
+    /// The village the raid was attacking is gone; the surviving raiders celebrate.
+    Loss,
 }
 
-/// `Raid.RaiderType.spawnsPerWaveBeforeBonus`, indexed by wave number
-/// (`1..=7`; index `0` is never read — vanilla's own array shape). Only the
-/// two raider types this crate's roster implements
-/// (`lodestone_entity::ai::roster::ranged::PILLAGER`, and vindicator per
-/// `docs/plans/villager-economy.md`'s scope note); ravager/evoker/witch
-/// arrays are real too but have no spawnable species here, so they are not
-/// transcribed — see `docs/raids-and-patrols.md` §5.
+/// Raiders a witch heals: every raiding species but the witch.
+fn is_healable_raider(species: &str) -> bool {
+    super::sim_mob::is_raider_species(species) && species != "witch"
+}
+
+/// Ticks the surviving raiders celebrate before a lost raid is dropped.
+const CELEBRATION_TICKS: i32 = 600;
+/// A raid is in a village while a claimed point of interest lies this near its centre.
+const VILLAGE_RADIUS: i32 = 32;
+/// A raid centre outside any village moves to a point of interest at most this far away.
+const RECENTRE_RADIUS: i32 = 64;
+/// A stray raider within this squared distance of an ongoing raid's centre joins it.
+const RECRUIT_RANGE_SQR: f64 = 9216.0;
+
+/// The raid leader's banner: a white banner with the ominous pattern layers.
+#[must_use]
+pub(super) fn ominous_banner() -> lodestone_model::ItemStack {
+    use lodestone_model::item::BannerPatternLayer;
+    let layer = |pattern: &str, color: &str| BannerPatternLayer {
+        pattern_asset_id: pattern.to_owned(),
+        color: color.to_owned(),
+    };
+    let mut stack = lodestone_model::ItemStack::new("minecraft:white_banner".parse().expect("valid key"), 1);
+    stack.components.banner_patterns = vec![
+        layer("rhombus", "cyan"),
+        layer("stripe_bottom", "light_gray"),
+        layer("stripe_center", "gray"),
+        layer("border", "light_gray"),
+        layer("stripe_middle", "black"),
+        layer("half_horizontal", "light_gray"),
+        layer("circle", "light_gray"),
+        layer("border", "black"),
+    ];
+    stack
+}
+
+/// Whether a dropped item is the ominous banner.
+#[must_use]
+pub(super) fn is_ominous_banner(item: &lodestone_model::ResourceKey, components: Option<&lodestone_model::ItemComponents>) -> bool {
+    let reference = ominous_banner();
+    item == &reference.item && components.is_some_and(|c| c.banner_patterns == reference.components.banner_patterns)
+}
+
+/// Base raiders per wave before the difficulty bonus, indexed by wave number
+/// (`1..=7`; index `0` is never read). Only pillager and vindicator are
+/// transcribed; ravager, evoker and witch waves have no spawnable species in
+/// this table — see `docs/raids.md`.
 const PILLAGER_BASE_SPAWNS: [i32; 8] = [0, 4, 3, 3, 4, 4, 4, 2];
 const VINDICATOR_BASE_SPAWNS: [i32; 8] = [0, 0, 2, 0, 1, 4, 2, 5];
 
-/// `Raid.getNumGroups` — total waves by difficulty. `Peaceful` is `0`
-/// (a raid cannot start), matching vanilla exactly: the `raids` game rule
-/// and difficulty are two independent gates, and this is the second one.
+/// Total waves by difficulty. `Peaceful` is `0` (a raid cannot start): the
+/// `raids` game rule and difficulty are two independent gates, and this is
+/// the second one.
 fn num_groups(difficulty: Difficulty) -> i32 {
     match difficulty {
         Difficulty::Peaceful => 0,
@@ -54,10 +97,9 @@ fn num_groups(difficulty: Difficulty) -> i32 {
     }
 }
 
-/// `Raid.getPotentialBonusSpawns` for `PILLAGER`/`VINDICATOR` (the only two
-/// arms this port needs — `EVOKER` returns `0` unconditionally and
-/// `WITCH`/`RAVAGER` have no spawnable species here): `nextInt(2)` on Easy,
-/// a flat `1` on Normal, a flat `2` on Hard, then `nextInt(bonus + 1)` more.
+/// Bonus raiders per wave for pillagers and vindicators (the only species
+/// spawned): a roll in `0..2` on Easy, a flat `1` on Normal, a flat `2` on
+/// Hard, then a roll in `0..=bonus` more.
 fn bonus_spawns(difficulty: Difficulty, rng: &mut SpawnRng) -> i32 {
     let bonus = match difficulty {
         Difficulty::Easy => rng.next_int(2),
@@ -77,41 +119,37 @@ pub(super) struct Raid {
     pub uuid: Uuid,
     pub center: Vec3,
     pub difficulty: Difficulty,
-    /// `Raid.raidOmenLevel`, `1..=`[`MAX_RAID_OMEN_LEVEL`] — set once at
-    /// [`MobSim::start_raid`] time (see that method's own doc for why this
-    /// port does not accumulate further absorption mid-raid the way vanilla's
-    /// `absorbRaidOmen` can).
+    /// Omen level, `1..=`[`MAX_RAID_OMEN_LEVEL`], set once at
+    /// [`MobSim::start_raid`] time; absorbing more omen mid-raid does not
+    /// raise it.
     pub omen_level: i32,
     pub total_waves: i32,
-    /// `Raid.groupsSpawned` — waves actually spawned so far, `0` before the
+    /// Waves actually spawned so far, `0` before the
     /// first.
     pub groups_spawned: i32,
     /// The current wave's live raider entity ids, pruned every tick against
     /// `self.mobs` (dead or missing == removed from this list).
     pub raiders: Vec<i32>,
-    /// The current wave's *captain* — its first-spawned raider, the data-only
-    /// stand-in for vanilla's `Raid.getOminousBannerInstance` head-slot
-    /// equipment. See `docs/raids-and-patrols.md` §5 for why the banner
-    /// itself needs an equipment-slot wire path this file cannot add.
+    /// The current wave's *captain* — its first-spawned raider, the one
+    /// wearing the ominous banner.
     pub captain: Option<i32>,
-    /// `Raid.raidCooldownTicks` — ticks left before the next wave, `0` before
-    /// the first wave (which spawns immediately, matching vanilla's
-    /// `raidCooldownTicks == 0 && groupsSpawned > 0` **not** being true yet).
+    /// Ticks left before the next wave, `0` before the first wave (which
+    /// spawns immediately).
     pub cooldown_ticks: i32,
     pub ticks_active: u64,
     pub status: RaidStatus,
-    /// `Raid.postRaidTicks` — the 40-tick delay between "no raiders, no more
+    /// The 40-tick delay between "no raiders, no more
     /// waves" and actually declaring [`RaidStatus::Victory`].
     pub post_raid_ticks: i32,
-    /// `Raid.heroesOfTheVillage` — every player-uuid credited with a killing
-    /// blow on one of this raid's raiders, across every wave
-    /// ([`MobSim::add_raid_hero`], `Raider.die`'s
-    /// `raidWhenKilled.addHeroOfTheVillage(killer)`). Consulted once, on
+    /// Every player uuid credited with a killing blow on one of this raid's
+    /// raiders, across every wave ([`MobSim::add_raid_hero`]). Consulted once, on
     /// [`RaidStatus::Victory`], to queue a `minecraft:hero_of_the_village`
     /// grant per hero — see [`MobSim::tick_raids`]'s own doc for where that
     /// happens and [`MobSim::take_hero_of_the_village_grants`] for how a
     /// connection collects it.
     pub heroes: std::collections::HashSet<Uuid>,
+    /// Ticks since the raid was lost.
+    pub celebration_ticks: i32,
 }
 
 impl Raid {
@@ -120,7 +158,7 @@ impl Raid {
     }
 }
 
-/// `Raid.absorbRaidOmen`'s pure arithmetic: the new omen level after
+/// The pure arithmetic of absorbing an omen: the new omen level after
 /// absorbing a Bad-Omen-turned-Raid-Omen effect of `amplifier`, clamped to
 /// `0..=`[`MAX_RAID_OMEN_LEVEL`].
 ///
@@ -164,12 +202,13 @@ impl<'w> MobSim<'w> {
                 status: RaidStatus::Ongoing,
                 post_raid_ticks: 0,
                 heroes: std::collections::HashSet::new(),
+                celebration_ticks: 0,
             },
         );
         Some(id)
     }
 
-    /// `Raider.die`'s player-kill half: records `uuid` as a hero-of-the-village
+    /// Records `uuid` as a hero-of-the-village
     /// candidate for raid `id`. A no-op if `id` no longer names a live raid
     /// (the kill outraced the raid's own removal, which cannot currently
     /// happen in one tick but costs nothing to guard). See
@@ -181,7 +220,7 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// `Raider.getCurrentRaid`'s query, from the entity-id side this sim
+    /// The raid a raider belongs to, from the entity-id side this sim
     /// indexes mobs by rather than a raid-membership field on [`super::SimMob`]
     /// itself (see this file's own module doc for why): the raid `entity_id`
     /// currently belongs to as a live raider of the *current* wave, if any.
@@ -193,35 +232,27 @@ impl<'w> MobSim<'w> {
             .map(|(&id, _)| id)
     }
 
-    /// One tick of every active raid — `Raid.tick`, narrowed to the parts
-    /// this sim can actually drive:
+    /// One tick of every active raid. Narrowings:
     ///
-    /// * **No village-persistence check**, so [`RaidStatus`] never reaches
-    ///   vanilla's `LOSS` — only `Ongoing`/`Victory`. Vanilla's loss
-    ///   condition is entirely about
-    ///   losing the village (`!level.isVillage(center)`); no POI census
-    ///   crosses this seam (see `docs/raids-and-patrols.md` §5), so this is a
-    ///   real, disclosed narrowing rather than a silent one.
-    /// * **No player-distance/visibility gating on the boss bar** — the
-    ///   `raidEvent`'s per-player add/remove vanilla does is not modelled;
+    /// * **No player-distance gating on the boss bar** — the per-player
+    ///   add/remove is not modelled;
     ///   [`push_raid_boss_bars`](Self::push_raid_boss_bars) always includes
     ///   every ongoing raid, the same simplification
     ///   [`super::dragon::MobSim::boss_bars`] already documents for the
     ///   dragon/wither bars.
     /// * **Spawn placement is a coarse random ring** around the raid centre
-    ///   rather than vanilla's `findRandomSpawnPos`'s real
+    ///   rather than a
     ///   village-boundary-aware search — see [`wave_spawn_position`].
     ///
     /// On [`RaidStatus::Victory`], every uuid in the raid's own
     /// [`Raid::heroes`] set is queued into [`Self::pending_hero_grants`] with
-    /// the raid's final omen level — `Raid.tick`'s own
-    /// `hero.addEffect(HERO_OF_THE_VILLAGE, 48000, raidOmenLevel - 1)` loop,
-    /// deferred to a queue rather than applied here because this method has
+    /// the raid's final omen level (a 48000-tick effect at
+    /// amplifier `omen - 1`), deferred to a queue rather than applied here because this method has
     /// no connection/`ActiveEffects` to apply an effect *to* (see
     /// [`Self::take_hero_of_the_village_grants`]'s own doc for who drains it
     /// and why a queue is the right shape). The 48000-tick timeout branch
-    /// just below does **not** queue a grant — vanilla only awards Hero of
-    /// the Village from the real `VICTORY` transition, never from a raid
+    /// just below does **not** queue a grant — Hero of the Village is only
+    /// awarded on a real victory, never from a raid
     /// that simply expired.
     pub(super) fn tick_raids(&mut self) {
         let ids: Vec<i32> = self.raids.keys().copied().collect();
@@ -237,8 +268,56 @@ impl<'w> MobSim<'w> {
                 let Some(raid) = self.raids.get(&id) else { continue };
                 raid.raiders.iter().copied().filter(|&rid| self.get(rid).is_some_and(|m| m.health() > 0.0)).collect()
             };
+            // The village check reads the claim ledgers, so it runs before the
+            // raid is borrowed mutably. A centre with no village near it moves to
+            // the nearest claimed point of interest, or the raid is lost.
+            let (in_village, recentre) = {
+                let Some(raid) = self.raids.get(&id) else { continue };
+                if raid.status != RaidStatus::Ongoing {
+                    (true, None)
+                } else {
+                    let c = lodestone_model::BlockPos::new(
+                        raid.center.x.floor() as i32,
+                        raid.center.y.floor() as i32,
+                        raid.center.z.floor() as i32,
+                    );
+                    if !self.occupied_village_pois_in_range(c, VILLAGE_RADIUS).is_empty() {
+                        (true, None)
+                    } else {
+                        let nearest = self
+                            .occupied_village_pois_in_range(c, RECENTRE_RADIUS)
+                            .into_iter()
+                            .min_by_key(|p| i64::from(p.x - c.x).pow(2) + i64::from(p.z - c.z).pow(2));
+                        match nearest {
+                            Some(p) => (true, Some(Vec3::new(f64::from(p.x) + 0.5, f64::from(p.y), f64::from(p.z) + 0.5))),
+                            None => (false, None),
+                        }
+                    }
+                }
+            };
             let Some(raid) = self.raids.get_mut(&id) else { continue };
             raid.raiders = alive;
+            if raid.captain.is_some_and(|c| !raid.raiders.contains(&c)) {
+                raid.captain = None;
+            }
+            if raid.status == RaidStatus::Loss {
+                raid.celebration_ticks += 1;
+                if raid.celebration_ticks >= CELEBRATION_TICKS {
+                    finished.push(id);
+                }
+                continue;
+            }
+            if let Some(center) = recentre {
+                raid.center = center;
+            }
+            if !in_village {
+                if raid.groups_spawned > 0 {
+                    raid.status = RaidStatus::Loss;
+                } else {
+                    finished.push(id);
+                }
+                continue;
+            }
             raid.ticks_active += 1;
             if raid.ticks_active >= 48_000 {
                 finished.push(id);
@@ -285,6 +364,145 @@ impl<'w> MobSim<'w> {
             self.raids.remove(&id);
         }
         self.pending_hero_grants.extend(hero_grants);
+        if self.tick_count % 20 == 0 {
+            self.recruit_stray_raiders();
+        }
+    }
+
+    /// Whether `id` is a raider that may join a raid: every raiding species
+    /// except a witch, which only spawns naturally here.
+    fn can_join_raid(species: &str) -> bool {
+        super::sim_mob::is_raider_species(species) && species != "witch"
+    }
+
+    /// Every twentieth tick, a living raider that belongs to no raid and stands
+    /// within 96 blocks of an ongoing raid's centre joins that raid's current wave.
+    fn recruit_stray_raiders(&mut self) {
+        let strays: Vec<(i32, Vec3)> = self
+            .mobs
+            .iter()
+            .filter(|m| m.health > 0.0 && Self::can_join_raid(m.entity_type.path()))
+            .filter(|m| self.raid_containing_raider(m.id).is_none())
+            .map(|m| (m.id, m.position()))
+            .collect();
+        for (id, at) in strays {
+            let nearest = self
+                .raids
+                .iter()
+                .filter(|(_, r)| r.status == RaidStatus::Ongoing)
+                .map(|(&rid, r)| (rid, (r.center.x - at.x).powi(2) + (r.center.y - at.y).powi(2) + (r.center.z - at.z).powi(2)))
+                .filter(|&(_, d)| d < RECRUIT_RANGE_SQR)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((rid, _)) = nearest
+                && let Some(raid) = self.raids.get_mut(&rid)
+            {
+                raid.raiders.push(id);
+            }
+        }
+    }
+
+    /// Hands the banner lying at a raider's feet to it when that raider may
+    /// take over its wave's leadership: the raid is ongoing, the wave has no
+    /// living leader and the raider wears no banner. The raider becomes the
+    /// wave's leader.
+    pub(super) fn resolve_banner_pickups(&mut self, requesters: Vec<i32>) {
+        for id in requesters {
+            let Some(raid_id) = self.raid_containing_raider(id) else { continue };
+            let Some(raid) = self.raids.get(&raid_id) else { continue };
+            if raid.status != RaidStatus::Ongoing || raid.captain.is_some() {
+                continue;
+            }
+            let Some(me) = self.mobs.iter().find(|m| m.id == id) else { continue };
+            if me.wears_banner || me.entity_type.path() == "ravager" {
+                continue;
+            }
+            let at = me.position();
+            let banner = self
+                .item_state
+                .iter()
+                .filter(|(_, s)| is_ominous_banner(&s.item, s.components.as_deref()))
+                .map(|(&item_id, s)| (item_id, (s.motion.position.x - at.x).powi(2) + (s.motion.position.y - at.y).powi(2) + (s.motion.position.z - at.z).powi(2)))
+                .filter(|&(_, d)| d < 2.0 * 2.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(item_id, _)| item_id);
+            let Some(item_id) = banner else { continue };
+            self.remove_item(item_id);
+            if let Some(me) = self.mobs.iter_mut().find(|m| m.id == id) {
+                me.wears_banner = true;
+                me.set_patrol_leader(true);
+            }
+            if let Some(raid) = self.raids.get_mut(&raid_id) {
+                raid.captain = Some(id);
+            }
+        }
+    }
+
+    /// Gives every other raider within 8 blocks of each shouting raider its
+    /// target, and makes them aggressive when the shout says so.
+    pub(super) fn resolve_raider_shouts(&mut self, shouts: Vec<(i32, bool)>) {
+        for (id, aggressive) in shouts {
+            let Some(shouter) = self.mobs.iter().find(|m| m.id == id) else { continue };
+            let (at, target) = (shouter.position(), shouter.mob.attack_target());
+            let Some(target) = target else { continue };
+            for other in self.mobs.iter_mut().filter(|m| {
+                m.id != id && m.health > 0.0 && super::sim_mob::is_raider_species(m.entity_type.path())
+            }) {
+                let p = other.position();
+                if (p.x - at.x).abs() > 8.0 || (p.y - at.y).abs() > 8.0 || (p.z - at.z).abs() > 8.0 {
+                    continue;
+                }
+                other.mob.set_attack_target(Some(target));
+                if aggressive {
+                    other.mob.set_aggressive(true);
+                }
+            }
+        }
+    }
+
+    /// The banner a raider could fetch: for a raider of an ongoing raid whose
+    /// wave has no living leader and that wears no banner, the nearest dropped
+    /// ominous banner within `reach` blocks horizontally and 8 vertically.
+    pub(super) fn banner_for_raider(&self, id: i32, at: Vec3, reach: f64) -> Option<Vec3> {
+        let raid = self.raids.get(&self.raid_containing_raider(id)?)?;
+        let me = self.mobs.iter().find(|m| m.id == id)?;
+        if raid.status != RaidStatus::Ongoing || raid.captain.is_some() || me.wears_banner || me.entity_type.path() == "ravager" {
+            return None;
+        }
+        self.item_state
+            .values()
+            .filter(|s| is_ominous_banner(&s.item, s.components.as_deref()))
+            .map(|s| s.motion.position)
+            .filter(|p| (p.x - at.x).abs() <= reach && (p.z - at.z).abs() <= reach && (p.y - at.y).abs() <= 8.0)
+            .min_by(|a, b| {
+                ((a.x - at.x).powi(2) + (a.z - at.z).powi(2)).total_cmp(&((b.x - at.x).powi(2) + (b.z - at.z).powi(2)))
+            })
+    }
+
+    /// The potion a launch carries: a witch aiming at another raider throws
+    /// healing at one with 4 health or less and regeneration at the rest, then
+    /// drops that target. Every other launch carries none.
+    pub(super) fn witch_potion_for(
+        &mut self,
+        shooter: i32,
+        kind: lodestone_entity::ai::mob::ProjectileKind,
+    ) -> Option<lodestone_data::potion::PotionId> {
+        if kind != lodestone_entity::ai::mob::ProjectileKind::SplashPotion {
+            return None;
+        }
+        let witch = self.mobs.iter().find(|m| m.id == shooter && m.entity_type.path() == "witch")?;
+        let target = witch.attack_target_id()?;
+        let health = self.mobs.iter().find(|m| m.id == target && is_healable_raider(m.entity_type.path()))?.health;
+        if let Some(witch) = self.mobs.iter_mut().find(|m| m.id == shooter) {
+            witch.mob.set_attack_target(None);
+            witch.set_attack_target_id(None);
+        }
+        let name = if health <= 4.0 { "minecraft:healing" } else { "minecraft:regeneration" };
+        lodestone_data::potion::potion_id(name).and_then(lodestone_data::potion::PotionId::from_registry_id)
+    }
+
+    /// Whether `id` belongs to a raid that was lost.
+    pub(super) fn raid_lost_for(&self, id: i32) -> bool {
+        self.raids.values().any(|r| r.status == RaidStatus::Loss && r.raiders.contains(&id))
     }
 
     /// Every active raid contributes a boss-bar snapshot to `out` through
@@ -341,13 +559,10 @@ impl<'w> MobSim<'w> {
     }
 
     /// A raid's own Raid Omen level (`1..=`[`MAX_RAID_OMEN_LEVEL`]) — what
-    /// [`absorb_raid_omen`] produced at [`MobSim::start_raid`] time. Vanilla
-    /// reads this for `getEnchantOdds` (a loot bonus with no enchantment
-    /// model to feed here — see `docs/raids-and-patrols.md` §5) and for the
-    /// Hero of the Village effect amplifier on victory
+    /// [`absorb_raid_omen`] produced at [`MobSim::start_raid`] time. It
+    /// sets the Hero of the Village effect amplifier on victory
     /// ([`take_hero_of_the_village_grants`](Self::take_hero_of_the_village_grants)
-    /// — the amplifier `- 1` conversion happens there, matching
-    /// `Raid.tick`'s own arithmetic); exposed so a gate can assert the value
+    /// — the amplifier `- 1` conversion happens there); exposed so a gate can assert the value
     /// actually reached the raid rather than only that a raid started.
     #[must_use]
     #[cfg(test)]
@@ -356,8 +571,8 @@ impl<'w> MobSim<'w> {
     }
 
     /// Every raid-victory-earned Hero of the Village grant queued for `uuid`,
-    /// each already converted to `Raid.tick`'s own amplifier
-    /// (`raidOmenLevel - 1`) — drained, not merely read, so a connection that
+    /// each already converted to the effect amplifier
+    /// (omen level minus one) — drained, not merely read, so a connection that
     /// checks every tick never double-grants the same victory.
     ///
     /// A queue rather than an inline application because [`tick_raids`] runs
@@ -392,11 +607,10 @@ impl<'w> MobSim<'w> {
         ids
     }
 
-    /// `Raids.getNearbyRaid` — the id of the nearest *ongoing* raid whose
-    /// centre lies within `max_dist_sqr` of `pos`, or `None`. Vanilla's own
-    /// `ServerLevel::getRaidAt` calls this with `9216` (`96²`); passed
-    /// through rather than hardcoded here since [`create_or_extend_raid`]
-    /// is this method's only caller and already carries that citation.
+    /// The id of the nearest *ongoing* raid whose centre lies within
+    /// `max_dist_sqr` of `pos`, or `None`. The game's own lookup passes
+    /// `9216` (`96²`); passed through rather than hardcoded since
+    /// [`create_or_extend_raid`] is the caller that carries that figure.
     #[must_use]
     fn raid_near(&self, pos: Vec3, max_dist_sqr: f64) -> Option<i32> {
         let mut closest: Option<(i32, f64)> = None;
@@ -484,11 +698,11 @@ impl<'w> MobSim<'w> {
 }
 
 /// A coarse spawn ring around the raid centre — `random angle, 20..40
-/// blocks out, at the terrain surface` — standing in for vanilla's
-/// `Raid.findRandomSpawnPos`, which walks outward from the centre testing
+/// blocks out, at the terrain surface` — standing in for a
+/// search that walks outward from the centre testing
 /// real line-of-sight/village-boundary conditions this sim's terrain seam
 /// (`ChunkWorld`) has no equivalent census for (no POI/village data — the
-/// same limit `docs/pillager-patrols.md` §5 already discloses for patrol
+/// same limit `docs/raids.md` already discloses for patrol
 /// spawn placement).
 fn wave_spawn_position(world: &super::ChunkWorld, center: Vec3, rng: &mut SpawnRng) -> Vec3 {
     let angle = f64::from(rng.next_f32()) * std::f64::consts::TAU;
@@ -500,7 +714,7 @@ fn wave_spawn_position(world: &super::ChunkWorld, center: Vec3, rng: &mut SpawnR
 }
 
 /// Spawns one wave of pillagers/vindicators for raid `id` and advances
-/// `groups_spawned` — `Raid.spawnGroup`, narrowed to the two raider types
+/// `groups_spawned`, narrowed to the two raider types
 /// this crate's roster implements (see this file's own module doc for
 /// ravager/evoker/witch).
 fn spawn_wave(sim: &mut MobSim<'_>, id: i32, world: &super::ChunkWorld) {
@@ -522,6 +736,12 @@ fn spawn_wave(sim: &mut MobSim<'_>, id: i32, world: &super::ChunkWorld) {
         let mob_id = sim.spawn_species("minecraft:vindicator".parse().expect("valid key"), pos).id();
         spawned.push(mob_id);
     }
+    if let Some(&first) = spawned.first()
+        && let Some(captain) = sim.mobs.iter_mut().find(|m| m.id == first)
+    {
+        captain.wears_banner = true;
+        captain.set_patrol_leader(true);
+    }
     if let Some(raid) = sim.raids.get_mut(&id) {
         raid.captain = spawned.first().copied();
         raid.raiders = spawned;
@@ -533,6 +753,13 @@ fn spawn_wave(sim: &mut MobSim<'_>, id: i32, world: &super::ChunkWorld) {
 mod raid_tests {
     use super::*;
     use crate::mobs::ChunkWorld;
+
+    /// A sim with a claimed bell at the origin, the village the raids attack.
+    fn village_sim(world: &ChunkWorld) -> MobSim<'_> {
+        let mut sim = MobSim::new(world);
+        assert!(sim.bell_claims.try_claim(lodestone_model::BlockPos::new(0, 1, 0)));
+        sim
+    }
 
     fn flat_world() -> ChunkWorld {
         let mut world = ChunkWorld::new(-64, 384);
@@ -563,7 +790,7 @@ mod raid_tests {
     #[test]
     fn a_hard_raid_escalates_through_all_seven_waves() {
         let world = flat_world();
-        let mut sim = MobSim::new(&world);
+        let mut sim = village_sim(&world);
         let id = sim.start_raid(Vec3::new(0.0, 1.0, 0.0), Difficulty::Hard, 1).expect("Hard has 7 waves");
         let mut waves_seen: Vec<i32> = Vec::new();
         // Enough ticks to clear all 7 waves: each wave's raiders are killed
@@ -572,7 +799,7 @@ mod raid_tests {
         for _ in 0..(300 * 8 + 100) {
             sim.tick_raids();
             let Some((wave, total, alive)) = sim.raid_state(id) else { break };
-            assert_eq!(total, 7, "Hard is 7 waves, Raid.getNumGroups(HARD)");
+            assert_eq!(total, 7, "Hard is 7 waves, total waves on Hard");
             if wave > waves_seen.last().copied().unwrap_or(0) {
                 waves_seen.push(wave);
             }
@@ -609,7 +836,7 @@ mod raid_tests {
     #[test]
     fn a_cleared_final_wave_reaches_victory_after_the_delay() {
         let world = flat_world();
-        let mut sim = MobSim::new(&world);
+        let mut sim = village_sim(&world);
         let id = sim.start_raid(Vec3::new(0.0, 1.0, 0.0), Difficulty::Easy, 1).expect("Easy has 3 waves");
         // Clear all three waves as fast as possible.
         for _ in 0..2_000 {
@@ -635,7 +862,7 @@ mod raid_tests {
     }
 
     /// **`absorb_raid_omen` is real arithmetic, predicted from the outside
-    /// record** (`Raid.absorbRaidOmen`), not merely "goes up": absorbing a
+    /// record** (omen absorption), not merely "goes up": absorbing a
     /// Bad Omen of amplifier `0` (the un-upgraded ominous bottle) at an
     /// existing level of `0` yields exactly `1`, and the ceiling clamps at
     /// [`MAX_RAID_OMEN_LEVEL`] regardless of how high the input climbs.
@@ -653,7 +880,7 @@ mod raid_tests {
     #[test]
     fn the_first_raider_of_a_wave_is_marked_captain() {
         let world = flat_world();
-        let mut sim = MobSim::new(&world);
+        let mut sim = village_sim(&world);
         let id = sim.start_raid(Vec3::new(0.0, 1.0, 0.0), Difficulty::Normal, 1).expect("Normal has 5 waves");
         sim.tick_raids();
         let captain = sim.raid_captain(id).expect("wave 1 must have spawned and named a captain");
@@ -730,13 +957,9 @@ mod raid_tests {
         assert_eq!(sim.raid_omen_level(id), Some(4), "absorb_raid_omen(0, 3) == 4");
     }
 
-    /// The POI-signal widening this pass makes: a village whose only claimed
-    /// `#village` POI is a workstation (no bed claimed at all) must still
-    /// trigger a raid, because vanilla's real tag is `home` + `meeting` +
-    /// `#acquirable_job_site`, not beds alone. Before
-    /// `occupied_village_pois_in_range` replaced the beds-only
-    /// `occupied_homes_in_range` call here, this exact scene found nothing
-    /// and `create_or_extend_raid` returned `None`.
+    /// A village whose only claimed village POI is a workstation (no bed
+    /// claimed at all) must still trigger a raid: the village tag is homes,
+    /// meeting points and job sites, not beds alone.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn create_or_extend_raid_uses_a_claimed_workstation_with_no_bed_at_all() {
@@ -766,7 +989,7 @@ mod raid_tests {
     /// production's `attack_from_player` does), and once the raid the raider
     /// belonged to reaches [`RaidStatus::Victory`], `take_hero_of_the_village_grants`
     /// hands that player's uuid back the raid's own omen-level-derived
-    /// amplifier — `Raid.tick`'s `raidOmenLevel - 1` — and only once.
+    /// amplifier (omen level minus one) and only once.
     ///
     /// Easy (3 waves, weakest escalation) so the tick budget stays small: the
     /// test kills every wave's raiders itself via the real
@@ -779,7 +1002,7 @@ mod raid_tests {
         use crate::mobs::{DamageFlags, PlayerIdentity};
 
         let world = flat_world();
-        let mut sim = MobSim::new(&world);
+        let mut sim = village_sim(&world);
         let id = sim.start_raid(Vec3::new(0.0, 1.0, 0.0), Difficulty::Easy, 1).expect("Easy has 3 waves");
         let hero_uuid = Uuid::from_u128(0x1234_5678);
         let hero = PlayerIdentity { uuid: hero_uuid, entity_id: 99 };
@@ -816,7 +1039,7 @@ mod raid_tests {
             grants,
             vec![0],
             "start_raid was called directly with omen_level 1, so raid.omen_level == 1 \
-             and the amplifier (raidOmenLevel - 1) must be 0"
+             and the amplifier (omen level minus one) must be 0"
         );
 
         // Drained, not merely read: a second call must find nothing left for

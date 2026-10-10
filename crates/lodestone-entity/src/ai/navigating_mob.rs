@@ -244,7 +244,7 @@ pub struct MobBody {
     attack_target: Option<Vec3>,
     /// The bare item id (e.g. `"trident"`) this mob spawned holding in its
     /// main hand, if any — vanilla's `getMainHandItem()` narrowed to the one
-    /// question a goal like `DrownedTridentAttackGoal.canUse` actually asks.
+    /// question the drowned's trident-attack activation check asks.
     /// Set once by the host from
     /// [`crate::spawn_equipment::populate_default_equipment_slots`]; nothing
     /// here mutates it mid-life (no drop/pickup model exists yet).
@@ -295,6 +295,7 @@ pub struct MobBody {
     active_target_block: Option<BlockPos>,
     last_look: Option<Vec3>,
     jumping: bool,
+    hop_wanted: bool,
     attacks: Vec<Vec3>,
     /// Projectile launches a ranged goal asked for, awaiting a host drain.
     /// The mirror of [`attacks`](Self::attacks): this crate can
@@ -503,6 +504,23 @@ pub struct MobBody {
     rearing_ticks: i32,
     more_carrot_ticks: i32,
     raid_center: Option<Vec3>,
+    village_pois: Vec<Vec3>,
+    home_pois: Vec<Vec3>,
+    raid_lost: bool,
+    banner_target: Option<Vec3>,
+    banner_pickup_requested: bool,
+    aggressive: bool,
+    celebrating: bool,
+    last_hurt_by_player: bool,
+    shout_request: Option<bool>,
+    no_action_reset: bool,
+    heal_cooldown: i32,
+    johnny: bool,
+    ridden: bool,
+    buck_intent: bool,
+    item_use_ticks: Option<i32>,
+    carried_block: Option<lodestone_data::block_states::StateId>,
+    carry_after_edit: Option<Option<lodestone_data::block_states::StateId>>,
     /// What a bee remembers; inert for every other species.
     bee: crate::ai::bee::BeeState,
     /// Where a hovering flier is steered this tick, with the speed requested.
@@ -845,6 +863,7 @@ impl<'w> NavigatingMob<'w> {
             active_target_block: None,
             last_look: None,
             jumping: false,
+            hop_wanted: false,
             attacks: Vec::new(),
             launches: Vec::new(),
             move_calls: 0,
@@ -918,6 +937,23 @@ impl<'w> NavigatingMob<'w> {
             rearing_ticks: 0,
             more_carrot_ticks: 0,
             raid_center: None,
+            village_pois: Vec::new(),
+            home_pois: Vec::new(),
+            raid_lost: false,
+            banner_target: None,
+            banner_pickup_requested: false,
+            aggressive: false,
+            celebrating: false,
+            last_hurt_by_player: false,
+            shout_request: None,
+            no_action_reset: false,
+            heal_cooldown: 0,
+            johnny: false,
+            ridden: false,
+            buck_intent: false,
+            item_use_ticks: None,
+            carried_block: None,
+            carry_after_edit: None,
             bee: crate::ai::bee::BeeState::default(),
             air_hover: None,
             path_effort: 1.0,
@@ -1475,6 +1511,7 @@ impl<'w> NavigatingMob<'w> {
     /// Records that a player just damaged the mob.
     pub fn note_hurt_by_player(&mut self) {
         self.player_hurt_stamp += 1;
+        self.last_hurt_by_player = true;
     }
 
     /// Forgets who last hurt the mob and what it was attacking.
@@ -1718,9 +1755,81 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
+    /// Host injection point: claimed beds near a raider.
+    pub fn set_home_pois(&mut self, pois: Vec<Vec3>) -> &mut Self {
+        self.home_pois = pois;
+        self
+    }
+
+    /// Host injection point: whether this raider's raid was lost.
+    pub fn set_raid_lost(&mut self, lost: bool) -> &mut Self {
+        self.raid_lost = lost;
+        self
+    }
+
+    /// Host injection point: the banner this raider may fetch.
+    pub fn set_banner_target(&mut self, at: Option<Vec3>) -> &mut Self {
+        self.banner_target = at;
+        self
+    }
+
+    /// Host injection point: whether the mob carries the name that makes a vindicator hunt everything.
+    pub fn set_johnny(&mut self, johnny: bool) -> &mut Self {
+        self.johnny = johnny;
+        self
+    }
+
+    /// Takes the pending request to pick up the banner underfoot.
+    pub fn take_banner_pickup(&mut self) -> bool {
+        std::mem::take(&mut self.banner_pickup_requested)
+    }
+
+    /// Takes the pending shout to nearby raiders (whether it also makes them aggressive).
+    pub fn take_shout(&mut self) -> Option<bool> {
+        self.shout_request.take()
+    }
+
+    /// Takes the pending idle-counter reset.
+    pub fn take_no_action_reset(&mut self) -> bool {
+        std::mem::take(&mut self.no_action_reset)
+    }
+
+    /// Host injection point: claimed village points of interest near the mob.
+    pub fn set_village_pois(&mut self, pois: Vec<Vec3>) -> &mut Self {
+        self.village_pois = pois;
+        self
+    }
+
     /// Host injection point: the centre of the ongoing raid this mob raids for.
     pub fn set_raid_center(&mut self, center: Option<Vec3>) -> &mut Self {
         self.raid_center = center;
+        self
+    }
+
+    /// Host injection point: whether a rider is aboard.
+    pub fn set_ridden(&mut self, ridden: bool) -> &mut Self {
+        self.ridden = ridden;
+        self
+    }
+
+    /// Whether the mount tried to throw its rider since the last call.
+    pub fn take_buck(&mut self) -> bool {
+        std::mem::take(&mut self.buck_intent)
+    }
+
+    /// Host report of whether the acknowledged edit landed; applies the carried
+    /// block the request was waiting on.
+    pub fn deliver_edit_result(&mut self, landed: bool) {
+        if let Some(carried) = self.carry_after_edit.take()
+            && landed
+        {
+            self.carried_block = carried;
+        }
+    }
+
+    /// Restores a saved carried block.
+    pub fn restore_carried_block(&mut self, block: Option<lodestone_data::block_states::StateId>) -> &mut Self {
+        self.carried_block = block;
         self
     }
 
@@ -1922,6 +2031,7 @@ impl<'w> NavigatingMob<'w> {
         self.damage_ticks = PANIC_DAMAGE_TICKS;
         if let Some(attacker) = attacker {
             self.last_hurt_by = Some(attacker);
+            self.last_hurt_by_player = false;
             self.hurt_by_ticks = LAST_HURT_BY_TICKS;
         }
         self
@@ -1977,6 +2087,9 @@ impl<'w> NavigatingMob<'w> {
     pub fn tick(&mut self, ai: &mut GoalSelector) {
         self.sense_fluids();
         self.rearing_ticks = (self.rearing_ticks - 1).max(0);
+        if let Some(ticks) = &mut self.item_use_ticks {
+            *ticks += 1;
+        }
         if self.more_carrot_ticks > 0 {
             self.more_carrot_ticks = (self.more_carrot_ticks - MobController::next_i32(self, 3)).max(0);
         }
@@ -2119,6 +2232,7 @@ impl<'w> NavigatingMob<'w> {
             self.love_ticks -= 1;
         }
         self.age_lock_cooldown = (self.age_lock_cooldown - 1).max(0);
+        self.heal_cooldown = (self.heal_cooldown - 1).max(0);
         if !self.age_locked {
             if self.age < 0 {
                 self.age += 1;
@@ -2262,6 +2376,10 @@ impl<'w> NavigatingMob<'w> {
 
         let climbing = self.shape.can_climb && self.against_wall;
         self.climbed = climbing;
+        // A requested hop launches a grounded mob with the jump impulse.
+        if std::mem::take(&mut self.hop_wanted) && self.fall_speed == 0.0 {
+            self.fall_speed = -JUMP_POWER;
+        }
         match waypoint {
             _ if climbing => {
                 self.pos.y += CLIMB_SPEED;
@@ -3290,8 +3408,124 @@ impl MobController for NavigatingMob<'_> {
         self.block_edits.push(edit);
     }
 
+    fn request_carry_edit(&mut self, edit: crate::ai::BlockEdit, carried: Option<lodestone_data::block_states::StateId>) {
+        self.block_edits.push(edit.acknowledged());
+        self.carry_after_edit = Some(carried);
+    }
+
+    fn edit_pending(&self) -> bool {
+        self.carry_after_edit.is_some()
+    }
+
+    fn carried_block(&self) -> Option<lodestone_data::block_states::StateId> {
+        self.carried_block
+    }
+
     fn raid_center(&self) -> Option<Vec3> {
         self.raid_center
+    }
+
+    fn village_pois(&self) -> &[Vec3] {
+        &self.village_pois
+    }
+
+    fn home_pois(&self) -> &[Vec3] {
+        &self.home_pois
+    }
+
+    fn raid_lost(&self) -> bool {
+        self.raid_lost
+    }
+
+    fn banner_target(&self) -> Option<Vec3> {
+        self.banner_target
+    }
+
+    fn request_banner_pickup(&mut self) {
+        self.banner_pickup_requested = true;
+    }
+
+    fn is_aggressive(&self) -> bool {
+        self.aggressive
+    }
+
+    fn set_aggressive(&mut self, aggressive: bool) {
+        self.aggressive = aggressive;
+    }
+
+    fn is_celebrating(&self) -> bool {
+        self.celebrating
+    }
+
+    fn set_celebrating(&mut self, celebrating: bool) {
+        self.celebrating = celebrating;
+    }
+
+    fn last_hurt_by_was_player(&self) -> bool {
+        self.last_hurt_by.is_some() && self.last_hurt_by_player
+    }
+
+    fn shout_to_raiders(&mut self, aggressive: bool) {
+        self.shout_request = Some(aggressive || self.shout_request.unwrap_or(false));
+    }
+
+    fn is_johnny(&self) -> bool {
+        self.johnny
+    }
+
+    fn heal_cooldown(&self) -> i32 {
+        self.heal_cooldown
+    }
+
+    fn set_heal_cooldown(&mut self, ticks: i32) {
+        self.heal_cooldown = ticks;
+    }
+
+    fn reset_no_action_time(&mut self) {
+        self.no_action_time = 0;
+        self.no_action_reset = true;
+    }
+
+    fn is_ridden(&self) -> bool {
+        self.ridden
+    }
+
+    fn start_using_item(&mut self) {
+        self.item_use_ticks = Some(0);
+    }
+
+    fn stop_using_item(&mut self) {
+        self.item_use_ticks = None;
+    }
+
+    fn is_using_item(&self) -> bool {
+        self.item_use_ticks.is_some()
+    }
+
+    fn item_use_ticks(&self) -> Option<i32> {
+        self.item_use_ticks
+    }
+
+    fn position_away(&mut self, threat: Vec3, min: f64, max: f64) -> Option<Vec3> {
+        const ATTEMPTS: u32 = 10;
+        const VERTICAL: i32 = 7;
+        for _ in 0..ATTEMPTS {
+            let (fx, fz) = (self.pos.x - threat.x, self.pos.z - threat.z);
+            let centre = fz.atan2(fx) - std::f64::consts::FRAC_PI_2;
+            let angle = centre + (2.0 * f64::from(MobController::next_f32(self)) - 1.0) * std::f64::consts::FRAC_PI_2;
+            let reach = min + MobController::next_f64(self) * (max - min).max(0.0);
+            let (x, z) = (-reach * angle.sin(), reach * angle.cos());
+            let dy = MobController::next_i32(self, 2 * VERTICAL + 1) - VERTICAL;
+            let cell = (self.pos.x.floor() as i32 + x.floor() as i32, self.pos.y.floor() as i32 + dy, self.pos.z.floor() as i32 + z.floor() as i32);
+            if let Some(found) = self.stroll_candidate(cell.0, cell.1, cell.2) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn request_buck(&mut self) {
+        self.buck_intent = true;
     }
 
     fn wants_more_food(&self) -> bool {
@@ -3527,6 +3761,10 @@ impl MobController for NavigatingMob<'_> {
         self.jumping = jumping;
     }
 
+    fn hop(&mut self) {
+        self.hop_wanted = true;
+    }
+
     fn look_at(&mut self, target: Vec3) {
         self.last_look = Some(target);
     }
@@ -3556,6 +3794,9 @@ impl MobController for NavigatingMob<'_> {
     }
 
     fn set_attack_target(&mut self, target: Option<Vec3>) {
+        if target.is_none() {
+            self.aggressive = false;
+        }
         self.attack_target = target;
     }
 

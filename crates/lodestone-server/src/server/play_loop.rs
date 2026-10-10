@@ -2197,6 +2197,10 @@ where
                     }
                 }
 
+                // Untamed mounts that threw this player off.
+                for mount in mobs.with(|sim| sim.take_ejections_of(player_entity_id)) {
+                    apply(conn, &mut state, proto.encode_set_passengers(mount, &[])).await?;
+                }
                 // The raid-completion queue carries the effect a player earns for
                 // a killing blow. It fires when a raid this player earned a killing
                 // blow in reaches `RaidStatus::Victory`. That transition

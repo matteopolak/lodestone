@@ -10,6 +10,7 @@ use super::mob::MobController;
 #[derive(Debug)]
 pub struct StalkAttackGoal {
     reach_sqr: f64,
+    base_speed: f64,
     target: Option<Vec3>,
     attack_time: i32,
 }
@@ -24,10 +25,10 @@ impl StalkAttackGoal {
     /// Beyond 15 blocks the hunt is dropped.
     const GIVE_UP_SQR: f64 = 225.0;
 
-    /// A hunt by a mob `width` blocks wide.
+    /// A hunt by a mob `width` blocks wide whose walking speed is `base_speed`.
     #[must_use]
-    pub fn new(width: f64) -> Self {
-        Self { reach_sqr: (width * 2.0).powi(2), target: None, attack_time: 0 }
+    pub fn new(width: f64, base_speed: f64) -> Self {
+        Self { reach_sqr: (width * 2.0).powi(2), base_speed, target: None, attack_time: 0 }
     }
 }
 
@@ -70,7 +71,7 @@ impl Goal for StalkAttackGoal {
         } else {
             0.8
         };
-        mob.chase(target, speed);
+        mob.chase(target, speed * self.base_speed);
         self.attack_time = (self.attack_time - 1).max(0);
         if gap_sqr <= self.reach_sqr && self.attack_time <= 0 {
             self.attack_time = Self::COOLDOWN;

@@ -525,7 +525,7 @@ mod lightning;
 mod fishing;
 
 // Raid support covers the raid half; patrols are documented in the module doc
-// and `docs/pillager-patrols.md`. Public `MobSim` methods provide the raid
+// and `docs/raids.md`. Public `MobSim` methods provide the raid
 // surface; `RAID_ROLL_SEED` is read the same way
 // `fishing::FISHING_ROLL_SEED` is.
 mod raid;
@@ -1699,6 +1699,11 @@ pub struct SimMob<'w> {
     /// loses and later reacquires a target rerolls rather than resuming a
     /// stale countdown.
     piglin_alert_ticks: i32,
+    /// The tick a levelled spear last landed a stab, for its 10-tick contact cooldown.
+    last_stab_tick: Option<u64>,
+    /// Whether a raider wears the raid's ominous banner, which makes it the
+    /// leader of its wave and drops the banner when it dies.
+    wears_banner: bool,
     /// The armadillo's own "danger detected recently" memory, collapsed to a plain
     /// countdown — the real jar tracks a rolling/scared/unrolling
     /// animation sub-state machine (10/50/30-tick phases) purely for the
@@ -2512,6 +2517,9 @@ pub struct MobSim<'w> {
     pending_crop_growths: Vec<(BlockPos, lodestone_data::block_states::StateId)>,
     /// World changes mobs asked for, drained by [`take_block_edits`](Self::take_block_edits).
     pending_block_edits: Vec<lodestone_entity::ai::BlockEdit>,
+    /// `(mount, player entity id)` pairs thrown off an untamed mount, awaiting the
+    /// connection that owns the player.
+    pending_ejections: Vec<(i32, i32)>,
     /// Rolls whether a mob standing on a turtle egg crushes it.
     trample_rng: SpawnRng,
     /// The `mob_griefing` game rule.
@@ -3256,7 +3264,7 @@ fn falling_block_entity_type() -> ResourceKey {
 
 mod collision;
 pub use collision::TerrainRead;
-use collision::{LiveBlockCollision, VOID_DESPAWN_DEPTH, settle_item, settle_mob, unloaded_state};
+use collision::{LiveBlockCollision, VOID_DESPAWN_DEPTH, settle_item, settle_sim_mob, unloaded_state};
 /// The entity-type key every dropped item streams as.
 ///
 /// `minecraft:item` is the entity type; the *stack* is metadata. Naming the key

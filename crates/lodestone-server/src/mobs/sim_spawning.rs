@@ -207,7 +207,7 @@ impl<'w> MobSim<'w> {
     ///
     /// # Disclosed, not modelled
     ///
-    /// `docs/pillager-patrols.md` has the full account; the summary:
+    /// `docs/raids.md` has the full account; the summary:
     ///
     /// * **No spectator filter and no village-proximity check.** Neither a
     ///   spectator flag nor a POI/village census exists on this seam.

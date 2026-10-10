@@ -682,6 +682,17 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("follow_range", 32.0),
             ],
         },
+        // The vindicator: the monster base with `MOVEMENT_SPEED 0.35`,
+        // `FOLLOW_RANGE 12.0`, `MAX_HEALTH 24.0` and `ATTACK_DAMAGE 5.0`.
+        "vindicator" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[
+                ("movement_speed", 0.35),
+                ("follow_range", 12.0),
+                ("max_health", 24.0),
+                ("attack_damage", 5.0),
+            ],
+        },
         // Vanilla's own zombified-piglin attribute builder is the zombie's with
         // `SPAWN_REINFORCEMENTS_CHANCE` re-added as 0.0 (already 0.0 in
         // `ZOMBIE`, so a no-op), `MOVEMENT_SPEED` re-added as 0.23 (also a

@@ -93,6 +93,7 @@ rabbit.panic	Rabbit.RabbitPanicGoal
 raider.celebrate	Raider.RaiderCelebration
 raider.fetch_leader_banner	Raider.ObtainRaidLeaderBannerGoal
 raider.hold_ground	Raider.HoldGroundAttackGoal
+raider.open_door	AbstractIllager.RaiderOpenDoorGoal
 raider.patrol_village	Raider.RaiderMoveThroughVillageGoal
 ranged_strike	RangedAttackGoal
 rear_up	RandomStandGoal
@@ -120,6 +121,8 @@ turtle.travel	Turtle.TurtleTravelGoal
 untamed_prey_target(animal)	NonTameRandomTargetGoal(Animal)
 untamed_prey_target(rabbit)	NonTameRandomTargetGoal(Rabbit)
 untamed_prey_target(turtle)	NonTameRandomTargetGoal(Turtle)
+vindicator.break_door	Vindicator.VindicatorBreakDoorGoal
+vindicator.johnny_target	Vindicator.VindicatorJohnnyAttackGoal
 walk_on_powder_snow	ClimbOnTopOfPowderSnowGoal
 wander	RandomStrollGoal
 wander_dry	WaterAvoidingRandomStrollGoal

@@ -188,3 +188,8 @@ mod class_targets_tests;
 mod turtle_eggs_tests;
 #[path = "tests/horse_parrot_rows.rs"]
 mod horse_parrot_rows_tests;
+
+#[path = "tests/raiders.rs"]
+mod raiders_tests;
+#[path = "tests/enderman_blocks.rs"]
+mod enderman_blocks_tests;

@@ -9,6 +9,10 @@
 
 pub mod bee;
 pub mod block_edit;
+pub mod enderman_block;
+pub mod kinetic;
+pub mod spear_use;
+pub mod village_walk;
 pub mod block_seek;
 pub mod goal;
 pub mod goals;
@@ -17,6 +21,7 @@ pub mod mob;
 pub mod navigating_mob;
 pub mod parrot;
 pub mod pathfind_to_raid;
+pub mod raider;
 pub mod raid_garden;
 pub mod remove_block;
 pub mod roster;

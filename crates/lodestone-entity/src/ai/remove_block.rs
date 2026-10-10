@@ -91,7 +91,7 @@ impl Goal for BreakBlockGoal {
         }
         if let Some(cell) = self.block_in_reach(mob) {
             if self.ticks_in_reach > BREAK_AFTER_TICKS {
-                mob.request_block_edit(BlockEdit { cell, expect: BlockExpect::Block(self.block), set: None });
+                mob.request_block_edit(BlockEdit::new(cell, BlockExpect::Block(self.block), None));
             }
             self.ticks_in_reach += 1;
         }

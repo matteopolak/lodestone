@@ -78,13 +78,20 @@ fn a_sustained_stare_freezes_the_enderman_and_looking_away_releases_it_to_close_
     // past that (40 ticks) both gives it time to acquire *and* proves the
     // freeze holds for a sustained stare, not just the one tick acquisition
     // happens on.
-    for _ in 0..40 {
+    //
+    // A stroll that began before the 5-tick acquisition leaves residual
+    // momentum, so the freeze is measured from tick 20, once that has decayed.
+    let mut frozen_from = enderman_pos;
+    for tick in 0..40 {
         sim.set_players(vec![PlayerPerception {
             position: player_pos,
             held_item: None,
             view_direction: stare,
         }]);
         sim.tick();
+        if tick == 19 {
+            frozen_from = sim.get(id).expect("alive").position();
+        }
     }
 
     let after_stare = sim.get(id).expect("alive");
@@ -96,15 +103,15 @@ fn a_sustained_stare_freezes_the_enderman_and_looking_away_releases_it_to_close_
          reaches the goal or never gets past the pending stage"
     );
     let pos_after_stare = after_stare.position();
-    let drift = ((pos_after_stare.x - enderman_pos.x).powi(2)
-        + (pos_after_stare.y - enderman_pos.y).powi(2)
-        + (pos_after_stare.z - enderman_pos.z).powi(2))
+    let drift = ((pos_after_stare.x - frozen_from.x).powi(2)
+        + (pos_after_stare.y - frozen_from.y).powi(2)
+        + (pos_after_stare.z - frozen_from.z).powi(2))
     .sqrt();
     assert!(
         drift < 0.5,
         "an enderman with an acquired target that is still being stared at \
          must stay frozen (EndermanFreezeUnderGazeGoal stops its navigation) \
-         — it drifted {drift:.3} blocks from its spawn point instead"
+         — it moved {drift:.3} blocks between ticks 20 and 40 of the stare"
     );
 
     // --- Phase 2: look away -------------------------------------------------

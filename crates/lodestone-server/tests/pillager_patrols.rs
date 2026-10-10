@@ -170,7 +170,7 @@ fn night_time_spawns_nothing() {
 /// (vanilla's own `PatrolSpawner`). This is a *value* prediction across three
 /// difficulties, not a "more mobs on harder difficulty" direction check: the
 /// exact size at each one is what separates a correct table from a plausible
-/// one (`docs/pillager-patrols.md` §4 has the disclosed approximation this
+/// one (`docs/raids.md` has the disclosed approximation this
 /// predicts against).
 #[test]
 fn group_size_scales_with_difficulty_as_the_jars_formula_predicts() {

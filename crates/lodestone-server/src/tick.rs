@@ -2540,17 +2540,39 @@ async fn run_tick_loop_with_weather_impl<W>(
                 lodestone_entity::ai::BlockExpect::State(state) => old == state,
                 lodestone_entity::ai::BlockExpect::Block(block) => old.block() == block,
             };
-            if !holds {
-                continue;
-            }
-            let new = edit.set.unwrap_or_else(crate::chunk::air_state);
-            if edit.set.is_none() || !lodestone_entity::ai::turtle_egg::is_air(old) {
-                if let Some(effect) = crate::effects::block_destroyed_id(BlockPos::new(x, y, z), old) {
-                    block_tick_out.publish_effect(effect);
+            let placeable = !edit.checked_placement || {
+                let below = resident_tick_state_id(&*world, x, y - 1, z);
+                let creature = mobs.with(|sim| sim.creature_in_cell(edit.cell));
+                holds
+                    && !creature
+                    && below.is_some_and(|b| {
+                        !lodestone_entity::ai::turtle_egg::is_air(b)
+                            && b.block() != lodestone_data::block::Block::Bedrock
+                            && crate::fluid::is_full_cube(b)
+                    })
+                    && edit.set.is_none_or(|state| {
+                        crate::block_support::survives(BlockPos::new(x, y, z), state, |p| {
+                            resident_tick_state_id(&*world, p.x, p.y, p.z).unwrap_or_else(crate::chunk::air_state)
+                        })
+                    })
+            };
+            let mut landed = false;
+            if holds && placeable {
+                let new = edit.set.unwrap_or_else(crate::chunk::air_state);
+                if edit.set.is_none() || !lodestone_entity::ai::turtle_egg::is_air(old) {
+                    if let Some(effect) = crate::effects::block_destroyed_id(BlockPos::new(x, y, z), old) {
+                        block_tick_out.publish_effect(effect);
+                    }
+                }
+                if resident_tick_set_block(&*world, x, y, z, new) {
+                    block_tick_out.publish_change(x, y, z, old, new);
+                    landed = true;
                 }
             }
-            if resident_tick_set_block(&*world, x, y, z, new) {
-                block_tick_out.publish_change(x, y, z, old, new);
+            if edit.ack
+                && let Some(mob) = edit.requester
+            {
+                mobs.with(|sim| sim.report_edit_result(mob, landed));
             }
         }
         // Bees go into and come out of hives, and nectar carriers tend crops.
@@ -5978,7 +6000,7 @@ mod tests {
     /// This replaced an `assert_eq!((x, z), (0, 0))` that asserted the sheep
     /// grazes where it spawned — which is **false, and for a good reason**: a
     /// sheep is persistent, so vanilla clears its idle throttle every tick and
-    /// its `WaterAvoidingRandomStrollGoal` is live, so it wanders before it eats.
+    /// its water-avoiding stroll is live, so it wanders before it eats.
     /// Both arms observed the graze at `(-5, 4)`, not `(0, 0)`. Pinning the spawn
     /// column would have been the same mistake as an earlier gate in this repo
     /// that pinned a mob to `(0,0,0)` while `WanderGoal` legitimately

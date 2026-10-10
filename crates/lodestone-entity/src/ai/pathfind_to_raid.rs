@@ -11,8 +11,18 @@ pub const VILLAGE_RADIUS: f64 = 32.0;
 
 /// Heads for the raid centre, in hops of up to fifteen blocks, while the mob
 /// has no target and is outside the village.
-#[derive(Debug, Default)]
-pub struct MarchOnRaidGoal;
+#[derive(Debug)]
+pub struct MarchOnRaidGoal {
+    speed: f64,
+}
+
+impl MarchOnRaidGoal {
+    /// A march at `speed` blocks per tick.
+    #[must_use]
+    pub fn new(speed: f64) -> Self {
+        Self { speed }
+    }
+}
 
 impl MarchOnRaidGoal {
     fn outside_village(mob: &dyn MobController) -> Option<Vec3> {
@@ -45,7 +55,7 @@ impl Goal for MarchOnRaidGoal {
         if mob.navigation_done()
             && let Some(spot) = mob.random_target_towards(centre)
         {
-            mob.move_to(spot, 1.0);
+            mob.move_to(spot, self.speed);
         }
     }
 }

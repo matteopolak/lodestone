@@ -3467,7 +3467,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
             let index: u8 = tok.next().expect("index column").parse().expect("u8");
             let owner = tok.next().expect("owner.FIELD column");
             let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer);
             }
         }
@@ -3663,7 +3663,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
             let index: u8 = tok.next().expect("index column").parse().expect("u8");
             let owner = tok.next().expect("owner.FIELD column");
             let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer);
             }
         }
@@ -3740,7 +3740,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
             let index: u8 = tok.next().expect("index column").parse().expect("u8");
             let owner = tok.next().expect("owner.FIELD column");
             let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer);
             }
         }
@@ -3840,7 +3840,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
             let index: u8 = tok.next().expect("index column").parse().expect("u8");
             let owner = tok.next().expect("owner.FIELD column");
             let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer);
             }
         }
@@ -3928,7 +3928,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
             let index: u8 = tok.next().expect("index column").parse().expect("u8");
             let owner = tok.next().expect("owner.FIELD column");
             let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer);
             }
         }
@@ -4330,7 +4330,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
             let index: u8 = tok.next().expect("index column").parse().expect("u8");
             let owner = tok.next().expect("owner.FIELD column");
             let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer);
             }
         }
@@ -4398,7 +4398,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
             let index: u8 = tok.next().expect("index column").parse().expect("u8");
             let owner = tok.next().expect("owner.FIELD column");
             let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer);
             }
         }
@@ -4451,7 +4451,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
             let index: u8 = tok.next().expect("index column").parse().expect("u8");
             let owner = tok.next().expect("owner.FIELD column");
             let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer);
             }
         }
@@ -4507,7 +4507,7 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
             let owner = tok.next().expect("owner.FIELD column");
             let _serializer_id: i32 = tok.next().expect("serializer column").parse().expect("i32");
             let serializer_name = tok.next().expect("serializer name column");
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer_name);
             }
         }
@@ -4565,7 +4565,7 @@ mod cosmetic_metadata_tests {
         METADATA_IDX_AXOLOTL_VARIANT, METADATA_IDX_BAT_FLAGS, METADATA_IDX_PUFF_STATE, METADATA_IDX_CAT_COLLAR, METADATA_IDX_CUSTOM_NAME,
         METADATA_IDX_CUSTOM_NAME_VISIBLE, METADATA_IDX_FOX_TYPE, METADATA_IDX_HORSE_VARIANT,
         METADATA_IDX_LLAMA_VARIANT, METADATA_IDX_MOOSHROOM_TYPE, METADATA_IDX_PARROT_VARIANT,
-        METADATA_IDX_RABBIT_TYPE, METADATA_IDX_SHEEP_WOOL, METADATA_IDX_WOLF_COLLAR, METADATA_IDX_WOLF_INTERESTED, METADATA_SER_BOOLEAN,
+        METADATA_IDX_RABBIT_TYPE, METADATA_IDX_SHEEP_WOOL, METADATA_IDX_WOLF_COLLAR, METADATA_IDX_WOLF_INTERESTED, METADATA_IDX_ENDERMAN_CARRIED, METADATA_IDX_RAIDER_CELEBRATING, METADATA_IDX_LIVING_FLAGS, METADATA_SER_OPTIONAL_BLOCK_STATE, METADATA_SER_BOOLEAN,
         METADATA_SER_BYTE, METADATA_SER_INT, METADATA_SER_OPTIONAL_COMPONENT, V770ServerProtocol,
         holder_variant_slot,
     };
@@ -4584,7 +4584,7 @@ mod cosmetic_metadata_tests {
             let index: u8 = tok.next().unwrap().parse().unwrap();
             let owner = tok.next().unwrap();
             let serializer: i32 = tok.next().unwrap().parse().unwrap();
-            if owner == owner_field {
+            if owner.replace("Enderman.", "EnderMan.") == owner_field {
                 return (index, serializer);
             }
         }
@@ -4622,7 +4622,10 @@ mod cosmetic_metadata_tests {
             ("Bat.DATA_ID_FLAGS", METADATA_IDX_BAT_FLAGS, METADATA_SER_BYTE),
             ("Pufferfish.PUFF_STATE", METADATA_IDX_PUFF_STATE, METADATA_SER_INT),
             ("Sheep.DATA_WOOL_ID", METADATA_IDX_SHEEP_WOOL, METADATA_SER_BYTE),
+            ("LivingEntity.DATA_LIVING_ENTITY_FLAGS", METADATA_IDX_LIVING_FLAGS, METADATA_SER_BYTE),
+            ("EnderMan.DATA_CARRY_STATE", METADATA_IDX_ENDERMAN_CARRIED, METADATA_SER_OPTIONAL_BLOCK_STATE),
             ("Wolf.DATA_INTERESTED_ID", METADATA_IDX_WOLF_INTERESTED, METADATA_SER_BOOLEAN),
+            ("Raider.IS_CELEBRATING", METADATA_IDX_RAIDER_CELEBRATING, METADATA_SER_BOOLEAN),
             ("Wolf.DATA_COLLAR_COLOR", METADATA_IDX_WOLF_COLLAR, METADATA_SER_INT),
             ("Cat.DATA_COLLAR_COLOR", METADATA_IDX_CAT_COLLAR, METADATA_SER_INT),
             ("Entity.DATA_CUSTOM_NAME", METADATA_IDX_CUSTOM_NAME, METADATA_SER_OPTIONAL_COMPONENT),

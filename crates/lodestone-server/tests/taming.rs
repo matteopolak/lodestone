@@ -724,7 +724,7 @@ fn feeding_a_horse_raises_temper_by_the_jars_amounts() {
     assert!(mismatches.is_empty(), "{mismatches:?}");
 }
 
-/// `RunAroundLikeCrazyGoal`'s roll is `nextInt(maxTemper) < temper`, so it is
+/// the run-around roll is `nextInt(maxTemper) < temper`, so it is
 /// **certain to fail at temper 0** and certain to succeed at temper 100 — two
 /// predictions that need no seed at all, and that a flat per-species chance
 /// cannot reproduce.
@@ -909,6 +909,9 @@ fn a_ridden_mobs_position_is_client_authoritative_and_survives_tick() {
     let horse = sim
         .spawn_species(rk("minecraft:horse"), Vec3::new(0.0, 0.0, 0.0))
         .id();
+    // Only a tame mount takes its rider's steering; an untamed one keeps
+    // running its own goals while ridden.
+    sim.get_mut(horse).expect("alive").tame(MobOwner::Player(alice().uuid));
     assert!(sim.mount_mob(horse, alice().entity_id));
 
     let reported = Vec3::new(50.0, 0.0, 50.0);

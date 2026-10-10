@@ -256,7 +256,7 @@ fn an_unprovoked_zombie_closes_on_a_player_it_was_never_told_about() {
 /// byte-for-byte with where it started.
 ///
 /// A creeper rather than a zombie because a creeper's roster has no
-/// `WaterAvoidingRandomStrollGoal`… it does, so immobility is not available from
+/// the water-avoiding stroll… it does, so immobility is not available from
 /// the roster set; see [`the_range_cut_is_the_jars_and_not_a_rounded_guess`] for
 /// the arm that isolates it. Here the separator is acquisition and pursuit.
 #[test]

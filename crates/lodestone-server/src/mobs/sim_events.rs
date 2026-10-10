@@ -148,6 +148,45 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_grazes)
     }
 
+    /// Drains the mounts that threw `player_entity_id` off since the last call,
+    /// so the connection can send the empty passenger list.
+    pub fn take_ejections_of(&mut self, player_entity_id: i32) -> Vec<i32> {
+        let mut mine = Vec::new();
+        self.pending_ejections.retain(|&(mount, player)| {
+            if player == player_entity_id {
+                mine.push(mount);
+                false
+            } else {
+                true
+            }
+        });
+        mine
+    }
+
+    /// Tells the mob that asked for an acknowledged edit whether it landed.
+    pub fn report_edit_result(&mut self, mob: i32, landed: bool) {
+        if let Some(m) = self.get_mut(mob) {
+            m.mob.deliver_edit_result(landed);
+        }
+    }
+
+    /// Whether any mob or player occupies the unit cube at `cell`.
+    #[must_use]
+    pub fn creature_in_cell(&self, (x, y, z): (i32, i32, i32)) -> bool {
+        let inside = |p: Vec3, half: f64, height: f64| {
+            p.x + half > f64::from(x)
+                && p.x - half < f64::from(x + 1)
+                && p.z + half > f64::from(z)
+                && p.z - half < f64::from(z + 1)
+                && p.y + height > f64::from(y)
+                && p.y < f64::from(y + 1)
+        };
+        self.mobs.iter().any(|m| {
+            let shape = m.mob.shape();
+            inside(m.position(), f64::from(shape.width) / 2.0, f64::from(shape.height))
+        }) || self.players.iter().any(|p| inside(p.perception.position, 0.3, 1.8))
+    }
+
     /// Drains the block changes mobs asked for since the last call. The driver
     /// applies each only if its cell still holds what the mob saw.
     pub fn take_block_edits(&mut self) -> Vec<lodestone_entity::ai::BlockEdit> {

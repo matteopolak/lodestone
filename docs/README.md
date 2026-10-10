@@ -853,6 +853,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   compatibility core carries selected wire layouts for protocols 776 and 777.
   Release-specific bodies share one parser with their production adapter callers; the
   26.3 crate reexports them rather than duplicating a client.
+- [Raids and patrols](./raids.md) — Pillager patrols wander toward villages and
+  start raids; a raid sends waves of raiders at a village until they are all dead
+  (victory) or the village is gone (loss). The raid state is
+  `lodestone_server::mobs::raid`; raider behaviour is `lodestone_entity::ai::raider`
+  plus the rows in `roster/ranged.rs`.
 - [Random-tick behavior families](./random-tick-families.md) — The random-tick
   scheduler picks positions and delegates each eligible block to a behavior family.
   Grass spreading, lava ignition, gravity and redstone live in separate modules;

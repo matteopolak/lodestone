@@ -34,7 +34,7 @@ use crate::ai::goal::{FlagSet, Goal};
 use crate::ai::goals::{MateGoal, TrailParentGoal, WatchPlayerGoal, FleeInPanicGoal, WanderGoal, LureGoal};
 use crate::ai::mob::MobController;
 
-use super::{LOOK_PROBABILITY, Registration, Selector, SpeciesContext, float_goal, random_look_around};
+use super::{LOOK_PROBABILITY, Registration, SpeciesContext, float_goal, random_look_around};
 
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
 pub const SPECIES: &[&str] = &["horse", "donkey", "mule"];
@@ -56,7 +56,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// donkey nor the mule override it), then a shared three-goal helper's own
 /// registrations, called last from inside the main registration method.
 pub static HORSE_FAMILY: &[Registration] = &[
-    Registration::missing(Selector::Goal, 1, "horse.buck_off_rider"),
+    Registration::goal(1, "horse.buck_off_rider", buck_off_rider),
     Registration::goal(2, "mate", breed_1_0),
     Registration::goal(4, "trail_parent", follow_parent_1_0),
     Registration::goal(6, "wander_dry", stroll_0_7),
@@ -68,10 +68,53 @@ pub static HORSE_FAMILY: &[Registration] = &[
     Registration::goal(3, "lure(horse_items)", tempt),
 ];
 
-/// Panic at 1.2, only ever running unridden: a ridden mount's goals do not
-/// tick, because its rider steers it.
+/// Panic at 1.2. A tamed ridden mount's goals do not tick, because its rider
+/// steers it; an untamed one's do.
 fn mount_panic(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FleeInPanicGoal::new(ctx.speed * 1.2))
+}
+
+fn buck_off_rider(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(BuckOffRiderGoal { speed: ctx.speed * 1.2, target: None })
+}
+
+/// An untamed horse with a rider runs to a random spot nearby and, one tick in
+/// fifty, tries to throw the rider; the host resolves whether the rider tames
+/// it or is thrown.
+#[derive(Debug)]
+struct BuckOffRiderGoal {
+    speed: f64,
+    target: Option<lodestone_model::Vec3>,
+}
+
+impl Goal for BuckOffRiderGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[crate::ai::goal::Flag::Move])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if mob.is_tame() || !mob.is_ridden() {
+            return false;
+        }
+        self.target = mob.random_stroll_target();
+        self.target.is_some()
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        !mob.is_tame() && mob.is_ridden() && !mob.navigation_done()
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        if let Some(t) = self.target {
+            mob.move_to(t, self.speed);
+        }
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        if !mob.is_tame() && mob.next_i32(crate::ai::goal::reduced_tick_delay(50)) == 0 {
+            mob.request_buck();
+        }
+    }
 }
 
 fn tempt(ctx: &SpeciesContext) -> Box<dyn Goal> {

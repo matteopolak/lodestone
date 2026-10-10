@@ -615,6 +615,8 @@ impl<'w> MobSim<'w> {
         let mut threat = vec![None; n];
         let mut beg = vec![None; n];
         let mut raid_centre = vec![None; n];
+        let mut raid_lost = vec![false; n];
+        let mut banner_target: Vec<Option<Vec3>> = vec![None; n];
         let mut partner = vec![None; n];
         let mut parent = vec![None; n];
         let mut owner = vec![None; n];
@@ -798,6 +800,10 @@ impl<'w> MobSim<'w> {
                 .and_then(|id| self.raids.get(&id))
                 .filter(|raid| raid.status == super::raid::RaidStatus::Ongoing)
                 .map(|raid| raid.center);
+            if super::sim_mob::is_raider_species(species.as_str()) {
+                raid_lost[i] = self.raid_lost_for(me.id);
+                banner_target[i] = self.banner_for_raider(me.id, pos, me.mob.follow_range());
+            }
 
             // --- begging ---------------------------------------------------
             // The nearest player within 8 blocks, and only if that player is
@@ -1091,6 +1097,23 @@ impl<'w> MobSim<'w> {
             Vec3::new(f64::from(p.x) + 0.5, f64::from(p.y) + 0.5, f64::from(p.z) + 0.5)
         };
 
+        // Claimed village points of interest, listed once and filtered per
+        // mob below, for the species whose goals walk a village.
+        let home_pois: Vec<Vec3> = if self.mobs.iter().any(|m| super::sim_mob::is_raider_species(m.entity_type().path())) {
+            self.bed_claims.occupied_in_range(BlockPos::new(0, 0, 0), i32::MAX).into_iter().map(block_center).collect()
+        } else {
+            Vec::new()
+        };
+        let village_pois: Vec<Vec3> = if self.mobs.iter().any(|m| walks_villages(m.entity_type().path())) {
+            let far = BlockPos::new(0, 0, 0);
+            let mut all = self.bed_claims.occupied_in_range(far, i32::MAX);
+            all.extend(self.workstation_claims.occupied_in_range(far, i32::MAX));
+            all.extend(self.bell_claims.occupied_in_range(far, i32::MAX));
+            all.into_iter().map(block_center).collect()
+        } else {
+            Vec::new()
+        };
+
         for (i, m) in self.mobs.iter_mut().enumerate() {
             // Not folded into the chain below: `set_tame`/`set_ordered_to_sit`
             // read `m`'s own record while the chain holds `m.mob` mutably.
@@ -1109,6 +1132,27 @@ impl<'w> MobSim<'w> {
             let job_site = m.workstation.map(block_center);
             let home = m.bed.map(block_center);
             let meeting_point = m.meeting_point.map(block_center);
+            let nearby_pois: Vec<Vec3> = if walks_villages(m.entity_type().path()) {
+                let here = m.position();
+                village_pois
+                    .iter()
+                    .copied()
+                    .filter(|p| (p.x - here.x).abs() <= 128.0 && (p.z - here.z).abs() <= 128.0)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let nearby_homes: Vec<Vec3> = if super::sim_mob::is_raider_species(m.entity_type().path()) {
+                let here = m.position();
+                home_pois
+                    .iter()
+                    .copied()
+                    .filter(|p| (p.x - here.x).abs() <= 64.0 && (p.z - here.z).abs() <= 64.0)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let johnny = m.entity_type().path() == "vindicator" && m.custom_name().as_deref() == Some("Johnny");
             let (high, cat_near) = std::mem::take(&mut sky_hunt[i]);
             m.mob.set_sky_hunt_inputs(high, cat_near).set_scary_near(scary_near[i]);
             m.mob
@@ -1116,6 +1160,11 @@ impl<'w> MobSim<'w> {
                 .set_temptation(temptation[i])
                 .set_begging_player(beg[i])
                 .set_raid_center(raid_centre[i])
+                .set_village_pois(nearby_pois)
+                .set_home_pois(nearby_homes)
+                .set_raid_lost(raid_lost[i])
+                .set_banner_target(banner_target[i])
+                .set_johnny(johnny)
                 .set_avoid_threat(threat[i])
                 // The sim has incremented this every tick since long before
                 // this mob's record, but it never crossed the
@@ -1182,6 +1231,10 @@ fn class_contains(class: TargetClass, asking: &str, other: &SimMob) -> bool {
         TargetClass::Guardian => matches!(species, "guardian" | "elder_guardian"),
         TargetClass::Hostile => species::is_hostile_species(other.entity_type()),
         TargetClass::OtherSpecies => species != asking,
+        TargetClass::AnyMob => true,
+        TargetClass::HealableRaider => {
+            matches!(species, "pillager" | "vindicator" | "evoker" | "illusioner" | "ravager")
+        }
     }
 }
 
@@ -1201,4 +1254,9 @@ fn class_search_reach(class: TargetClass, follow_range: f64) -> (f64, f64) {
 fn llama_scares_wolf(wolf: &SimMob<'_>, llama: &SimMob<'_>, tick: u64) -> bool {
     !wolf.is_tame()
         && appearance::llama_strength(llama.uuid()) >= appearance::tick_roll(wolf.uuid(), tick, 5)
+}
+
+/// Species whose goals walk between village points of interest.
+fn walks_villages(entity_type: &str) -> bool {
+    matches!(entity_type, "zombie" | "husk" | "pillager" | "vindicator" | "evoker" | "illusioner" | "witch" | "ravager")
 }

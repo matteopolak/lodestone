@@ -153,6 +153,7 @@ pub enum PatternKind {
     ThisCommit,
     ThisPatch,
     ThisPr,
+    VanillaGoalName,
 }
 
 impl PatternKind {
@@ -165,6 +166,7 @@ impl PatternKind {
             PatternKind::ThisCommit => "\"this commit\"",
             PatternKind::ThisPatch => "\"this patch\"",
             PatternKind::ThisPr => "\"this PR\"",
+            PatternKind::VanillaGoalName => "vanilla goal-class name",
         }
     }
 }
@@ -770,7 +772,7 @@ fn overlaps(a: (usize, usize), b: (usize, usize)) -> bool {
 /// Scans one already-masked line, returning `(kind, char_start, char_end)`
 /// triples. `before this change` is checked first so its nested `this
 /// change` is suppressed -- one comment, one finding.
-fn scan_line(masked_line: &str) -> Vec<(PatternKind, usize, usize)> {
+fn scan_line(masked_line: &str, goal_names: &[String]) -> Vec<(PatternKind, usize, usize)> {
     let lower = masked_line.to_lowercase();
     let mut out = Vec::new();
 
@@ -796,15 +798,52 @@ fn scan_line(masked_line: &str) -> Vec<(PatternKind, usize, usize)> {
     for span in find_issue_references(masked_line) {
         out.push((PatternKind::IssueReference, span.0, span.1));
     }
+    for name in goal_names {
+        for span in find_word_bounded(masked_line, name) {
+            out.push((PatternKind::VanillaGoalName, span.0, span.1));
+        }
+    }
     out.sort_by_key(|(_, start, _)| *start);
     out
+}
+
+/// Where the goal-name table lives; the only file allowed to spell a
+/// reference goal-class name.
+const GOAL_NAMES_PATH: &str = "crates/lodestone-entity/data/goal-names.tsv";
+
+/// Goal-class names from the reference column of the goal-name table, minus
+/// any that this workspace defines as its own type (those are ours to name).
+/// Lowercased for [`find_word_bounded`], which matches case-insensitively.
+fn reference_goal_names(workspace_root: &Path, rust_sources: &[String]) -> Vec<String> {
+    let Ok(table) = std::fs::read_to_string(workspace_root.join(GOAL_NAMES_PATH)) else {
+        return Vec::new();
+    };
+    let mut names = BTreeSet::new();
+    for line in table.lines() {
+        let Some((_, reference)) = line.split_once('\t') else { continue };
+        let reference = reference.split('(').next().unwrap_or("");
+        for token in reference.split('.') {
+            if token.len() > 4 && token.ends_with("Goal") && token.chars().all(|c| c.is_ascii_alphanumeric()) {
+                names.insert(token.to_owned());
+            }
+        }
+    }
+    names
+        .into_iter()
+        .filter(|name| {
+            !["struct", "enum", "trait", "type"]
+                .iter()
+                .any(|kw| rust_sources.iter().any(|src| src.contains(&format!("{kw} {name}"))))
+        })
+        .map(|n| n.to_lowercase())
+        .collect()
 }
 
 // ---------------------------------------------------------------------
 // Scan
 // ---------------------------------------------------------------------
 
-fn scan_file(rel_path: &str, kind: FileKind, src: &str) -> Vec<Hit> {
+fn scan_file(rel_path: &str, kind: FileKind, src: &str, goal_names: &[String]) -> Vec<Hit> {
     let masked = match kind {
         FileKind::Rust => mask_to_rust_comments(src),
         FileKind::Wgsl => mask_to_wgsl_comments(src),
@@ -815,7 +854,7 @@ fn scan_file(rel_path: &str, kind: FileKind, src: &str) -> Vec<Hit> {
         if line.trim().is_empty() {
             continue;
         }
-        for (kind, start, end) in scan_line(line) {
+        for (kind, start, end) in scan_line(line, goal_names) {
             let snippet: String = line.chars().skip(start.saturating_sub(20)).take(80).collect();
             hits.push(Hit {
                 file: rel_path.to_owned(),
@@ -835,6 +874,7 @@ fn scan_file(rel_path: &str, kind: FileKind, src: &str) -> Vec<Hit> {
 /// without tripping the file-count floor, mirroring `check-ptr-const`.
 fn scan_paths(files: &[PathBuf], workspace_root: &Path) -> Result<Report> {
     let mut report = Report::default();
+    let mut loaded: Vec<(String, FileKind, String)> = Vec::new();
     for path in files {
         let Some(kind) = file_kind(path) else {
             continue;
@@ -860,7 +900,16 @@ fn scan_paths(files: &[PathBuf], workspace_root: &Path) -> Result<Report> {
             FileKind::Markdown => report.md_files += 1,
             FileKind::Wgsl => report.wgsl_files += 1,
         }
-        report.hits.extend(scan_file(&rel, kind, &text));
+        loaded.push((rel, kind, text));
+    }
+    let rust_sources: Vec<String> = loaded
+        .iter()
+        .filter(|(_, kind, _)| matches!(kind, FileKind::Rust))
+        .map(|(_, _, text)| text.clone())
+        .collect();
+    let goal_names = reference_goal_names(workspace_root, &rust_sources);
+    for (rel, kind, text) in &loaded {
+        report.hits.extend(scan_file(rel, *kind, text, &goal_names));
     }
     report.hits.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     Ok(report)
@@ -1034,6 +1083,53 @@ mod tests {
     fn scan_fixture(root: &Path) -> Result<Report> {
         let files = collect_scan_files(root)?;
         scan_paths(&files, root)
+    }
+
+    const GOAL_TABLE: &str = "name_a\tFooBarGoal\nname_b\tOwnedGoal\nname_c\tOuter.NestedGoal(ARG)\nname_d\t-\n";
+
+    #[test]
+    fn a_vanilla_goal_name_in_a_comment_or_doc_fails_and_a_clean_comment_does_not() -> Result<()> {
+        let ws = Workspace::new()?;
+        ws.write(GOAL_NAMES_PATH, GOAL_TABLE)?;
+        ws.write(
+            "crates/fixture/src/bad.rs",
+            "/// Mirrors `FooBarGoal` closely.\n// and Outer's NestedGoal too\npub fn f() {}\n",
+        )?;
+        ws.write("docs/bad.md", "The `FooBarGoal` row.\n")?;
+        // Control: the same words, no goal name.
+        ws.write(
+            "crates/fixture/src/clean.rs",
+            "/// Strolls and avoids water.\npub fn g() { let _ = \"FooBarGoal\"; }\n",
+        )?;
+        let report = scan_fixture(ws.root())?;
+        let hits: Vec<_> = report
+            .hits
+            .iter()
+            .filter(|h| h.kind == PatternKind::VanillaGoalName)
+            .map(|h| (h.file.as_str(), h.line))
+            .collect();
+        assert_eq!(
+            hits,
+            vec![("crates/fixture/src/bad.rs", 1), ("crates/fixture/src/bad.rs", 2), ("docs/bad.md", 1)],
+            "{:#?}",
+            report.hits
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_goal_name_this_workspace_defines_itself_is_not_flagged() -> Result<()> {
+        let ws = Workspace::new()?;
+        ws.write(GOAL_NAMES_PATH, GOAL_TABLE)?;
+        ws.write(
+            "crates/fixture/src/lib.rs",
+            "pub struct OwnedGoal;\n/// Drives an `OwnedGoal` and a `FooBarGoal`.\npub fn f() {}\n",
+        )?;
+        let report = scan_fixture(ws.root())?;
+        let hits: Vec<_> = report.hits.iter().filter(|h| h.kind == PatternKind::VanillaGoalName).collect();
+        assert_eq!(hits.len(), 1, "only the unowned name is flagged: {hits:#?}");
+        assert!(hits[0].snippet.contains("FooBarGoal"));
+        Ok(())
     }
 
     #[test]

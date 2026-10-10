@@ -547,7 +547,7 @@ impl<'w> MobSim<'w> {
     /// The horse family's whole mechanism is a persisted counter, so this arm
     /// makes **no** tame roll: feeding raises `Temper` and nothing else. The roll
     /// lives in [`attempt_horse_tame`](Self::attempt_horse_tame), which
-    /// `RunAroundLikeCrazyGoal` drives while a player is riding.
+    /// the run-around-while-ridden rule drives while a player is riding.
     fn interact_horse(
         &mut self,
         mob_id: i32,
@@ -571,9 +571,7 @@ impl<'w> MobSim<'w> {
             if mob.is_baby() {
                 return InteractOutcome::Pass;
             }
-            return if !mob.is_tame() {
-                self.attempt_horse_tame(mob_id, actor, max_temper)
-            } else if self.mount_mob(mob_id, actor.entity_id) {
+            return if self.mount_mob(mob_id, actor.entity_id) {
                 InteractOutcome::Mounted
             } else {
                 // Already ridden by someone else.
@@ -663,6 +661,46 @@ impl<'w> MobSim<'w> {
         }
         mob.set_in_love();
         true
+    }
+
+    /// Resolves every untamed mount that tried to throw its rider this tick: a
+    /// player rider tames it when a draw under the mount's maximum temper falls
+    /// below its temper, and otherwise raises its temper by five; either way a
+    /// failure throws the rider off, rears the mount, and queues the ejection
+    /// for the rider's connection.
+    pub(super) fn resolve_bucks(&mut self) {
+        let bucking: Vec<i32> = self.mobs.iter_mut().filter_map(|m| m.mob.take_buck().then_some(m.id)).collect();
+        for id in bucking {
+            let Some(mount) = self.get(id) else { continue };
+            let (Some(rider), false) = (mount.rider, mount.is_tame()) else { continue };
+            let max_temper = match species::tame_mechanism(mount.entity_type().path()) {
+                Some(species::TameMechanism::Temper { max_temper }) => max_temper,
+                _ => 0,
+            };
+            let temper = mount.temper();
+            let uuid = self
+                .players
+                .iter()
+                .filter_map(|p| p.identity)
+                .find(|identity| identity.entity_id == rider)
+                .map(|identity| identity.uuid);
+            if let Some(uuid) = uuid {
+                if max_temper > 0 && self.tame_rng.next_int(max_temper) < temper {
+                    if let Some(mount) = self.get_mut(id) {
+                        mount.tame(MobOwner::Player(uuid));
+                    }
+                    continue;
+                }
+                if let Some(mount) = self.get_mut(id) {
+                    mount.set_temper((temper + 5).clamp(0, max_temper.max(temper)));
+                }
+            }
+            if let Some(mount) = self.get_mut(id) {
+                mount.rider = None;
+                lodestone_entity::ai::MobController::rear_up(&mut mount.mob);
+            }
+            self.pending_ejections.push((id, rider));
+        }
     }
 
     /// Vanilla's own "run around like crazy" goal's per-tick tame roll for the horse family:

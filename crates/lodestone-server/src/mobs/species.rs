@@ -67,6 +67,7 @@ pub(super) fn is_hostile_species(entity_type: &ResourceKey) -> bool {
             // function answers and it is `MONSTER` like any other hostile.
             | "witch"
             | "pillager"
+            | "vindicator"
     )
 }
 
@@ -148,6 +149,8 @@ pub(super) fn avoided_species(species: &str) -> &'static [&'static str] {
         "spider" | "cave_spider" => &["armadillo"],
         // An untamed wolf only; `llama_scares_wolf` applies the rest.
         "wolf" => &["llama", "trader_llama"],
+        // The pillager and vindicator registrations both avoid a creaking.
+        "pillager" | "vindicator" => &["creaking"],
         _ => &[],
     }
 }
@@ -241,7 +244,7 @@ pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
         // `#cat_food` — the same two items `tame_mechanism("cat")` and
         // `breeding_food("cat")` already use. `lodestone_entity`'s
         // `roster::passive::CAT` installs the goal this feeds
-        // (`Cat.CatTemptGoal(CAT_FOOD)`); without this arm the row was
+        // (the cat's food-lure goal); without this arm the row was
         // installed on a real mob but never reached by real perception.
         "cat" => &["cod", "salmon"],
         "turtle" => &["seagrass"],
@@ -348,7 +351,7 @@ pub(super) enum TameMechanism {
         sit_on_success: bool,
     },
     /// The horse family: feeding raises `Temper` and never rolls; the roll
-    /// happens in `RunAroundLikeCrazyGoal` while a player is riding.
+    /// happens in the run-around-while-ridden rule while a player is riding.
     Temper {
         /// `AbstractHorse.getMaxTemper()`.
         max_temper: i32,
@@ -578,6 +581,7 @@ mod hostility_category_tests {
         // monster by registration, whatever a raid does with it.
         ("witch", true),
         ("pillager", true),
+        ("vindicator", true),
     ];
 
     fn key(path: &str) -> ResourceKey {

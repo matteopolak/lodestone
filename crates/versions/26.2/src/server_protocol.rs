@@ -339,7 +339,12 @@ const METADATA_IDX_SHEEP_WOOL: u8 = 18;
 const METADATA_IDX_FOX_TYPE: u8 = 18;
 const METADATA_IDX_AXOLOTL_VARIANT: u8 = 18;
 const METADATA_IDX_HORSE_VARIANT: u8 = 19;
+const METADATA_IDX_LIVING_FLAGS: u8 = 8;
+const METADATA_IDX_ENDERMAN_CARRIED: u8 = 16;
+const METADATA_SER_OPTIONAL_BLOCK_STATE: i32 = 15;
 const METADATA_IDX_WOLF_INTERESTED: u8 = 20;
+/// `Raider.IS_CELEBRATING`.
+const METADATA_IDX_RAIDER_CELEBRATING: u8 = 16;
 const METADATA_IDX_WOLF_COLLAR: u8 = 21;
 const METADATA_IDX_CAT_COLLAR: u8 = 23;
 const METADATA_IDX_LLAMA_VARIANT: u8 = 21;
@@ -4670,10 +4675,25 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_BYTE);
                     w.i8(((*color & 0x0F) | if *sheared { 0x10 } else { 0 }) as i8);
                 }
+                MetadataField::UsingItem(using) => {
+                    w.u8(METADATA_IDX_LIVING_FLAGS);
+                    w.var_i32(METADATA_SER_BYTE);
+                    w.i8(i8::from(*using));
+                }
+                MetadataField::EndermanCarried(state) => {
+                    w.u8(METADATA_IDX_ENDERMAN_CARRIED);
+                    w.var_i32(METADATA_SER_OPTIONAL_BLOCK_STATE);
+                    w.var_i32(state.map_or(0, |s| s as i32));
+                }
                 MetadataField::WolfInterested(interested) => {
                     w.u8(METADATA_IDX_WOLF_INTERESTED);
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*interested);
+                }
+                MetadataField::RaiderCelebrating(celebrating) => {
+                    w.u8(METADATA_IDX_RAIDER_CELEBRATING);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*celebrating);
                 }
                 MetadataField::WolfCollar(color) => {
                     w.u8(METADATA_IDX_WOLF_COLLAR);

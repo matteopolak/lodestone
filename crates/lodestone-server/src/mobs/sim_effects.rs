@@ -66,7 +66,7 @@ impl<'w> MobSim<'w> {
         // from inside this `self.mobs.iter()` closure borrows disjointly —
         // both borrows are shared, so nothing here needs deferring the way
         // the mutable passes below do.
-        let dead: Vec<(i32, ResourceKey, Vec3, bool, bool)> = self
+        let dead: Vec<(i32, ResourceKey, Vec3, bool, bool, bool)> = self
             .mobs
             .iter()
             .filter(|m| m.health <= 0.0)
@@ -81,6 +81,7 @@ impl<'w> MobSim<'w> {
                     m.position(),
                     by_player && !m.is_baby(),
                     drops_ominous_bottle,
+                    m.wears_banner,
                 )
             })
             .collect();
@@ -88,10 +89,19 @@ impl<'w> MobSim<'w> {
             return;
         }
         self.mobs.retain(|m| m.health > 0.0);
-        for (id, entity_type, position, drops_experience, drops_ominous_bottle) in dead {
+        for (id, entity_type, position, drops_experience, drops_ominous_bottle, wore_banner) in dead {
             self.drop_death_loot(&entity_type, position);
             if drops_ominous_bottle {
                 self.drop_ominous_bottle(position);
+            }
+            if wore_banner && self.mob_drops {
+                let banner = super::raid::ominous_banner();
+                self.spawn_item(
+                    &banner,
+                    position,
+                    Vec3::new(0.0, 0.2, 0.0),
+                    ItemLifecycle::newly_dropped(1, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),
+                );
             }
             // Drop ordinary death loot before experience, so the two output
             // streams retain their stable ordering.
@@ -358,9 +368,7 @@ impl<'w> MobSim<'w> {
     /// (its own "set ominous bottle amplifier" loot function); every bottle dropped here is
     /// amplifier `0` instead of the real roll, because persisting a
     /// per-stack amplifier needs a new field on
-    /// `lodestone_model::ItemComponents`, which this session's ownership
-    /// does not reach (`crates/lodestone-model/**` — see
-    /// `docs/raids-and-patrols.md` §5 for the exact hunk).
+    /// `lodestone_model::ItemComponents`.
     /// `crate::server::finish_drinking_ominous_bottle` is the consumer this
     /// feeds; amplifier `0` is still a real, working value there —
     /// `raid::absorb_raid_omen(0, 0) == 1` starts a genuine raid — so this is

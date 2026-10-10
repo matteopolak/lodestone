@@ -370,11 +370,11 @@ impl Goal for LayEggGoal {
             let (x, y, z) = self.seek.block();
             let eggs = 1 + mob.next_i32(4) as u32;
             if let Some(egg) = turtle_egg::state(eggs, 0) {
-                mob.request_block_edit(crate::ai::BlockEdit {
-                    cell: (x, y + 1, z),
-                    expect: crate::ai::BlockExpect::Air,
-                    set: Some(egg),
-                });
+                mob.request_block_edit(crate::ai::BlockEdit::new(
+                    (x, y + 1, z),
+                    crate::ai::BlockExpect::Air,
+                    Some(egg),
+                ));
             }
             mob.set_has_egg(false);
             mob.set_laying_egg_ticks(0);

@@ -37,6 +37,42 @@ impl Goal for StayAfloatGoal {
     }
 }
 
+/// Jumps while the mob stands inside powder snow whose cell above is powder
+/// snow or open, so a light mob that fell in climbs back to the surface.
+#[derive(Debug)]
+pub struct ClimbOutOfPowderSnowGoal;
+
+impl ClimbOutOfPowderSnowGoal {
+    fn is_powder_snow(mob: &dyn MobController, cell: (i32, i32, i32)) -> bool {
+        mob.block_state_at(cell).is_some_and(|s| s.block().name() == "minecraft:powder_snow")
+    }
+}
+
+impl Goal for ClimbOutOfPowderSnowGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Jump])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        let at = mob.position();
+        let feet = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+        if !Self::is_powder_snow(mob, feet) {
+            return false;
+        }
+        let above = (feet.0, feet.1 + 1, feet.2);
+        Self::is_powder_snow(mob, above) || mob.air_at(Vec3::new(f64::from(above.0) + 0.5, f64::from(above.1), f64::from(above.2) + 0.5))
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        mob.set_jumping(true);
+        mob.hop();
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+}
+
 /// Walks back inside the mob's home radius when it has strayed out of it.
 ///
 /// Vanilla's own move-towards-restriction goal (flag MOVE): a random point up
@@ -2661,7 +2697,7 @@ impl Goal for GrazeGoal {
 /// * **Vanilla's own random-wander fallback** is ported, using
 ///   this seam's own random draw in place of vanilla's own random source.
 /// * **Vanilla's own controlling-passenger clause is not modelled** — no
-///   passenger state crosses this seam (see `docs/pillager-patrols.md`).
+///   passenger state crosses this seam (see `docs/raids.md`).
 #[derive(Debug)]
 pub struct PatrolRouteGoal {
     /// A non-leader's pace.

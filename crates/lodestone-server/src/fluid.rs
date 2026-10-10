@@ -1066,7 +1066,7 @@ fn covers_unit_square(rects: &[FaceRect]) -> bool {
 
 /// `true` iff the state's collision shape is exactly the full cube —
 /// the real full-block-shape identity test.
-fn is_full_cube(state: StateId) -> bool {
+pub(crate) fn is_full_cube(state: StateId) -> bool {
     let boxes = collision_boxes_for(state);
     boxes.len() == 1
         && boxes[0].min.iter().all(|&c| c.abs() <= 1.0e-7)

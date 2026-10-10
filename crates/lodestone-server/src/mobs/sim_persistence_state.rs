@@ -50,6 +50,7 @@ pub(super) const OWNED_FIELDS: &[&str] = &[
     "home_pos",
     "home_radius",
     "has_egg",
+    "carriedBlockState",
 ];
 
 /// Species with a persistent grudge: the ones whose saves carry
@@ -237,6 +238,13 @@ impl<'w> MobSim<'w> {
         if let Some((at, radius)) = mob.mob.restriction() {
             fields.push(("home_radius".to_owned(), Nbt::Int(radius)));
             fields.push(("home_pos".to_owned(), int_array_pos(at)));
+        }
+
+        if let Some(carried) = mob.mob.carried_block() {
+            fields.push((
+                "carriedBlockState".to_owned(),
+                compound(vec![("Name", Nbt::String(carried.canonical_state()))]),
+            ));
         }
 
         if mob.entity_type.path() == "turtle" {
@@ -475,6 +483,12 @@ impl<'w> MobSim<'w> {
             && radius >= 0
         {
             self.mobs[index].mob.set_restriction(Some((at, radius)));
+        }
+
+        if species == "enderman"
+            && let Some(Nbt::String(name)) = get("carriedBlockState").and_then(|c| field(c, "Name"))
+        {
+            self.mobs[index].mob.restore_carried_block(lodestone_data::block_states::StateId::from_state_str(name));
         }
 
         if species == "turtle" {

@@ -875,12 +875,16 @@ impl<'w> SimMob<'w> {
         .into_iter()
         .map(|(slot, item)| EntityEquipment {
             slot,
-            item: item.map(|item| {
-                ItemStack::new(
-                    ResourceKey::from_str(item.name()).expect("built-in item key is valid"),
-                    1,
-                )
-            }),
+            item: if slot == ModelEquipmentSlot::Head && self.wears_banner {
+                Some(raid::ominous_banner())
+            } else {
+                item.map(|item| {
+                    ItemStack::new(
+                        ResourceKey::from_str(item.name()).expect("built-in item key is valid"),
+                        1,
+                    )
+                })
+            },
         })
         .collect()
     }
@@ -1313,6 +1317,15 @@ impl<'w> SimMob<'w> {
                 has_right: self.has_right_horn,
             });
         }
+        if matches!(self.entity_type.path(), "zombie" | "husk" | "drowned" | "zombie_villager" | "zombified_piglin") {
+            metadata.push(MetadataField::UsingItem(self.mob.is_using_item()));
+        }
+        if is_raider_species(self.entity_type.path()) {
+            metadata.push(MetadataField::RaiderCelebrating(self.mob.is_celebrating()));
+        }
+        if self.entity_type.path() == "enderman" {
+            metadata.push(MetadataField::EndermanCarried(self.mob.carried_block().map(|s| s.raw())));
+        }
         if self.entity_type.path() == "wolf" {
             metadata.push(MetadataField::WolfInterested(self.mob.is_interested()));
         }
@@ -1395,4 +1408,9 @@ impl SimMob<'_> {
     pub fn school_size(&self) -> i32 {
         self.flock.size
     }
+}
+
+/// Species that raid: they carry the celebration metadata and may join a raid.
+pub(super) fn is_raider_species(path: &str) -> bool {
+    matches!(path, "pillager" | "vindicator" | "evoker" | "illusioner" | "ravager" | "witch")
 }

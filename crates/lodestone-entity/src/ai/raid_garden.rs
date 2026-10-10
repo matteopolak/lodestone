@@ -41,8 +41,8 @@ pub struct CropRaidGoal {
 impl CropRaidGoal {
     /// The rabbit goal: speed 0.7, sixteen-block search.
     #[must_use]
-    pub fn new() -> Self {
-        Self { seek: BlockSeek::new(0.7, 16, 1), can_raid: false }
+    pub fn new(base_speed: f64) -> Self {
+        Self { seek: BlockSeek::new(base_speed * 0.7, 16, 1), can_raid: false }
     }
 
     fn supports_crop(mob: &dyn MobController, (x, y, z): (i32, i32, i32)) -> Option<StateId> {
@@ -51,12 +51,6 @@ impl CropRaidGoal {
             return None;
         }
         mob.block_state_at((x, y + 1, z))
-    }
-}
-
-impl Default for CropRaidGoal {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -110,7 +104,7 @@ impl Goal for CropRaidGoal {
             && let Some(age) = carrot_age(state)
         {
             let set = if age == 0 { None } else { carrots_at(age - 1) };
-            mob.request_block_edit(BlockEdit { cell: crop, expect: BlockExpect::State(state), set });
+            mob.request_block_edit(BlockEdit::new(crop, BlockExpect::State(state), set));
             mob.set_more_carrot_ticks(SATIATED_TICKS);
         }
         self.can_raid = false;

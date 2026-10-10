@@ -64,7 +64,7 @@
 //!
 //! **A generalisation not to inherit.** The fix's body grouped seven `Missing` rows
 //! across two families as one seam capability. Measured against the jar it closes
-//! **one**: a rabbit's `ClimbOnTopOfPowderSnowGoal` needs powder-snow physics
+//! **one**: a rabbit's powder-snow climb needs powder-snow physics
 //! nothing here models, its `CropRaidGoal` needs a host-computed candidate
 //! block position (`MoveToBlockGoal`'s spiral) plus a block-state *property*, and
 //! [`hostile_melee`](super::hostile_melee)'s `AvoidSunlightGoal` reads no block at
@@ -157,8 +157,8 @@ pub static COW: &[Registration] = &[
     Registration::goal(7, "idle_glance", random_look_around),
 ];
 
-/// Vanilla's own sheep goal registration. Note it assigns `this.eatBlockGoal` before
-/// the first `addGoal`, so the `addGoal` calls themselves come after.
+/// Vanilla's own sheep goal registration. Its grass-eating goal is constructed before
+/// the first registration, so the registrations themselves come after.
 pub static SHEEP: &[Registration] = &[
     Registration::goal(0, "stay_afloat", float_goal),
     Registration::goal(1, "flee_in_panic", panic_1_25),
@@ -215,8 +215,8 @@ pub static CHICKEN: &[Registration] = &[
 /// * **No `TrailParentGoal`.** Every other species here registers one; a rabbit
 ///   does not — vanilla's own registration has no such line — so there is no row for it. Do not
 ///   add one for consistency with its siblings.
-/// * **Three registrations share priority 1** (`StayAfloatGoal`,
-///   `ClimbOnTopOfPowderSnowGoal`, `RabbitPanicGoal`), where every other species
+/// * **Three registrations share priority 1** (stay afloat,
+///   powder-snow climb, panic), where every other species
 ///   here has exactly one goal per priority.
 /// * **Its look goal is at priority 11**, not 6 or 7, and at **`10.0F`** rather
 ///   than the `6.0F` every other farm animal uses.
@@ -235,18 +235,11 @@ pub static CHICKEN: &[Registration] = &[
 /// Adding them as rows would make the cited line range a lie.
 pub static RABBIT: &[Registration] = &[
     Registration::goal(1, "stay_afloat", float_goal),
-    // Vanilla's own climb-on-powder-snow goal. The *cue* half
-    // is now answerable — `MobController::block_cues_*` could carry
-    // "the block above is powder snow or has empty collision" — but the goal
-    // also gates on `isInPowderSnow`/`wasInPowderSnow`, which no physics here
-    // sets, and `#powder_snow` identity is not a `BlockCues` field. Blocked on
-    // powder-snow physics, not on block access;
-    // `docs/mob-block-perception.md`.
-    Registration::missing(Selector::Goal, 1, "walk_on_powder_snow"),
+    Registration::goal(1, "walk_on_powder_snow", climb_out_of_powder_snow),
     Registration::goal(1, "rabbit.panic", panic_2_2),
     Registration::goal(2, "mate", breed_0_8),
     Registration::goal(3, "lure(rabbit_food)", tempt_1_0),
-    // The three `RabbitAvoidEntityGoal`s differ from the creeper's
+    // The rabbit's three flee goals differ from the creeper's
     // pair in a way worth being explicit about: the creeper's Ocelot and Cat
     // registrations share one radius (`6.0F`), so one class-agnostic goal of
     // ours reproduces both exactly. A rabbit's three do **not** — Player
@@ -280,8 +273,13 @@ pub static RABBIT: &[Registration] = &[
     Registration::goal(11, "watch_player(player)", look_at_player_10),
 ];
 
-fn raid_garden(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(crate::ai::raid_garden::CropRaidGoal::new())
+/// Jumps back out of powder snow the mob has sunk into.
+fn climb_out_of_powder_snow(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::goals::ClimbOutOfPowderSnowGoal)
+}
+
+fn raid_garden(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raid_garden::CropRaidGoal::new(ctx.speed))
 }
 
 /// Vanilla's own cat goal registration.
@@ -304,10 +302,10 @@ fn raid_garden(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 ///   `(10, 2)` — so [`cat_follow_owner`] is a distinct builder.
 /// * **A cat has no combat goal at all.** Unlike the wolf, vanilla registers no
 ///   `DefendOwnerGoal`/`AssistOwnerGoal` for `Cat` — its two
-///   `targetSelector` rows are both `NonTameRandomTargetGoal`, an *untamed*
+///   `targetSelector` rows are both the untamed-only random target, an *untamed*
 ///   cat's own rabbit/turtle hunting, unrelated to its owner. A cat does not
 ///   defend you.
-/// * **Its `WaterAvoidingRandomStrollGoal` almost never fires.** Vanilla passes
+/// * **Its water-avoiding stroll almost never fires.** Vanilla passes
 ///   an explicit `1.0000001E-5F` probability, the reciprocal of which
 ///   is is ~100,000 ticks between attempts — a cat parked near its owner or a
 ///   bed essentially does not wander on its own, unlike every other species in
@@ -556,8 +554,8 @@ fn parrot_follow_mob(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(crate::ai::parrot::TrailMobGoal::new(ctx.speed))
 }
 
-fn stalk_attack(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(crate::ai::stalk_attack::StalkAttackGoal::new(0.6))
+fn stalk_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::stalk_attack::StalkAttackGoal::new(0.6, ctx.speed))
 }
 
 fn cat_stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {

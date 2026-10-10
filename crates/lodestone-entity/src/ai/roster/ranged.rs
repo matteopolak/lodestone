@@ -69,7 +69,7 @@ use lodestone_model::Vec3;
 
 use super::{
     Registration, Selector, SpeciesContext, avoid_entity, float_goal, hurt_by_target,
-    look_at_player_6, look_at_player_8, move_towards_restriction, nearest_attackable_target,
+    look_at_player_3, look_at_player_6, look_at_player_8, melee_attack, move_towards_restriction, nearest_attackable_target,
     random_look_around, stroll, target_hostile, target_iron_golem, target_villager_unseen,
 };
 use crate::ai::goal::{Flag, FlagSet, Goal};
@@ -567,7 +567,7 @@ impl Goal for BlazeFireballGoal {
 ///
 /// **Registers no [`Flag`] at all** — its constructor never calls
 /// `setFlags`, unlike every other goal in this file — so it runs alongside
-/// [`Ghast::RandomFloatAroundGoal`](super::specialist)/`FaceTargetGoal`
+/// the ghast's random float and face-target goals
 /// rather than contesting MOVE/LOOK with them, and this port's empty
 /// [`FlagSet`] reproduces that exactly rather than approximating it.
 ///
@@ -763,7 +763,7 @@ const WITCH_POTION_POWER: f64 = 0.75;
 /// (its own ranged-attack step, which calls a shared crossbow-attack helper at `1.6F`).
 ///
 /// Modelled with [`RangedStrikeGoal`] rather than a new crossbow goal, and the
-/// difference is worth stating: vanilla's `RangedCrossbowAttackGoal` has a
+/// difference is worth stating: vanilla's crossbow attack goal has a
 /// four-state machine (uncharged → charging → charged → ready) driven by the
 /// crossbow item's own `CHARGED_PROJECTILES` component, which this repo has no item
 /// component model for. `RangedStrikeGoal`'s fixed interval stands in for the
@@ -844,10 +844,10 @@ pub static SNOW_GOLEM: &[Registration] = &[
 pub static WITCH: &[Registration] = &[
     // -- inherited from PatrollingMonster / Raider --
     Registration::missing(Selector::Goal, 4, "patrol_route"),
-    Registration::missing(Selector::Goal, 1, "raider.fetch_leader_banner"),
+    Registration::goal(1, "raider.fetch_leader_banner", fetch_leader_banner),
     Registration::goal(3, "march_on_raid", pathfind_to_raid),
-    Registration::missing(Selector::Goal, 4, "raider.patrol_village"),
-    Registration::missing(Selector::Goal, 5, "raider.celebrate"),
+    Registration::goal(4, "raider.patrol_village", raider_patrol_village),
+    Registration::goal(5, "raider.celebrate", raider_celebrate),
     // -- the witch's own --
     Registration::goal(1, "stay_afloat", float_goal),
     Registration::goal(2, "ranged_strike", witch_potion),
@@ -855,20 +855,58 @@ pub static WITCH: &[Registration] = &[
     Registration::goal(3, "watch_player", look_at_player_8),
     Registration::goal(3, "idle_glance", random_look_around),
     Registration::target(1, "retaliate", hurt_by_target),
-    // Vanilla's own nearest-healable-raider-target goal — a witch heals *other raiders*, which
-    // needs both a raid and mob-vs-mob targeting. Neither exists.
-    Registration::missing(Selector::Target, 2, "witch.nearest_healable_raider"),
-    // `NearestAttackableWitchTargetGoal` is a `NearestTargetGoal`
-    // subclass whose only override suppresses targeting *while a raid is active
-    // and the witch has not finished its wave* (vanilla's own witch-specific inner class). With
-    // no raid, the override is inert and the base behaviour is exactly ours — so
-    // this is `Modelled`, not `Missing`, and that is a claim about the subclass
-    // rather than a convenient substitution.
-    Registration::target(3, "witch.nearest_target", nearest_attackable_target),
+    Registration::target(2, "witch.nearest_healable_raider", heal_raider_target),
+    // Hunts players, but not while the heal cooldown after choosing a raider runs.
+    Registration::target(3, "witch.nearest_target", witch_player_target),
 ];
 
-fn pathfind_to_raid(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(crate::ai::pathfind_to_raid::MarchOnRaidGoal)
+fn fetch_leader_banner(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raider::FetchLeaderBannerGoal::new(ctx.speed * 1.15))
+}
+
+fn raider_patrol_village(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raider::RaiderHomeVisitGoal::new(ctx.speed * 1.05, 1.0))
+}
+
+fn raider_celebrate(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raider::RaiderCelebrationGoal)
+}
+
+/// Hold ground until the target is within 15 blocks.
+fn hold_ground_15(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raider::HoldGroundAttackGoal::new(15.0))
+}
+
+/// Hold ground until the target is within 10 blocks.
+fn hold_ground_10(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raider::HoldGroundAttackGoal::new(10.0))
+}
+
+fn heal_raider_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raider::HealRaiderTargetGoal::default())
+}
+
+fn witch_player_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raider::AfterHealingTargetGoal::default())
+}
+
+/// A stroll at 0.6 of the walking speed.
+fn slow_stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::goals::WanderGoal::new(ctx.speed * 0.6))
+}
+
+/// Hunts the nearest villager it can see.
+fn target_villager_seen(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::goals::NearestTargetGoal::of_class(crate::ai::TargetClass::Villager, true))
+}
+
+/// A vindicator named Johnny hunts any living mob.
+fn johnny_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::raider::JohnnyTargetGoal::default())
+}
+
+fn pathfind_to_raid(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::pathfind_to_raid::MarchOnRaidGoal::new(ctx.speed))
 }
 
 /// Vanilla's own pillager goal registration, plus the same inherited
@@ -879,7 +917,7 @@ fn pathfind_to_raid(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// machine, replaced by a fixed interval). The inherited
 /// vanilla's own long-distance-patrol goal row is [`patrol_goal`] — the one
 /// row in the inherited chain that is real rather than raid machinery, because
-/// it is patrol machinery instead; `docs/pillager-patrols.md` has the full
+/// it is patrol machinery instead; `docs/raids.md` has the full
 /// account, including what the goal itself does not port.
 pub static PILLAGER: &[Registration] = &[
     // -- inherited from PatrollingMonster / Raider --
@@ -888,29 +926,27 @@ pub static PILLAGER: &[Registration] = &[
     // registration
     // — but the pillager is the *only* species vanilla's `PatrolSpawner`
     // ever spawns, so it is the only
-    // one that needs the goal to be real. `docs/pillager-patrols.md` has the
+    // one that needs the goal to be real. `docs/raids.md` has the
     // full account of what `patrol_goal`'s underlying
     // `PatrolRouteGoal` does and does not port.
     Registration::goal(4, "patrol_route", patrol_goal),
-    Registration::missing(Selector::Goal, 1, "raider.fetch_leader_banner"),
+    Registration::goal(1, "raider.fetch_leader_banner", fetch_leader_banner),
     Registration::goal(3, "march_on_raid", pathfind_to_raid),
-    Registration::missing(Selector::Goal, 4, "raider.patrol_village"),
-    Registration::missing(Selector::Goal, 5, "raider.celebrate"),
+    Registration::goal(4, "raider.patrol_village", raider_patrol_village),
+    Registration::goal(5, "raider.celebrate", raider_celebrate),
     // -- the pillager's own --
     Registration::goal(0, "stay_afloat", float_goal),
     // Vanilla's own pillager avoid-creaking goal. Ours resolves the avoided species
     // through the host's own feed, the same route the creeper's cat/ocelot
     // avoidance takes.
     Registration::goal(1, "flee_entity", avoid_entity),
-    // Vanilla's own hold-ground-attack goal — the raid-wave "stand and fight at the
-    // village bell" behaviour. Raid machinery again.
-    Registration::missing(Selector::Goal, 2, "raider.hold_ground"),
+    Registration::goal(2, "raider.hold_ground", hold_ground_15),
     Registration::goal(3, "crossbow_strike", crossbow_attack),
     // Vanilla's own pillager stroll goal — note this is the plain stroll, not
     // the water-avoiding one the witch gets, and vanilla's speed factor is 0.6.
     // Ours is one goal for both, so the row is `Modelled` with the factor visible
     // at `stroll`'s own definition rather than here.
-    Registration::goal(8, "wander", stroll),
+    Registration::goal(8, "wander", slow_stroll),
     Registration::goal(9, "watch_player", look_at_player_8),
     // The second `WatchPlayerGoal` at priority 10 targets `Mob`, not `Player`
     // (vanilla's own pillager registration) — a different class, so per this family's own rule it is a row
@@ -921,6 +957,34 @@ pub static PILLAGER: &[Registration] = &[
     // The two priority-3 rows hunt villagers (unseen is fine) and iron golems.
     Registration::target(3, "nearest_target", target_villager_unseen),
     Registration::target(3, "nearest_target", target_iron_golem),
+];
+
+/// The vindicator: the inherited raider rows plus an axe fighter that holds
+/// ground on patrol, strikes in melee and, when named Johnny, hunts any mob.
+/// The door-breaking and door-opening rows stay missing: no goal here opens or
+/// breaks doors.
+pub static VINDICATOR: &[Registration] = &[
+    // -- inherited from PatrollingMonster / Raider --
+    Registration::goal(4, "patrol_route", patrol_goal),
+    Registration::goal(1, "raider.fetch_leader_banner", fetch_leader_banner),
+    Registration::goal(3, "march_on_raid", pathfind_to_raid),
+    Registration::goal(4, "raider.patrol_village", raider_patrol_village),
+    Registration::goal(5, "raider.celebrate", raider_celebrate),
+    // -- the vindicator's own --
+    Registration::goal(0, "stay_afloat", float_goal),
+    Registration::goal(1, "flee_entity", avoid_entity),
+    Registration::missing(Selector::Goal, 2, "vindicator.break_door"),
+    Registration::missing(Selector::Goal, 3, "raider.open_door"),
+    Registration::goal(4, "raider.hold_ground", hold_ground_10),
+    Registration::goal(5, "melee_strike", melee_attack),
+    Registration::goal(8, "wander", slow_stroll),
+    Registration::goal(9, "watch_player", look_at_player_3),
+    Registration::covered(Selector::Goal, 10, "watch_player", "watch_player"),
+    Registration::target(1, "retaliate", hurt_by_target),
+    Registration::target(2, "nearest_target(player)", nearest_attackable_target),
+    Registration::target(3, "nearest_target(villager)", target_villager_seen),
+    Registration::target(3, "nearest_target(iron_golem)", target_iron_golem),
+    Registration::target(4, "vindicator.johnny_target", johnny_target),
 ];
 
 /// The registry path a [`ProjectileKind`] spawns as.
@@ -1004,7 +1068,7 @@ pub const fn integrates_as_arrow(kind: ProjectileKind) -> bool {
 /// and are exactly what a player meets outside a raid. Leaving them out meant a
 /// witch and a pillager fell through to the fallback table and had no ranged attack
 /// at all.
-pub const SPECIES: &[&str] = &["blaze", "snow_golem", "witch", "pillager"];
+pub const SPECIES: &[&str] = &["blaze", "snow_golem", "witch", "pillager", "vindicator"];
 
 /// Resolves a species path to its table, or `None` if this family does not claim
 /// it.
@@ -1015,6 +1079,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
         "snow_golem" => Some(SNOW_GOLEM),
         "witch" => Some(WITCH),
         "pillager" => Some(PILLAGER),
+        "vindicator" => Some(VINDICATOR),
         _ => None,
     }
 }
@@ -1430,7 +1495,30 @@ mod tests {
             (Selector::Target, 3, "nearest_target"),
         ];
 
+        let vindicator_expected = vec![
+            (Selector::Goal, 4, "patrol_route"),
+            (Selector::Goal, 1, "raider.fetch_leader_banner"),
+            (Selector::Goal, 3, "march_on_raid"),
+            (Selector::Goal, 4, "raider.patrol_village"),
+            (Selector::Goal, 5, "raider.celebrate"),
+            (Selector::Goal, 0, "stay_afloat"),
+            (Selector::Goal, 1, "flee_entity"),
+            (Selector::Goal, 2, "vindicator.break_door"),
+            (Selector::Goal, 3, "raider.open_door"),
+            (Selector::Goal, 4, "raider.hold_ground"),
+            (Selector::Goal, 5, "melee_strike"),
+            (Selector::Goal, 8, "wander"),
+            (Selector::Goal, 9, "watch_player"),
+            (Selector::Goal, 10, "watch_player"),
+            (Selector::Target, 1, "retaliate"),
+            (Selector::Target, 2, "nearest_target(player)"),
+            (Selector::Target, 3, "nearest_target(villager)"),
+            (Selector::Target, 3, "nearest_target(iron_golem)"),
+            (Selector::Target, 4, "vindicator.johnny_target"),
+        ];
+
         for (species, expected) in [
+            ("vindicator", vindicator_expected),
             ("blaze", blaze_expected),
             ("snow_golem", snow_golem_expected),
             ("witch", witch_expected),
@@ -1461,7 +1549,7 @@ mod tests {
         // Every `Modelled` row builds and no `Missing` or `CoveredBy` one does, which is
         // what makes the raid rows honest bookkeeping rather than silent no-ops.
         for (species, expected_built) in
-            [("blaze", 7), ("snow_golem", 5), ("witch", 8), ("pillager", 11)]
+            [("blaze", 7), ("snow_golem", 5), ("witch", 12), ("pillager", 15), ("vindicator", 16)]
         {
             let ctx = SpeciesContext::new(0.23);
             let built = goals_for(species, &ctx);

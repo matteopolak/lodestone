@@ -162,7 +162,7 @@ use crate::ai::goals::{
 };
 
 use super::{
-    Registration, Selector, SpeciesContext, breed_1_0, float_goal, hurt_by_target, leap_0_4,
+    Registration, SpeciesContext, breed_1_0, float_goal, hurt_by_target, leap_0_4,
     look_at_player_8, melee_attack, owner_hurt_by_target, owner_hurt_target, random_look_around,
     reset_universal_anger_alerting, reset_universal_anger_solo, sit_when_ordered, stroll,
     target_endermite, target_skeleton_unseen, untamed_target_baby_turtle, untamed_target_prey,
@@ -234,10 +234,8 @@ pub static ENDERMAN: &[Registration] = &[
     Registration::goal(7, "wander_dry", stroll),
     Registration::goal(8, "watch_player(player)", look_at_player_8),
     Registration::goal(8, "idle_glance", random_look_around),
-    // Carrying and placing blocks — a piece of per-entity carried-block state
-    // plus a block-placement path the AI seam has no access to.
-    Registration::missing(Selector::Goal, 10, "enderman.put_down_block"),
-    Registration::missing(Selector::Goal, 11, "enderman.pick_up_block"),
+    Registration::goal(10, "enderman.put_down_block", put_down_block),
+    Registration::goal(11, "enderman.pick_up_block", pick_up_block),
     // Vanilla's own teleport-on-stare goal. `Coverage::Modelled` now: see
     // `EndermanGazeWatchGoal`'s own doc comment for the port and its
     // disclosed narrowings (no per-player identity, no line of sight, no
@@ -303,7 +301,7 @@ pub static ZOMBIFIED_PIGLIN: &[Registration] = &[
     Registration::goal(8, "idle_glance", random_look_around),
     // The piglin's own override adds the rows from here down.
     // A ranged goal, so it belongs to the ranged-attack family, not this one.
-    Registration::missing(Selector::Goal, 1, "spear_lunge"),
+    Registration::goal(1, "spear_lunge", super::hostile_melee::spear_lunge),
     // Vanilla's own melee goal for this species extends the shared melee
     // goal, adding only the raised-arms metadata flag while it runs.
     Registration::goal(2, "zombie.melee_attack", melee_attack),
@@ -533,6 +531,14 @@ pub static WOLF: &[Registration] = &[
 // The factors live here rather than in `super` because no other family
 // registers these three goals at these multipliers.
 
+fn put_down_block(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::enderman_block::PutDownBlockGoal)
+}
+
+fn pick_up_block(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::enderman_block::PickUpBlockGoal)
+}
+
 /// Vanilla's own stare-freeze goal for this species takes no constructor arguments.
 fn freeze_when_looked_at(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(EndermanFreezeUnderGazeGoal::new())
@@ -646,6 +652,7 @@ mod tests {
     use super::super::probe::SpeedProbe;
     use super::super::{Coverage, goals_for, is_fallback, registrations_for};
     use super::*;
+    use crate::ai::roster::Selector;
     use crate::ai::goal::GoalSelector;
     use crate::ai::navigating_mob::NavigatingMob;
     use crate::pathfinding::{Aabb, MobShape, PathType, PathWorld};

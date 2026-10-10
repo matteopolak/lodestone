@@ -245,13 +245,11 @@ pub static ZOMBIE: &[Registration] = &[
     // Vanilla's own spear-use goal — new in 26.2, and a ranged
     // goal, so it belongs to the ranged-attack roster (`super::ranged`) rather
     // than here.
-    Registration::missing(Selector::Goal, 2, "spear_lunge"),
+    Registration::goal(2, "spear_lunge", spear_lunge),
     // Vanilla's own zombie melee goal extends `MeleeStrikeGoal`, adding only
     // the raised-arms metadata flag while it runs.
     Registration::goal(3, "zombie.melee_attack", melee_attack),
-    // Vanilla's own move-through-village goal — needs
-    // village POI data that does not exist here.
-    Registration::missing(Selector::Goal, 6, "patrol_village"),
+    Registration::goal(6, "patrol_village", patrol_village),
     Registration::goal(7, "wander_dry", stroll),
     // Vanilla's own registration chains an alert-others flag naming the
     // zombified piglin as the excluded species. The
@@ -274,7 +272,7 @@ pub static ZOMBIE: &[Registration] = &[
 /// rows the zombie's own registration adds itself (turtle-egg at 4, and both look goals
 /// at 8) and replaces the other nine wholesale. Reading "Drowned inherits
 /// Zombie's goals" off the class hierarchy would give it `SpearUseGoal`,
-/// `ZombieAttackGoal`, `MoveThroughVillageGoal` and a water-avoiding stroll that
+/// the zombie's attack goal, its village walk and a water-avoiding stroll that
 /// vanilla never registers on it, and lose all six goals that make it amphibious.
 ///
 /// The go-to-water, swim-up, melee and every target row are modelled; the
@@ -455,6 +453,18 @@ fn stroll_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// Declared on `AbstractSkeleton` but reachable only by [`WITHER_SKELETON`]: the
 /// `else` branch that installs it needs a non-bow main hand, and only the wither
 /// overrides `populateDefaultEquipmentSlots` to have one.
+/// Walks between village points of interest after dark, ending within four
+/// blocks of each.
+pub fn patrol_village(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::village_walk::MoveThroughVillageGoal::new(ctx.speed, true, 4.0))
+}
+
+/// Charges with a spear at its walking speed, approaching within 10 blocks and
+/// counting 2 as a touch.
+pub fn spear_lunge(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::spear_use::SpearUseGoal::new(ctx.speed, ctx.speed, 10.0, 2.0))
+}
+
 /// The zombie family's walk to a turtle egg to stamp it out, at `ctx.speed`.
 pub fn attack_turtle_egg(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(crate::ai::remove_block::BreakBlockGoal::new(
@@ -908,7 +918,7 @@ mod tests {
             zombie.attacks > 0,
             "a zombie built from the roster must reach MeleeStrikeGoal's attack: \
              gap {:?}, attacks {}. Nothing in this test adds a goal, so a failure \
-             means ZombieAttackGoal is not reaching the goal selector",
+             means the zombie melee goal is not reaching the goal selector",
             zombie.gap,
             zombie.attacks
         );
@@ -980,7 +990,7 @@ mod tests {
         );
         assert!(
             drowned.attacks > 0,
-            "a drowned must reach its DrownedAttackGoal: gap {:?}, attacks {}",
+            "a drowned must reach its melee attack: gap {:?}, attacks {}",
             drowned.gap,
             drowned.attacks
         );

@@ -176,7 +176,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// * **Line of sight.** Vanilla drops the target when `!hasLineOfSight`, in
 ///   its own per-tick update. This seam has no raycast primitive — the same
 ///   disclosed simplification `FuseGoal`'s own doc comment already makes.
-/// * **`randomStrollGoal.trigger()` on stop**, in vanilla's own stop step,
+/// * **Re-arming the stroll on stop**, in vanilla's own stop step,
 ///   which has no seam.
 #[derive(Debug)]
 pub struct GuardianBeamGoal {
@@ -380,7 +380,7 @@ pub static GUARDIAN: &[Registration] = &[
 /// `ElderGuardian` declares no goal registration of its own, so there is nothing to transcribe
 /// differently — but vanilla's own elder-guardian attack-duration getter overrides it to 60, so
 /// its beam charges in 70 ticks where a guardian's takes 90, and
-/// `GuardianAttackGoal`'s own `elder` flag also removes its 3-block give-up
+/// the guardian attack goal's elder flag also removes its 3-block give-up
 /// range.
 ///
 /// This is the shape of trap the "check each species' own goal registration" rule is

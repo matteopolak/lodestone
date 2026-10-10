@@ -28,11 +28,15 @@ pub enum TargetClass {
     Hostile,
     /// Any mob of a different species from the asking mob.
     OtherSpecies,
+    /// Any raider that is not a witch.
+    HealableRaider,
+    /// Any other mob at all.
+    AnyMob,
 }
 
 impl TargetClass {
     /// Every class, in discriminant order.
-    pub const ALL: [TargetClass; 12] = [
+    pub const ALL: [TargetClass; 14] = [
         Self::Villager,
         Self::IronGolem,
         Self::BabyLandTurtle,
@@ -45,6 +49,8 @@ impl TargetClass {
         Self::Guardian,
         Self::Hostile,
         Self::OtherSpecies,
+        Self::HealableRaider,
+        Self::AnyMob,
     ];
 
     /// The number of classes.

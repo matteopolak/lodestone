@@ -366,6 +366,7 @@ impl<'w> MobSim<'w> {
         // Retain the attacked position from each record so the resolution pass
         // can identify which player, if any, receives the hit.
         let mut hits: Vec<(Option<i32>, Vec3, f32, Vec3, bool)> = Vec::new();
+        let velocities: Vec<(i32, Vec3)> = self.mobs.iter().map(|m| (m.id, m.mob.velocity())).collect();
         let mut detonations: Vec<(i32, Vec3)> = Vec::new();
         let mut bred: Vec<(i32, Vec3, ResourceKey)> = Vec::new();
         // Accumulated into a local and moved into
@@ -376,6 +377,8 @@ impl<'w> MobSim<'w> {
         let mut hive_entries: Vec<(i32, (i32, i32, i32))> = Vec::new();
         let mut crop_growths: Vec<(BlockPos, lodestone_data::block_states::StateId)> = Vec::new();
         let mut launches: Vec<(i32, ProjectileLaunch)> = Vec::new();
+        let mut banner_pickups: Vec<i32> = Vec::new();
+        let mut raider_shouts: Vec<(i32, bool)> = Vec::new();
         // Self-inflicted damage requests are drained per mob and resolved
         // below, after `hits`.
         let mut self_damage: Vec<(i32, f32)> = Vec::new();
@@ -444,7 +447,9 @@ impl<'w> MobSim<'w> {
                 let at = m.position();
                 terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some()
             };
-            if m.rider.is_none() && column_loaded {
+            // An untamed mount is not steered by its rider, so its goals keep ticking.
+            if (m.rider.is_none() || (!m.tame && matches!(m.entity_type.path(), "horse" | "donkey" | "mule"))) && column_loaded {
+                m.mob.set_ridden(m.rider.is_some());
                 let helmeted = m.equipment.head.is_some();
                 m.mob.set_sea_level(sea_level);
                 if m.mob.bee_state().active {
@@ -486,7 +491,7 @@ impl<'w> MobSim<'w> {
                 m.mob.tick_in(&path_world, &mut m.goals);
                 // Navigation integrates the body; the live shapes then clip it,
                 // so a block placed or mined since the last tick is respected.
-                settle_mob(&live_collision, &mut m.mob, before_live_collision, true);
+                settle_sim_mob(&live_collision, m, before_live_collision, true);
             }
             // Vanilla's own generic per-tick base update's ambient-sound roll runs every tick a
             // mob is alive, independent of any goal — see
@@ -604,6 +609,35 @@ impl<'w> MobSim<'w> {
                 m.stung_at = Some(tick_count);
                 m.anger = None;
             }
+            if m.health > 0.0
+                && let Some(ticks) = m.mob.item_use_ticks()
+                && let Some(spear) = m.mob.main_hand_item().and_then(lodestone_entity::ai::kinetic::kinetic_spear)
+                && ticks >= spear.delay_ticks
+                && let Some(target_pos) = m.mob.attack_target()
+                && m.last_stab_tick.is_none_or(|t| tick_count >= t + 10)
+            {
+                let yaw = f64::from(m.mob.head_yaw()).to_radians();
+                let look = Vec3::new(-yaw.sin(), 0.0, yaw.cos());
+                let at = m.position();
+                let to = Vec3::new(target_pos.x - at.x, 0.0, target_pos.z - at.z);
+                let reach = (to.x * to.x + to.z * to.z).sqrt();
+                // A mob's reach is half the spear's 1 to 4.5 blocks, plus the hitbox margin.
+                let in_reach = (1.0..=2.25 + 0.125).contains(&reach) && to.x * look.x + to.z * look.z > 0.0;
+                if in_reach {
+                    let along = |v: Vec3| (v.x * look.x + v.z * look.z) * 20.0;
+                    let speed = along(m.mob.velocity());
+                    let target_speed = m
+                        .attack_target_id
+                        .and_then(|id| velocities.iter().find(|(i, _)| *i == id))
+                        .map_or(0.0, |(_, v)| along(*v));
+                    let relative = (speed - target_speed).max(0.0);
+                    if spear.damage.test(ticks - spear.delay_ticks, speed, relative, 0.2) {
+                        let damage = m.attack_damage + (relative * f64::from(spear.damage_multiplier)).floor() as f32;
+                        hits.push((m.attack_target_id, target_pos, damage, at, false));
+                        m.last_stab_tick = Some(tick_count);
+                    }
+                }
+            }
             for target_pos in new_attacks {
                 // Carry the attacker's position so the victim can retaliate and
                 // identify the source of the hit.
@@ -637,7 +671,10 @@ impl<'w> MobSim<'w> {
             if let Some(cell) = m.mob.take_hive_entry() {
                 hive_entries.push((m.id, cell));
             }
-            block_edits.extend(m.mob.take_block_edits());
+            for mut edit in m.mob.take_block_edits() {
+                edit.requester = Some(m.id);
+                block_edits.push(edit);
+            }
             if self.mob_griefing
                 && m.mob.is_on_ground()
                 && !matches!(m.entity_type.path(), "turtle" | "bat")
@@ -648,11 +685,11 @@ impl<'w> MobSim<'w> {
                     && let Some((eggs, hatch)) = lodestone_entity::ai::turtle_egg::counts(state)
                     && self.trample_rng.next_int(100) == 0
                 {
-                    block_edits.push(lodestone_entity::ai::BlockEdit {
+                    block_edits.push(lodestone_entity::ai::BlockEdit::new(
                         cell,
-                        expect: lodestone_entity::ai::BlockExpect::State(state),
-                        set: (eggs > 1).then(|| lodestone_entity::ai::turtle_egg::state(eggs - 1, hatch)).flatten(),
-                    });
+                        lodestone_entity::ai::BlockExpect::State(state),
+                        (eggs > 1).then(|| lodestone_entity::ai::turtle_egg::state(eggs - 1, hatch)).flatten(),
+                    ));
                 }
             }
             crop_growths.extend(
@@ -690,6 +727,15 @@ impl<'w> MobSim<'w> {
             // it: a projectile is created inside its shooter's own bounding box,
             // so without an owner a skeleton's arrow hits the skeleton.
             launches.extend(m.mob.take_new_launches().into_iter().map(|l| (m.id, l)));
+            if m.mob.take_banner_pickup() {
+                banner_pickups.push(m.id);
+            }
+            if let Some(aggressive) = m.mob.take_shout() {
+                raider_shouts.push((m.id, aggressive));
+            }
+            if m.mob.take_no_action_reset() {
+                m.no_action_time = 0;
+            }
             for amount in m.mob.take_self_damage() {
                 self_damage.push((m.id, amount));
             }
@@ -847,6 +893,8 @@ impl<'w> MobSim<'w> {
                 }
             }
         }
+        self.resolve_banner_pickups(banner_pickups);
+        self.resolve_raider_shouts(raider_shouts);
         for (shooter, launch) in launches {
             use lodestone_entity::ai::roster::ranged::{integrates_as_arrow, projectile_entity_type};
             let projectile = if integrates_as_arrow(launch.kind) {
@@ -856,7 +904,10 @@ impl<'w> MobSim<'w> {
             };
             let key = ResourceKey::from_str(&format!("minecraft:{}", projectile_entity_type(launch.kind)))
                 .expect("static projectile key");
-            self.spawn_projectile_from(key, projectile, Some(shooter));
+            // A witch throwing at one of its own raiders heals it and then
+            // forgets the target: healing under 4 health, regeneration above.
+            let potion = self.witch_potion_for(shooter, launch.kind);
+            self.spawn_potion_projectile_from(key, projectile, Some(shooter), potion);
         }
         let mut infected: Vec<i32> = Vec::new();
         for (target_id, target_pos, raw_damage, attacker_pos, infects) in hits {
@@ -926,6 +977,7 @@ impl<'w> MobSim<'w> {
             }
         }
         self.reap_dead();
+        self.resolve_bucks();
         self.resolve_breeding(bred);
         // Drain the cat morning-gift roll/spawn and parrot shoulder-mount
         // request collected alongside `bred`.
@@ -1057,7 +1109,7 @@ impl<'w> MobSim<'w> {
                 // This pass only resolves motion added after the main AI sweep. Do
                 // not integrate gravity twice when a mined floor left a mob
                 // unsupported: the first pass already did that for this tick.
-                settle_mob(&live_collision, &mut mob.mob, before_live_collision, false);
+                settle_sim_mob(&live_collision, mob, before_live_collision, false);
             }
         }
 

@@ -678,8 +678,14 @@ pub enum MetadataField {
         /// Whether the turtle is digging to lay it.
         laying: bool,
     },
+    /// Whether the mob is using its held item (index 8, bit 0 of the living-entity flags).
+    UsingItem(bool),
+    /// The block an enderman carries (index 16), as a global block-state id.
+    EndermanCarried(Option<u32>),
     /// Whether a wolf is begging (index 20).
     WolfInterested(bool),
+    /// Whether a raider is celebrating a lost village (index 16).
+    RaiderCelebrating(bool),
     /// A wolf's collar dye ordinal (index 21).
     WolfCollar(u8),
     /// A cat's collar dye ordinal (index 23).
