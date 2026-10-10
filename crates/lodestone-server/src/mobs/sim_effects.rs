@@ -230,7 +230,7 @@ impl<'w> MobSim<'w> {
     /// Allay item delivery: a carrying allay within
     /// [`ALLAY_DELIVER_ARRIVAL_DISTANCE`] of its liked note-block's `.above()`
     /// cell throws one item from its inventory there per tick — a real dropped
-    /// [`ItemEntity`](lodestone_entity::item_entity), not a state flag, so a
+    /// [item entity](lodestone_entity::item_entity), not a state flag, so a
     /// player can actually walk over and collect it. Throws use a 20-tick
     /// cadence with a small random velocity; this model drains one item per
     /// tick and does not model velocity spread.
@@ -500,7 +500,7 @@ impl<'w> MobSim<'w> {
 
     /// Dismounts every shoulder rider whose owner meets a dismount condition,
     /// respawning the mob at the owner's position — vanilla's own
-    /// player-side "remove entities on shoulder"/"respawn entity on shoulder"
+    /// player-side shoulder removal and respawn
     /// calls,
     /// gated the same way on `mounted_tick + 20 <
     /// gameTime` so a parrot cannot fall off the instant it lands.

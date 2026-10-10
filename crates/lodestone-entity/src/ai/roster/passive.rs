@@ -66,7 +66,7 @@
 //! across two families as one seam capability. Measured against the jar it closes
 //! **one**: a rabbit's powder-snow climb needs powder-snow physics
 //! nothing here models, its `CropRaidGoal` needs a host-computed candidate
-//! block position (`MoveToBlockGoal`'s spiral) plus a block-state *property*, and
+//! block position (move-to-block goal's spiral) plus a block-state *property*, and
 //! [`hostile_melee`](super::hostile_melee)'s `AvoidSunlightGoal` reads no block at
 //! all. Anyone planning off the original table would expect the rest to be free.
 //!
@@ -92,7 +92,7 @@
 //! **The cat is the one exception, and it is a vanilla fact rather than a gap
 //! here.** `crate::natural_spawn`'s table has an `"ocelot"` row and no `"cat"`
 //! row, matching vanilla: a real cat spawns near villages through a dedicated
-//! `CatSpawner`, not the ordinary per-biome cycle, and that mechanism is not
+//! Cat spawner, not the ordinary per-biome cycle, and that mechanism is not
 //! modelled anywhere in this tree. [`CAT`] is therefore reachable from tests, a
 //! caller that names `"cat"` directly, or an ocelot a future v-cat-conversion
 //! feature turns into one — never from a spawn a player did not cause some
@@ -116,7 +116,7 @@ use super::{
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
 ///
 /// `cat` and `parrot` joined this family: both are `Animal`s
-/// with a `TamableAnimal`-style goal set (not neutral, not hostile), the same
+/// with a tameable-style goal set (not neutral, not hostile), the same
 /// shape as the farm animals above them — see [`CAT`] and [`PARROT`]'s own
 /// doc comments for what each does and does not carry.
 pub const SPECIES: &[&str] = &[
@@ -128,9 +128,9 @@ pub const SPECIES: &[&str] = &[
 #[must_use]
 pub fn lookup(species: &str) -> Option<&'static [Registration]> {
     match species {
-        // `MushroomCow` declares no goal registration of its own
+        // Mooshroom declares no goal registration of its own
         // in vanilla, so a mooshroom inherits
-        // `AbstractCow`'s verbatim — the same reason they share `cow_food`.
+        // Cow's verbatim — the same reason they share `cow_food`.
         "cow" | "mooshroom" => Some(COW),
         "sheep" => Some(SHEEP),
         "pig" => Some(PIG),
@@ -326,7 +326,7 @@ pub static CAT: &[Registration] = &[
     // `LureGoal` has no scare state, same simplification as every other
     // `LureGoal` row in this roster.
     Registration::goal(4, "cat.lure(cat_food)", cat_tempt_0_6),
-    // Vanilla's own cat bed-hunt goal — a `MoveToBlockGoal` that hunts
+    // Vanilla's own cat bed-hunt goal — a move-to-block goal that hunts
     // beds in an 8-block radius. The candidate bed position is host-computed
     // (`MobController::cat_bed_target`, `docs/mob-block-perception.md`'s own
     // guidance for a goal that needs to search a neighbourhood) rather than

@@ -21,13 +21,13 @@ pub(super) enum GolemCell {
 }
 
 impl GolemCell {
-    /// Vanilla's own block predicates: `BlockStatePredicate.forBlock` for
+    /// Vanilla's own block predicates: block state predicate for
     /// iron/snow, the carved-pumpkin-or-jack-o'-lantern `Predicate` literal
-    /// (`CarvedPumpkinBlock.PUMPKINS_PREDICATE`), and `BlockStateBase::isAir`
+    /// (carved pumpkin), and block state
     /// for the required-clear cells.
     fn matches(self, block: StateId) -> bool {
         // Strip any `[prop=value]` state suffix so this compares block
-        // identity only, matching `BlockStatePredicate.forBlock`.
+        // identity only, matching block state predicate.
         let path = block.block().name();
         match self {
             GolemCell::Iron => path == "minecraft:iron_block",
@@ -40,7 +40,7 @@ impl GolemCell {
     }
 }
 
-/// The snow golem's pattern (`CarvedPumpkinBlock.getOrCreateSnowGolemFull`):
+/// The snow golem's pattern (carved pumpkin):
 /// one column, a pumpkin over two snow blocks. Indexed `[down][right]`, a
 /// single `forward` layer (depth 1, `.aisle(...)` called once).
 pub(super) const SNOW_GOLEM_PATTERN: &[&[GolemCell]] =
@@ -56,7 +56,7 @@ pub(super) const IRON_GOLEM_PATTERN: &[&[GolemCell]] = &[
     &[GolemCell::Air, GolemCell::Iron, GolemCell::Air],
 ];
 
-/// The six axis-aligned unit vectors `BlockPattern.find` rotates a pattern
+/// The six axis-aligned unit vectors block pattern rotates a pattern
 /// through (vanilla `Direction.values()`), as `(dx, dy, dz)`.
 const GOLEM_PATTERN_DIRECTIONS: [(i32, i32, i32); 6] = [
     (0, -1, 0),
@@ -79,8 +79,8 @@ fn vec3i_neg(v: (i32, i32, i32)) -> (i32, i32, i32) {
     (-v.0, -v.1, -v.2)
 }
 
-/// A matched golem pattern's orientation — vanilla `BlockPattern.
-/// BlockPatternMatch`'s `(frontTopLeft, forwards, up)` triple, sufficient to
+/// A matched golem pattern's orientation — vanilla's pattern match
+/// `(front-top-left, forwards, up)` triple, sufficient to
 /// re-derive any cell's world position.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct GolemPatternMatch {
@@ -90,7 +90,7 @@ pub(super) struct GolemPatternMatch {
 }
 
 impl GolemPatternMatch {
-    /// Vanilla `BlockPattern.translateAndRotate`: the world cell at local
+    /// Vanilla block pattern: the world cell at local
     /// `(right, down, forward)`.
     pub(super) fn translate(&self, right: i32, down: i32, forward: i32) -> (i32, i32, i32) {
         let r = vec3i_cross(self.forwards, self.up);
@@ -101,8 +101,8 @@ impl GolemPatternMatch {
         )
     }
 
-    /// Every non-air cell's world position — what vanilla
-    /// `CarvedPumpkinBlock.clearPatternBlocks` iterates to clear (it walks
+    /// Every non-air cell's world position — what vanilla's
+    /// carved pumpkin iterates to clear (it walks
     /// every cell including the air ones, but clearing air to air is a
     /// no-op, so only the real blocks are worth reporting to a caller).
     pub(super) fn consumed(&self, pattern: &[&[GolemCell]]) -> Vec<BlockPos> {
@@ -135,7 +135,7 @@ fn golem_pattern_matches(
     true
 }
 
-/// Vanilla `BlockPattern.find`: brute-forces every position in the
+/// Vanilla block pattern: brute-forces every position in the
 /// `dist × dist × dist` cube starting at `placed` (inclusive of `placed`
 /// itself), and every valid `(forwards, up)` axis pair (24 orientations —
 /// `up` excludes only parallel-to-`forwards`), until one fully matches.
@@ -195,8 +195,8 @@ pub enum GolemSpecies {
 }
 
 /// The result of a successful golem-pattern match: which golem spawned, its
-/// entity id, and the world cells the caller must clear (vanilla
-/// `CarvedPumpkinBlock.clearPatternBlocks` — air them and fire the level
+/// entity id, and the world cells the caller must clear (vanilla's
+/// carved pumpkin airs them and fires the level
 /// event, both the block-placement owner's job, not this crate's).
 #[derive(Debug, Clone)]
 pub struct GolemConstruction {
@@ -235,7 +235,7 @@ mod golem_tests {
 
     /// **The real iron golem shape, standing upright.** Four iron blocks in
     /// a T (three across at `y=4`, one more below centre at `y=3`) topped
-    /// with a carved pumpkin — the exact geometry `CarvedPumpkinBlock`'s
+    /// with a carved pumpkin — the exact geometry carved pumpkin's
     /// `getOrCreateIronGolemFull` declares, worked out independently against
     /// its `translateAndRotate` formula rather than assumed.
     #[test]

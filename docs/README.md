@@ -575,6 +575,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `lodestone_data::mob_effects::MobEffectId` is the validated 26.2 built-in
   `minecraft:mob_effect` registry id. It separates a known entry in the shipped census
   from an arbitrary integer carried by a version-free item component or an extension.
+- [Mob equipment streaming](./mob-equipment-streaming.md) — Held items, armour and
+  the raid banner on mobs are sent to clients with the set-equipment packet, on spawn
+  and whenever a slot changes. Without it a zombie's weapon, a skeleton's bow and the
+  captain's banner are invisible.
 - [Mob spawning](./mob-spawning.md) — Everything that puts a mob into a live world
   and gives it a life afterwards: the natural spawn cycle and biome tables, spawn
   equipment, species-aware body and goal resolution, spawn eggs, breeding and growth,

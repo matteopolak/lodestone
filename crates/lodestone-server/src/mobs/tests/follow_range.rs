@@ -1025,7 +1025,7 @@ fn a_non_captain_pillager_drops_no_ominous_bottle() {
 /// **Control**: a vindicator patrol leader, involved in no raid, drops
 /// no bottle — only `entities/pillager.json` carries this loot pool in
 /// vanilla, even though a vindicator can lead a patrol too
-/// (`PatrollingMonster` is not species-specific).
+/// (leading a patrol is not species-specific).
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn a_vindicator_patrol_leader_drops_no_ominous_bottle() {

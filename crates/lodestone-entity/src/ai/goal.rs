@@ -254,7 +254,7 @@ impl GoalSelector {
     /// our `Goal::stop` needs the controller vanilla's parameterless `Goal::stop`
     /// reads off the mob field.
     ///
-    /// This exists for vanilla's runtime goal swap. `AbstractSkeleton.reassessWeaponGoal`
+    /// This exists for vanilla's runtime goal swap. Skeleton
     /// removes *both* its melee and bow goals and re-adds exactly one at
     /// priority 4 every time its weapon changes, which is inexpressible with
     /// `add`/`disable` alone: `disable` is per-[`Flag`] and would take out
@@ -637,7 +637,7 @@ mod tests {
 
     // -- `remove` ------------------------------------------------------------
     //
-    // These gate the capability `AbstractSkeleton.reassessWeaponGoal` needs.
+    // These gate the capability skeleton needs.
     // The weak version of this test asserts `len()` shrank, which proves
     // nothing about the *scheduler*: a goal can be gone from the collection
     // and still have been the last thing to hold a flag, and a goal can be

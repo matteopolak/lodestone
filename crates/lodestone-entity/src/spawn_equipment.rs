@@ -38,7 +38,7 @@
 //!   exists for: `10% * 10/16 = 6.25%` of drowned spawns get a trident, which
 //!   is what [`crate::ai::roster::ranged::trident_attack`]'s own `canUse` gate
 //!   (via [`crate::ai::MobController::main_hand_item`]) now reads.
-//! * **`AbstractSkeleton.populateDefaultEquipmentSlots`** calls `super` then
+//! * **Skeleton** calls `super` then
 //!   sets a bow **unconditionally** — no roll. `Skeleton`, `Stray`, `Bogged`
 //!   and `Parched` declare no override, so they share this arm.
 //! * **`WitherSkeleton.populateDefaultEquipmentSlots`** does **not** call
@@ -283,7 +283,7 @@ pub fn populate_default_equipment_slots(
                 slots.set(EquipmentSlot::MainHand, item);
             }
         }
-        // `AbstractSkeleton.populateDefaultEquipmentSlots`: `super` then an
+        // Skeleton: `super` then an
         // unconditional bow. `Stray`, `Bogged` and `Parched` share this arm.
         EntityType::Skeleton | EntityType::Stray | EntityType::Bogged | EntityType::Parched => {
             base_armor_roll(rng, special_multiplier, hard, &mut slots);

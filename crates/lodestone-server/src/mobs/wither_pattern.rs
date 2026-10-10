@@ -42,7 +42,7 @@ impl WitherCell {
     }
 }
 
-/// `WitherSkullBlock.getOrCreateWitherFull`'s `.aisle("^^^", "###", "~#~")`:
+/// Wither skull block's `.aisle("^^^", "###", "~#~")`:
 /// three skulls over three base blocks over `[air, base, air]`. One aisle
 /// (depth 1), rows top-to-bottom exactly as `golem::IRON_GOLEM_PATTERN`
 /// already establishes the convention for (`down = 0` is the row nearest
@@ -55,7 +55,7 @@ pub(super) const WITHER_PATTERN: &[&[WitherCell]] = &[
 ];
 
 /// `golem::GOLEM_PATTERN_DIRECTIONS` — vanilla `Direction.values()`, the six
-/// axis-aligned unit vectors `BlockPattern.find` rotates a pattern through.
+/// axis-aligned unit vectors block pattern rotates a pattern through.
 const WITHER_PATTERN_DIRECTIONS: [(i32, i32, i32); 6] =
     [(0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)];
 
@@ -86,9 +86,8 @@ impl WitherPatternMatch {
         )
     }
 
-    /// Every non-air cell's world position — `CarvedPumpkinBlock.
-    /// clearPatternBlocks`'s wither-specific caller
-    /// (`WitherSkullBlock.checkSpawn`) walks the same match to air the three
+    /// Every non-air cell's world position — what the wither-specific
+    /// pattern-clearing caller (the wither skull block) walks the same match to air the three
     /// skulls and three base blocks once the wither is spawned.
     pub(super) fn consumed(&self) -> Vec<BlockPos> {
         let mut out = Vec::new();
@@ -104,7 +103,7 @@ impl WitherPatternMatch {
     }
 
     /// `match.getBlock(1, 2, 0)` — the bottom-centre base block's cell, the
-    /// spawn anchor `WitherSkullBlock.checkSpawn` reads.
+    /// spawn anchor wither skull block reads.
     pub(super) fn spawn_anchor(&self) -> (i32, i32, i32) {
         self.translate(1, 2, 0)
     }
@@ -125,7 +124,7 @@ fn wither_pattern_matches(
     true
 }
 
-/// `WitherSkullBlock.getOrCreateWitherFull().find(level, pos)` — brute-forces
+/// Wither skull block — brute-forces
 /// every position in the `dist × dist × dist` cube starting at `placed`, and
 /// every one of the 24 `(forwards, up)` orientations, exactly as
 /// `golem::find_golem_pattern` does (see that function's own doc for why 24

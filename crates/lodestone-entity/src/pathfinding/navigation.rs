@@ -3,7 +3,7 @@
 //! A path is not consumed instantly: a mob walks toward the current waypoint,
 //! advances when it gets close enough, and the navigation is periodically
 //! recomputed and can fail. [`PathNavigator`] models that lifecycle, mirroring
-//! vanilla's `PathNavigation.followThePath` / `doStuckDetection`: the
+//! vanilla's navigator / `doStuckDetection`: the
 //! close-enough radius scales with the mob's width, and a mob that stops making
 //! progress for 100 ticks is declared stuck and its path dropped.
 //!

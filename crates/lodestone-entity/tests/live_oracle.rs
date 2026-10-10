@@ -4,7 +4,7 @@
 //! our own table or a static data file, it asks a **running vanilla 26.2 server**
 //! what a mob's attributes actually are and checks our numbers against it. The
 //! `/attribute … base get` command reports the live base value, so attributes a
-//! mob does not override reveal the game's `RangedAttribute` default directly.
+//! mob does not override reveal the game's ranged attribute default directly.
 //!
 //! It is `#[ignore]`d because it needs an isolated Docker server with RCON. Bring
 //! one up (never touch the shared `lodestone-mc262` / `lodestone-mc189`):
@@ -166,7 +166,7 @@ fn live_attribute_defaults_match_our_table() {
     let tag = "lodestone_oracle_defaults";
     let sel = rcon.summon_tagged("pig", tag);
 
-    // Attributes a pig does NOT override expose the game's RangedAttribute
+    // Attributes a pig does NOT override expose the game's ranged attribute
     // default. These validate our `default_def` table against the running game.
     for path in ["step_height", "knockback_resistance", "gravity"] {
         let key = Identifier::from_str(&format!("minecraft:{path}")).unwrap();

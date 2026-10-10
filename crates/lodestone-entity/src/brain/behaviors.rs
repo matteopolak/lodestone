@@ -97,7 +97,7 @@ impl Behavior for RandomStroll {
 
 /// Walks toward a claimed point-of-interest position read from `source` (e.g.
 /// [`MemoryModuleType::JOB_SITE`]/`HOME`/`MEETING_POINT`) — vanilla's
-/// `SetWalkTargetFromBlockMemory`, simplified. A one-shot: when farther than
+/// Walk-to-remembered-block behaviour, simplified. A one-shot: when farther than
 /// `close_enough` from the position `source` names, it writes
 /// [`MemoryModuleType::WALK_TARGET`] so [`MoveToTargetSink`] does the actual
 /// walking; when already close enough it does nothing, leaving the mob to
@@ -620,7 +620,7 @@ fn uniform_roll(mob: &mut dyn BrainMob, min: i32, max: i32) -> i32 {
 }
 
 /// Vanilla's own goat-ram-preparation behaviour — the goat ram's first phase:
-/// pick the nearest visible living entity, back away from it to a ramming
+/// pick the nearest visible living creature, back away from it to a ramming
 /// distance, wait [`ram_prepare_time`](Self::new)'s worth of ticks once
 /// there, then hand off to [`RamTarget`] by writing
 /// [`MemoryModuleType::RAM_TARGET`].
@@ -632,7 +632,7 @@ fn uniform_roll(mob: &mut dyn BrainMob, min: i32, max: i32) -> i32 {
 ///   off) armour stands; this crate's [`NearbyBrainEntity`](super::mob::NearbyBrainEntity)
 ///   carries no species tag a filter could read (see
 ///   [`NearestVisibleLivingEntitiesSensor`](super::sensor::NearestVisibleLivingEntitiesSensor)'s
-///   own doc), so the nearest visible living entity is always the candidate —
+///   own doc), so the nearest visible living creature is always the candidate —
 ///   including another goat.
 /// * **No real pathfinding-based start-position search.** Vanilla scans the
 ///   four cardinal directions for the walkable cell furthest from the target
@@ -737,7 +737,7 @@ impl Behavior for PrepareRam {
         &self.entry
     }
 
-    // `PrepareRamNearestTarget`'s own `super(..., 160)`: a fixed duration, not
+    // Ram preparation's own `super(..., 160)`: a fixed duration, not
     // a rolled range.
     fn min_duration(&self) -> i32 {
         160

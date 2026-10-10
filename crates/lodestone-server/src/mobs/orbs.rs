@@ -66,7 +66,7 @@ const ORB_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.5, 0.5, 0.0);
 /// another orb's own box, so `0.25 + 0.5 + 0.25`.
 ///
 /// **Isotropic**, unlike [`ITEM_MERGE_REACH_XZ`]/[`ITEM_MERGE_REACH_Y`]: `inflate(0.5)`
-/// with one argument inflates y too, where `ItemEntity`'s three-argument
+/// with one argument inflates y too, where item entity's three-argument
 /// `inflate(0.5, 0.0, 0.5)` deliberately does not. Two orbs a block apart vertically
 /// *do* merge; two items never do.
 const ORB_MERGE_REACH: f64 = 0.25 + 0.5 + 0.25;
@@ -1388,7 +1388,7 @@ mod experience_orb_tests {
     /// **A player kill drops experience; every other death does not.**
     ///
     /// The three arms share one fixture and differ only in how the mob dies, because the
-    /// claim is about `LivingEntity.dropExperience`'s `lastHurtByPlayerMemoryTime > 0`
+    /// claim is about the recent-player-damage
     /// guard and nothing else:
     ///
     /// | arm | orbs |

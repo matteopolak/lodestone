@@ -68,13 +68,13 @@ struct VehicleTickInput {
     vehicle: TrackedVehicle,
 }
 
-/// `VehicleEntity.hurtServer`'s `setHurtTime(10)` — how long the hull rocks
+/// Ticks the hull rocks after a hit (10) — how long the hull rocks
 /// after a hit, in ticks. The client's roll formula reads the same counter
 /// *twice* (inside its sine and as a linear falloff), so this number sets both
 /// the duration and the number of swings.
 const VEHICLE_HURT_TICKS: i32 = 10;
 
-/// `VehicleEntity.hurtServer`'s destruction threshold on accumulated damage.
+/// The destruction threshold on accumulated damage.
 /// Used here as a **clamp** rather than as a trigger — see
 /// [`MobSim::attack_vehicle`] for why this crate does not destroy the vehicle.
 const VEHICLE_DESTROY_DAMAGE: f32 = 40.0;
@@ -83,7 +83,7 @@ const VEHICLE_DESTROY_DAMAGE: f32 = 40.0;
 const VEHICLE_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
 impl<'w> MobSim<'w> {
-    /// Creates one `AbstractBoat` at `position` facing `yaw` and returns its
+    /// Creates one boat at `position` facing `yaw` and returns its
     /// network entity id — `level.addFreshEntity(boat)`.
     ///
     /// `entity_type` is a full boat/raft key; [`crate::boat`] is the only producer
@@ -110,7 +110,7 @@ impl<'w> MobSim<'w> {
                 rider: None,
                 paddle_left: false,
                 paddle_right: false,
-                // `VehicleEntity.defineSynchedData`'s registered defaults, and
+                // The vehicle's registered defaults, and
                 // the `1` is the one that matters -- see `TrackedVehicle::hurt_dir`.
                 hurt_time: 0,
                 hurt_dir: 1,
@@ -136,7 +136,7 @@ impl<'w> MobSim<'w> {
         server_entity_id(self.spawn_vehicle(entity_type, position, yaw))
     }
 
-    /// `VehicleEntity.hurtServer` — the whole of what a punch does to a boat,
+    /// The whole of what a punch does to a boat,
     /// raft or minecart: flip the rock direction, restart the ten-tick clock and
     /// add the damage that scales the rock's amplitude.
     ///
@@ -241,7 +241,7 @@ impl<'w> MobSim<'w> {
             .map(server_entity_id)
     }
 
-    /// `AbstractBoat.interact` → `player.startRiding(this)`.
+    /// A player boards the boat.
     ///
     /// Returns `true` when the player is now aboard, which is the caller's signal
     /// to send `SET_PASSENGERS`. Refuses — vanilla's `PASS` — when:
@@ -333,7 +333,7 @@ impl<'w> MobSim<'w> {
             .map(server_entity_id)
     }
 
-    /// Vanilla `AbstractBoat.getDismountLocationForPassenger` for one tracked
+    /// Vanilla's boat dismount location for one tracked
     /// boat, evaluated against the live chunk source the connection is using.
     ///
     /// The preferred point is one collision-width outside the hull in the
@@ -368,7 +368,7 @@ impl<'w> MobSim<'w> {
     /// the packet (there is no velocity field on the wire). That matters for the
     /// tick after a dismount: the boat carries on with the momentum the client
     /// last gave it rather than stopping dead, which is what
-    /// `AbstractBoat.floatBoat`'s drag then bleeds off.
+    /// The float step's drag then bleeds off.
     ///
     /// No "moved too quickly" rejection is implemented, so
     /// [`ServerProtocol::encode_move_vehicle`](crate::protocol::ServerProtocol) has
@@ -395,7 +395,7 @@ impl<'w> MobSim<'w> {
         Some(id)
     }
 
-    /// Accepts a `ServerboundPaddleBoatPacket` for the vehicle
+    /// Accepts a paddle-boat packet for the vehicle
     /// `player_entity_id` is riding — purely cosmetic bookkeeping for
     /// [`snapshots`](Self::snapshots)'s `MetadataField::BoatPaddles`, refused
     /// the same way [`apply_vehicle_move`](Self::apply_vehicle_move) is when
@@ -413,7 +413,7 @@ impl<'w> MobSim<'w> {
         Some(id)
     }
 
-    /// One tick of every **unridden** vehicle — `AbstractBoat.tick`'s
+    /// One tick of every **unridden** vehicle — the boat tick's
     /// buoyancy/drag half, without `controlBoat`.
     ///
     /// A ridden boat is skipped entirely, which is the handover: the moment a
@@ -652,7 +652,7 @@ fn tick_one_vehicle(
     use lodestone_physics::vehicle::{BOAT_STEP_HEIGHT, boat_status, float_boat};
     use lodestone_physics::{MoveContext, PhysicsProfile, move_entity};
 
-    // `AbstractBoat.tick`'s first two clauses, and they run **before** the
+    // The boat tick's first two clauses, and they run **before** the
     // ridden-boat bail below rather than after it: a rider's client owns the
     // boat's *motion*, not its damage state, so a boat punched while someone is
     // aboard must still count its rock down or it stays tipped over for as long
@@ -714,7 +714,7 @@ fn ticked_vehicle(
 /// A [`CollisionView`] for the vehicle tick: [`LiveBlockCollision`]'s shapes plus the
 /// three hooks a boat's buoyancy needs and a dropped item's settle does not.
 ///
-/// `fluid_at` is the load-bearing addition. `AbstractBoat.getStatus` classifies
+/// `fluid_at` is the load-bearing addition. The boat status check classifies
 /// its surroundings from per-cell fluid **amount**, not from a boolean — the
 /// difference between a source (`8/9` tall) and a flow (`1/9`..`7/9`) is the whole
 /// of `waterLevel`, and with a coarse `is_water` every boat would compute a
@@ -789,7 +789,7 @@ impl CollisionView for VehicleCollision<'_> {
 }
 
 /// The block-floor rule shared by both target cells in vanilla's boat dismount
-/// search (`BlockGetter.getBlockFloorHeight`).
+/// search (block floor height).
 fn block_floor_height(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> f64 {
     let top = view.collision_top(x, y, z);
     if top > 0.0 {
@@ -1213,7 +1213,7 @@ mod vehicle_tests {
             ));
         }
 
-        // Dismount, then the same five ticks. `AbstractBoat.getDefaultGravity()` is
+        // Dismount, then the same five ticks. A boat's default gravity is
         // 0.04, so five ticks of free fall move it by strictly more than one tick's
         // worth — the prediction is a floor derived from the constant rather than a
         // "did it move at all" sign check.
@@ -1233,7 +1233,7 @@ mod vehicle_tests {
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
-    /// **Punching a boat writes `VehicleEntity`'s hurt triple, it reaches the
+    /// **Punching a boat writes the vehicle hurt triple, it reaches the
     /// streamed snapshot, and the tick counts it back down.**
     ///
     /// This is the wiring proof for the whole rocking animation, and the arm
@@ -1302,7 +1302,7 @@ mod vehicle_tests {
             other => wrong.push(format!("after one hit the triple was {other:?}, expected (10, -1, 25.0)")),
         }
 
-        // One tick of `AbstractBoat.tick`: the clock and the damage each fall by
+        // One boat tick: the clock and the damage each fall by
         // one. A reset to zero, or a decay of only one of the two, both leave a
         // visibly wrong animation and both look like "it decays" from here.
         sim.tick_vehicles(&|_, _, _| block_states::air_state());

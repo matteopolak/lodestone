@@ -209,6 +209,7 @@ fn snap(id: i32, x: f64) -> EntitySnapshot {
         on_ground: false,
         metadata: Vec::new(),
         object_data: 0,
+        equipment: Vec::new(),
         leash_link: None,
     }
 }

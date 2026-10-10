@@ -394,7 +394,7 @@ fn registry_asset_path(name: String) -> String {
     name.strip_prefix("minecraft:").unwrap_or(&name).to_owned()
 }
 
-const DYE_COLOR_NAMES: [&str; 16] = [
+pub(crate) const DYE_COLOR_NAMES: [&str; 16] = [
     "white",
     "orange",
     "magenta",

@@ -11,10 +11,10 @@
 //!
 //! * **Throwables** (snowball, egg, ender pearl, potion, experience bottle):
 //!   gravity `0.03`, air inertia `0.99`, water inertia `0.8`, integrated
-//!   **gravity → drag → move** ([`ThrowableProjectile.tick`]).
+//!   **gravity → drag → move** (thrown-projectile tick).
 //! * **Arrows** (arrow, spectral arrow, trident): gravity `0.05`, air inertia
 //!   `0.99`, water inertia `0.6`, integrated **move → drag → gravity**
-//!   ([`AbstractArrow.tick`]). Note the different order *and* that in water the
+//!   (arrow tick). Note the different order *and* that in water the
 //!   drag is applied **before** the move, not after — the [`Projectile::tick`]
 //!   here models the common in-air path exactly and the in-water path to the
 //!   same constants.
@@ -237,12 +237,12 @@ pub const THROWABLE_SHOOT_POWER: f64 = 1.5;
 /// a snowball, and is the one throwable with a non-zero pitch offset.
 pub const POTION_SHOOT_POWER: f64 = 0.5;
 
-/// `ThrowablePotionItem`'s `spawnProjectileFromRotation(..., -20.0F, 0.5F, 1.0F)`
+/// The throwable potion item's launch call (rotation offset -20, power 0.5, inaccuracy 1.0)
 /// pitch offset, which is what makes a thrown potion arc upward out of the hand
 /// instead of travelling flat.
 pub const POTION_PITCH_OFFSET: f64 = -20.0;
 
-/// Vanilla `BowItem.getPowerForTime`: `pow = t / 20; pow = (pow² + 2·pow) / 3;`
+/// Vanilla's bow power curve: `pow = t / 20; pow = (pow² + 2·pow) / 3;`
 /// clamped above at `1.0`.
 ///
 /// **Not linear**, and that is the whole character of a bow: the curve is
@@ -299,7 +299,7 @@ pub fn launch_velocity(yaw: f64, pitch: f64, pitch_offset: f64, power: f64) -> V
 // ---------------------------------------------------------------------------
 
 /// The entity-hitbox inflation a projectile uses for its impact test, vanilla's
-/// `ProjectileUtil.computeMargin`: `clamp((tickCount - 2) / 20, 0, 0.3)`.
+/// The projectile hit margin: `clamp((age - 2) / 20, 0, 0.3)`.
 ///
 /// **The first two ticks have a margin of exactly zero, and that is the point.**
 /// A projectile is spawned inside its shooter's own box; a fixed `0.3` inflation
@@ -515,7 +515,7 @@ pub struct TrackedProjectile {
 /// [`clip_aabb`], [`hitbox_margin`] and [`impact_effect`], so a host supplies the
 /// candidate list and nothing more. `lodestone-server`'s `MobSim` is that host:
 /// its per-tick impact pass runs before this `tick`, exactly as vanilla's
-/// `AbstractArrow.tick` tests the segment it is about to travel rather than the
+/// The arrow tick tests the segment it is about to travel rather than the
 /// one it just travelled.
 #[derive(Debug, Default, Clone)]
 pub struct ProjectileRegistry {
@@ -949,7 +949,7 @@ mod tests {
     /// A full-charge bow arrow deals **6**, and the two wrong formulas are each
     /// excluded by number rather than by direction.
     ///
-    /// `BowItem.releaseUsing` shoots at `pow * 3.0` with `pow == 1.0`, so the
+    /// A full-draw bow shoots at `pow * 3.0` with `pow == 1.0`, so the
     /// arrow's speed at launch is `3.0`; `baseDamage` is `2.0`; so
     /// `ceil(3.0 * 2.0) == 6`. Dropping the speed scale gives `2`, and using the
     /// trident's `8.0` base instead gives `24`.

@@ -1,17 +1,16 @@
-//! `MobSim`'s minecart slice — the five `AbstractMinecart` subclasses, rail
+//! `MobSim`'s minecart slice — the five minecart subclasses, rail
 //! following, riding, and the furnace/TNT special cases.
 //!
 //! # What this is
 //!
-//! A port of vanilla's own abstract minecart base and its "old" movement
+//! A port of vanilla's own minecart base and its legacy movement
 //! behaviour, plus
-//! the plain, furnace and TNT minecarts' own overrides. **Not**
-//! `NewMinecartBehavior` — 26.2 ships both behind one gate,
-//! `AbstractMinecart.useExperimentalMovement` (`level.enabledFeatures()
-//! .contains(FeatureFlags.MINECART_IMPROVEMENTS)`), and that feature flag is
+//! the plain, furnace and TNT minecarts' own overrides. **Not** ported is the
+//! experimental movement behaviour — 26.2 ships both behind one feature gate
+//! (minecart improvements), and that feature flag is
 //! packaged as its own opt-in datapack
 //! (`.cache/mc/26.2/src/data/minecraft/datapacks/minecart_improvements/pack.mcmeta`),
-//! not part of any vanilla world's default feature set. `OldMinecartBehavior`
+//! not part of any vanilla world's default feature set. Legacy movement
 //! is therefore what an ordinary world actually runs, and it is the one
 //! ported here.
 //!
@@ -21,12 +20,12 @@
 //!
 //! # How it works
 //!
-//! [`MobSim::tick_minecarts`] is `AbstractMinecart.tick`/`OldMinecartBehavior
-//! .tick`, transcribed in vanilla's own order: gravity, then either
+//! [`MobSim::tick_minecarts`] is the minecart tick plus legacy
+//! movement, transcribed in vanilla's own order: gravity, then either
 //! [`move_along_track`] (on a rail) or [`come_off_track`] (not on one), then
 //! the yaw/flip bookkeeping that keeps a cart's sprite pointed the way it is
 //! actually travelling. [`move_along_track`] is
-//! `OldMinecartBehavior.moveAlongTrack` in full: the powered-rail
+//! the legacy on-rail movement in full: the powered-rail
 //! boost/brake read, the ascending-rail slide impulse, the exit-pair
 //! geometry that snaps a cart's `(x, z)` onto the rail's own centreline for
 //! all ten [`RailShape`] values (six straight, four curved), the
@@ -49,8 +48,8 @@
 //!
 //! # What is deliberately simplified
 //!
-//! * **No rider movement nudge.** `OldMinecartBehavior.moveAlongTrack` reads
-//!   `ServerPlayer.getLastClientMoveIntent()` and adds a `0.001`-magnitude
+//! * **No rider movement nudge.** Legacy movement reads
+//!   the riding player's last move intent and adds a `0.001`-magnitude
 //!   nudge in that direction when the cart's own speed is near zero — this is
 //!   what lets a player free a stalled cart by walking against it. Wiring a
 //!   live per-tick input vector from a connection into `MobSim` is a
@@ -74,7 +73,7 @@
 //! * **Detector rail has no *producer* here.** `crate::redstone::
 //!   is_detector_rail`'s `POWERED` *read* already exists; nothing (not this
 //!   module, not any other) yet sets a detector rail's `POWERED` when a
-//!   minecart sits on it (`DetectorRailBlock.checkPressed`'s own
+//!   minecart sits on it (the detector rail's
 //!   world-mutation — `setBlock` plus a neighbour fan-out and a 20-tick
 //!   re-check schedule — needs the live `ChunkSource` and scheduled-tick
 //!   queue this sim's `world: &ChunkWorld` snapshot does not have). A
@@ -82,7 +81,7 @@
 //!   feature: never powered by the cart's own presence.
 //! * **TNT-minecart ignition is activator-rail only.** Vanilla also primes a
 //!   TNT minecart from a burning-arrow hit, an explosion, fire, or a hard
-//!   fall (`MinecartTNT.hurtServer`/`destroy`/`causeFallDamage`) — none of
+//!   fall (the TNT minecart's hurt, destroy and fall-damage paths) — none of
 //!   which this crate's minecart tick has a signal for (no combat-vs-vehicle
 //!   model exists at all). Only `activateMinecart` (the activator-rail
 //!   producer, shared with the plain cart's own ejection) is wired.
@@ -99,7 +98,7 @@
 //!   `crate::block_entities`'s own module doc gives for "no chest block
 //!   entity in this crate at all" — there is nothing on either side of that
 //!   adjacency to wire together yet.
-//! * **No hurt-flash bookkeeping.** `Minecart.activateMinecart` also sets a
+//! * **No hurt-flash bookkeeping.** the minecart's activator-rail hook also sets a
 //!   ten-tick hurt animation/damage jolt on ejection
 //!   (`setHurtDir`/`setHurtTime`/`setDamage`) purely for the client's shake
 //!   animation; the ejection itself (`ejectPassengers`) is what matters
@@ -206,8 +205,8 @@ fn rail_shape_id(state: lodestone_data::block_states::StateId) -> Option<RailSha
     get_str_property(state, PropertyKey::Shape).and_then(RailShape::from_value)
 }
 
-/// `BaseRailBlock.isRail` — `state.is(BlockTags.RAILS) && state.getBlock()
-/// instanceof BaseRailBlock`, narrowed to the four block ids `BlockTags.RAILS`
+/// Whether a block is a rail: a member of the rails tag and a rail block,
+/// narrowed to the four block ids the tag
 /// actually holds in 26.2 (checked against the jar's own block list, not
 /// assumed): plain rail, powered rail, activator rail, detector rail.
 #[must_use]
@@ -266,10 +265,10 @@ impl RailShape {
         )
     }
 
-    /// `AbstractMinecart.EXITS` — the two cell-relative offsets (as
+    /// The two cell-relative offsets (as
     /// `(dx, dy, dz)`) a cart travels between for this shape.
-    /// `Direction.WEST/EAST/NORTH/SOUTH.getUnitVec3i()` and `.below()`,
-    /// transcribed verbatim from the static-initialiser table.
+    /// unit steps west, east, north, south and one down,
+    /// transcribed verbatim from vanilla's table.
     #[must_use]
     pub fn exits(self) -> ((i32, i32, i32), (i32, i32, i32)) {
         match self {
@@ -287,24 +286,24 @@ impl RailShape {
     }
 }
 
-/// The five `AbstractMinecart` subclasses this crate models.
+/// The five minecart subclasses this crate models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MinecartKind {
     /// `Minecart` — the only rideable one (`isRideable() => true`).
     Plain,
-    /// `MinecartChest` — `AbstractMinecartContainer`, 27 slots.
+    /// Chest minecart — container minecart, 27 slots.
     Chest,
-    /// `MinecartHopper` — `AbstractMinecartContainer` + `Hopper`, 5 slots.
+    /// Hopper minecart — container minecart + `Hopper`, 5 slots.
     Hopper,
-    /// `MinecartFurnace` — burns coal/charcoal for a constant self-push.
+    /// Furnace minecart — burns coal/charcoal for a constant self-push.
     Furnace,
-    /// `MinecartTNT` — primes and explodes off an activator rail.
+    /// TNT minecart — primes and explodes off an activator rail.
     Tnt,
 }
 
 impl MinecartKind {
     /// Vanilla's own minecart-item item→type pairing (its own item registration
-    /// table's five `new MinecartItem(EntityTypes.X, …)` registrations) — the item id
+    /// table's five minecart item registrations) — the item id
     /// *is* the entity-type id, exactly as `crate::boat`'s own derivation is
     /// for boats.
     #[must_use]
@@ -331,19 +330,19 @@ impl MinecartKind {
         name.parse().expect("every minecart kind is a valid resource key")
     }
 
-    /// `AbstractMinecart.isRideable()` — `Minecart` alone overrides it `true`.
+    /// Whether a player can ride this kind: the plain cart alone.
     #[must_use]
     pub fn is_rideable(self) -> bool {
         matches!(self, Self::Plain)
     }
 
-    /// `AbstractMinecart.isFurnace()`.
+    /// Whether this is the furnace cart.
     #[must_use]
     pub fn is_furnace(self) -> bool {
         matches!(self, Self::Furnace)
     }
 
-    /// `AbstractMinecartContainer.getContainerSize()` — `0` for a kind with
+    /// Inventory slot count: `0` for a kind with
     /// no inventory at all (see this module's own doc comment for why that
     /// storage is currently unreachable through any menu).
     #[must_use]
@@ -358,9 +357,9 @@ impl MinecartKind {
 
 // ---- Constants, every one a record value rather than a guess ----
 
-/// `OldMinecartBehavior.MAX_SPEED_ON_LAND`/`ABSOLUTE_MAX_SPEED`.
+/// Top speed on land under legacy movement, in blocks per tick.
 pub const MAX_SPEED_LAND: f64 = 0.4;
-/// `OldMinecartBehavior.MAX_SPEED_IN_WATER`.
+/// Top speed in water under legacy movement, in blocks per tick.
 pub const MAX_SPEED_WATER: f64 = 0.2;
 /// The literal `0.0078125` slide impulse `moveAlongTrack` adds on an
 /// ascending rail (halved again in water).
@@ -369,40 +368,40 @@ const SLIDE_SPEED: f64 = 0.007_812_5;
 const POWERED_BOOST: f64 = 0.06;
 /// The two-conductor brake nudge on an otherwise-stalled powered rail.
 const POWERED_STALL_NUDGE: f64 = 0.02;
-/// `AbstractMinecart.getDefaultGravity()` — land.
+/// Gravity on land.
 const GRAVITY_LAND: f64 = 0.04;
-/// `AbstractMinecart.getDefaultGravity()` — water.
+/// Gravity in water.
 const GRAVITY_WATER: f64 = 0.005;
-/// `AbstractMinecart.getAirDrag()` — `comeOffTrack`'s off-rail drag.
+/// Drag applied while off the rails.
 const AIR_DRAG: f64 = 0.95;
-/// `AbstractMinecart.WATER_SLOWDOWN_FACTOR`.
+/// Extra slowdown factor in water.
 const WATER_SLOWDOWN: f64 = 0.95;
-/// `OldMinecartBehavior.getSlowdownFactor()` — ridden (`isVehicle()`).
+/// Per-tick slowdown while ridden.
 const SLOWDOWN_RIDDEN: f64 = 0.997;
-/// `OldMinecartBehavior.getSlowdownFactor()` — unridden.
+/// Per-tick slowdown while unridden.
 const SLOWDOWN_UNRIDDEN: f64 = 0.96;
-/// `MinecartFurnace.FUEL_TICKS_PER_ITEM` — one coal/charcoal.
+/// Fuel ticks one coal or charcoal adds.
 pub const FURNACE_FUEL_TICKS_PER_ITEM: i32 = 3600;
-/// `MinecartFurnace.MAX_FUEL_TICKS`.
+/// Fuel tick cap.
 pub const FURNACE_MAX_FUEL_TICKS: i32 = 32_000;
-/// `MinecartTNT.primeFuse`'s fixed fuse — the only ignition producer this
+/// The TNT minecart's fixed fuse — the only ignition producer this
 /// module wires (see the module doc for why the others are cut).
 pub const TNT_MINECART_FUSE: i32 = 80;
-/// `MinecartTNT.explosionPowerBase`'s default.
+/// Base explosion power.
 const TNT_EXPLOSION_POWER_BASE: f32 = 4.0;
-/// `MinecartTNT.explosionSpeedFactor`'s default.
+/// Explosion power added per unit of speed.
 const TNT_EXPLOSION_SPEED_FACTOR: f64 = 1.0;
 
 /// Dense-scene cutoff measured by `measure_dense_minecart_owner_workers`.
 const MINECART_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
-/// `AbstractMinecart`'s hitbox, `0.98 x 0.7`
+/// Minecart's hitbox, `0.98 x 0.7`
 /// (`crates/lodestone-data/src/generated/entity_dimensions.rs`), no
-/// auto-step: a bare `Entity`'s `maxUpStep()` is `0.0`, matching
-/// `mobs::tnt::TNT_DIMENSIONS`'s own reasoning for a non-`LivingEntity`.
+/// auto-step: a non-living entity's step height is `0.0`, matching
+/// `mobs::tnt::TNT_DIMENSIONS`'s own reasoning for a non-living entity.
 pub const MINECART_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.98, 0.7, 0.0);
 
-/// `MinecartItem.useOn`'s spawn point for a rail at `pos` already known to
+/// Minecart item's spawn point for a rail at `pos` already known to
 /// carry `shape` — `pos + (0.5, 0.0625 + offset, 0.5)`, `offset` `0.5` on a
 /// slope and `0.0` otherwise. The dispenser's own placement math
 /// (`crate::redstone_dispenser::minecart_dispense`) is a different formula
@@ -477,7 +476,7 @@ fn in_water(view: &MinecartCollision<'_>, position: Vec3d) -> bool {
     false
 }
 
-/// `AbstractMinecart.getCurrentBlockPosOrRailBelow` — the cell a cart reads
+/// The cell a cart reads
 /// its rail state from: its own floored cell, or one below when *that* cell
 /// isn't a rail but the one under it is (the "cart sits fractionally above a
 /// flat rail's `y + 0.0625`" case).
@@ -491,7 +490,7 @@ fn current_block_pos_or_rail_below(view: &MinecartCollision<'_>, position: Vec3d
     BlockPos::new(xt, yt, zt)
 }
 
-/// `OldMinecartBehavior.getPos` — the cart's exact position **on the rail's
+/// The cart's exact position **on the rail's
 /// own centreline** for an arbitrary `(x, y, z)`, used only for the
 /// before/after height sample `move_along_track`'s hill-speed adjustment
 /// reads. `None` when `(x, y, z)`'s cell (or the one below it) is not a rail
@@ -536,9 +535,9 @@ fn current_pos_along_rail(view: &MinecartCollision<'_>, x: f64, y: f64, z: f64) 
     Some(Vec3d::new(x0 + xd * progress, out_y, z0 + zd * progress))
 }
 
-/// `MinecartFurnace.calculateNewPushAlong` — re-aim the stored push vector
+/// Re-aim the stored push vector
 /// along the current direction of travel, keeping its magnitude.
-/// `Vec3.projectedOn(other) = other.scale(this.dot(other) / other.lengthSqr())`.
+/// The projection onto `other` is `other * (self . other) / |other|^2`.
 fn calculate_new_push_along(push: Vec3d, movement: Vec3d) -> Vec3d {
     let push_h_sqr = push.x * push.x + push.z * push.z;
     let move_h_sqr = movement.x * movement.x + movement.z * movement.z;
@@ -562,10 +561,10 @@ fn calculate_new_push_along(push: Vec3d, movement: Vec3d) -> Vec3d {
 }
 
 impl<'w> MobSim<'w> {
-    /// `AbstractMinecart.createMinecart` + `level.addFreshEntity` — spawns a
+    /// Spawns a
     /// fresh, empty, un-primed, un-fuelled cart at `position` and returns its
-    /// network id. Yaw starts at `0.0`: vanilla's `MinecartItem`/
-    /// `MinecartDispenseItemBehavior` never call `setYRot`, so a freshly
+    /// network id. Yaw starts at `0.0`: vanilla's minecart item and
+    /// dispenser behaviour never set a yaw, so a freshly
     /// placed cart's facing comes entirely from [`MobSim::tick_minecarts`]'s
     /// own travel-direction computation on its first moving tick.
     pub fn spawn_minecart(&mut self, kind: MinecartKind, position: Vec3) -> i32 {
@@ -649,7 +648,7 @@ impl<'w> MobSim<'w> {
         self.minecarts.get(&id).map_or(-1, |c| c.fuse)
     }
 
-    /// `Minecart.interact` — `player.startRiding(this)`. Refuses (vanilla
+    /// A player boards the cart. Refuses (vanilla
     /// `PASS`) when `id` is not a minecart, the kind is not
     /// [`MinecartKind::is_rideable`], or the seat is already taken by someone
     /// else. A player already riding something else is dismounted first —
@@ -694,7 +693,7 @@ impl<'w> MobSim<'w> {
         Some(id)
     }
 
-    /// `MinecartFurnace.addFuel` — `ItemTags.FURNACE_MINECART_FUEL` is
+    /// Whether the item is furnace-cart fuel: the fuel tag is
     /// exactly `{coal, charcoal}` (`.cache/mc/26.2/src/data/minecraft/tags/
     /// item/furnace_minecart_fuel.json`). `interacting_pos` is the clicking
     /// player's own position, which sets the push *direction* (`this.push =
@@ -904,8 +903,8 @@ impl<'w> MobSim<'w> {
     fn apply_minecart_detonations(&mut self, detonated: Vec<(i32, (Vec3, f32))>) {
         for (id, (centre, speed_sqr)) in detonated {
             self.minecarts.remove(&id);
-            // `MinecartTNT.explode` — `explosionPowerBase +
-            // explosionSpeedFactor * random * 1.5 * min(sqrt(speedSqr), 5.0)`.
+            // TNT minecart blast power: base power plus
+            // speed factor * random * 1.5 * min(speed, 5.0).
             // Drawn from `tnt_rng`, the same isolated stream `spawn_tnt`'s
             // own launch direction uses, so a TNT-minecart blast cannot shift
             // any other behaviour's roll.
@@ -1029,14 +1028,14 @@ fn tick_one_minecart(
     }
 }
 
-/// `AbstractMinecart.activateMinecart` — the activator-rail producer shared
+/// The activator-rail producer shared
 /// by the plain cart (ejects its rider) and the TNT cart (primes its fuse).
 /// `active` is the rail's own `POWERED`; vanilla's every override is a no-op
 /// on `false`. Applied **inline**, in the same per-cart iteration
 /// `move_along_track` runs in and strictly before that cart's own fuse
-/// countdown — mirroring vanilla's real call order (`behavior.tick()`, which
-/// this activation is part of, runs inside `AbstractMinecart.tick()`, which
-/// `MinecartTNT.tick()` calls via `super.tick()` *before* its own
+/// countdown — mirroring vanilla's real call order (the movement behaviour's tick, which
+/// this activation is part of, runs inside the base minecart tick, which
+/// the TNT minecart calls *before* its own
 /// fuse-decrement code). A deferred, end-of-loop application would prime a
 /// fuse one whole tick late.
 fn apply_activation(cart: &mut TrackedMinecart, active: bool) {
@@ -1056,7 +1055,7 @@ fn apply_activation(cart: &mut TrackedMinecart, active: bool) {
     }
 }
 
-/// `OldMinecartBehavior.moveAlongTrack` — see this module's own doc comment
+/// Legacy on-rail movement — see this module's own doc comment
 /// for what it does and what is cut.
 fn move_along_track(
     cart: &mut TrackedMinecart,
@@ -1214,7 +1213,7 @@ fn move_along_track(
     }
 }
 
-/// `AbstractMinecart.comeOffTrack` — plain clamped physics for the tick a
+/// Plain clamped physics for the tick a
 /// cart is not over a rail cell at all.
 fn come_off_track(cart: &mut TrackedMinecart, view: &MinecartCollision<'_>, profile: &PhysicsProfile, wet: bool) {
     let max_speed = max_speed(cart, wet);
@@ -1229,8 +1228,8 @@ fn come_off_track(cart: &mut TrackedMinecart, view: &MinecartCollision<'_>, prof
     }
 }
 
-/// `AbstractMinecart.getMaxSpeed`/`MinecartFurnace`'s own override
-/// (`isInWater() ? super * 0.75 : super * 0.5`).
+/// Top speed, with the furnace cart's own override
+/// (three quarters in water, half on land).
 fn max_speed(cart: &TrackedMinecart, wet: bool) -> f64 {
     let base = if wet { MAX_SPEED_WATER } else { MAX_SPEED_LAND };
     if cart.kind.is_furnace() {
@@ -1240,7 +1239,7 @@ fn max_speed(cart: &TrackedMinecart, wet: bool) -> f64 {
     }
 }
 
-/// `AbstractMinecart.applyNaturalSlowdown`, with `MinecartFurnace`'s own
+/// Natural slowdown, with the furnace cart's own
 /// override folded in ahead of the base multiply — see this file's own
 /// [`calculate_new_push_along`] for the push re-aim it performs first.
 fn apply_natural_slowdown(cart: &mut TrackedMinecart, movement: Vec3d, wet: bool) -> Vec3d {
@@ -1746,7 +1745,7 @@ mod tests {
         assert!(!is_rail_block(state("minecraft:stone")));
     }
 
-    /// [`placement_position`] — `MinecartItem.useOn`'s own offset: `0.0625`
+    /// [`placement_position`] — the minecart item's own offset: `0.0625`
     /// flat, `0.5625` on a slope.
     #[test]
     fn placement_position_matches_the_flat_and_slope_offsets() {

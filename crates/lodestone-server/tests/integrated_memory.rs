@@ -448,6 +448,7 @@ fn entity_encoder_defaults_are_harmless_noops() {
         on_ground: false,
         metadata: Vec::new(),
         object_data: 0,
+        equipment: Vec::new(),
         leash_link: None,
     };
 
@@ -539,6 +540,7 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
         on_ground: false,
         metadata: Vec::new(),
         object_data: 0,
+        equipment: Vec::new(),
         leash_link: None,
     };
     entities.set(vec![pig(0.0)]);

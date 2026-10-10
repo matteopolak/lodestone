@@ -197,7 +197,7 @@ pub trait PathWorld: Send + Sync {
     fn min_y(&self) -> i32;
 
     /// The **raw** per-block classification, equivalent to vanilla's
-    /// `WalkNodeEvaluator.getPathTypeFromState`. This is the single seam holding
+    /// Path node evaluator. This is the single seam holding
     /// block-registry semantics; everything else (neighbour damage borders,
     /// "open over walkable = walkable", per-mob aggregation) is derived from it
     /// in version-free code.

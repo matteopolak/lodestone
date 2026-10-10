@@ -29,7 +29,7 @@ std::thread_local! {
 /// columns and blocks outside the vertical range read as air. Each cell's
 /// global block-state id is looked up in
 /// [`lodestone_data::path_types`] / [`lodestone_data::collision_shapes`] — the
-/// same 32,366-state census `WalkNodeEvaluator.getPathTypeFromState` produces
+/// same 32,366-state census path node evaluator produces
 /// in vanilla — so water, lava, fences, doors, rails and damaging blocks
 /// classify distinctly instead of collapsing to solid/air. A state that fails
 /// to resolve (should not happen for anything this crate's own worldgen or
@@ -477,7 +477,7 @@ impl RayView for ChunkWorld {
     /// steps the segment at quarter-block spacing (fine enough that a
     /// full-block cell can never be skipped between samples) and reports
     /// blocked the moment any sample lands in a solid cell. This is not
-    /// vanilla's exact voxel traversal (`ClipContext`), but it is a real
+    /// vanilla's exact voxel traversal (clip context), but it is a real
     /// terrain query — not the `OpenAir` stand-in [`explosion::seen_percent`]'s
     /// own tests use — which is what makes "a wall shields a mob from a blast"
     /// an observable, testable consequence rather than an assumption.

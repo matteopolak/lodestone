@@ -117,7 +117,7 @@ pub trait BrainMob {
     }
 
     /// A candidate land wander destination within the given block radii
-    /// (vanilla's `LandRandomPos.getPos`). `None` means none was found.
+    /// (vanilla's random land position). `None` means none was found.
     fn random_land_pos(&mut self, max_xz: i32, max_y: i32) -> Option<Vec3>;
 
     /// The position of whoever last damaged this mob, if that memory has not
@@ -240,7 +240,7 @@ pub trait BrainMob {
     }
 
     /// Records a melee hit landing on whatever occupies `target` this tick —
-    /// vanilla's `LivingEntity.hurtServer`/`knockback` calls a ram or an
+    /// vanilla's hurt and knockback calls a ram or an
     /// attack-target behaviour makes directly on the target entity. This
     /// crate's [`BrainMob`] has no entity handle to call a method *on*, only
     /// a position, so — the same seam

@@ -52,7 +52,7 @@ impl Activity {
     /// Chasing and eating tongue-attack prey (frog) — vanilla's own tongue activity.
     pub const TONGUE: Self = Self("tongue");
     /// Flying a carried item to its delivery target (allay). Not a named
-    /// vanilla `Activity` — real `AllayAi` runs `GoAndGiveItemsToTarget`
+    /// vanilla `Activity` — real allay brain runs give-items behaviour
     /// inside the ordinary `IDLE` package rather than swapping activities;
     /// this crate gives it its own activity instead, a disclosed
     /// non-faithful-but-honest shape for a species-specific slice this

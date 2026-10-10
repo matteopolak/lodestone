@@ -2540,26 +2540,22 @@ async fn run_tick_loop_with_weather_impl<W>(
                 lodestone_entity::ai::BlockExpect::State(state) => old == state,
                 lodestone_entity::ai::BlockExpect::Block(block) => old.block() == block,
             };
-            let placeable = !edit.checked_placement || {
-                let below = resident_tick_state_id(&*world, x, y - 1, z);
-                let creature = mobs.with(|sim| sim.creature_in_cell(edit.cell));
-                holds
-                    && !creature
-                    && below.is_some_and(|b| {
-                        !lodestone_entity::ai::turtle_egg::is_air(b)
-                            && b.block() != lodestone_data::block::Block::Bedrock
-                            && crate::fluid::is_full_cube(b)
-                    })
-                    && edit.set.is_none_or(|state| {
+            let placeable = !edit.checked_placement
+                || crate::mobs::edit_site::placement_site_ok(
+                    holds,
+                    mobs.with(|sim| sim.creature_in_cell(edit.cell)),
+                    resident_tick_state_id(&*world, x, y - 1, z),
+                    edit.set,
+                    |state| {
                         crate::block_support::survives(BlockPos::new(x, y, z), state, |p| {
                             resident_tick_state_id(&*world, p.x, p.y, p.z).unwrap_or_else(crate::chunk::air_state)
                         })
-                    })
-            };
+                    },
+                );
             let mut landed = false;
             if holds && placeable {
                 let new = edit.set.unwrap_or_else(crate::chunk::air_state);
-                if edit.set.is_none() || !lodestone_entity::ai::turtle_egg::is_air(old) {
+                if !edit.quiet && (edit.set.is_none() || !lodestone_entity::ai::turtle_egg::is_air(old)) {
                     if let Some(effect) = crate::effects::block_destroyed_id(BlockPos::new(x, y, z), old) {
                         block_tick_out.publish_effect(effect);
                     }

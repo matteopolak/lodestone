@@ -21,11 +21,15 @@ Pillager patrols wander toward villages and start raids; a raid sends waves of r
 - The village radius, recentre radius, celebration length and recruit range are constants at the top of `raid.rs`.
 - Tests: `mobs/tests/raiders.rs` (each has a control) and the unit tests at the bottom of `raid.rs`. In tests `sim.bell_claims.try_claim(BlockPos)` is enough to create a village.
 
+**Doors.** Vindicators break doors on Normal and Hard while their raid is active; every raider opens doors during a raid (`ai/door.rs`, rows in `roster/ranged.rs`). Both edit the door through the block-edit seam, so the world owns the change.
+
+**Witch potions.** `witch_potion_for` (`mobs/raid.rs`) picks the throw: a raider target gets healing (4 health or less) or regeneration and is then dropped as a target; anything else gets slowness from 8 blocks, poison at 8+ health, weakness within 3 blocks one time in four (`witch_rng`), otherwise harming. A splash that reaches a player queues timed effects (drained per connection in `play_loop.rs` through `take_player_effects`) and a `PlayerHit` for instant damage.
+
+**Banner on the client.** The captain's banner and mob armour reach clients through the equipment stream, see [`mob-equipment-streaming.md`](./mob-equipment-streaming.md).
+
 ## Known gaps
 
-- The vindicator's door-breaking and door-opening rows stay `Registration::missing`; no door goal exists.
-- The server sends no equipment for mobs (no set-equipment packet from `EntityStreamer`, and the item component writer omits `banner_patterns`), so the banner and the celebration pose are not visible on a client. The celebration flag itself is on the wire.
-- Raid state is not persisted; celebration sounds, enchantment-odds loot and per-player boss-bar gating are not modelled.
+- Raid state is not persisted (a raid in progress is lost on restart); celebration sounds, enchantment-odds loot and per-player boss-bar gating are not modelled.
 - Spawn placement is a coarse ring, not a village-boundary search.
 
 ## Configuration

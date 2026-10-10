@@ -4,11 +4,11 @@
 //! Vanilla's blast damage is not a simple radius falloff — an entity's exposure
 //! is measured by firing a grid of rays from sample points across its bounding
 //! box toward the blast centre and counting how many reach it unobstructed
-//! (`ServerExplosion.getSeenPercent`). The sample density depends on the box
+//! (the explosion's seen-percent rule). The sample density depends on the box
 //! size — a bigger entity is sampled at *more* points (the step is
 //! `1/(size*2+1)`) — so reproducing the exact grid is what makes the exposure
 //! fraction match. Given that fraction, the damage is a closed form
-//! (`ExplosionDamageCalculator.getEntityDamageAmount`).
+//! (the explosion damage calculator).
 //!
 //! The ray-vs-block test is the version crate's collision world, so this takes a
 //! [`RayView`] seam (mirroring `lodestone-physics`'s `CollisionView`) rather than
@@ -21,11 +21,11 @@
 //! §12.31 settled that attack knockback needs no client model: the server sets
 //! the entity's velocity and the client's integrator just consumes the
 //! `SET_ENTITY_MOTION` it is handed. That generalisation **holds for non-player
-//! entities under a blast** — `ServerExplosion.hurtEntities` calls
+//! entities under a blast** — the explosion routine calls
 //! `entity.push(knockback)` server-side and the change rides the normal velocity
 //! packet — but it **breaks for the local player**, which is client-predicted.
 //! Verified in 26.2 source: the server records each hit player's vector into
-//! `hitPlayers` and ships it as `ClientboundExplodePacket.playerKnockback`
+//! `hitPlayers` and ships it as the explosion packet's
 //! (`Optional<Vec3>`); the client applies it *itself* with
 //! `player.addDeltaMovement(knockback)` — an **additive** impulse to current
 //! velocity, not a replacement (contrast attack knockback, which partially
@@ -150,7 +150,7 @@ pub fn entity_damage(radius: f32, distance: f64, exposure: f32) -> f32 {
 }
 
 /// The scalar knockback power `(1 - dist) * exposure * multiplier * (1 - kbRes)`
-/// from `ServerExplosion.hurtEntities`. `impl-physics` multiplies this by the
+/// from the explosion routine. `impl-physics` multiplies this by the
 /// normalised direction to get the velocity push — do not apply it here.
 #[must_use]
 pub fn knockback_power(

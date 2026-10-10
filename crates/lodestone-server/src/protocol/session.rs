@@ -2,7 +2,7 @@
 //!
 //! These records describe session-visible state without encoding packet ids or wire layouts.
 
-use lodestone_model::{BlockPos, GameMode, ResourceKey, Rotation, Text, Vec3};
+use lodestone_model::{BlockPos, EntityEquipment, GameMode, ResourceKey, Rotation, Text, Vec3};
 use uuid::Uuid;
 
 use super::ResourcePackUrl;
@@ -155,6 +155,14 @@ pub struct EntitySnapshot {
     /// already-leashed mob show its rope to a client that joins or re-enters view
     /// range late — not just to whoever witnessed the attach.
     pub leash_link: Option<i32>,
+    /// What the entity holds and wears, one entry per slot it can carry
+    /// (an empty slot is an explicit `None` item).
+    ///
+    /// [`crate::server::EntityStreamer::sync`] sends the occupied slots on
+    /// spawn and, on an update, the slots whose item changed (including ones
+    /// that became empty) through [`ServerProtocol::encode_set_equipment`]. A
+    /// source that models no equipment leaves this empty.
+    pub equipment: Vec<EntityEquipment>,
 }
 
 /// One boss bar this world wants a client to hold, keyed by [`id`](Self::id) —
@@ -462,7 +470,7 @@ pub enum MetadataField {
     /// **Indices 11 and 12**, each a two-way `BOOLEAN` collision in the
     /// committed jar dump (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
     /// index 11 is the real abstract boat's own left-paddle field and
-    /// the real living entity's own effect-ambience field; index 12 is
+    /// a living entity's own effect-ambience field; index 12 is
     /// the real abstract boat's own right-paddle field and the real thrown
     /// trident's own foil field. No
     /// census column separates them, so — the same rule

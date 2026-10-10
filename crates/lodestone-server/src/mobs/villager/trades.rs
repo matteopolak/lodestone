@@ -46,7 +46,7 @@ use super::Profession;
 pub use lodestone_data::villager_trades::{TradeRecord, VillagerLevel};
 
 /// This level's own trade set: the pool [`offers_for`] draws from and how
-/// many of it a real `TradeSet` picks. Forwards to
+/// many of it a real trade set picks. Forwards to
 /// [`lodestone_data::villager_trades::pool_for`] keyed by
 /// [`Profession::path`].
 #[must_use]
@@ -54,7 +54,7 @@ pub fn pool_for(profession: Profession, level: VillagerLevel) -> Option<(&'stati
     lodestone_data::villager_trades::pool_for(profession.path(), level)
 }
 
-/// The trades this level's own `TradeSet` contributes — **not** cumulative
+/// The trades this level's own trade set contributes — **not** cumulative
 /// across levels; see [`offers_up_to`] for the villager-facing accumulation.
 /// Empty for any profession/level [`lodestone_data::villager_trades`] has not
 /// ported. `VillagerLevel` makes an out-of-range tier unrepresentable here.

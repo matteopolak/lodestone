@@ -185,6 +185,7 @@ async fn injected_detector_control() {
         on_ground: true,
         metadata: Vec::new(),
         object_data: 0,
+        equipment: Vec::new(),
         leash_link: None,
     };
     let (server, io) = IntegratedServer::open_in_memory_with_entities(

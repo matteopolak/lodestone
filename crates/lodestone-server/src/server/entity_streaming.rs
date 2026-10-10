@@ -265,6 +265,13 @@ impl EntityStreamer {
                     if !entity.metadata.is_empty() {
                         directives.push(proto.encode_set_entity_data(entity.id, &entity.metadata));
                     }
+                    // Equipment is a separate packet too; only occupied slots
+                    // matter to a client that has never seen the entity.
+                    let worn: Vec<lodestone_model::EntityEquipment> =
+                        entity.equipment.iter().filter(|e| e.item.is_some()).cloned().collect();
+                    if !worn.is_empty() {
+                        directives.push(proto.encode_set_equipment(entity.id, &worn));
+                    }
                     // A snapshot with a leash link needs both the spawn and link
                     // frames, so a client whose first visible snapshot contains
                     // `leash_link` renders the rope immediately.
@@ -282,6 +289,19 @@ impl EntityStreamer {
                     // of whether position/rotation also changed this tick.
                     if prev.metadata != entity.metadata {
                         directives.push(proto.encode_set_entity_data(entity.id, &entity.metadata));
+                    }
+                    // Only the slots that changed travel, a cleared slot as an
+                    // explicit empty item.
+                    if prev.equipment != entity.equipment {
+                        let changed: Vec<lodestone_model::EntityEquipment> = entity
+                            .equipment
+                            .iter()
+                            .filter(|now| prev.equipment.iter().find(|was| was.slot == now.slot) != Some(*now))
+                            .cloned()
+                            .collect();
+                        if !changed.is_empty() {
+                            directives.push(proto.encode_set_equipment(entity.id, &changed));
+                        }
                     }
                     // A leash-link transition covers both attachment (`None` →
                     // `Some`) and detachment (`Some` → `None`); the encoder

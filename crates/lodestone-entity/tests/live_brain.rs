@@ -25,7 +25,7 @@
 //! Over a long sprint with no stimulus, a real brain-mob:
 //!
 //! 1. **wanders bounded and local** — it never drifts away, because each stroll
-//!    picks a target within `LandRandomPos`'s 10-block reach and strolls are
+//!    picks a target within random land position's 10-block reach and strolls are
 //!    rare;
 //! 2. **moves in short bursts separated by long pauses** — the `RandomStroll` →
 //!    `MoveToTargetSink` → idle cycle, not continuous motion;
@@ -202,7 +202,7 @@ fn live_brain_mob_idle_wander_is_bounded_bursty_and_correctly_timed() {
         bz + 48
     ));
 
-    // (1) Bounded, local wander: never drifts away. LandRandomPos reaches at
+    // (1) Bounded, local wander: never drifts away. Random land position reaches at
     // most 10 blocks and strolls are rare, so a generous 24-block bound proves
     // "local" without being flaky.
     assert!(

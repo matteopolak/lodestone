@@ -478,9 +478,14 @@ impl<'w> MobSim<'w> {
             })
     }
 
-    /// The potion a launch carries: a witch aiming at another raider throws
+    /// The potion a launch carries. A witch aiming at another raider throws
     /// healing at one with 4 health or less and regeneration at the rest, then
-    /// drops that target. Every other launch carries none.
+    /// drops that target. Against anything else it throws, in order: slowness
+    /// from 8 blocks away at a target not already slowed; poison at a target
+    /// with 8 or more health that is not poisoned; weakness within 3 blocks at
+    /// a target not weakened, one time in four; otherwise harming. A player's
+    /// own effects are not visible here, so a player counts as having none.
+    /// Every other shooter's launch carries no potion.
     pub(super) fn witch_potion_for(
         &mut self,
         shooter: i32,
@@ -490,14 +495,47 @@ impl<'w> MobSim<'w> {
             return None;
         }
         let witch = self.mobs.iter().find(|m| m.id == shooter && m.entity_type.path() == "witch")?;
-        let target = witch.attack_target_id()?;
-        let health = self.mobs.iter().find(|m| m.id == target && is_healable_raider(m.entity_type.path()))?.health;
-        if let Some(witch) = self.mobs.iter_mut().find(|m| m.id == shooter) {
-            witch.mob.set_attack_target(None);
-            witch.set_attack_target_id(None);
-        }
-        let name = if health <= 4.0 { "minecraft:healing" } else { "minecraft:regeneration" };
+        let witch_pos = witch.position();
+        let target_pos = witch.attack_target()?;
+        let target = witch.attack_target_id().and_then(|id| self.mobs.iter().find(|m| m.id == id));
+        let name = if let Some(raider) = target.filter(|m| is_healable_raider(m.entity_type.path())) {
+            let health = raider.health;
+            if let Some(witch) = self.mobs.iter_mut().find(|m| m.id == shooter) {
+                witch.mob.set_attack_target(None);
+                witch.set_attack_target_id(None);
+            }
+            if health <= 4.0 { "minecraft:healing" } else { "minecraft:regeneration" }
+        } else {
+            let (dx, dz) = (target_pos.x - witch_pos.x, target_pos.z - witch_pos.z);
+            let distance = dx.hypot(dz);
+            let has = |effect: &str| target.is_some_and(|m| m.effects().get(effect).is_some());
+            let health = target.map_or(20.0, |m| m.health);
+            if distance >= 8.0 && !has("minecraft:slowness") {
+                "minecraft:slowness"
+            } else if health >= 8.0 && !has("minecraft:poison") {
+                "minecraft:poison"
+            } else if distance <= 3.0 && !has("minecraft:weakness") && self.witch_rng.next_f32() < 0.25 {
+                "minecraft:weakness"
+            } else {
+                "minecraft:harming"
+            }
+        };
         lodestone_data::potion::potion_id(name).and_then(lodestone_data::potion::PotionId::from_registry_id)
+    }
+
+    /// Timed potion effects that landed on the player `uuid` since the last
+    /// call, as `(effect, duration, amplifier)`.
+    pub fn take_player_effects(&mut self, uuid: Uuid) -> Vec<(lodestone_data::mob_effects::MobEffectId, i32, u32)> {
+        let mut out = Vec::new();
+        self.pending_player_effects.retain(|&(player, effect, duration, amplifier)| {
+            if player == uuid {
+                out.push((effect, duration, amplifier));
+                false
+            } else {
+                true
+            }
+        });
+        out
     }
 
     /// Whether `id` belongs to a raid that was lost.
@@ -666,7 +704,7 @@ impl<'w> MobSim<'w> {
     /// see any of the three, since none of the three claim ledgers persist
     /// (see `crate::mobs::villager`'s own module doc) — that narrowing is
     /// real and stays disclosed. A village whose villagers have claimed jobs
-    /// and a bell but genuinely no bed (no `SleepInBed`/work-rest schedule
+    /// and a bell but genuinely no bed (no sleep-in-bed behaviour/work-rest schedule
     /// has claimed one) still centres correctly; a beds-only query would not.
     ///
     /// Native-only, for [`super::MobSim::occupied_village_pois_in_range`]'s own

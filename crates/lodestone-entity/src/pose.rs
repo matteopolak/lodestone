@@ -33,7 +33,7 @@
 
 use crate::interpolation::wrap_degrees;
 
-/// The walk-cycle smoothing factor vanilla feeds `WalkAnimationState.update`.
+/// The walk-cycle smoothing factor vanilla feeds walk animation.
 pub const LIMB_SWING_SMOOTHING: f32 = 0.4;
 /// The leg-swing position scale applied to babies (their legs swing faster).
 pub const BABY_LIMB_SCALE: f32 = 3.0;
@@ -53,7 +53,7 @@ pub const MAX_HEAD_PITCH: f32 = 40.0;
 /// decodes that component yet; see [`swing_duration`].
 pub const DEFAULT_SWING_DURATION: i32 = 6;
 
-/// Vanilla's `LivingEntity.getCurrentSwingDuration`, as a pure function of the
+/// Vanilla's swing duration, as a pure function of the
 /// held item's base duration and the two mining effects.
 ///
 /// ```text
@@ -102,7 +102,7 @@ pub fn walk_target_speed(distance: f32) -> f32 {
     (distance * 4.0).min(1.0)
 }
 
-/// Vanilla's `WalkAnimationState`: the leg/arm swing phase and amplitude, with a
+/// Vanilla's walk animation: the leg/arm swing phase and amplitude, with a
 /// one-tick history so the renderer can interpolate.
 ///
 /// `speed` is the swing **amplitude** (how far limbs swing), `position` is the
@@ -275,7 +275,7 @@ impl EntityPose {
     }
 
     /// Begins an arm swing if one is not already past its half-way point, like
-    /// `LivingEntity.swing`. `duration` is the swing length in ticks — build it
+    /// vanilla's swing start. `duration` is the swing length in ticks — build it
     /// with [`swing_duration`].
     ///
     /// The "not already past its half-way point" test is what makes a held
@@ -305,7 +305,7 @@ impl EntityPose {
     pub fn tick(&mut self, x: f64, z: f64, body_yaw: f32, head_yaw: f32, head_pitch: f32) {
         self.age = self.age.saturating_add(1);
 
-        // Attack swing (LivingEntity.updateSwingTime).
+        // Attack swing.
         self.o_attack_anim = self.attack_anim;
         if self.swinging {
             self.swing_time += 1;
@@ -384,7 +384,7 @@ impl EntityPose {
     }
 
     /// The interpolated attack-swing progress for a partial tick — vanilla's
-    /// `LivingEntity.getAttackAnim`.
+    /// swing progress.
     ///
     /// # This is not a plain lerp, and the difference is visible
     ///

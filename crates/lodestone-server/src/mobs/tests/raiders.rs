@@ -301,3 +301,91 @@ fn a_vindicator_hunts_and_strikes_a_player() {
     assert!(vindicator_damage(true) >= 5.0, "the vindicator should land a 5-damage axe blow");
     assert_eq!(vindicator_damage(false), 0.0, "control: with no player nothing is struck");
 }
+
+fn potion_name(potion: Option<lodestone_data::potion::PotionId>) -> &'static str {
+    let potion = potion.expect("the witch threw a potion");
+    ["slowness", "poison", "weakness", "harming", "healing", "regeneration"]
+        .into_iter()
+        .find(|name| lodestone_data::potion::potion_id(&format!("minecraft:{name}")) == Some(potion.registry_id()))
+        .expect("one of the witch's potions")
+}
+
+/// What a witch at the origin throws, `throws` times in a row, at a golem
+/// `distance` blocks away, given the effects already on it.
+fn witch_throws(distance: f64, effects: &[&str], health: Option<f32>, throws: usize) -> Vec<&'static str> {
+    let world = field();
+    let mut sim = MobSim::new(&world);
+    let witch = sim.spawn_species(key("witch"), Vec3::new(0.5, 1.0, 0.5)).id();
+    let target_pos = Vec3::new(0.5 + distance, 1.0, 0.5);
+    let target = sim.spawn_species(key("iron_golem"), target_pos).id();
+    for effect in effects {
+        sim.get_mut(target).expect("golem").apply_effect(*effect, 600, 0);
+    }
+    if let Some(health) = health {
+        sim.get_mut(target).expect("golem").set_health(health);
+    }
+    let shooter = sim.get_mut(witch).expect("witch");
+    shooter.mob.set_attack_target(Some(target_pos));
+    shooter.set_attack_target_id(Some(target));
+    (0..throws)
+        .map(|_| potion_name(sim.witch_potion_for(witch, lodestone_entity::ai::mob::ProjectileKind::SplashPotion)))
+        .collect()
+}
+
+fn witch_throw(distance: f64, effects: &[&str], health: Option<f32>) -> &'static str {
+    witch_throws(distance, effects, health, 1)[0]
+}
+
+/// A witch picks slowness at range, then poison, then weakness up close (one
+/// time in four), and harming when none of those apply.
+#[test]
+fn a_witch_chooses_its_potion_by_range_and_the_targets_existing_effects() {
+    assert_eq!(witch_throw(10.0, &[], None), "slowness");
+    assert_eq!(witch_throw(10.0, &["minecraft:slowness"], None), "poison");
+    assert_eq!(witch_throw(10.0, &["minecraft:slowness", "minecraft:poison"], None), "harming");
+    assert_eq!(witch_throw(5.0, &["minecraft:slowness", "minecraft:poison"], None), "harming");
+    // Poison is skipped under 8 health.
+    assert_eq!(witch_throw(5.0, &[], Some(6.0)), "harming");
+    // Weakness is the one-in-four close-range choice.
+    let close = witch_throws(2.0, &["minecraft:poison"], None, 200);
+    let weak = close.iter().filter(|p| **p == "weakness").count();
+    assert!((20..=80).contains(&weak), "weakness thrown {weak} times in 200");
+    assert!(close.iter().all(|p| matches!(*p, "weakness" | "harming")));
+}
+
+/// A splash that lands on a player queues its timed effect and a harming one
+/// queues a hit; a player out of range gets neither (control).
+#[test]
+fn a_splash_potion_reaches_a_player_in_range() {
+    let outcome = |player_x: f64, potion: &str| {
+        let world = field();
+        let mut sim = MobSim::new(&world);
+        let identity = PlayerIdentity { uuid: uuid::Uuid::from_u128(7), entity_id: 90 };
+        sim.set_players(vec![PerceivedPlayer {
+            identity: Some(identity),
+            perception: PlayerPerception {
+                position: Vec3::new(player_x, 1.0, 0.5),
+                held_item: None,
+                view_direction: Vec3::new(0.0, 0.0, 1.0),
+            },
+        }]);
+        let potion = lodestone_data::potion::potion_id(potion).and_then(lodestone_data::potion::PotionId::from_registry_id);
+        sim.spawn_potion_projectile_from(
+            key("splash_potion"),
+            Projectile::throwable(Vec3::new(0.5, 3.0, 0.5), Vec3::new(0.0, -0.5, 0.0)),
+            None,
+            potion,
+        );
+        for _ in 0..20 {
+            sim.resolve_projectile_impacts();
+            sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        }
+        let effects = sim.take_player_effects(identity.uuid);
+        let hits = sim.take_player_hits();
+        (effects.len(), hits.iter().map(|h| h.raw_damage).sum::<f32>())
+    };
+    assert_eq!(outcome(0.5, "minecraft:slowness").0, 1, "slowness lands on a player below the throw");
+    assert_eq!(outcome(30.5, "minecraft:slowness").0, 0, "a player 30 blocks away is untouched");
+    assert!(outcome(0.5, "minecraft:harming").1 > 0.0, "harming hurts a player below the throw");
+    assert_eq!(outcome(30.5, "minecraft:harming").1, 0.0);
+}

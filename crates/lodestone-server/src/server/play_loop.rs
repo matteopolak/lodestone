@@ -2232,6 +2232,26 @@ where
                     .await?;
                 }
 
+                // Potion effects a splash left on this player.
+                for (effect, duration, amplifier) in mobs.with(|sim| sim.take_player_effects(player_uuid)) {
+                    effects.apply(effect, duration, amplifier);
+                    apply(
+                        conn,
+                        &mut state,
+                        proto.encode_update_mob_effect(
+                            LOCAL_PLAYER_ENTITY_ID,
+                            lodestone_data::mob_effects::mob_effect_name_for(effect),
+                            amplifier,
+                            duration,
+                            true,
+                            true,
+                            true,
+                            false,
+                        ),
+                    )
+                    .await?;
+                }
+
                 // The shared mob simulation queues exit-portal geometry and
                 // egg placement because it has no connection on which to
                 // publish world changes. Resolve the sibling world through

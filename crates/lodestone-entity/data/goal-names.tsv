@@ -132,5 +132,6 @@ watch_player(player)	LookAtPlayerGoal(Player)
 witch.nearest_healable_raider	NearestHealableRaiderTargetGoal
 witch.nearest_target	NearestAttackableWitchTargetGoal
 wolf.flee_entity(llama)	Wolf.WolfAvoidEntityGoal(Llama)
+zombie.break_door	BreakDoorGoal
 zombie.break_turtle_egg	Zombie.ZombieAttackTurtleEggGoal
 zombie.melee_attack	ZombieAttackGoal

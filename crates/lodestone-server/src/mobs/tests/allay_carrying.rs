@@ -173,9 +173,9 @@ fn an_allay_ignores_a_dropped_item_of_a_different_type() {
     assert_eq!(sim.item_count(), 1, "the mismatched item must still be on the ground");
 }
 
-/// `GoAndGiveItemsToTarget`: a carrying allay standing at its own liked
+/// Give-items behaviour: a carrying allay standing at its own liked
 /// note block's `.above()` cell throws exactly one item there per tick
-/// — a real dropped [`crate::item_entity::ItemEntity`] a player could
+/// — a real dropped [`crate::item_entity::item entity] a player could
 /// walk over, not a state flag. Drives `MobSim::tick` →
 /// `allay_deliver_items` directly against host state set the way
 /// `resolve_vibrations`' own `hearNoteblock` arm would have left it,

@@ -1537,6 +1537,27 @@ fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemCompo
             }
         });
     }
+    if !components.banner_patterns.is_empty() {
+        // Layers carry their pattern inline (asset id, translation key), which
+        // needs no synchronised pattern registry on the receiving side.
+        entry("minecraft:banner_patterns", &|w| {
+            let layers: Vec<(&lodestone_model::item::BannerPatternLayer, i32)> = components
+                .banner_patterns
+                .iter()
+                .filter_map(|layer| {
+                    let color = crate::adapter::inventory::DYE_COLOR_NAMES.iter().position(|name| *name == layer.color)?;
+                    Some((layer, color as i32))
+                })
+                .collect();
+            w.var_i32(layers.len() as i32);
+            for (layer, color) in layers {
+                w.var_i32(0);
+                w.string(&format!("minecraft:{}", layer.pattern_asset_id));
+                w.string(&format!("block.minecraft.banner.{}", layer.pattern_asset_id));
+                w.var_i32(color);
+            }
+        });
+    }
     if let Some(color) = components.dyed_color {
         // A bare fixed-width INT, unlike the VarInt scalars around it.
         entry("minecraft:dyed_color", &|w| w.i32(color as i32));
@@ -4231,6 +4252,25 @@ impl ServerProtocol for V770ServerProtocol {
         w.i32(target_id.unwrap_or(0));
         ServerDirective::Send {
             packet_id: play::clientbound::SET_ENTITY_LINK,
+            payload: w.into_vec(),
+        }
+    }
+
+    fn encode_set_equipment(&self, entity_id: i32, equipment: &[lodestone_model::EntityEquipment]) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(entity_id);
+        let last = equipment.len().saturating_sub(1);
+        for (i, entry) in equipment.iter().enumerate() {
+            let ordinal = lodestone_model::EquipmentSlot::ALL
+                .iter()
+                .position(|slot| *slot == entry.slot)
+                .expect("every slot is in the ordinal table") as u8;
+            // The high bit says another entry follows.
+            w.u8(if i < last { ordinal | 0x80 } else { ordinal });
+            write_optional_item_stack(self.wire, &mut w, entry.item.as_ref());
+        }
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_EQUIPMENT,
             payload: w.into_vec(),
         }
     }

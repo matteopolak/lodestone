@@ -602,7 +602,13 @@ pub fn registrations_for(species: &str) -> &'static [Registration] {
 #[must_use]
 pub fn goals_for(species: &str, ctx: &SpeciesContext) -> Vec<(i32, Box<dyn Goal>)> {
     if let Some(brain) = crate::brain::brain_for(species) {
-        return vec![(BRAIN_PRIORITY, Box::new(brain))];
+        let mut out: Vec<(i32, Box<dyn Goal>)> = vec![(BRAIN_PRIORITY, Box::new(brain))];
+        // A villager opens a door on its path and shuts it behind itself; the
+        // goal takes no flags, so it runs beside the brain.
+        if species == "villager" {
+            out.push((BRAIN_PRIORITY, Box::new(crate::ai::door::OpenDoorGoal::new(true))));
+        }
+        return out;
     }
     let table = registrations_for(species);
     let mut out = Vec::new();
@@ -621,7 +627,7 @@ pub fn goals_for(species: &str, ctx: &SpeciesContext) -> Vec<(i32, Box<dyn Goal>
 /// `0`, i.e. the highest, and it is the only goal a brain mob gets — so the number
 /// is about *insulation* rather than arbitration. If a later species needs a real
 /// goal alongside its brain (vanilla does this: a `Villager` still registers
-/// `StayAfloatGoal` and a `TradeWithPlayerGoal` on its goal selector), that goal takes
+/// `StayAfloatGoal` and a trade-with-player goal on its goal selector), that goal takes
 /// its own vanilla priority and loses `MOVE`/`LOOK` to the brain, which is the
 /// vanilla outcome.
 pub const BRAIN_PRIORITY: i32 = 0;
@@ -889,6 +895,7 @@ mod tests {
             (
                 "zombie",
                 &[
+                    (Selector::Goal, 1, "zombie.break_door"),
                     (Selector::Goal, 4, "zombie.break_turtle_egg"),
                     (Selector::Goal, 8, "watch_player(player)"),
                     (Selector::Goal, 8, "idle_glance"),

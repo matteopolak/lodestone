@@ -909,7 +909,7 @@ impl<'w> MobSim<'w> {
         // nothing here may mutate `self.mobs` until this loop is done reading it.
         let mut applications: Vec<(i32, Vec<mob_effects::SplashEffect>)> = Vec::new();
         for m in &self.mobs {
-            // `LivingEntity.isAffectedByPotions() == !isDeadOrDying()`; this
+            // A mob counts as alive while it is not dying; this
             // sim has no distinct dying state, so health above zero is the
             // whole guard.
             if m.health() <= 0.0 {
@@ -935,6 +935,45 @@ impl<'w> MobSim<'w> {
             let effects = mob_effects::potion_splash_effects(potion, scale, 1.0);
             if !effects.is_empty() {
                 applications.push((m.id(), effects));
+            }
+        }
+
+        // Connected players in range: harming becomes a hit through the damage
+        // pipeline and timed effects queue for the player's own connection.
+        let reached: Vec<(super::PlayerIdentity, Vec<mob_effects::SplashEffect>)> = self
+            .players
+            .iter()
+            .filter_map(|p| {
+                let identity = p.identity?;
+                let feet = p.perception.position;
+                let hw = 0.3 + impact.margin;
+                let min = Vec3::new(feet.x - hw, feet.y - impact.margin, feet.z - hw);
+                let max = Vec3::new(feet.x + hw, feet.y + 1.8 + impact.margin, feet.z + hw);
+                let dist_sq = point_to_box_distance_sq(impact.location, min, max);
+                if dist_sq >= mob_effects::SPLASH_RANGE_SQ {
+                    return None;
+                }
+                let effects = mob_effects::potion_splash_effects(potion, mob_effects::splash_scale(dist_sq), 1.0);
+                (!effects.is_empty()).then_some((identity, effects))
+            })
+            .collect();
+        for (identity, effects) in reached {
+            for effect in effects {
+                match effect {
+                    mob_effects::SplashEffect::Instant {
+                        effect_id: lodestone_data::mob_effects::MobEffectId::INSTANT_DAMAGE,
+                        amount,
+                    } if amount > 0.0 => self.pending_player_hits.push(super::PlayerHit {
+                        identity,
+                        raw_damage: amount,
+                        attacker_pos: impact.location,
+                        poison_ticks: 0,
+                    }),
+                    mob_effects::SplashEffect::Timed { effect_id, duration, amplifier } => {
+                        self.pending_player_effects.push((identity.uuid, effect_id, duration, amplifier));
+                    }
+                    mob_effects::SplashEffect::Instant { .. } => {}
+                }
             }
         }
 

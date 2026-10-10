@@ -2260,7 +2260,7 @@ impl Goal for CatPerchGoal {
 /// A tamed cat walks to and lies on the nearest bed.
 ///
 /// Vanilla `CatLieOnBedGoal(cat, speedModifier, searchRange)`, a
-/// `MoveToBlockGoal` subclass with `verticalSearchStart = -2` and
+/// Move-to-block goal subclass with `verticalSearchStart = -2` and
 /// `verticalSearchRange = 6` (flags MOVE + JUMP, per its own explicit
 /// `setFlags`). The search itself is host-computed — see
 /// [`MobController::cat_bed_target`]'s own doc, same reasoning as

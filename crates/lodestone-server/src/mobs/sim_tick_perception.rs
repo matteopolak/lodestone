@@ -24,7 +24,7 @@ impl<'w> MobSim<'w> {
     /// [`villager::find_and_claim_workstation`]'s bounded terrain scan (see
     /// that function's own doc for the cost it is bounding). 100 ticks is a
     /// scope choice, not a transcribed vanilla constant: nothing in this
-    /// codebase ports `AssignProfessionFromJobSite`'s own interval.
+    /// codebase ports profession assignment's own interval.
     const JOB_SEARCH_INTERVAL_TICKS: i32 = 100;
 
     /// One villager-profession pass: throttled job search for
@@ -118,7 +118,7 @@ impl<'w> MobSim<'w> {
 
     /// Bed search interval — [`JOB_SEARCH_INTERVAL_TICKS`](Self::JOB_SEARCH_INTERVAL_TICKS)'s
     /// own scope choice, reused for the identical reason: nothing in this
-    /// codebase ports `AcquirePoi`'s own per-behavior scheduling.
+    /// codebase ports point-of-interest acquisition's own per-behavior scheduling.
     const BED_SEARCH_INTERVAL_TICKS: i32 = 100;
 
     /// One villager-bed pass (the raid trigger): throttled bed
@@ -554,7 +554,7 @@ impl<'w> MobSim<'w> {
             golem_pos,
         );
 
-        // `nearbyVillagers.forEach(GolemSensor::golemDetected)`: every
+        // `nearbyVillagers.forEach(golem sensor)`: every
         // villager in the search box, not only the ones that individually
         // wanted a golem — vanilla marks the whole nearby set.
         let until = tick_count + Self::GOLEM_DETECTED_TTL;
@@ -1093,6 +1093,7 @@ impl<'w> MobSim<'w> {
         let day_time = self.day_time;
         let universal_anger = self.universal_anger;
         let mob_griefing = self.mob_griefing;
+        let difficulty = self.difficulty;
         let block_center = |p: BlockPos| {
             Vec3::new(f64::from(p.x) + 0.5, f64::from(p.y) + 0.5, f64::from(p.z) + 0.5)
         };
@@ -1194,7 +1195,8 @@ impl<'w> MobSim<'w> {
                 .set_ticks_since_shoulder_dismount(shoulder_dismount_ticks)
                 .set_day_time(day_time)
                 .set_universal_anger(universal_anger)
-                .set_mob_griefing(mob_griefing);
+                .set_mob_griefing(mob_griefing)
+                .set_difficulty(difficulty);
             m.class_target_ids.clear();
             for class in TargetClass::ALL {
                 if m.target_classes.contains(class) {

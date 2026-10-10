@@ -18,6 +18,8 @@ impl<'w> MobSim<'w> {
             equipment_rng: SpawnRng::new(EQUIPMENT_ROLL_SEED),
             goat_horn_rng: SpawnRng::new(GOAT_HORN_ROLL_SEED),
             door_rng: SpawnRng::new(DOOR_BREAK_ROLL_SEED),
+            witch_rng: SpawnRng::new(WITCH_POTION_SEED),
+            pending_player_effects: Vec::new(),
             spawn_special_multiplier: 0.0,
             spawn_hard_difficulty: false,
             spawn_monsters_enabled: false,
@@ -412,7 +414,7 @@ impl<'w> MobSim<'w> {
     /// it verbatim — no lookup needed.
     ///
     /// [`LeashHolder::Fence`] returns `None`: this sim never spawns a
-    /// `LeashFenceKnotEntity` (see that variant's own doc comment for why), so
+    /// Leash knot (see that variant's own doc comment for why), so
     /// there is no entity id on the wire to link to yet. A mob leashed to a fence
     /// is tracked correctly server-side and draws no rope until a knot entity
     /// exists — a disclosed gap, not a silent one.

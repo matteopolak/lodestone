@@ -111,10 +111,10 @@ pub(crate) fn merge_falling_block_tick_effect_batches(
 
 impl<'w> MobSim<'w> {
     // -----------------------------------------------------------------------
-    // `FallingBlockEntity` — the falling sand/gravel animation
+    // Falling block — the falling sand/gravel animation
     // -----------------------------------------------------------------------
 
-    /// `FallingBlockEntity.fall`: the block at `origin` becomes a tracked,
+    /// Falling block: the block at `origin` becomes a tracked,
     /// broadcast entity that will come to rest at `landing_y`.
     ///
     /// Returns the new entity id and the two effects, **in vanilla's order**:
@@ -125,8 +125,8 @@ impl<'w> MobSim<'w> {
     ///
     /// # Why the order is a return value and not a comment
     ///
-    /// `fall` is `new FallingBlockEntity(...)`, `level.setBlock(pos, air, 3)`,
-    /// *then* `level.addFreshEntity(entity)`. If the entity is broadcast first the
+    /// `fall` is: construct the falling block, set the cell to air,
+    /// *then* add the entity to the level. If the entity is broadcast first the
     /// client shows the block **and** the falling copy in the same cell until the
     /// block update arrives. Two statements in a caller cannot be tested for
     /// order; a returned sequence can. See `crate::gravity_tick`'s module doc for
@@ -164,7 +164,7 @@ impl<'w> MobSim<'w> {
         )
     }
 
-    /// One tick of every live falling block — `FallingBlockEntity.tick`'s motion
+    /// One tick of every live falling block — falling block's motion
     /// and landing decision, for all of them.
     ///
     /// Returns the effects of the ticks that *finished*, in vanilla's order per
@@ -215,7 +215,7 @@ impl<'w> MobSim<'w> {
                     effects.push(FallingBlockEffect::Discarded { entity_id: id });
                 }
                 crate::gravity_tick::FallingBlockStep::Expired => {
-                    // `FallingBlockEntity.tick`'s `time > 600` branch discards
+                    // Falling block's `time > 600` branch discards
                     // with no placement. Vanilla also drops the block as an item
                     // when `entityDrops` is on; not modelled, because this branch
                     // is unreachable for a fall resolved by `find_landing_y` (see
@@ -323,7 +323,7 @@ mod falling_block_tests {
         MobSim::new(world)
     }
 
-    /// **The spawn ordering, as an ordering fact.** `FallingBlockEntity.fall`
+    /// **The spawn ordering, as an ordering fact.** Falling block
     /// clears the origin cell *before* `addFreshEntity`, so the client is never
     /// told about the entity while the block it came from is still there.
     ///
@@ -580,7 +580,7 @@ mod falling_block_tests {
     ///
     /// The object-data assertion is the one that matters: it is the only channel a
     /// client learns which block is falling
-    /// (`FallingBlockEntity.defineSynchedData` registers `DATA_START_POS` alone),
+    /// (falling block registers `DATA_START_POS` alone),
     /// so a `0` here draws whatever state id `0` happens to be with nothing logged
     /// anywhere. Compared against `lodestone_data::block_states::state_id`, which
     /// is generated from the real 26.2 `Block.BLOCK_STATE_REGISTRY` — an outside

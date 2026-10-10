@@ -8,6 +8,7 @@
 //! the AI layer stays free of world and physics dependencies.
 
 pub mod bee;
+pub mod door;
 pub mod block_edit;
 pub mod enderman_block;
 pub mod kinetic;

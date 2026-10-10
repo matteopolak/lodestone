@@ -115,7 +115,7 @@ const BOW_FULL_DRAW_TICKS: i32 = 20;
 const ARROW_POWER: f64 = 1.6;
 
 /// A blaze fireball's launch speed. `SmallFireball` is an
-/// `AbstractHurtingProjectile`, whose constructor sets
+/// Hurting projectile, whose constructor sets
 /// `direction.normalize().scale(accelerationPower)` with `accelerationPower`
 /// defaulting to `0.1` (vanilla's own field
 /// default and its own directional-movement assignment). **Not `1.6`** — a fireball is two orders of magnitude
@@ -842,7 +842,7 @@ pub static SNOW_GOLEM: &[Registration] = &[
 ///
 /// The ranged row itself is real, and it is what this family exists for.
 pub static WITCH: &[Registration] = &[
-    // -- inherited from PatrollingMonster / Raider --
+    // -- inherited from the patrolling-raider base --
     Registration::missing(Selector::Goal, 4, "patrol_route"),
     Registration::goal(1, "raider.fetch_leader_banner", fetch_leader_banner),
     Registration::goal(3, "march_on_raid", pathfind_to_raid),
@@ -891,6 +891,17 @@ fn witch_player_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 }
 
 /// A stroll at 0.6 of the walking speed.
+fn vindicator_break_door(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    use lodestone_model::Difficulty;
+    Box::new(crate::ai::door::BreakDoorGoal::new(|mob| {
+        mob.raid_center().is_some() && matches!(mob.difficulty(), Difficulty::Normal | Difficulty::Hard)
+    }))
+}
+
+fn raider_open_door(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::door::OpenDoorGoal::new(true).only_when(|mob| mob.raid_center().is_some()))
+}
+
 fn slow_stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(crate::ai::goals::WanderGoal::new(ctx.speed * 0.6))
 }
@@ -910,7 +921,7 @@ fn pathfind_to_raid(ctx: &SpeciesContext) -> Box<dyn Goal> {
 }
 
 /// Vanilla's own pillager goal registration, plus the same inherited
-/// `Raider`/`PatrollingMonster` chain [`WITCH`] documents.
+/// raider and patrolling base chain [`WITCH`] documents.
 ///
 /// The crossbow row is [`crossbow_attack`]; read its doc comment for what is exact
 /// (the projectile and its launch speed) and what is a stand-in (the charge-state
@@ -920,11 +931,11 @@ fn pathfind_to_raid(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// it is patrol machinery instead; `docs/raids.md` has the full
 /// account, including what the goal itself does not port.
 pub static PILLAGER: &[Registration] = &[
-    // -- inherited from PatrollingMonster / Raider --
+    // -- inherited from the patrolling-raider base --
     // Pillager patrols. This row was `Missing` alongside the
     // witch's identical one — both inherit vanilla's own patrolling-monster
     // registration
-    // — but the pillager is the *only* species vanilla's `PatrolSpawner`
+    // — but the pillager is the *only* species vanilla's patrol spawner
     // ever spawns, so it is the only
     // one that needs the goal to be real. `docs/raids.md` has the
     // full account of what `patrol_goal`'s underlying
@@ -961,10 +972,10 @@ pub static PILLAGER: &[Registration] = &[
 
 /// The vindicator: the inherited raider rows plus an axe fighter that holds
 /// ground on patrol, strikes in melee and, when named Johnny, hunts any mob.
-/// The door-breaking and door-opening rows stay missing: no goal here opens or
-/// breaks doors.
+/// It breaks doors on Normal and Hard while its raid is active, and opens them
+/// during a raid.
 pub static VINDICATOR: &[Registration] = &[
-    // -- inherited from PatrollingMonster / Raider --
+    // -- inherited from the patrolling-raider base --
     Registration::goal(4, "patrol_route", patrol_goal),
     Registration::goal(1, "raider.fetch_leader_banner", fetch_leader_banner),
     Registration::goal(3, "march_on_raid", pathfind_to_raid),
@@ -973,8 +984,8 @@ pub static VINDICATOR: &[Registration] = &[
     // -- the vindicator's own --
     Registration::goal(0, "stay_afloat", float_goal),
     Registration::goal(1, "flee_entity", avoid_entity),
-    Registration::missing(Selector::Goal, 2, "vindicator.break_door"),
-    Registration::missing(Selector::Goal, 3, "raider.open_door"),
+    Registration::goal(2, "vindicator.break_door", vindicator_break_door),
+    Registration::goal(3, "raider.open_door", raider_open_door),
     Registration::goal(4, "raider.hold_ground", hold_ground_10),
     Registration::goal(5, "melee_strike", melee_attack),
     Registration::goal(8, "wander", slow_stroll),
@@ -998,7 +1009,7 @@ pub static VINDICATOR: &[Registration] = &[
 ///
 /// A `Trident` spawns as `minecraft:trident` — the *thrown entity* shares its
 /// name with the item, unlike `SplashPotion`, whose entity is
-/// `minecraft:splash_potion` while `ThrownSplashPotion` is the class
+/// `minecraft:splash_potion` while thrown splash potion is the class
 /// (vanilla's own witch ranged-attack step).
 #[must_use]
 pub const fn projectile_entity_type(kind: ProjectileKind) -> &'static str {
@@ -1027,7 +1038,7 @@ pub const fn projectile_entity_type(kind: ProjectileKind) -> &'static str {
 ///
 /// A small fireball (and, for the identical reason, a wither skull, a large
 /// fireball and a dragon fireball) is **neither** in vanilla —
-/// `AbstractHurtingProjectile` *accelerates* instead of falling (in
+/// Hurting projectile *accelerates* instead of falling (in
 /// its own per-tick update), and the base fireball type extends
 /// the hurting-projectile base exactly as `SmallFireball` does (the large
 /// fireball extends the base fireball type) — so all four are reported as throwables, the closer of
@@ -1456,7 +1467,7 @@ mod tests {
         ];
 
         // The witch's own five goal rows and three target rows, plus the five
-        // inherited `Raider`/`PatrollingMonster` rows its `super.registerGoals()`
+        // inherited raider and patrolling rows its `super.registerGoals()`
         // pulls in. The inherited rows are the point: a table that transcribed only
         // the witch's own `addGoal` calls would look complete and would be missing
         // five, and no behavioural test could see the difference because all five
@@ -1549,7 +1560,7 @@ mod tests {
         // Every `Modelled` row builds and no `Missing` or `CoveredBy` one does, which is
         // what makes the raid rows honest bookkeeping rather than silent no-ops.
         for (species, expected_built) in
-            [("blaze", 7), ("snow_golem", 5), ("witch", 12), ("pillager", 15), ("vindicator", 16)]
+            [("blaze", 7), ("snow_golem", 5), ("witch", 12), ("pillager", 15), ("vindicator", 18)]
         {
             let ctx = SpeciesContext::new(0.23);
             let built = goals_for(species, &ctx);

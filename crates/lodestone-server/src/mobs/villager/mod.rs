@@ -2,7 +2,7 @@
 //!
 //! # What it is
 //!
-//! The block-side half of vanilla's `VillagerProfession`/`PoiTypes` pairing:
+//! The block-side half of vanilla's villager profession/point-of-interest types pairing:
 //! which workstation block registers which point-of-interest type
 //! (`poi_type_for_state`), which profession that POI type hands out
 //! ([`profession_for_poi_type`]), and the live claim ledger
@@ -60,7 +60,7 @@
 //!
 //! **This claims the bed as a *ticket*, not as a nightly sleep.** The
 //! occupancy flag is true the moment a villager's
-//! `AcquirePoi` behavior takes the ticket — independent of whether anyone is
+//! Point-of-interest acquisition behavior takes the ticket — independent of whether anyone is
 //! ever physically lying in the bed. So the raid trigger's occupancy check
 //! needs only this claim, not a full work/rest sleep cycle. Sleep-state
 //! tracking is separate from this ledger. Sleep tracking does not alter the
@@ -121,7 +121,7 @@ pub enum Profession {
     Librarian,
     Mason,
     /// `VillagerProfession.NITWIT` — like `None`, has no job site and no
-    /// trades (`register(registry, NITWIT, PoiType.NONE, PoiType.NONE,
+    /// trades (`register(registry, NITWIT, point-of-interest type, point-of-interest type,
     /// null)`), but is a distinct, permanent state a villager is born into
     /// rather than one it can be unemployed from.
     Nitwit,
@@ -192,7 +192,7 @@ impl Profession {
 /// `VillagerProfession.bootstrap`'s `jobSite -> profession` pairing,
 /// inverted: which profession a workstation POI type hands out. Only the
 /// thirteen professions with a real job site answer `Some` — `None` and
-/// `Nitwit` both register `PoiType.NONE` (vanilla's own POI-type
+/// `Nitwit` both register point-of-interest type (vanilla's own POI-type
 /// sentinel, not a real POI type any block produces), so neither is
 /// reachable from a POI type and both are absent here by construction, not
 /// by omission.
@@ -635,7 +635,7 @@ impl BellClaims {
     }
 
     /// The bell at `pos` is gone or no longer a bell — vanilla's
-    /// `PoiManager.remove`. Any tickets held there are discarded with the
+    /// Point-of-interest manager. Any tickets held there are discarded with the
     /// record itself.
     pub fn remove(&mut self, pos: BlockPos) {
         self.records.remove(&(pos.x, pos.y, pos.z));

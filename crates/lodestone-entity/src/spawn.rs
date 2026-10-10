@@ -24,7 +24,7 @@
 //! requirement, a slime-chunk special case, …), so they live entirely in the
 //! integrated server (`lodestone_server::natural_spawn::SpawnRule` and its
 //! `SPAWN_RULES` table) rather than behind a seam in this crate. An earlier
-//! `SpawnConditions`/`SpawnSample`/`SpawnEnvironment` seam attempted the
+//! Spawn conditions/spawn sample/spawn environment seam attempted the
 //! version-free version of this and was removed: it had no implementer and
 //! the real placement rules were built independently in `lodestone-server`
 //! because its shape could not express them.

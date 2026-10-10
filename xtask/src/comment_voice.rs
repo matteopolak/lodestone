@@ -154,6 +154,7 @@ pub enum PatternKind {
     ThisPatch,
     ThisPr,
     VanillaGoalName,
+    VanillaClassName,
 }
 
 impl PatternKind {
@@ -167,6 +168,7 @@ impl PatternKind {
             PatternKind::ThisPatch => "\"this patch\"",
             PatternKind::ThisPr => "\"this PR\"",
             PatternKind::VanillaGoalName => "vanilla goal-class name",
+            PatternKind::VanillaClassName => "vanilla class name",
         }
     }
 }
@@ -531,70 +533,95 @@ fn consume_char_literal(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
-/// Masks `src` to comment-only text for a `.rs` file: every character that
-/// is not inside a `//`/`/* */` comment becomes `' '`, with string/char
-/// literal content tracked (but not itself preserved) so a `//`/`"`
-/// sequence inside one is never mistaken for a comment or string
-/// delimiter. Newlines are always preserved so line numbers stay aligned.
-fn mask_to_rust_comments(src: &str) -> String {
+/// Which characters of a `.rs` file are comment text and which are string or
+/// char literal content; everything else is code.
+struct RustRegions {
+    chars: Vec<char>,
+    comment: Vec<bool>,
+    literal: Vec<bool>,
+}
+
+fn lex_rust(src: &str) -> RustRegions {
     let chars: Vec<char> = src.chars().collect();
     let n = chars.len();
-    let mut out = vec![' '; n];
+    let mut comment = vec![false; n];
+    let mut literal = vec![false; n];
     let mut i = 0usize;
     while i < n {
         let c = chars[i];
-        if c == '\n' {
-            out[i] = '\n';
-            i += 1;
-            continue;
-        }
         if c == '/' && chars.get(i + 1) == Some(&'/') {
             while i < n && chars[i] != '\n' {
-                out[i] = chars[i];
+                comment[i] = true;
                 i += 1;
             }
             continue;
         }
         if c == '/' && chars.get(i + 1) == Some(&'*') {
-            out[i] = '/';
-            out[i + 1] = '*';
+            comment[i] = true;
+            comment[i + 1] = true;
             i += 2;
             let mut depth = 1u32;
             while i < n && depth > 0 {
                 if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
-                    out[i] = '/';
-                    out[i + 1] = '*';
+                    comment[i] = true;
+                    comment[i + 1] = true;
                     depth += 1;
                     i += 2;
                     continue;
                 }
                 if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
-                    out[i] = '*';
-                    out[i + 1] = '/';
+                    comment[i] = true;
+                    comment[i + 1] = true;
                     depth -= 1;
                     i += 2;
                     continue;
                 }
-                out[i] = chars[i];
+                comment[i] = true;
                 i += 1;
             }
             continue;
         }
         if let Some(end) = consume_string_like(&chars, i) {
-            preserve_newlines(&chars, &mut out, i, end);
+            literal[i..end].fill(true);
             i = end;
             continue;
         }
         if c == '\'' {
             if let Some(end) = consume_char_literal(&chars, i) {
-                preserve_newlines(&chars, &mut out, i, end);
+                literal[i..end].fill(true);
                 i = end;
                 continue;
             }
         }
         i += 1;
     }
-    out.into_iter().collect()
+    RustRegions { chars, comment, literal }
+}
+
+/// Masks `src` to comment-only text for a `.rs` file: every character that
+/// is not inside a `//`/`/* */` comment becomes `' '`, with string/char
+/// literal content tracked (but not itself preserved) so a `//`/`"`
+/// sequence inside one is never mistaken for a comment or string
+/// delimiter. Newlines are always preserved so line numbers stay aligned.
+fn mask_to_rust_comments(src: &str) -> String {
+    let regions = lex_rust(src);
+    regions
+        .chars
+        .iter()
+        .zip(&regions.comment)
+        .map(|(&c, &in_comment)| if c == '\n' || in_comment { c } else { ' ' })
+        .collect()
+}
+
+/// The code of a `.rs` file with comments and literals blanked out.
+fn rust_code_only(src: &str) -> String {
+    let regions = lex_rust(src);
+    regions
+        .chars
+        .iter()
+        .zip(regions.comment.iter().zip(&regions.literal))
+        .map(|(&c, (&in_comment, &in_literal))| if c == '\n' || !(in_comment || in_literal) { c } else { ' ' })
+        .collect()
 }
 
 /// Masks `src` to comment-only text for a `.wgsl` file: `//` and `/* */`
@@ -772,7 +799,7 @@ fn overlaps(a: (usize, usize), b: (usize, usize)) -> bool {
 /// Scans one already-masked line, returning `(kind, char_start, char_end)`
 /// triples. `before this change` is checked first so its nested `this
 /// change` is suppressed -- one comment, one finding.
-fn scan_line(masked_line: &str, goal_names: &[String]) -> Vec<(PatternKind, usize, usize)> {
+fn scan_line(masked_line: &str, names: &ReferenceNames, classes_enforced: bool) -> Vec<(PatternKind, usize, usize)> {
     let lower = masked_line.to_lowercase();
     let mut out = Vec::new();
 
@@ -798,9 +825,28 @@ fn scan_line(masked_line: &str, goal_names: &[String]) -> Vec<(PatternKind, usiz
     for span in find_issue_references(masked_line) {
         out.push((PatternKind::IssueReference, span.0, span.1));
     }
-    for name in goal_names {
+    for name in &names.goals {
         for span in find_word_bounded(masked_line, name) {
             out.push((PatternKind::VanillaGoalName, span.0, span.1));
+        }
+    }
+    if classes_enforced && !names.classes.is_empty() {
+        let chars: Vec<char> = masked_line.chars().collect();
+        let mut start = 0;
+        while start < chars.len() {
+            if !(chars[start].is_alphanumeric() || chars[start] == '_') {
+                start += 1;
+                continue;
+            }
+            let mut end = start;
+            while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let token: String = chars[start..end].iter().collect();
+            if names.classes.contains(&token) {
+                out.push((PatternKind::VanillaClassName, start, end));
+            }
+            start = end;
         }
     }
     out.sort_by_key(|(_, start, _)| *start);
@@ -811,50 +857,101 @@ fn scan_line(masked_line: &str, goal_names: &[String]) -> Vec<(PatternKind, usiz
 /// reference goal-class name.
 const GOAL_NAMES_PATH: &str = "crates/lodestone-entity/data/goal-names.tsv";
 
-/// Goal-class names from the reference column of the goal-name table, minus
-/// any that this workspace defines as its own type (those are ours to name).
-/// Lowercased for [`find_word_bounded`], which matches case-insensitively.
-fn reference_goal_names(workspace_root: &Path, rust_sources: &[String]) -> Vec<String> {
-    let Ok(table) = std::fs::read_to_string(workspace_root.join(GOAL_NAMES_PATH)) else {
-        return Vec::new();
-    };
-    let mut names = BTreeSet::new();
-    for line in table.lines() {
-        let Some((_, reference)) = line.split_once('\t') else { continue };
-        let reference = reference.split('(').next().unwrap_or("");
-        for token in reference.split('.') {
-            if token.len() > 4 && token.ends_with("Goal") && token.chars().all(|c| c.is_ascii_alphanumeric()) {
-                names.insert(token.to_owned());
+/// The committed list of reference class names (one per line), generated by
+/// `scripts/gen-vanilla-class-names.py`. Absent in a fixture tree, which then
+/// scans for goal names only.
+const CLASS_NAMES_PATH: &str = "xtask/vanilla-class-names.txt";
+
+/// Paths where reference class names are enforced. Other areas have not been
+/// swept yet; add a path here once its comments describe behaviour instead of
+/// naming reference classes.
+const CLASS_NAME_SCOPES: &[&str] = &[
+    "crates/lodestone-entity/",
+    "crates/lodestone-server/src/mobs/",
+    "crates/lodestone-server/tests/taming.rs",
+    "docs/mob-ai.md",
+    "docs/raids.md",
+];
+
+/// Reference names a comment or doc must not spell.
+#[derive(Debug, Default)]
+struct ReferenceNames {
+    /// Goal-class names from the goal-name table, lowercased for the
+    /// case-insensitive [`find_word_bounded`].
+    goals: Vec<String>,
+    /// Reference class names matched case-sensitively as whole identifiers.
+    classes: BTreeSet<String>,
+}
+
+/// Identifiers that appear in this workspace's own code: a reference class
+/// name used there is ours to name, so comments about it are not flagged.
+fn own_code_identifiers(rust_sources: &[String]) -> BTreeSet<String> {
+    let mut own = BTreeSet::new();
+    for src in rust_sources {
+        let code = rust_code_only(src);
+        let mut token = String::new();
+        for c in code.chars().chain(std::iter::once(' ')) {
+            if c.is_alphanumeric() || c == '_' {
+                token.push(c);
+            } else if !token.is_empty() {
+                if token.chars().next().is_some_and(char::is_uppercase) {
+                    own.insert(std::mem::take(&mut token));
+                } else {
+                    token.clear();
+                }
             }
         }
     }
-    names
-        .into_iter()
-        .filter(|name| {
-            !["struct", "enum", "trait", "type"]
-                .iter()
-                .any(|kw| rust_sources.iter().any(|src| src.contains(&format!("{kw} {name}"))))
+    own
+}
+
+fn reference_names(workspace_root: &Path, rust_sources: &[String]) -> ReferenceNames {
+    let own = own_code_identifiers(rust_sources);
+    let mut goals = BTreeSet::new();
+    if let Ok(table) = std::fs::read_to_string(workspace_root.join(GOAL_NAMES_PATH)) {
+        for line in table.lines() {
+            let Some((_, reference)) = line.split_once('\t') else { continue };
+            let reference = reference.split('(').next().unwrap_or("");
+            for token in reference.split('.') {
+                if token.len() > 4
+                    && token.ends_with("Goal")
+                    && token.chars().all(|c| c.is_ascii_alphanumeric())
+                    && !own.contains(token)
+                {
+                    goals.insert(token.to_lowercase());
+                }
+            }
+        }
+    }
+    let classes = std::fs::read_to_string(workspace_root.join(CLASS_NAMES_PATH))
+        .map(|list| {
+            list.lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty() && !own.contains(*name))
+                .map(str::to_owned)
+                .collect()
         })
-        .map(|n| n.to_lowercase())
-        .collect()
+        .unwrap_or_default();
+    ReferenceNames { goals: goals.into_iter().collect(), classes }
 }
 
 // ---------------------------------------------------------------------
 // Scan
 // ---------------------------------------------------------------------
 
-fn scan_file(rel_path: &str, kind: FileKind, src: &str, goal_names: &[String]) -> Vec<Hit> {
+fn scan_file(rel_path: &str, kind: FileKind, src: &str, names: &ReferenceNames) -> Vec<Hit> {
     let masked = match kind {
         FileKind::Rust => mask_to_rust_comments(src),
         FileKind::Wgsl => mask_to_wgsl_comments(src),
         FileKind::Markdown => mask_to_markdown_prose(src),
     };
+    let classes_enforced = CLASS_NAME_SCOPES.iter().any(|scope| rel_path.starts_with(scope));
     let mut hits = Vec::new();
     for (idx, line) in masked.split('\n').enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        for (kind, start, end) in scan_line(line, goal_names) {
+        for (kind, start, end) in scan_line(line, names, classes_enforced) {
             let snippet: String = line.chars().skip(start.saturating_sub(20)).take(80).collect();
             hits.push(Hit {
                 file: rel_path.to_owned(),
@@ -907,9 +1004,9 @@ fn scan_paths(files: &[PathBuf], workspace_root: &Path) -> Result<Report> {
         .filter(|(_, kind, _)| matches!(kind, FileKind::Rust))
         .map(|(_, _, text)| text.clone())
         .collect();
-    let goal_names = reference_goal_names(workspace_root, &rust_sources);
+    let names = reference_names(workspace_root, &rust_sources);
     for (rel, kind, text) in &loaded {
-        report.hits.extend(scan_file(rel, *kind, text, &goal_names));
+        report.hits.extend(scan_file(rel, *kind, text, &names));
     }
     report.hits.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     Ok(report)
@@ -1130,6 +1227,47 @@ mod tests {
         assert_eq!(hits.len(), 1, "only the unowned name is flagged: {hits:#?}");
         assert!(hits[0].snippet.contains("FooBarGoal"));
         Ok(())
+    }
+
+    #[test]
+    fn a_reference_class_name_fails_in_scope_only_and_not_when_the_workspace_owns_it() -> Result<()> {
+        let ws = Workspace::new()?;
+        ws.write(CLASS_NAMES_PATH, "AbstractFoo\nOwnType\n")?;
+        // In scope: flagged. Whole-identifier, case-sensitive: `AbstractFooBar` and
+        // `abstractfoo` are controls that must not match.
+        ws.write(
+            "crates/lodestone-entity/src/bad.rs",
+            "/// Mirrors `AbstractFoo` closely.\n// AbstractFooBar and abstractfoo are fine\npub fn f() {}\n",
+        )?;
+        // Out of scope: the same comment passes.
+        ws.write("crates/other/src/unswept.rs", "/// Mirrors `AbstractFoo` closely.\npub fn g() {}\n")?;
+        // In scope, but the name is one our own code defines.
+        ws.write(
+            "crates/lodestone-entity/src/own.rs",
+            "pub struct OwnType;\n/// Wraps an `OwnType`.\npub fn h() {}\n",
+        )?;
+        // A string literal is code, not a comment.
+        ws.write(
+            "crates/lodestone-entity/src/literal.rs",
+            "pub fn i() -> &'static str { \"AbstractFoo\" }\n",
+        )?;
+        let report = scan_fixture(ws.root())?;
+        let hits: Vec<_> = report
+            .hits
+            .iter()
+            .filter(|h| h.kind == PatternKind::VanillaClassName)
+            .map(|h| (h.file.as_str(), h.line))
+            .collect();
+        assert_eq!(hits, vec![("crates/lodestone-entity/src/bad.rs", 1)], "{:#?}", report.hits);
+        Ok(())
+    }
+
+    #[test]
+    fn own_code_identifiers_ignores_comments_and_literals() {
+        let own = own_code_identifiers(&["// Hidden\nstruct Shown;\nconst S: &str = \"Quoted\";\n".to_string()]);
+        assert!(own.contains("Shown"));
+        assert!(!own.contains("Hidden"), "{own:?}");
+        assert!(!own.contains("Quoted"), "{own:?}");
     }
 
     #[test]

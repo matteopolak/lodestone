@@ -28,14 +28,14 @@
 //! * `FOLLOW_RANGE` is `16.0` for every mob (`Mob.createMobAttributes`), raised to
 //!   `35.0` by the zombie family (`Zombie.createAttributes`).
 //! * The cut is a full 3-D `distanceToSqr` against `max(range, 2.0)`
-//!   (`TargetingConditions.test`).
+//!   (targeting conditions).
 //! * A target that *leaves* follow range is dropped
-//!   (`TargetGoal.canContinueToUse`).
+//!   (the target goals).
 //!
 //! If you change a distance here, change it because the jar says so.
 //!
 //! Deliberately absent: line of sight. Vanilla checks it with an eye-to-eye ray
-//! (`TargetingConditions.test`'s line-of-sight branch), which is not a query this seam can answer;
+//! (targeting conditions's line-of-sight branch), which is not a query this seam can answer;
 //! see `NavigatingMob::find_nearest_target`'s doc. Every mob here has clear
 //! sight of its player, so no assertion depends on the omission.
 
@@ -305,7 +305,7 @@ fn a_player_just_outside_follow_range_is_not_acquired_and_one_just_inside_is() {
 /// bare target registration plus melee attack, so nothing else can move the
 /// mob, and an out-of-range mob's position must be bit-identical to its start.
 /// It also pins the `max(range, 2.0)` floor
-/// (`TargetingConditions.test`'s `visibilityDistance` computation), which is
+/// (targeting conditions's `visibilityDistance` computation), which is
 /// invisible to any test using a normal follow range.
 #[test]
 fn the_range_cut_is_the_jars_and_not_a_rounded_guess() {
@@ -340,7 +340,7 @@ fn the_range_cut_is_the_jars_and_not_a_rounded_guess() {
 
 /// Vanilla drops a target that walks out of follow range and re-writes the
 /// target's live position every tick it does not (both in
-/// `TargetGoal.canContinueToUse`). Ours did neither: it held the point
+/// the target goals). Ours did neither: it held the point
 /// it acquired, for ever.
 ///
 /// Both directions in one run, so a goal that clears the target unconditionally
@@ -441,7 +441,7 @@ fn no_passive_species_can_acquire_a_target() {
 ///
 /// Vanilla's zombified piglin, wolf and bee registrations end in a
 /// `this::isAngryAt` selector, which narrows the candidate set to the entity
-/// their persistent grudge names (`NeutralMob.isAngryAt`). Our predicate-free
+/// their persistent grudge names (neutral mob). Our predicate-free
 /// `NearestTargetGoal` has no equivalent, so those three rows are
 /// `Coverage::Missing` — and while `find_nearest_target` was circular, a wrongly
 /// `Modelled` row would have been *invisible*. It is not invisible any more:

@@ -191,5 +191,7 @@ mod horse_parrot_rows_tests;
 
 #[path = "tests/raiders.rs"]
 mod raiders_tests;
+#[path = "tests/doors.rs"]
+mod doors_tests;
 #[path = "tests/enderman_blocks.rs"]
 mod enderman_blocks_tests;

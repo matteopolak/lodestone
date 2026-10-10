@@ -1,6 +1,6 @@
 //! End-to-end pathfinding tests against a synthetic world.
 //!
-//! These exercise the whole `PathFinder` + `WalkNodeEvaluator` stack through the
+//! These exercise the whole pathfinder + path node evaluator stack through the
 //! public API, using the project's preferred detector: **known node positions in
 //! a known world**. A transposed axis or an off-by-one floor calculation
 //! survives a "did it find *a* path" check but fails an exact-coordinate check

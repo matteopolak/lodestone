@@ -13,8 +13,8 @@
 //!   are real ports** — driven through [`crate::wither`] exactly as that
 //!   module's own doc describes.
 //! * **No movement.** A live wither stays at its spawn position. Vanilla's
-//!   `WitherBoss` has real `FlyingMoveControl` navigation
-//!   (`WaterAvoidingRandomFlyingGoal`); this codebase's flying-mob AI has no
+//!   Wither has real flying move control navigation
+//!   (water-avoiding flying stroll); this codebase's flying-mob AI has no
 //!   aerial pathfinder (the same gap `mobs::dragon`'s own doc names for the
 //!   ender dragon, substituted there with a simplified orbit — the wither
 //!   gets no substitute at all here, a smaller scope than the dragon's own
@@ -35,7 +35,7 @@
 //! * **"Aimed" means "aimed at launch", not steered in flight** —
 //!   [`lodestone_entity::projectile::Projectile::throwable`] does not home;
 //!   neither does vanilla's own `WitherSkull` (it is a ballistic
-//!   `AbstractHurtingProjectile`, same family as a blaze fireball). Calling
+//!   Hurting projectile, same family as a blaze fireball). Calling
 //!   the targeted shot "homing" is the colloquial name, not a claim that the
 //!   projectile curves toward a moving target after launch.
 //! * **The 220-tick emergence blast and each skull's impact blast both call
@@ -186,7 +186,7 @@ pub struct WitherConstruction {
 impl<'w> MobSim<'w> {
     /// Given a just-placed wither skull (or wall skull) at `skull_pos`,
     /// checks whether it completes the soul-sand-and-skull pattern and, if
-    /// so, spawns a wither — vanilla `WitherSkullBlock.setPlacedBy` →
+    /// so, spawns a wither — vanilla wither skull block →
     /// `checkSpawn`. Same shape and same disclosed contract as
     /// [`try_construct_golem`](Self::try_construct_golem): a pure detection
     /// query with no block-write authority — the caller (the block-placement
@@ -410,7 +410,7 @@ impl<'w> MobSim<'w> {
             .min_by(|(_, a), (_, b)| a.partial_cmp(b).expect("distances are always finite"));
 
         // `WitherBoss.performRangedAttack`'s two shapes: an **aimed** shot at
-        // a real target (vanilla's main head, real `TargetingConditions`
+        // a real target (vanilla's main head, real targeting conditions
         // range), or, with nothing in range, an **unaimed** shot toward a
         // random nearby offset (vanilla's idle-head fallback,
         // `idleHeadUpdates[i] > 15`) — see module doc for why this is one
@@ -504,13 +504,14 @@ impl<'w> MobSim<'w> {
                     w.invulnerable_ticks,
                 )],
                 object_data: 0,
+                equipment: Vec::new(),
                 leash_link: None,
             });
         }
     }
 
     /// The wither half of [`MobSim::boss_bars`] — see
-    /// `WitherBoss`'s own `ServerBossEvent` construction
+    /// Wither's own boss bar construction
     /// (`BossEvent.BossBarColor.PURPLE`, `BossEvent.BossBarOverlay.PROGRESS`,
     /// `setDarkenScreen(true)`); the darken-screen flag has no carrier in
     /// [`crate::protocol::BossBarSnapshot`] today (see this crate's own

@@ -1,7 +1,7 @@
 //! Dropped item entities: their fall dynamics and — the version-free part that
 //! actually matters — their **lifecycle** (age, despawn, pickup delay, merge).
 //!
-//! Vanilla's numbers, all from `ItemEntity`:
+//! Vanilla's numbers, all from the item-entity tick and merge:
 //!   * despawn at `age >= 6000` ticks (5 minutes),
 //!   * `age == -32768` is the sentinel for *never despawn* (`INFINITE_LIFETIME`),
 //!   * `pickupDelay == 32767` is the sentinel for *never pick up*, any other
@@ -71,7 +71,7 @@ impl ItemLifecycle {
     }
 
     /// Advances one tick: decrements a finite pickup delay, then increments a
-    /// finite age. Mirrors the counter updates in `ItemEntity.tick`.
+    /// finite age. Mirrors the counter updates in the item-entity tick.
     pub fn tick(&mut self) {
         if self.pickup_delay > 0 && self.pickup_delay != NEVER_PICKUP_DELAY {
             self.pickup_delay -= 1;
@@ -211,7 +211,7 @@ impl ItemEntityRegistry {
 
     /// Advances every tracked item's age/pickup-delay counters one tick
     /// ([`ItemLifecycle::tick`]) and removes any that reach [`DESPAWN_AGE`]
-    /// this tick (`ItemEntity.tick`, `this.age >= 6000`), returning their
+    /// this tick (the item-entity tick, age at least 6000), returning their
     /// ids so the caller can remove the matching world entity.
     pub fn tick(&mut self) -> Vec<i32> {
         for e in &mut self.entries {
@@ -232,7 +232,7 @@ impl ItemEntityRegistry {
     /// Attempts to merge `from_id`'s stack into `to_id`'s, per [`try_merge`].
     /// On success, updates `to_id` in place and either shrinks `from_id`'s
     /// count or removes it outright when it hits zero (mirroring
-    /// `ItemEntity.tryToMerge`'s `fromItem.discard()`), returning `true`.
+    /// the merged-from item is discarded), returning `true`.
     /// Returns `false` with no change made if either id is untracked or
     /// [`try_merge`] refuses (not mergable, or `to` already full).
     pub fn merge(&mut self, to_id: i32, from_id: i32) -> bool {
@@ -300,7 +300,7 @@ impl ItemMotion {
     }
 
     /// Advances one tick of free/rolling motion: gravity, translate, then the
-    /// split horizontal/vertical drag (`ItemEntity.tick`, airborne branch). This
+    /// split horizontal/vertical drag (item-entity tick, airborne branch). This
     /// models the entity's own motion; block collision that would zero a
     /// component is the world crate's job and is expressed here through
     /// `on_ground`.
@@ -393,7 +393,7 @@ mod tests {
         // Pickup delay carried onto the survivor as max(5, 8).
         assert_eq!(new_to.pickup_delay, 8);
         // `from` keeps its own pickup_delay untouched (vanilla never writes
-        // `fromItem.pickupDelay` in `ItemEntity.merge`).
+        // the merged-from item's pickup delay in the merge).
         assert_eq!(new_from.pickup_delay, 8, "unchanged from its own value");
     }
 
@@ -402,7 +402,7 @@ mod tests {
         // `to` is the older stack, `from` is younger and has a smaller
         // pickup_delay — this distinguishes "to always wins" (a bug this test
         // catches) from vanilla's real per-field rule
-        // (the four-argument `ItemEntity.merge` overload): only `to.age`/`to.pickup_delay` move,
+        // (the four-argument merge overload): only `to.age`/`to.pickup_delay` move,
         // and `to.age` becomes the *minimum* of the two, not `to`'s own value.
         let to = ItemLifecycle {
             age: 500,

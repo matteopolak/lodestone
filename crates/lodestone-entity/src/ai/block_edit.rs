@@ -35,19 +35,29 @@ pub struct BlockEdit {
     pub checked_placement: bool,
     /// The mob that asked, stamped by the host when it drains the edit.
     pub requester: Option<i32>,
+    /// Whether the host skips the block-break effect, as for a door swinging
+    /// open: the block changes state without being destroyed.
+    pub quiet: bool,
 }
 
 impl BlockEdit {
     /// An edit with no acknowledgement and no placement check.
     #[must_use]
     pub fn new(cell: (i32, i32, i32), expect: BlockExpect, set: Option<StateId>) -> Self {
-        Self { cell, expect, set, ack: false, checked_placement: false, requester: None }
+        Self { cell, expect, set, ack: false, checked_placement: false, requester: None, quiet: false }
     }
 
     /// Asks the host to report whether the edit landed.
     #[must_use]
     pub fn acknowledged(mut self) -> Self {
         self.ack = true;
+        self
+    }
+
+    /// Asks the host not to play the block-break effect for this edit.
+    #[must_use]
+    pub fn quietly(mut self) -> Self {
+        self.quiet = true;
         self
     }
 

@@ -1,6 +1,6 @@
 //! Piston entity shoving — the entity-aware half of a piston
 //! move that `crate::piston`'s own module doc names as still missing:
-//! `PistonMovingBlockEntity`'s `moveCollidedEntities`/`moveStuckEntities`.
+//! Moving piston block entity's `moveCollidedEntities`/`moveStuckEntities`.
 //!
 //! # What it is
 //!

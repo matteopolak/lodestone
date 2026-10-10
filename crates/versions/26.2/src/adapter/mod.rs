@@ -113,7 +113,7 @@ mod chat;
 mod chunk;
 mod connection;
 mod entity;
-mod inventory;
+pub(crate) mod inventory;
 mod player;
 mod release_dispatch;
 mod scoreboard;

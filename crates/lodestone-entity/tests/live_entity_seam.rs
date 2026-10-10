@@ -5,7 +5,7 @@
 //! Every module in this crate — metadata application, the attribute pipeline
 //! validated in §12.20, [`EntityPose`] interpolation — is well unit-tested.
 //! Production entity tracking now lives in `lodestone_ecs::entity::EntityKind`,
-//! a distinct type from anything in this crate; the pre-ECS `EntityTracker`/
+//! a distinct type from anything in this crate; the pre-ECS entity tracker/
 //! `EntityState`/`EntityKind` that used to live here had zero production
 //! callers anywhere in the workspace and was deleted. But unit tests here mock
 //! the thing they integrate with, and

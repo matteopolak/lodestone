@@ -14,7 +14,7 @@
 //! * [`interpolation`] — the 20 Hz-to-render blending seam.
 //! * [`metadata`] — version-free metadata values plus the version schema seam.
 //! * [`attribute`] — vanilla's attribute arithmetic and default table.
-//! * [`pathfinding`] — vanilla's A* (`PathFinder`, `WalkNodeEvaluator`, `Path`)
+//! * [`pathfinding`] — vanilla's A* (pathfinder, path node evaluator, `Path`)
 //!   over the [`PathWorld`](pathfinding::PathWorld) seam.
 //! * [`ai`] — the [`GoalSelector`](ai::GoalSelector) scheduler and a
 //!   representative set of goals.

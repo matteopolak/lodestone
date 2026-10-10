@@ -1,8 +1,8 @@
-//! Vanilla's A* land pathfinder: `PathFinder`, `WalkNodeEvaluator`, and `Path`.
+//! Vanilla's A* land pathfinder: the pathfinder, the walk node evaluator, and `Path`.
 //!
 //! This combines vanilla's `PathFinder` (the A* loop over a
 //! [`BinaryHeap`](super::heap::BinaryHeap) open set) and its
-//! `WalkNodeEvaluator` (neighbour generation, step-up/drop-down/water logic,
+//! the walk node evaluator (neighbour generation, step-up/drop-down/water logic,
 //! per-mob path-type aggregation). The two are separate classes in vanilla but
 //! share a mutable node pool; in Rust a single owning [`Search`] over a node
 //! arena expresses that sharing without interior mutability, while the method
@@ -161,6 +161,12 @@ impl Path {
     /// Keeps only the first `len` waypoints.
     pub fn truncate(&mut self, len: usize) {
         self.nodes.truncate(len);
+    }
+
+    /// The index of the next waypoint to walk toward.
+    #[must_use]
+    pub fn next_index(&self) -> usize {
+        self.next_index
     }
 
     /// Advances to the next waypoint.

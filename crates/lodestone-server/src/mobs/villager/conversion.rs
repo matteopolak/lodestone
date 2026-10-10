@@ -157,9 +157,8 @@ pub fn conversion_progress(
     amount
 }
 
-/// Whether a block state is one of `getConversionProgress`'s
-/// two accelerants: `minecraft:iron_bars`, or any bed (`BlockStateBase
-/// instanceof BedBlock`, ported here as "id ends in `_bed`" — every vanilla
+/// Whether a block state is one of the cure's
+/// two accelerants: `minecraft:iron_bars`, or any bed (a bed block, ported here as "id ends in `_bed`" — every vanilla
 /// bed's registry name has that suffix and nothing else does).
 fn is_special_conversion_block(state: lodestone_data::block_states::StateId) -> bool {
     matches!(

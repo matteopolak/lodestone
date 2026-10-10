@@ -79,7 +79,11 @@ Raiders (witch, pillager, vindicator) march to the raid centre while their raid 
 
 **Registration names.** Each roster row carries a descriptive lowercase name (`wander_dry`, `ghast.face_target`, `nearest_target(player)`). `crates/lodestone-entity/data/goal-names.tsv` maps every name to the reference registration it stands for (`-` where there is none), and `ai::roster::tests::every_registration_name_is_descriptive_and_mapped_to_its_reference` fails on a class-style name, an unmapped name, or an unused map entry. Add the line when you add a row.
 
-Rows still `Registration::missing` are the vindicator's door-breaking and door-opening rows in `roster/ranged.rs`; no door goal exists.
+Rows still `Registration::missing`: the witch's patrol route in `roster/ranged.rs`.
+
+### Doors
+
+`ai/door.rs` holds `OpenDoorGoal` (opens a door on the path and optionally shuts it behind the mob) and `BreakDoorGoal` (a timed break, gated by a per-species predicate such as difficulty). Pathfinding already routes through closed doors for mobs whose `shape.can_open_doors` is set; zombies roll that flag at spawn. Both goals take no flags, so they run beside the movement goals. They never touch the world: they queue a `BlockEdit` (`ai/block_edit.rs`) that the tick loop applies only if the cell still holds the `expect`ed state. `BlockEdit::quiet` skips the break effect (opening a door is not a break). `checked_placement` edits are vetted by `mobs::edit_site::placement_site_ok` before they land, so a goal cannot place a block where a player could not. Villagers add an `OpenDoorGoal` next to their brain goal; the brain stops navigation, so tests drive them by claiming a bed beyond the door.
 
 ### Ranged attacks
 

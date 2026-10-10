@@ -105,6 +105,7 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
         on_ground: false,
         metadata: Vec::new(),
         object_data: 0,
+        equipment: Vec::new(),
         leash_link: None,
     };
 
@@ -199,6 +200,94 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
     println!(
         "real client observed a live entity: spawn={start_pos:?} moved_to={observed:?} then removed"
     );
+
+    drop(handle);
+    server.shutdown().await;
+}
+
+/// A mob's held items and worn banner reach a real client over the wire, and a
+/// later change to one slot reaches it too (control: a slot nobody touched
+/// keeps its item).
+#[tokio::test]
+async fn a_real_client_sees_mob_equipment_on_spawn_and_after_a_change() {
+    use lodestone_model::item::BannerPatternLayer;
+    use lodestone_model::{EntityEquipment, EquipmentSlot, ItemStack};
+
+    let source = StoneFloorSource::new(-64, 384, 0);
+    let key = |s: &str| ResourceKey::from_str(s).unwrap();
+    let mut banner = ItemStack::new(key("minecraft:white_banner"), 1);
+    banner.components.banner_patterns = vec![
+        BannerPatternLayer { pattern_asset_id: "rhombus".into(), color: "cyan".into() },
+        BannerPatternLayer { pattern_asset_id: "border".into(), color: "black".into() },
+    ];
+    let equipment = |hand: &str| {
+        vec![
+            EntityEquipment { slot: EquipmentSlot::MainHand, item: Some(ItemStack::new(key(hand), 1)) },
+            EntityEquipment { slot: EquipmentSlot::OffHand, item: None },
+            EntityEquipment { slot: EquipmentSlot::Head, item: Some(banner.clone()) },
+        ]
+    };
+    let mob_id = 4343;
+    let snapshot = |hand: &str| EntitySnapshot {
+        id: mob_id,
+        uuid: Uuid::new_v4(),
+        entity_type: key("minecraft:pillager"),
+        position: Vec3::new(8.5, 1.0, 8.5),
+        rotation: Rotation { yaw: 0.0, pitch: 0.0 },
+        head_yaw: 0.0,
+        velocity: Vec3::new(0.0, 0.0, 0.0),
+        on_ground: false,
+        metadata: Vec::new(),
+        object_data: 0,
+        equipment: equipment(hand),
+        leash_link: None,
+    };
+    let mut first = snapshot("minecraft:crossbow");
+    let uuid = first.uuid;
+    let entities = Arc::new(Mutex::new(vec![first.clone()]));
+    let (server, client_io) = IntegratedServer::open_in_memory_with_entities(
+        V770ServerProtocol,
+        source,
+        SharedSnapshotSource(entities.clone()),
+        0,
+    );
+    let (handle, _events) =
+        ClientBuilder::new(address(), profile(), Box::new(adapter())).connect_with(client_io);
+
+    let held = |handle: &lodestone_client::ClientHandle, slot: EquipmentSlot| {
+        handle
+            .entity_from_wire(mob_id)
+            .and_then(|view| view.equipment.into_iter().find(|e| e.slot == slot))
+            .and_then(|e| e.item)
+    };
+    macro_rules! wait {
+        ($what:expr, $done:expr) => {{
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            while !$done {
+                assert!(std::time::Instant::now() < deadline, $what);
+                let _ = handle.chat("poke");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }};
+    }
+    wait!(
+        "the crossbow never reached the client",
+        held(&handle, EquipmentSlot::MainHand).is_some_and(|i| i.item == key("minecraft:crossbow"))
+    );
+    let head = held(&handle, EquipmentSlot::Head).expect("the banner reached the client with the crossbow");
+    assert_eq!(head.item, key("minecraft:white_banner"));
+    assert_eq!(head.components.banner_patterns, banner.components.banner_patterns);
+
+    // Change only the main hand.
+    first = snapshot("minecraft:iron_sword");
+    first.uuid = uuid;
+    *entities.lock().unwrap() = vec![first];
+    wait!(
+        "the swapped main-hand item never reached the client",
+        held(&handle, EquipmentSlot::MainHand).is_some_and(|i| i.item == key("minecraft:iron_sword"))
+    );
+    let head = held(&handle, EquipmentSlot::Head).expect("the untouched head slot keeps its banner");
+    assert_eq!(head.components.banner_patterns, banner.components.banner_patterns);
 
     drop(handle);
     server.shutdown().await;

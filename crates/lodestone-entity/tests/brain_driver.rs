@@ -36,7 +36,7 @@ use lodestone_entity::ai::{GoalSelector, NavigatingMob, SpeciesContext, goals_fo
 use lodestone_entity::pathfinding::{Aabb, MobShape, PathType, PathWorld};
 use lodestone_model::Vec3;
 
-/// A brain-driven species. `frog` is a `Frog` in 26.2, whose AI is `FrogAi` —
+/// A brain-driven species. `frog` is a `Frog` in 26.2, whose AI is frog brain —
 /// there is no `registerGoals` to fall back on, which is the whole point.
 const BRAIN_SPECIES: &str = "frog";
 

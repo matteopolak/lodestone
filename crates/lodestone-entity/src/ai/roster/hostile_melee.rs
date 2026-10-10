@@ -225,7 +225,7 @@ pub static SPIDER: &[Registration] = &[
     Registration::goal(6, "idle_glance", random_look_around),
     Registration::target(1, "retaliate", hurt_by_target),
     // Vanilla's own spider target goal extends
-    // `NearestTargetGoal`, adding only a daylight brightness penalty to
+    // the nearest-target goal, adding only a daylight brightness penalty to
     // the search radius.
     Registration::target(2, "spider.target(player)", nearest_attackable_target),
     Registration::target(3, "spider.target(iron_golem)", target_iron_golem),
@@ -239,6 +239,9 @@ pub static SPIDER: &[Registration] = &[
 /// A zombie gets **no** `StayAfloatGoal`, which is not an omission: vanilla does not
 /// register one, because zombies sink and walk along the bottom.
 pub static ZOMBIE: &[Registration] = &[
+    // Gated at run time by the spawn-time door roll (`MobController::can_open_doors`),
+    // and on Hard.
+    Registration::goal(1, "zombie.break_door", zombie_break_door),
     Registration::goal(4, "zombie.break_turtle_egg", attack_turtle_egg),
     Registration::goal(8, "watch_player(player)", look_at_player_8),
     Registration::goal(8, "idle_glance", random_look_around),
@@ -315,6 +318,10 @@ pub static DROWNED: &[Registration] = &[
     Registration::target(3, "nearest_target(axolotl)", target_axolotl),
     Registration::target(5, "nearest_target(turtle)", target_baby_turtle),
 ];
+
+fn zombie_break_door(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(crate::ai::door::BreakDoorGoal::new(|mob| mob.difficulty() == lodestone_model::Difficulty::Hard))
+}
 
 /// A drowned goes for a target only in water, or at night wherever it is.
 fn drowned_target_ok(mob: &dyn MobController, target: Vec3) -> bool {
@@ -450,7 +457,7 @@ fn stroll_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// The melee speed factor `1.2` — vanilla's own skeleton-family melee-goal field,
 /// faster than the 1.0 every other species in this family uses.
 ///
-/// Declared on `AbstractSkeleton` but reachable only by [`WITHER_SKELETON`]: the
+/// Declared on skeleton but reachable only by [`WITHER_SKELETON`]: the
 /// `else` branch that installs it needs a non-bow main hand, and only the wither
 /// overrides `populateDefaultEquipmentSlots` to have one.
 /// Walks between village points of interest after dark, ending within four

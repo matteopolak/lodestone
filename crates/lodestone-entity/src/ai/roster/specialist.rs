@@ -38,13 +38,12 @@
 //!
 //! Its vibration sensing is a second, larger reason, and it is a **subsystem, not
 //! a goal**: vanilla's own warden implements a vibration-system interface, and it owns a
-//! `DynamicGameEventListener<VibrationSystem.Listener>` field ticked by
+//! game-event listener field ticked by
 //! its own vibration-system ticker in its own per-tick update,
 //! filtered by its own can-listen tag through
 //! its own can-receive-vibration check. That is a level-wide event bus — `GameEvent`,
-//! `GameEventDispatcher`, `GameEventListenerRegistry`,
-//! `EuclideanGameEventListenerRegistry`, `PositionSource` and the whole
-//! `gameevent/vibrations/` package — a level-wide event bus with per-listener
+//! the game-event dispatcher, listener registries, position sources and the whole
+//! vibration package — a level-wide event bus with per-listener
 //! radii and occlusion.
 //!
 //! **None of it exists here, and the name `GameEvent` is already taken twice by
@@ -77,14 +76,13 @@
 //! Recorded here so the next agent does not have to re-derive it:
 //!
 //! * **`shulker`** (vanilla's own shulker registration) — four of its seven rows are its
-//!   own nested classes (`ShulkerAttackGoal` fires a `ShulkerBullet`, so belongs
-//!   to the ranged-attack roster; plus `ShulkerPeekGoal`,
-//!   `ShulkerNearestAttackGoal`, `ShulkerDefenseAttackGoal`), and peeking is a
+//!   own nested classes (the shulker attack goal fires a shulker bullet, so belongs
+//!   to the ranged-attack roster; plus the peek, nearest-target and defence goals), and peeking is a
 //!   block-state/attachment mechanic with no seam here.
 //! * **`vex`** (vanilla's own vex registration) and **`ravager`** (vanilla's own ravager registration)
 //!   both call **the base registration as their first statement**, so their
 //!   real tables are not the lines you can see. `Ravager extends Raider extends
-//!   PatrollingMonster`, which drags in the raid goals; vanilla's own vex copy-owner-target goal
+//!   the patrolling raider base, which drags in the raid goals; vanilla's own vex copy-owner-target goal
 //!   needs an owner relation that does not exist. Transcribing either means
 //!   transcribing its whole ancestry, and getting that wrong silently is
 //!   precisely what the multiset gate is supposed to catch — so neither is

@@ -9,16 +9,15 @@
 //! its ignition producers, read out of vanilla's own TNT block and
 //! the fire block's `checkBurnOut`:
 //!
-//! * **Redstone** — `TntBlock::onPlace`/`neighborChanged`, both `if
-//!   (level.hasNeighborSignal(pos) && prime(...)) level.removeBlock(...)`.
-//! * **Flint and steel / fire charge** — `TntBlock::useItemOn`.
-//! * **Fire** — `FireBlock::checkBurnOut`'s `if (block instanceof TntBlock)
-//!   TntBlock.prime(...)`, when a spreading fire consumes a TNT block.
-//! * **Chain reaction** — `TntBlock::wasExploded`, called for every TNT block
+//! * **Redstone** — the block's placement and neighbour-change hooks: on a
+//!   neighbour signal it primes and removes the block.
+//! * **Flint and steel / fire charge** — the block's item-use hook.
+//! * **Fire** — a spreading fire that consumes a TNT block primes it.
+//! * **Chain reaction** — the block's explosion hook, called for every TNT block
 //!   a *different* blast destroys. Its fuse is not [`DEFAULT_FUSE_TIME`] but
-//!   [`random_short_fuse`]'s shortened draw — `PrimedTnt.getRandomShortFuse`.
-//! * **Mining an unstable block** — `TntBlock::playerWillDestroy`, gated on
-//!   `state.getValue(UNSTABLE)` and not the player's own `instabuild`
+//!   [`random_short_fuse`]'s shortened draw.
+//! * **Mining an unstable block** — the block's break hook, gated on
+//!   the `unstable` block-state property and not the player's own `instabuild`
 //!   ability. Not wired here: this crate's block-breaking path does not
 //!   thread the `unstable` block-state property through to a primer, and no
 //!   producer here ever sets it (see [`super::TrackedTnt`]'s doc).
@@ -37,8 +36,8 @@
 //!
 //! # What is deliberately simplified
 //!
-//! * **No fluid current push** (`Entity.updateFluidInteraction`'s
-//!   `applyCurrentTo`). `PrimedTnt.tick` calls it every tick the fuse has not
+//! * **No fluid current push** (the entity fluid-interaction
+//!   step). Primed TNT runs it every tick the fuse has not
 //!   run out, so a primed TNT swept by flowing water or lava in vanilla
 //!   drifts with the current here it does not. Gravity, collision (including
 //!   landing in and settling under water) and the on-ground bounce are all
@@ -69,8 +68,8 @@
 //!   spawn: the gap is `2.98e-8` blocks on one tick, never compounded, and is
 //!   below anything a test here could observe. [`LAUNCH_VERTICAL`] is the
 //!   exact decimal.
-//! * **No `EntityReference<LivingEntity>` owner.** Vanilla's `PrimedTnt`
-//!   remembers who lit it (`getOwner`), consulted for `Explosion`'s
+//! * **No owner reference.** Vanilla's primed TNT
+//!   remembers who lit it, consulted for the explosion's
 //!   indirect-source attribution. Nothing here reads it back, so
 //!   [`MobSim::spawn_tnt`] takes no owner parameter.
 
@@ -143,12 +142,12 @@ struct TntTickInput {
     tnt: TrackedTnt,
 }
 
-/// `PrimedTnt.DEFAULT_FUSE_TIME` — the fuse a fresh ignition starts at, in
+/// The fuse a fresh ignition starts at, in
 /// ticks (`80` = 4 real-time seconds).
 pub const DEFAULT_FUSE_TIME: i32 = 80;
 
-/// `PrimedTnt.DEFAULT_EXPLOSION_POWER` — the blast radius handed to
-/// `Level::explode`, the TNT analogue of `mobs::mod::CREEPER_EXPLOSION_RADIUS`.
+/// The blast radius handed to
+/// the explosion, the TNT analogue of `mobs::mod::CREEPER_EXPLOSION_RADIUS`.
 pub const EXPLOSION_POWER: f32 = 4.0;
 
 /// Dense-scene cutoff measured by `measure_dense_tnt_owner_workers`: four
@@ -156,8 +155,8 @@ pub const EXPLOSION_POWER: f32 = 4.0;
 /// retain the serial arm because their executor has no native worker lanes.
 const TNT_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
-/// `PrimedTnt.getDefaultGravity` override — `0.04`, the same per-tick downward
-/// acceleration `FallingBlockEntity` uses (`crate::gravity_tick`'s own `0.04`),
+/// Primed TNT's gravity — `0.04`, the same per-tick downward
+/// acceleration a falling block uses (`crate::gravity_tick`'s own `0.04`),
 /// because neither overrides `Entity`'s gravity in a version- or
 /// entity-specific way beyond this one constant.
 const GRAVITY: f64 = 0.04;
@@ -169,8 +168,8 @@ const GRAVITY: f64 = 0.04;
 const AIR_DRAG: f64 = 0.98;
 
 /// The horizontal magnitude of the random launch direction —
-/// `-Math.sin(rot) * 0.02F`/`-Math.cos(rot) * 0.02F` in `PrimedTnt`'s
-/// three-argument constructor.
+/// `-sin(rot) * 0.02` and `-cos(rot) * 0.02` in primed TNT's
+/// spawn routine.
 const LAUNCH_HORIZONTAL: f64 = 0.02;
 
 /// The exact-decimal vertical launch component (vanilla's `0.2F`, widened to
@@ -178,16 +177,16 @@ const LAUNCH_HORIZONTAL: f64 = 0.02;
 /// is not reproduced here.
 const LAUNCH_VERTICAL: f64 = 0.2;
 
-/// `this.setDeltaMovement(this.getDeltaMovement().multiply(0.7, -0.5, 0.7))` —
-/// the on-ground bounce/friction `PrimedTnt.tick` applies after drag, every
+/// The velocity multiplier `(0.7, -0.5, 0.7)` —
+/// the on-ground bounce/friction primed TNT applies after drag, every
 /// tick it is grounded. The negative `y` factor is what turns a downward
 /// landing velocity into a small upward hop — the visible TNT "wobble".
 const GROUND_BOUNCE: (f64, f64, f64) = (0.7, -0.5, 0.7);
 
-/// `PrimedTnt`'s hitbox — `0.98 x 0.98`
+/// Primed TNT's hitbox, `0.98 x 0.98`
 /// (`crates/lodestone-data/src/generated/entity_dimensions.rs`, network id 133
-/// `minecraft:tnt`), no auto-step: a bare `Entity`'s `maxUpStep()` is `0.0`,
-/// unlike a `LivingEntity`'s `STEP_HEIGHT`-attribute default of `0.6`. See
+/// `minecraft:tnt`), no auto-step: a non-living entity's step height is `0.0`,
+/// unlike a living entity's step-height attribute default of `0.6`. See
 /// `mobs::mod::ITEM_DIMENSIONS`'s own doc for the identical reasoning applied
 /// to a different non-living entity.
 const TNT_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.98, 0.98, 0.0);
@@ -198,8 +197,8 @@ const TNT_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.98, 0.98, 0.0);
 /// this module (`orbs::ORB_BEHAVIOR_SEED`, `TAME_ROLL_SEED`, ...).
 pub(super) const TNT_LAUNCH_SEED: u64 = 0x544e_545f_4c41_554e;
 
-/// `PrimedTnt.getRandomShortFuse` — the shortened fuse `TntBlock::wasExploded`
-/// gives a chain-reacted TNT block: `random.nextInt(max(1, fuse / 4)) + fuse / 8`.
+/// The shortened fuse a chain-reacted TNT block
+/// gets: a random value below `max(1, fuse / 4)` plus `fuse / 8`.
 #[must_use]
 pub fn random_short_fuse(fuse: i32, rng: &mut SpawnRng) -> i32 {
     rng.next_int((fuse / 4).max(1)) + fuse / 8
@@ -216,8 +215,8 @@ pub fn is_tnt_block(state: lodestone_data::block_states::StateId) -> bool {
 }
 
 /// The block-tick key [`crate::random_tick`]'s redstone-signal arm schedules
-/// when a neighbour supplies a signal to a TNT block — `TntBlock::onPlace`/
-/// `neighborChanged`, whose vanilla body primes and removes the block in the
+/// when a neighbour supplies a signal to a TNT block — vanilla's
+/// neighbour-change hook, whose body primes and removes the block in the
 /// same call, synchronously. That dispatcher runs over a bare `ChunkColumn`
 /// with no [`MobSim`] to spawn into, so the actual prime happens one hop
 /// later, in `tick::run_tick_loop`'s scheduled-tick drain — the same handoff
@@ -239,12 +238,11 @@ pub(super) fn tnt_entity_type() -> ResourceKey {
 }
 
 impl<'w> MobSim<'w> {
-    /// `new PrimedTnt(level, x, y, z, owner)` — every `TntBlock::prime`/
-    /// `wasExploded` call site's common constructor, minus the owner (see this
+    /// Spawns a primed TNT — the common constructor for every ignition path, minus the owner (see this
     /// module's doc for what that costs).
     ///
     /// `fuse` is the caller's choice rather than always
-    /// [`DEFAULT_FUSE_TIME`]: `TntBlock::wasExploded`'s chain reaction starts
+    /// [`DEFAULT_FUSE_TIME`]: a chain reaction starts
     /// at [`random_short_fuse`]'s shortened value instead. Returns the new
     /// entity's network id.
     pub fn spawn_tnt(&mut self, position: Vec3, fuse: i32) -> i32 {
@@ -270,7 +268,7 @@ impl<'w> MobSim<'w> {
         id
     }
 
-    /// `TntBlock::wasExploded` — primes a TNT block another blast just
+    /// Primes a TNT block another blast just
     /// destroyed, at [`random_short_fuse`]'s shortened fuse rather than
     /// [`DEFAULT_FUSE_TIME`]. Draws from [`Self`]'s own isolated `tnt_rng`, so
     /// a chain reaction cannot shift which roll a mob spawn or a block drop
@@ -304,10 +302,10 @@ impl<'w> MobSim<'w> {
     /// One tick of every live primed TNT: gravity, collision/bounce, the fuse
     /// countdown, and — the tick the fuse reaches `0` — detonation.
     ///
-    /// `PrimedTnt.tick`, transcribed in vanilla's own order: `applyGravity`,
-    /// `move(SELF, delta)`, then drag and (on ground) the bounce, *then* the
-    /// fuse decrement and the `fuse <= 0` branch (`discard()` then
-    /// `explode()`). [`move_entity`] is `lodestone_physics::entity`'s single
+    /// One primed-TNT tick, in vanilla's own order: gravity,
+    /// move, then drag and (on ground) the bounce, *then* the
+    /// fuse decrement and the `fuse <= 0` branch (discard, then
+    /// explode). [`move_entity`] is `lodestone_physics::entity`'s single
     /// shared integrator — the same primitive [`MobSim::tick_vehicles`] uses —
     /// so a primed TNT resolves collision through the identical code a boat or
     /// a player does, not a second copy.

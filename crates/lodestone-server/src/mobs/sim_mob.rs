@@ -1388,6 +1388,7 @@ impl<'w> SimMob<'w> {
             metadata,
             // No mob supplies additional spawn data here.
             object_data: 0,
+            equipment: self.equipment_snapshot(),
             // Resolved by `MobSim::snapshots`, not here: `leash_holder` names a
             // player by uuid, and only `MobSim` (through `self.players`) can turn
             // that into the wire entity id `EntitySnapshot::leash_link` carries.

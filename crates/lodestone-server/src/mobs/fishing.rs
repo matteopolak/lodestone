@@ -343,6 +343,7 @@ impl<'w> MobSim<'w> {
                 // real client's bobber renderer reads to draw the line back to the
                 // rod tip.
                 object_data: b.owner,
+                equipment: Vec::new(),
                 leash_link: None,
             });
         }

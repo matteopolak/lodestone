@@ -1,6 +1,6 @@
 //! The sniffer's own seek/dig/rise/egg-drop state machine (the last
 //! remaining species) — `Sniffer.State`'s `IDLING -> SNIFFING -> SEARCHING ->
-//! DIGGING -> RISING` loop, `Sniffer`/`SnifferAi`'s own timers and block
+//! DIGGING -> RISING` loop, `Sniffer`/sniffer brain's own timers and block
 //! search collapsed into one host-side per-mob driver, the same shape
 //! `mobs::warden` already established for a Brain-adjacent species this
 //! crate has no seam to drive purely through `Brain`/`BrainMob`.
@@ -18,7 +18,7 @@
 //! that `Brain` — the same one-way constraint `camel_random_sitting`'s own
 //! doc already names for a goal-driven signal this seam likewise cannot see.
 //!
-//! # Disclosed narrowings against `Sniffer`/`SnifferAi`
+//! # Disclosed narrowings against `Sniffer`/sniffer brain
 //!
 //! - **`FEELING_HAPPY`/`SCENTING`** — both purely cosmetic animation states
 //!   with no gameplay consequence — are not built at all. A finished dig
@@ -30,7 +30,7 @@
 //!   already establishes for a Brain-internal choice this seam cannot
 //!   observe.
 //! - **The dig-position search is a bounded box scan around the sniffer's
-//!   own feet** ([`find_dig_position`]), not `LandRandomPos`'s
+//!   own feet** ([`find_dig_position`]), not random land position's
 //!   pathfinding-aware sampling, and skips the real reachability check
 //!   (`Path::canReach`) entirely — the same "no bounding-box on this seam"
 //!   cut `RamTarget`'s own doc already discloses for a different species. A
@@ -51,7 +51,7 @@
 //!
 //! # How to change it
 //!
-//! - **Timers**: the constants below, each cited from `Sniffer`/`SnifferAi`.
+//! - **Timers**: the constants below, each cited from `Sniffer`/sniffer brain.
 //! - **Dig-search radius/shape**: [`find_dig_position`] — the one function
 //!   that reads [`ChunkWorld`].
 //! - **Eligibility**: [`eligible_to_sniff`]/[`eligible_to_dig`], mirroring
@@ -68,23 +68,23 @@ use lodestone_model::{BlockPos, ResourceKey, Vec3};
 use super::{ChunkWorld, MobSim, SimMob};
 use crate::mob_spawn::SpawnRng;
 
-/// `SnifferAi.Sniffing`'s own duration range.
+/// Sniffer brain's own duration range.
 pub const SNIFFING_MIN_TICKS: i32 = 40;
 /// See [`SNIFFING_MIN_TICKS`].
 pub const SNIFFING_MAX_TICKS: i32 = 80;
 
-/// `SnifferAi.Searching`'s own single-duration constructor argument — real
+/// Sniffer brain's own single-duration constructor argument — real
 /// vanilla's `Searching.canStillUse` actually stops the instant the walk
 /// target is reached (an arrival this module detects itself, see the module
 /// doc), so this is purely the "gave up" timeout.
 pub const SEARCHING_TIMEOUT_TICKS: i32 = 600;
 
-/// `SnifferAi.Digging`'s own duration range.
+/// Sniffer brain's own duration range.
 pub const DIGGING_MIN_TICKS: i32 = 160;
 /// See [`DIGGING_MIN_TICKS`].
 pub const DIGGING_MAX_TICKS: i32 = 180;
 
-/// `SnifferAi.FinishedDigging`'s own fixed duration (`min == max == 40`).
+/// Sniffer brain's own fixed duration (`min == max == 40`).
 pub const RISING_TICKS: i32 = 40;
 
 /// `Sniffer.SNIFFING_COOLDOWN_TICKS` — how long after a finished dig before
@@ -96,12 +96,12 @@ pub const EXPLORED_POSITIONS_CAP: usize = 20;
 
 /// Not a vanilla constant — the horizontal half-width of
 /// [`find_dig_position`]'s bounded scan, standing in for
-/// `LandRandomPos.getPos`'s smallest attempted radius (`10 + 2*0`). See the
+/// Random land position's smallest attempted radius (`10 + 2*0`). See the
 /// module doc's disclosed cut on this search.
 const DIG_SEARCH_HORIZONTAL_RADIUS: i32 = 10;
 
 /// Not a vanilla constant — the vertical half-height of the same scan,
-/// matching `LandRandomPos.getPos`'s own `3`-block argument.
+/// matching random land position's own `3`-block argument.
 const DIG_SEARCH_VERTICAL_RADIUS: i32 = 3;
 
 /// Not a vanilla constant — how close (squared, blocks) counts as "arrived"
@@ -221,7 +221,7 @@ fn roll_duration(rng: &mut SpawnRng, min: i32, max: i32) -> i32 {
 }
 
 /// `Sniffer.calculateDigPosition`, collapsed to a single bounded box scan —
-/// see the module doc's disclosed cut against `LandRandomPos`'s
+/// see the module doc's disclosed cut against random land position's
 /// pathfinding-aware five-candidate search. Returns the nearest diggable,
 /// headroom-clear, not-recently-explored candidate's own **walkable cell**
 /// (one block above the diggable block itself — see the module doc for why
@@ -369,7 +369,7 @@ impl<'w> MobSim<'w> {
                     }
                     m.sniffer_state_ticks -= 1;
                     if m.sniffer_state_ticks <= 0 {
-                        // `FinishedDigging.start` -> `RISING`;
+                        // Finished-digging state -> `RISING`;
                         // `onDiggingComplete(true)`'s explored-position
                         // record happens here rather than in `RISING`'s own
                         // stop, since this module has no separate

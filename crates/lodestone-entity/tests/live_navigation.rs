@@ -21,7 +21,7 @@
 //!
 //! Vanilla AI has three unobservable-seed entropy sources here:
 //!   * `NearestTargetGoal` acquires on a random tick interval,
-//!   * `PathNavigation` recomputes on a jittered schedule,
+//!   * Navigator recomputes on a jittered schedule,
 //!   * `WanderGoal` injects noise before a target is locked, and the A*
 //!     tie-break picks a detour side we cannot predict.
 //!
@@ -46,7 +46,7 @@
 //! # The `Invulnerable` trap (why the lure must be mortal)
 //!
 //! An `Invulnerable:1b` villager is **never targeted** — vanilla's
-//! `TargetingConditions` rejects invulnerable entities, so the zombie just
+//! Targeting conditions rejects invulnerable entities, so the zombie just
 //! random-strolls and never paths anywhere. (This cost this session a false
 //! failure: the "detour" test froze at the origin.) The lure is therefore
 //! `NoAI:1b` (stationary, still targetable) and *not* invulnerable; the zombie

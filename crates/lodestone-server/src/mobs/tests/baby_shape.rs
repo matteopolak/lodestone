@@ -68,7 +68,7 @@ fn growing_up_restores_the_adult_shape() {
 }
 
 /// **Control: a species with no `baby_dimensions` entry uses the real
-/// `LivingEntity` fallback (half size), not a made-up constant.**
+/// baby fallback (half size), not a made-up constant.**
 ///
 /// Skeletons never naturally have babies, but `is_baby()` only reads the
 /// age counter — nothing species-gates it — so this is the discriminating

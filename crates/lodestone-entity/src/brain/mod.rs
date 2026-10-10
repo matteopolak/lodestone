@@ -90,7 +90,7 @@ pub struct Brain {
     /// all-must-hold rule.
     ///
     /// Exists for villager-shaped panic triggers: vanilla's own
-    /// `VillagerPanicTrigger` is an imperative `Behavior` that calls
+    /// Villager panic trigger is an imperative `Behavior` that calls
     /// `brain.setActiveActivityIfPossible(Activity.PANIC)` directly from
     /// inside `start()`, which this crate's [`Behavior`] trait has no seam
     /// for (it receives `&mut Memories` and `&mut dyn BrainMob`, never `&mut

@@ -102,7 +102,7 @@ impl GateBehavior {
             .all(|&(ty, status)| mem.check(ty, status))
     }
 
-    /// Weighted shuffle matching vanilla `ShufflingList.shuffle`: sort by
+    /// Weighted shuffle matching vanilla shuffling list: sort by
     /// `-nextFloat()^(1/weight)` ascending. Higher weight biases toward the
     /// front.
     fn apply_order(&mut self, mob: &mut dyn BrainMob) {

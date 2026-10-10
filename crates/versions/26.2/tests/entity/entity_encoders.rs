@@ -84,6 +84,7 @@ fn zombie_snapshot(id: i32, uuid: Uuid) -> EntitySnapshot {
         on_ground: false,
         metadata: Vec::new(),
         object_data: 0,
+        equipment: Vec::new(),
         leash_link: None,
     }
 }
@@ -299,4 +300,52 @@ fn encode_set_entity_link_round_trips_a_detach_through_the_real_adapter() {
     };
     assert_eq!(*entity_id, 11);
     assert_eq!(*holder_id, None);
+}
+
+/// `SET_EQUIPMENT` round-tripped through the real adapter: two slots with a
+/// distinct item each (so a swapped slot ordinal shows), an explicit cleared
+/// slot, and the ominous banner's eight pattern layers in order.
+#[test]
+fn encode_set_equipment_round_trips_slots_items_and_banner_layers_through_the_real_adapter() {
+    use lodestone_model::item::BannerPatternLayer;
+    use lodestone_model::{EntityEquipment, EquipmentSlot, ItemStack};
+    let key = |s: &str| s.parse::<ResourceKey>().expect("valid key");
+    let layer = |pattern: &str, color: &str| BannerPatternLayer {
+        pattern_asset_id: pattern.to_owned(),
+        color: color.to_owned(),
+    };
+    let mut banner = ItemStack::new(key("minecraft:white_banner"), 1);
+    banner.components.banner_patterns = vec![
+        layer("rhombus", "cyan"),
+        layer("stripe_bottom", "light_gray"),
+        layer("stripe_center", "gray"),
+        layer("border", "light_gray"),
+        layer("stripe_middle", "black"),
+        layer("half_horizontal", "light_gray"),
+        layer("circle", "light_gray"),
+        layer("border", "black"),
+    ];
+    let sent = vec![
+        EntityEquipment { slot: EquipmentSlot::MainHand, item: Some(ItemStack::new(key("minecraft:iron_sword"), 1)) },
+        EntityEquipment { slot: EquipmentSlot::OffHand, item: None },
+        EntityEquipment { slot: EquipmentSlot::Head, item: Some(banner.clone()) },
+    ];
+    let ServerDirective::Send { packet_id, payload } = V770ServerProtocol.encode_set_equipment(77, &sent) else {
+        panic!("expected a Send directive");
+    };
+    assert_eq!(packet_id, play::clientbound::SET_EQUIPMENT);
+    let events = decode_events(packet_id, &payload);
+    let [ClientEvent::EntityEquipmentUpdated { entity_id, equipment }] = events.as_slice() else {
+        panic!("expected one EntityEquipmentUpdated, got {events:?}");
+    };
+    assert_eq!(*entity_id, 77);
+    assert_eq!(equipment.len(), 3);
+    assert_eq!(equipment[0].slot, EquipmentSlot::MainHand);
+    assert_eq!(equipment[0].item.as_ref().map(|i| i.item.clone()), Some(key("minecraft:iron_sword")));
+    assert_eq!(equipment[1].slot, EquipmentSlot::OffHand);
+    assert_eq!(equipment[1].item, None);
+    assert_eq!(equipment[2].slot, EquipmentSlot::Head);
+    let head = equipment[2].item.as_ref().expect("banner on the head");
+    assert_eq!(head.item, key("minecraft:white_banner"));
+    assert_eq!(head.components.banner_patterns, banner.components.banner_patterns);
 }

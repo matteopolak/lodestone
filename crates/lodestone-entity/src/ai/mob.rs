@@ -290,6 +290,22 @@ pub trait MobController {
         false
     }
 
+    /// Whether this mob can open (and so break) wooden doors on its path.
+    fn can_open_doors(&self) -> bool {
+        false
+    }
+
+    /// The cells of the path waypoints already walked and the next two, or
+    /// `None` when there is no unfinished path.
+    fn path_cells_near(&self) -> Option<Vec<(i32, i32, i32)>> {
+        None
+    }
+
+    /// The world difficulty.
+    fn difficulty(&self) -> lodestone_model::Difficulty {
+        lodestone_model::Difficulty::Normal
+    }
+
     /// Asks the host to change a block; see [`BlockEdit`](crate::ai::BlockEdit).
     fn request_block_edit(&mut self, edit: crate::ai::BlockEdit) {
         let _ = edit;
@@ -819,7 +835,7 @@ pub trait MobController {
     /// foot within its search radius, or `None`. A separate field from
     /// [`cat_sit_target`](Self::cat_sit_target) because the two goals hunt
     /// different block sets (chests/lit furnaces vs. beds) and vanilla itself
-    /// keeps them as two distinct `MoveToBlockGoal` searches.
+    /// keeps them as two distinct move-to-block goal searches.
     fn cat_bed_target(&self) -> Option<Vec3> {
         None
     }
@@ -959,9 +975,8 @@ pub trait MobController {
         false
     }
 
-    /// Whether a player is currently staring at this mob — vanilla
-    /// `LivingEntity::isLookingAtMe(player, coneSize, adjustForDistance, …)`,
-    /// wrapped for the enderman by `EnderMan::isBeingStaredBy`.
+    /// Whether a player is currently staring at this mob — vanilla's
+    /// player gaze test, as the enderman applies it.
     ///
     /// The host computes the answer from each player's eye position **and view
     /// vector** and feeds only the boolean: the geometric half is the free
@@ -1072,7 +1087,7 @@ pub trait MobController {
     /// Two separate methods rather than one taking an offset because these are
     /// the only two positions any of the goals in question reads, and vanilla
     /// spells them as two distinct expressions. A goal that needs to *search* a
-    /// neighbourhood (`MoveToBlockGoal`'s 16- or 24-block spiral) must not be
+    /// neighbourhood (move-to-block goal's 16- or 24-block spiral) must not be
     /// built on this — see `docs/mob-block-perception.md` for why that is a
     /// host-computed candidate position instead.
     fn block_cues_below(&self) -> BlockCues {
@@ -1102,7 +1117,7 @@ pub trait MobController {
     }
 
     /// Records the intent to launch a projectile this tick — vanilla's
-    /// `RangedAttackMob::performRangedAttack`.
+    /// Ranged attacker.
     ///
     /// This is an **intent**, exactly like [`attack`](MobController::attack): a
     /// goal in `lodestone-entity` has no access to a world, an entity id
@@ -1132,8 +1147,8 @@ pub trait MobController {
         let _ = target;
     }
 
-    /// Vanilla `EnderMan::teleport(x, y, z)` folded with
-    /// `LivingEntity::randomTeleport`'s own landing search: given a raw
+    /// Vanilla's enderman teleport folded with
+    /// its landing search: given a raw
     /// candidate position, walks the column downward looking for solid,
     /// non-fluid ground and a footprint that does not collide with
     /// anything, returning the validated landing position (feet resting on
@@ -1331,7 +1346,7 @@ pub fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
     d.x * d.x + d.y * d.y + d.z * d.z
 }
 
-/// The geometric half of vanilla `LivingEntity::isLookingAtMe`: whether the
+/// The geometric half of vanilla's gaze test: whether the
 /// point `target` lies inside a viewer's acceptance cone.
 ///
 /// `viewer_eye` is the viewer's eye position and `look` its view vector

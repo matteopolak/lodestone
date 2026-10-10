@@ -12,7 +12,7 @@
 //! # What is deliberately not ported
 //!
 //! * **`handlePortal`/nether-portal interaction** and **igniting the block
-//!   below it on fire** (`EndCrystal.tick`'s `BaseFireBlock.getState`
+//!   below it on fire** (end crystal's fire block
 //!   write) — both are single-tick side effects on the *world*, and this
 //!   struct tracks no block-state oracle to write through (the same class of
 //!   cut `tnt.rs`'s own doc names for fluid current).
@@ -60,7 +60,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// The number of live end crystals — `dragon::fight`'s `alive_crystals`
-    /// input, and `EnderDragonFight.updateCrystalCount`'s network-visible
+    /// input, and dragon fight's network-visible
     /// result (minus the spike-bounding-box scoping that function does and
     /// this sim cannot, per the module doc: every crystal here counts,
     /// there being nowhere else for one to be).
@@ -94,7 +94,7 @@ impl<'w> MobSim<'w> {
     /// or `None` if `id` was not a live crystal.
     ///
     /// Vanilla's `hurtServer` skips the explosion entirely when the
-    /// destroying `DamageSource` `is(DamageTypeTags.IS_EXPLOSION)` (so a
+    /// destroying damage source `is(damage-type tags)` (so a
     /// chained blast from a neighbouring crystal does not double-explode).
     /// That distinction is not modelled here — every destruction explodes —
     /// which over-explodes a chain reaction relative to vanilla; a caller
@@ -147,6 +147,7 @@ impl<'w> MobSim<'w> {
                     crate::protocol::MetadataField::CrystalBeamTarget(None),
                 ],
                 object_data: 0,
+                equipment: Vec::new(),
                 leash_link: None,
             });
         }

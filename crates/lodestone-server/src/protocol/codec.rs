@@ -952,6 +952,14 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes a `SET_EQUIPMENT` update for an entity: the given slots, each
+    /// with its item or `None` for a cleared slot. The default emits nothing,
+    /// so a protocol family without it shows mobs bare-handed.
+    fn encode_set_equipment(&self, entity_id: i32, equipment: &[lodestone_model::EntityEquipment]) -> ServerDirective {
+        let _ = (entity_id, equipment);
+        ServerDirective::None
+    }
+
     /// Encodes a `BOSS_EVENT` `ADD` operation — vanilla's own
     /// boss-event-packet add-packet constructor.
     /// `id` is the bar's own id (see [`BossBarSnapshot::id`]), `name` its title,
@@ -2228,6 +2236,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
         (**self).encode_set_entity_data(entity_id, fields)
+    }
+
+    fn encode_set_equipment(&self, entity_id: i32, equipment: &[lodestone_model::EntityEquipment]) -> ServerDirective {
+        (**self).encode_set_equipment(entity_id, equipment)
     }
 
     fn encode_boss_event_add(&self, id: Uuid, name: &Text, progress: f32) -> ServerDirective {

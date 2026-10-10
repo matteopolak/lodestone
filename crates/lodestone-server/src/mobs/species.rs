@@ -113,7 +113,7 @@ pub(super) fn category_of(entity_type: &ResourceKey) -> MobCategory {
 /// a thin wrapper rather than a second table that could drift from it.
 ///
 /// Vanilla layers per-species exceptions on both sides of that default:
-/// `TamableAnimal` forces it back to `true` (redundant here, since none of
+/// the tameable base forces it back to `true` (redundant here, since none of
 /// wolf/cat/parrot/the horse family are `Enemy` anyway), several water
 /// creatures force it to `false`, and a few `Enemy`-hierarchy species
 /// (hoglin, zoglin, the undead horse/camel variants) force it back to
@@ -227,7 +227,7 @@ pub(super) fn not_scary_for_pufferfish(species: &str) -> bool {
 
 pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
     match species {
-        // `AbstractCow` covers both, and they share `cow_food`.
+        // Cow covers both, and they share `cow_food`.
         "cow" | "mooshroom" => &["wheat"],
         "sheep" => &["wheat"],
         "pig" => &["carrot", "potato", "beetroot", "carrot_on_a_stick"],
@@ -276,7 +276,7 @@ pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
 /// for a horse, which it is not.
 pub(super) fn breeding_food(species: &str) -> &'static [&'static str] {
     match species {
-        // `AbstractCow` covers both, and they share `#cow_food`.
+        // Cow covers both, and they share `#cow_food`.
         "cow" | "mooshroom" => &["wheat"],
         "sheep" => &["wheat"],
         "pig" => &["carrot", "potato", "beetroot"],
@@ -353,7 +353,7 @@ pub(super) enum TameMechanism {
     /// The horse family: feeding raises `Temper` and never rolls; the roll
     /// happens in the run-around-while-ridden rule while a player is riding.
     Temper {
-        /// `AbstractHorse.getMaxTemper()`.
+        /// The horse's maximum temper.
         max_temper: i32,
     },
 }
@@ -361,9 +361,9 @@ pub(super) enum TameMechanism {
 /// The taming mechanism for a species path, or `None` for a species that cannot
 /// be tamed.
 ///
-/// The `donkey`/`mule`/`skeleton_horse`/`zombie_horse` rows are `AbstractHorse`
-/// subclasses and inherit its temper mechanism unchanged; `getMaxTemper` is
-/// overridden by none of them.
+/// The `donkey`/`mule`/`skeleton_horse`/`zombie_horse` rows are horse
+/// subclasses and inherit its temper mechanism unchanged; none of them
+/// overrides the maximum temper.
 pub(super) fn tame_mechanism(species: &str) -> Option<TameMechanism> {
     match species {
         "wolf" => Some(TameMechanism::FoodRoll {
@@ -397,7 +397,7 @@ pub(super) fn tame_mechanism(species: &str) -> Option<TameMechanism> {
     }
 }
 
-/// `AbstractHorse.handleEating`'s temper gain for one item, or `0` for anything
+/// The temper a horse gains from one item, or `0` for anything
 /// that is not horse food.
 ///
 /// # Read the table, not the tag
@@ -405,12 +405,12 @@ pub(super) fn tame_mechanism(species: &str) -> Option<TameMechanism> {
 /// `#horse_food` and this function disagree twice, in both directions, and both
 /// disagreements are vanilla's:
 ///
-/// * **`hay_block` is horse food and grants no temper at all** (`heal = 20.0F`,
-///   `ageUp = 180`, and `temper` left at its `0` initialiser). Deriving temper
+/// * **`hay_block` is horse food and grants no temper at all** (it heals 20,
+///   ages up by 180, and leaves temper at `0`). Deriving temper
 ///   from the tag would let a stack of hay bales tame a horse.
 /// * **`red_mushroom` grants 3 temper and is *not* in `#horse_food`**, so
-///   `AbstractHorse.isFood` is false for it while `handleEating` still accepts
-///   it. Deriving the accepted set from `isFood` would drop it.
+///   the food check is false for it while the feeding routine still accepts
+///   it. Deriving the accepted set from the food check would drop it.
 pub(super) fn horse_temper_gain(item: &str) -> i32 {
     match item {
         "wheat" | "sugar" | "apple" | "carrot" | "red_mushroom" => 3,
@@ -424,9 +424,9 @@ pub(super) fn horse_temper_gain(item: &str) -> i32 {
 /// The items that put a **tamed** horse in love — the horse family's breeding
 /// trigger, which is not its food tag.
 ///
-/// `AbstractHorse.handleEating` calls `setInLove` in exactly two of its arms,
-/// `Items.GOLDEN_CARROT` and `Items.GOLDEN_APPLE`/`ENCHANTED_GOLDEN_APPLE`, and
-/// each is additionally gated on `isTamed() && getAge() == 0 && !isInLove()`.
+/// Horse feeding puts the horse in love in exactly two arms,
+/// the golden carrot and the golden or enchanted golden apple, and
+/// each is additionally gated on being tamed, an adult, and not already in love.
 /// Wheat, sugar, apples, carrots and hay all feed a horse and none of them breeds
 /// it, so the ordinary [`breeding_food`] route cannot express this species and its
 /// row there is empty.
@@ -450,14 +450,14 @@ pub(super) fn tame_feed_heal(species: &str) -> f32 {
     }
 }
 
-/// `LivingEntity.getExperienceReward`'s base value for one species —
-/// `Mob.getBaseExperienceReward`, which returns the per-class `xpReward` field.
+/// The base experience reward for one species —
+/// the per-class reward field.
 ///
 /// # Where each number comes from
 ///
 /// The `xpReward` assignment in the species' own class, read out of the 26.2
 /// decompile. Class defaults do the rest, and there are only two that matter:
-/// `Monster`'s constructor sets `5`, and `Animal.getBaseExperienceReward` overrides the
+/// hostile mobs set `5`, and animals override the
 /// field entirely with `1 + random.nextInt(3)` — so **an animal's reward is a roll of
 /// 1..=3, not a constant**, and a table of flat numbers would be wrong for every
 /// passive mob.
@@ -465,16 +465,16 @@ pub(super) fn tame_feed_heal(species: &str) -> f32 {
 /// | value | species | source class |
 /// |---|---|---|
 /// | `0` | `creaking`, `snow_golem`, `iron_golem` | never assign `xpReward`, so it keeps `Mob`'s `0` |
-/// | `1..=3` | every `Animal` | `Animal.getBaseExperienceReward` |
+/// | `1..=3` | every `Animal` | animal override |
 /// | `3` | `vex`, `endermite` | own assignment |
-/// | `5` | every other `Monster` | `Monster`'s constructor |
+/// | `5` | every other `Monster` | hostile-mob default |
 /// | `10` | `blaze`, `guardian`, `elder_guardian`, `evoker`, `breeze` | own assignment (`elder_guardian` inherits `Guardian`'s) |
 /// | `20` | `ravager`, `piglin_brute` | own assignment |
 /// | `50` | `wither` | own assignment |
 ///
 /// # What is deliberately not modelled
 ///
-/// * **The equipment bonus.** `Mob.getBaseExperienceReward` adds `1 + nextInt(3)` per
+/// * **The equipment bonus.** The base reward adds `1 + nextInt(3)` per
 ///   droppable equipped item. Nothing in this sim equips a mob, so the sum is always
 ///   over an empty set.
 /// * **`Zombie`'s baby ×2.5.** It is real and it is unreachable: `dropExperience`
@@ -498,7 +498,7 @@ pub(super) fn mob_experience_reward(entity_type: &ResourceKey, rng: &mut SpawnRn
         "blaze" | "guardian" | "elder_guardian" | "evoker" | "breeze" => 10,
         "ravager" | "piglin_brute" => 20,
         "wither" => 50,
-        // `Animal.getBaseExperienceReward` and `AgeableWaterCreature`'s identical
+        // The animal override and the ageable water creature's identical
         // override: a roll, not a constant.
         "bee" | "camel" | "cat" | "chicken" | "cow" | "donkey" | "fox" | "goat" | "horse"
         | "llama" | "mooshroom" | "mule" | "ocelot" | "panda" | "pig" | "polar_bear"

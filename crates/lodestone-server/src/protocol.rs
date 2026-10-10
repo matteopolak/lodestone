@@ -280,6 +280,9 @@ mod tests {
         // Overridden for the same reason `encode_set_entity_data` above is: the
         // trait default emits nothing, so a missing forward on the box would pass
         // a parity assertion built on the default alone.
+        fn encode_set_equipment(&self, entity_id: i32, equipment: &[lodestone_model::EntityEquipment]) -> ServerDirective {
+            send(770 + entity_id * 10 + equipment.len() as i32)
+        }
         fn encode_set_entity_link(&self, source_id: i32, target_id: Option<i32>) -> ServerDirective {
             send(750 + source_id * 10 + target_id.unwrap_or(-1))
         }
@@ -417,6 +420,7 @@ mod tests {
             on_ground: false,
             metadata: Vec::new(),
             object_data: 0,
+            equipment: Vec::new(),
             leash_link: None,
         }
     }
@@ -498,6 +502,7 @@ mod tests {
             boxed.encode_set_entity_data(9, &fields),
             direct.encode_set_entity_data(9, &fields)
         );
+        assert_eq!(boxed.encode_set_equipment(9, &[]), direct.encode_set_equipment(9, &[]));
         assert_eq!(
             boxed.encode_set_entity_link(9, Some(11)),
             direct.encode_set_entity_link(9, Some(11))

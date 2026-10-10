@@ -45,6 +45,7 @@ impl<'w> MobSim<'w> {
                     // data at `0`; only add-entity-packet overrides carry one,
                     // and no projectile this sim spawns has one.
                     object_data: 0,
+                    equipment: Vec::new(),
                     // A projectile is never leashable, vanilla's own interface for that.
                     leash_link: None,
                 });
@@ -102,6 +103,7 @@ impl<'w> MobSim<'w> {
                 }],
                 // The stack travels as metadata (above), not as object data.
                 object_data: 0,
+                equipment: Vec::new(),
                 // A dropped item is never leashable.
                 leash_link: None,
             });
@@ -140,6 +142,7 @@ impl<'w> MobSim<'w> {
                 // and a client that knew it would still draw one sprite.
                 metadata: vec![MetadataField::ExperienceOrbValue { value: orb.value }],
                 object_data: 0,
+                equipment: Vec::new(),
                 // An experience orb is never leashable, vanilla's own interface for that.
                 leash_link: None,
             });
@@ -188,6 +191,7 @@ impl<'w> MobSim<'w> {
                 // three states `crate::gravity_tick::is_gravity_block` accepts all
                 // resolve.
                 object_data: tracked.state.raw() as i32,
+                equipment: Vec::new(),
                 // A falling block is never leashable, vanilla's own interface for that.
                 leash_link: None,
             });
@@ -232,8 +236,8 @@ impl<'w> MobSim<'w> {
                 // The paddle pair is emitted — the `PADDLE_BOAT`
                 // remainder — via `MetadataField::BoatPaddles`, whose own doc
                 // has the index-11/12 collision this loop is the guard for
-                // (every entry here is a boat by construction, never the
-                // living entity/thrown-trident that also claim those
+                // (every entry here is a boat by construction, never a
+                // living entity or thrown trident, which also claim those
                 // indices). Always included, even at its `false, false`
                 // default — the same "always included" convention
                 // `CreeperSwellDir`'s own doc states, and load-bearing here:
@@ -259,6 +263,7 @@ impl<'w> MobSim<'w> {
                 ],
                 // The boat supplies no additional spawn data.
                 object_data: 0,
+                equipment: Vec::new(),
                 // A boat is never leashable.
                 leash_link: None,
             });
@@ -290,6 +295,7 @@ impl<'w> MobSim<'w> {
                 metadata: vec![MetadataField::TntFuse(t.fuse)],
                 // No additional spawn data is needed.
                 object_data: 0,
+                equipment: Vec::new(),
                 // Never leashable.
                 leash_link: None,
             });
@@ -319,6 +325,7 @@ impl<'w> MobSim<'w> {
                     components: None,
                 }],
                 object_data: 0,
+                equipment: Vec::new(),
                 leash_link: None,
             });
         }
@@ -355,6 +362,7 @@ impl<'w> MobSim<'w> {
                 metadata,
                 // No additional spawn data is needed.
                 object_data: 0,
+                equipment: Vec::new(),
                 // Never leashable.
                 leash_link: None,
             });
@@ -387,6 +395,7 @@ impl<'w> MobSim<'w> {
                 metadata: Vec::new(),
                 // No additional spawn data is needed for this lightning entity.
                 object_data: 0,
+                equipment: Vec::new(),
                 // Never a `Leashable`.
                 leash_link: None,
             });

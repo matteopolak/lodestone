@@ -398,6 +398,7 @@ fn merge_leash_tick_owner_batches(mut batches: Vec<LeashTickOwnerBatch>) -> Vec<
 }
 
 mod block_ids;
+pub(crate) mod edit_site;
 
 mod world;
 
@@ -592,7 +593,7 @@ fn attr_present(attrs: &AttributeMap, path: &str) -> Option<f64> {
 /// templates this module knows (the zombie family, skeleton family,
 /// creeper, spider, and the common animals); for anything else it falls back
 /// to an empty [`AttributeMap`], whose [`AttributeMap::value`] already resolves
-/// every path to the generic `RangedAttribute` default (`max_health` 20,
+/// every path to the generic ranged attribute default (`max_health` 20,
 /// `attack_damage` 2, no armor, no knockback resistance) — the same "unknown
 /// type gets the generic default, never a guess" shape
 /// [`resolve_mob_shape`](crate::resolve_mob_shape) uses for census geometry.
@@ -2386,6 +2387,11 @@ pub struct MobSim<'w> {
     /// doors must not shift which denomination an orb merges into or which
     /// roll a despawn check sees.
     door_rng: SpawnRng,
+    /// Rolls the witch's weakness potion choice.
+    witch_rng: SpawnRng,
+    /// Timed potion effects that landed on a connected player, per player uuid,
+    /// drained by that player's connection ([`MobSim::take_player_effects`]).
+    pending_player_effects: Vec<(Uuid, lodestone_data::mob_effects::MobEffectId, i32, u32)>,
     /// Vanilla's own "special difficulty multiplier" getter fed to every spawn's
     /// [`lodestone_entity::spawn_equipment::populate_default_equipment_slots`]
     /// call. `0.0` by default — vanilla's own value for a fresh world's
@@ -2421,7 +2427,7 @@ pub struct MobSim<'w> {
     /// version-free sim does not hold. See
     /// [`take_reinforcement_calls`](Self::take_reinforcement_calls).
     pending_reinforcements: Vec<ReinforcementCall>,
-    /// Live `FallingBlockEntity`s, keyed by network entity id — the falling
+    /// Live falling blocks, keyed by network entity id — the falling
     /// sand/gravel a `crate::gravity_tick::TICK_GRAVITY` scheduled tick created.
     ///
     /// A plain map here rather than a registry in `lodestone-entity` beside
@@ -2644,7 +2650,7 @@ pub struct MobSim<'w> {
     difficulty: lodestone_model::Difficulty,
     /// The `universal_anger` game rule.
     universal_anger: bool,
-    /// Live rideable **vehicles** — every `AbstractBoat` a player has placed,
+    /// Live rideable **vehicles** — every boat a player has placed,
     /// keyed by network entity id.
     ///
     /// A registry of its own rather than a [`SimMob`], and that is the whole
@@ -2661,7 +2667,7 @@ pub struct MobSim<'w> {
     /// the motion is [`lodestone_physics::vehicle`]'s, shared with the client so
     /// a boat we *watch* and a boat we *ride* cannot disagree about a slab.
     vehicles: HashMap<i32, TrackedVehicle>,
-    /// Live `PrimedTnt`, keyed by network entity id — see [`TrackedTnt`] for
+    /// Live primed TNT, keyed by network entity id — see [`TrackedTnt`] for
     /// why this is a plain map beside [`vehicles`](Self::vehicles) rather than
     /// a [`SimMob`].
     tnt: HashMap<i32, TrackedTnt>,
@@ -2669,7 +2675,7 @@ pub struct MobSim<'w> {
     eyes: HashMap<i32, TrackedEye>,
     /// Drop-versus-shatter and drop-scatter rolls for [`eye_of_ender`].
     eye_rng: SpawnRng,
-    /// Live minecarts — every `AbstractMinecart` subclass, keyed by network
+    /// Live minecarts — every minecart subclass, keyed by network
     /// entity id. See [`TrackedMinecart`] for the shape and `mobs::minecart`'s
     /// own module doc for the physics.
     minecarts: HashMap<i32, TrackedMinecart>,
@@ -2899,7 +2905,7 @@ struct TrackedVehicle {
 /// matters (it is not selector-visible and nothing paths around it).
 ///
 /// The block state it imitates (vanilla's own block-state metadata field) is **not**
-/// carried here: this crate's only producers (`TntBlock::prime`'s several call
+/// carried here: this crate's only producers (TNT block's several call
 /// sites) always construct vanilla's own default tnt block state
 /// — nothing here ever sets it to
 /// anything else — so a per-entity field would
@@ -3319,6 +3325,10 @@ const GOAT_HORN_ROLL_SEED: u64 = 0x474F_4154_484F_524E;
 /// is separate. ASCII `"DOORBRKS"`.
 const DOOR_BREAK_ROLL_SEED: u64 = 0x444F_4F52_4252_4B53;
 
+/// Default seed for [`MobSim::witch_rng`]. See [`TAME_ROLL_SEED`] for why it
+/// is separate. ASCII `"WITCHPOT"`.
+const WITCH_POTION_SEED: u64 = 0x5749_5443_4850_4F54;
+
 /// Default seed for [`MobSim::reinforcement_rng`]. See [`TAME_ROLL_SEED`] for
 /// why it is separate. ASCII `"REINFORC"`.
 const REINFORCEMENT_ROLL_SEED: u64 = 0x5245_494E_464F_5243;
@@ -3340,7 +3350,7 @@ const ZOMBIE_REINFORCEMENT_CALLEE_CHARGE: f64 = 0.05;
 
 /// The `early_game.json` timeline's `gameplay/can_pillager_patrol_spawn` gate,
 /// transcribed as a plain tick count rather than read from a general timeline
-/// engine — this crate has no `EnvironmentAttributes`/timeline reader at all,
+/// engine — this crate has no environment attributes/timeline reader at all,
 /// and building one is out of scope for one boolean keyframe.
 /// `.cache/mc/26.2/src/data/minecraft/timeline/early_game.json`'s track has
 /// exactly two keyframes: `false` at tick `0`, `true` at tick `120000`, and

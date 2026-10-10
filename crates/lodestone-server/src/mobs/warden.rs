@@ -50,10 +50,10 @@ use lodestone_model::Vec3;
 
 use super::MobSim;
 
-/// `AngerManagement.MAX_ANGER`.
+/// Anger tracking.
 pub const MAX_ANGER: i32 = 150;
 
-/// `AngerManagement.DEFAULT_ANGER_DECREASE`, applied once per tick to every
+/// Anger tracking, applied once per tick to every
 /// listener's [`SimMob::warden_anger`](super::SimMob::warden_anger) —
 /// including a listener with no target, matching vanilla's own unconditional
 /// per-suspect decay.
@@ -77,7 +77,7 @@ pub const ANGRY_THRESHOLD: i32 = 80;
 /// jar-derived figure.
 pub const MELEE_RANGE_SQR: f64 = 9.0;
 
-/// `WardenAi.EMERGE_DURATION` — `Mth.ceil(133.59999F)`. How long a
+/// The ceiling of `133.6` ticks. How long a
 /// freshly-spawned warden holds `Pose::EMERGING` — invulnerable
 /// ([`SimMob::apply_damage`](super::SimMob::apply_damage)'s own warden arm)
 /// and outside the `FIGHT` activity's reach (see [`resolve_warden_anger`]'s
@@ -234,9 +234,9 @@ impl<'w> MobSim<'w> {
             if was_digging {
                 mob.warden_digging_ticks -= 1;
                 if mob.warden_digging_ticks == 0 {
-                    // `Digging.stop`: `body.remove(RemovalReason.DISCARDED)`
+                    // The digging state's stop: the body is removed
                     // — a silent despawn, not a death (no loot, no death
-                    // sound), the same `Entity.discard()` shape a creeper's
+                    // sound), the same plain-discard shape a creeper's
                     // own post-explosion removal already uses in this file.
                     discarded.push(mob.id);
                 }
@@ -300,8 +300,8 @@ impl<'w> MobSim<'w> {
                 && distance_sqr_xz(warden_pos, target_pos) <= SONIC_BOOM_RANGE_XZ_SQR
                 && distance_sqr_y(warden_pos, target_pos) <= SONIC_BOOM_RANGE_Y_SQR;
             if can_sonic_boom {
-                // `SonicBoom` runs *ahead* of `MeleeAttack` in
-                // `WardenAi::initFightActivity`'s own behaviour list — a
+                // Sonic boom runs *ahead* of melee attack in
+                // Warden brain's own behaviour list — a
                 // warden in range and off cooldown always booms rather than
                 // melees, exactly matching that ordering rather than the
                 // (dead in 26.2 — see this module's own doc for the
@@ -615,7 +615,7 @@ mod warden_anger_tests {
 
     /// A freshly-spawned warden is angry and in melee range on tick one —
     /// and lands **no** hit, because `EMERGE` outranks `FIGHT`
-    /// (`WardenAi::updateActivity`). The discriminating control against "the
+    /// (warden brain). The discriminating control against "the
     /// emerge gate does nothing": everything else about this setup is
     /// identical to `an_angry_warden_in_range_lands_a_real_hit`, which does
     /// land a hit once `warden_emerge_ticks` is zeroed.
@@ -761,8 +761,8 @@ mod warden_anger_tests {
     /// (never fought, never disturbed) past its emerge window and the full
     /// `DIGGING_COOLDOWN_TICKS` becomes digging-eligible, reports the real
     /// `Pose.DIGGING` ordinal, and despawns outright once
-    /// `DIGGING_DURATION_TICKS` elapses — `Digging.stop`'s own
-    /// `Entity.RemovalReason.DISCARDED`, not a state reset back to
+    /// `DIGGING_DURATION_TICKS` elapses — the digging state's own stop is a
+    /// removal, not a state reset back to
     /// `IDLING`.
     #[test]
     fn an_undisturbed_warden_eventually_digs_and_despawns() {
@@ -802,7 +802,7 @@ mod warden_anger_tests {
 
     /// **Control**: a warden kept angry throughout the whole cooldown window
     /// must never let `warden_dig_cooldown` reach zero —
-    /// `WardenAi.DIG_COOLDOWN_SETTER`'s own "refresh only while present"
+    /// Warden brain's own "refresh only while present"
     /// shape, ported directly. Without this refresh, the positive test above
     /// would pass for the wrong reason (any warden digs eventually,
     /// regardless of how much fighting it did).

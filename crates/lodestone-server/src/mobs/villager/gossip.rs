@@ -227,7 +227,7 @@ impl GossipContainer {
         }
     }
 
-    /// `EntityGossips.weightedValue` for one target, summed over every
+    /// Villager gossip for one target, summed over every
     /// tracked [`GossipType`] — this **is** `getReputation(target, t ->
     /// true)`, vanilla's own predicate every real caller (`Villager.
     /// getPlayerReputation`) passes. A predicate-narrowed variant is not

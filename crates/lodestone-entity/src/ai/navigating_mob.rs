@@ -65,7 +65,7 @@ impl MainHandItem for String {
 /// (`this.inLove = 600;`).
 pub const LOVE_TICKS: i32 = 600;
 
-/// Vanilla `AgeableMob::BABY_START_AGE`. The
+/// The
 /// age timer a freshly bred (or otherwise spawned) baby starts at; it counts
 /// up by one every tick until it reaches `0` (adult).
 pub const BABY_START_AGE: i32 = -24_000;
@@ -86,19 +86,14 @@ pub const PARENT_AGE_AFTER_BREEDING: i32 = 6000;
 /// (`Creeper::tick`, `explodeCreeper()`).
 pub const MAX_SWELL: i32 = 30;
 
-/// How long a mob remembers who hurt it, in ticks. Vanilla `LivingEntity::baseTick`
-/// clears `lastHurtByMob` once the record ages past this
-/// (`else if (this.tickCount - this.lastHurtByMobTimestamp > 100)`), which is
-/// what bounds `RetaliateGoal`'s retaliation window
-/// (`RetaliateGoal::canUse` reads exactly that pair).
+/// How long a mob remembers who hurt it, in ticks. Vanilla drops
+/// the attacker record once it ages past this (100 ticks), which is
+/// what bounds `RetaliateGoal`'s retaliation window.
 pub const LAST_HURT_BY_TICKS: i32 = 100;
 
 /// How long a mob stays panicked after taking damage, in ticks. Vanilla's
-/// `FleeInPanicGoal::shouldPanic` tests
-/// `getLastDamageSource() != null`, and `getLastDamageSource` self-clears once
-/// the stamp ages past this
-/// (`LivingEntity::getLastDamageSource`,
-/// `if (this.level().getGameTime() - this.lastDamageStamp > 40L)`).
+/// panic check tests whether a damage source is still recorded, and that
+/// record self-clears once its stamp ages past this (40 ticks of game time).
 ///
 /// Note this is a **different, shorter** window than [`LAST_HURT_BY_TICKS`]:
 /// vanilla panics off the *damage source* and retaliates off the *attacking
@@ -113,7 +108,7 @@ pub const PANIC_DAMAGE_TICKS: i32 = 40;
 /// Vanilla's own generic mob attribute-builder sets it to `16.0` for **every** mob.
 /// Note the *registry* default on the attribute itself is `32.0`
 /// and is the wrong number to copy: no
-/// living entity ever uses it, because the mob supplier always overrides it.
+/// living entity ever uses it, because every mob's attribute set overrides it.
 /// Species that raise it do so in their own attribute-builder — zombie and
 /// its subclasses `35.0`, blaze `48.0`,
 /// enderman `64.0` —
@@ -310,7 +305,7 @@ pub struct MobBody {
     /// Offsets this mob's goal cadence (its entity id, so neighbours alternate).
     ai_phase: u64,
     /// The tick a same-destination re-search last ran, so a wedged mob does not
-    /// recompute A\* every tick (vanilla `PathNavigation.recomputePath` refuses
+    /// recompute A\* every tick (vanilla navigator refuses
     /// to recompute within 20 ticks — `MAX_TIME_RECOMPUTE`).
     last_search_tick: Option<u64>,
     /// The actual position delta applied on the last [`advance`], i.e. the mob's
@@ -327,8 +322,8 @@ pub struct MobBody {
     /// a physics proposal to depenetrate.
     needs_live_unembed: bool,
     /// The stored downward speed carried between ticks while the mob is
-    /// falling toward a waypoint below it — vanilla's own `deltaMovement.y`
-    /// between calls to `LivingEntity.travel`, integrated by
+    /// falling toward a waypoint below it — vanilla's own vertical velocity,
+    /// integrated by
     /// [`FALL_GRAVITY_PER_TICK`]/[`FALL_VERTICAL_AIR_DRAG`] each
     /// [`advance`](Self::advance) call and reset to `0.0` the tick the mob is
     /// climbing, level, or has landed. Always `>= 0.0` (a magnitude; this
@@ -411,12 +406,11 @@ pub struct MobBody {
     /// partner's identity or of creating a new entity, only of the *event*
     /// happening).
     bred: bool,
-    /// Vanilla `AgeableMob::age`:
-    /// negative while a baby (ticks up toward `0`), positive as the
+    /// Negative while a baby (ticks up toward `0`), positive as the
     /// post-breeding parent cooldown (ticks down toward `0`), `0` for an
     /// adult with no cooldown. [`MobController::is_baby`] is `age < 0`.
     age: i32,
-    /// Vanilla `AgeableMob::AGE_LOCKED`: freezes [`age`](Self::age) from
+    /// Freezes [`age`](Self::age) from
     /// advancing at all while `true`. Toggled by the golden-dandelion
     /// interaction through [`NavigatingMob::toggle_age_lock`].
     age_locked: bool,
@@ -494,6 +488,7 @@ pub struct MobBody {
     going_home: bool,
     /// Host-fed: whether the world lets mobs change blocks.
     mob_griefing: bool,
+    difficulty: lodestone_model::Difficulty,
     /// Block changes goals asked for this tick, drained by the host.
     block_edits: Vec<crate::ai::BlockEdit>,
     /// Turtles only: whether the mob carries an egg.
@@ -585,16 +580,16 @@ pub struct MobBody {
     /// [`RetaliateGoal`](super::goals::RetaliateGoal) retaliates against.
     last_hurt_by: Option<Vec3>,
     /// Ticks remaining on [`last_hurt_by`](Self::last_hurt_by). Vanilla stores
-    /// the *timestamp* and compares against `tickCount`
-    /// (`LivingEntity::baseTick`); a countdown is the same thing with no need
+    /// the *timestamp* and compares against the entity's tick count;
+    /// a countdown is the same thing with no need
     /// for a shared clock, and it decays in `advance` alongside
     /// [`love_ticks`](Self::love_ticks) for the same reason — vanilla ages it
     /// every tick regardless of whether any goal ran.
     hurt_by_ticks: i32,
     /// The position of whoever most recently damaged this mob's **owner** —
     /// the owner-scoped twin of [`last_hurt_by`](Self::last_hurt_by). A
-    /// player is a `LivingEntity` like any other, so `DefendOwnerGoal`
-    /// reading `owner.getLastHurtByMob()` is the *same* field and the *same*
+    /// player is a living entity like any other, so the defend-owner goal
+    /// reading the owner's attacker record is the *same* field and the *same*
     /// 100-tick clear vanilla applies to a mob's own record — hence sharing
     /// [`LAST_HURT_BY_TICKS`] rather than a separate constant. Recorded by
     /// [`set_owner_hurt_by`](Self::set_owner_hurt_by), decayed in
@@ -608,8 +603,8 @@ pub struct MobBody {
     owner_hurt_by_ticks: i32,
     /// The position of whoever this mob's **owner** most recently attacked —
     /// drives [`AssistOwnerGoal`](super::goals::AssistOwnerGoal),
-    /// which reads vanilla's `owner.getLastHurtMob()` (again the owner's own
-    /// `LivingEntity` field, same [`LAST_HURT_BY_TICKS`] clear). Recorded by
+    /// which reads the owner's own last-attacked record (the same
+    /// [`LAST_HURT_BY_TICKS`] clear). Recorded by
     /// [`set_owner_hurt_target`](Self::set_owner_hurt_target).
     owner_hurt_target: Option<Vec3>,
     /// Ticks remaining on [`owner_hurt_target`](Self::owner_hurt_target),
@@ -634,7 +629,7 @@ pub struct MobBody {
     /// `WatchPlayerGoal` (its original consumer) lives in the goal — so a
     /// `find_nearest_target` that returned it raw would make every hostile mob
     /// in the world target the player from any distance. Vanilla's cut is
-    /// `TargetGoal::getFollowDistance`, i.e. exactly this attribute.
+    /// the targeting range of its target goals, i.e. exactly this attribute.
     follow_range: f64,
     /// Host injection point: the entity this mob holds a live persistent grudge
     /// against, or `None`. Drives [`MobController::angry_target`] — see that
@@ -718,23 +713,23 @@ pub struct MobBody {
     /// Set by [`MobController::request_gift`]; drained by the host once per
     /// tick, the same shape as [`eaten`](Self::eaten).
     gift_requested: bool,
-    /// Host injection point: vanilla `ShoulderRidingEntity.rideCooldownCounter`.
+    /// Host injection point: the shoulder-riding parrot.
     /// Drives [`MobController::ticks_since_shoulder_dismount`]. Defaults to
     /// `i32::MAX` — see that method's own doc for why the permissive default.
     ticks_since_shoulder_dismount: i32,
     /// Set by [`MobController::request_shoulder_ride`]; drained by the host
     /// once per tick, the same shape as [`gift_requested`](Self::gift_requested).
     shoulder_ride_requested: bool,
-    /// Host injection point: vanilla `PatrollingMonster.patrolling`. Drives
+    /// Host injection point: whether this raider is on patrol. Drives
     /// [`MobController::is_patrolling`].
     patrolling: bool,
-    /// Host injection point: vanilla `PatrollingMonster.patrolLeader`. Drives
+    /// Host injection point: whether this raider leads its patrol. Drives
     /// [`MobController::is_patrol_leader`].
     patrol_leader: bool,
     /// This mob's own current long-distance patrol waypoint, round-tripped
     /// through [`PatrolRouteGoal`](super::goals::PatrolRouteGoal)
     /// via [`MobController::patrol_target`]/[`MobController::set_patrol_target`]
-    /// — vanilla `PatrollingMonster.patrolTarget`.
+    /// — the patrolling raider's target.
     patrol_target: Option<Vec3>,
     /// Host injection point, refreshed once per tick for a non-leader only:
     /// the patrol's shared waypoint, as the host resolves it from nearby
@@ -931,6 +926,7 @@ impl<'w> NavigatingMob<'w> {
             nest: None,
             going_home: false,
             mob_griefing: false,
+            difficulty: lodestone_model::Difficulty::Normal,
             block_edits: Vec::new(),
             has_egg: false,
             laying_egg_ticks: 0,
@@ -1023,7 +1019,7 @@ impl<'w> NavigatingMob<'w> {
 
     /// Overwrites the mob's body yaw directly — the rotation half of
     /// [`set_position`](Self::set_position), for the same ridden-mount case:
-    /// vanilla drives a ridden `AbstractHorse`'s yaw from the rider's own
+    /// vanilla drives a ridden horse's yaw from the rider's own
     /// reported yaw (`Player.setYRot` propagating through
     /// `Entity.positionRider`), not from [`advance`]'s movement-direction
     /// derivation.
@@ -1039,12 +1035,9 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Replaces the mob's collision body — the host's hook for
-    /// vanilla `LivingEntity::refreshDimensions`, called when
+    /// resizing, called when
     /// [`set_age`](Self::set_age) crosses the baby/adult boundary and the
-    /// host recomputes its species' dimensions for the new state. Vanilla's
-    /// `AgeableMob::setAge` flips `DATA_BABY_ID` rather than calling
-    /// `refreshDimensions()` itself; the call happens indirectly, through
-    /// `AgeableMob::onSyncedDataUpdated` reacting to that flag changing.
+    /// host recomputes its species' dimensions for the new state.
     ///
     /// Updates the hitbox only. [`PathNavigator`](super::super::pathfinding::navigation::PathNavigator)
     /// keeps the width it was constructed with — rebuilding it here would
@@ -1368,7 +1361,7 @@ impl<'w> NavigatingMob<'w> {
 
     /// Sets the age timer directly — e.g. [`BABY_START_AGE`] to spawn this
     /// mob as a baby, or [`PARENT_AGE_AFTER_BREEDING`] to apply the
-    /// post-breeding cooldown (vanilla `AgeableMob::setAge`).
+    /// post-breeding cooldown.
     pub fn set_age(&mut self, age: i32) -> &mut Self {
         self.age = age;
         self
@@ -1548,6 +1541,12 @@ impl<'w> NavigatingMob<'w> {
     /// Host injection point: whether the world lets mobs change blocks.
     pub fn set_mob_griefing(&mut self, allowed: bool) -> &mut Self {
         self.mob_griefing = allowed;
+        self
+    }
+
+    /// Host injection point: the world difficulty.
+    pub fn set_difficulty(&mut self, difficulty: lodestone_model::Difficulty) -> &mut Self {
+        self.difficulty = difficulty;
         self
     }
 
@@ -1906,13 +1905,13 @@ impl<'w> NavigatingMob<'w> {
 
     /// Host injection point: refreshes
     /// [`PerchOnOwnerGoal`](super::goals::PerchOnOwnerGoal)'s
-    /// read of `ShoulderRidingEntity.rideCooldownCounter`.
+    /// read of the shoulder-dismount timer.
     pub fn set_ticks_since_shoulder_dismount(&mut self, ticks: i32) -> &mut Self {
         self.ticks_since_shoulder_dismount = ticks;
         self
     }
 
-    /// Host injection point: vanilla `TamableAnimal.setTame`'s `0x04` bit. See
+    /// Host injection point: the tamed flag. See
     /// the `tame` field's own doc comment for why this is not
     /// `set_owner(Some(..)).is_some()`.
     pub fn set_tame(&mut self, tame: bool) -> &mut Self {
@@ -1920,23 +1919,21 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
-    /// Host injection point: vanilla `TamableAnimal.setOrderedToSit`, the
-    /// persisted sitting *intent*.
+    /// Host injection point: the persisted sitting *intent*.
     pub fn set_ordered_to_sit(&mut self, ordered_to_sit: bool) -> &mut Self {
         self.ordered_to_sit = ordered_to_sit;
         self
     }
 
-    /// Host injection point: vanilla `PatrollingMonster.setPatrolling`/the
-    /// `patrolling` side effect of `setPatrolLeader`/`setPatrolTarget`.
+    /// Host injection point: the patrolling flag.
     pub fn set_patrolling(&mut self, patrolling: bool) -> &mut Self {
         self.patrolling = patrolling;
         self
     }
 
-    /// Host injection point: vanilla `PatrollingMonster.setPatrolLeader`.
-    /// **Does not** also set `patrolling` — unlike vanilla's own method, which
-    /// folds the two together — because the host here already calls
+    /// Host injection point: the patrol-leader flag.
+    /// **Does not** also set `patrolling` — vanilla folds the two
+    /// together — because the host here already calls
     /// [`set_patrolling`](Self::set_patrolling) explicitly at spawn time; two
     /// setters each doing one thing is more legible at the call site than one
     /// that quietly does two.
@@ -2011,11 +2008,10 @@ impl<'w> NavigatingMob<'w> {
     /// `attacker`.
     ///
     /// This is one call for vanilla's two separate records, because one hit
-    /// writes both: `LivingEntity::hurtServer` sets `lastDamageSource`
+    /// writes both: it records the damage source
     /// directly — which is what
     /// [`FleeInPanicGoal`](super::goals::FleeInPanicGoal) reads — *and*, when the source
-    /// has a living attacker, calls `LivingEntity::resolveMobResponsibleForDamage`,
-    /// which calls `setLastHurtByMob`, which is what
+    /// has a living attacker, records that attacker, which is what
     /// [`RetaliateGoal`](super::goals::RetaliateGoal) reads. They then
     /// expire on **different** timers ([`PANIC_DAMAGE_TICKS`] vs
     /// [`LAST_HURT_BY_TICKS`]), so both are tracked separately here.
@@ -2038,7 +2034,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Records that this mob's **owner** was just damaged by an attacker at
-    /// `attacker` — vanilla's `LivingEntity::setLastHurtByMob`, called on the
+    /// `attacker` — vanilla records this on the
     /// *owner's* entity rather than this one. The host (which alone knows who
     /// owns whom, and resolves a hit against a player) calls this on every
     /// tamed pet belonging to that player the instant the hit resolves; see
@@ -2055,8 +2051,8 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
-    /// Records that this mob's **owner** just attacked `target` — vanilla's
-    /// `LivingEntity::setLastHurtMob`, called on the owner's entity. Same
+    /// Records that this mob's **owner** just attacked `target` — vanilla
+    /// records it on the owner's entity. Same
     /// host-drives-it shape as [`set_owner_hurt_by`](Self::set_owner_hurt_by);
     /// see [`owner_hurt_target`](Self::owner_hurt_target)'s doc comment for
     /// the decay rule.
@@ -2225,7 +2221,7 @@ impl<'w> NavigatingMob<'w> {
                 }
             }
         }
-        // Vanilla `Animal::aiStep`/`AgeableMob::aiStep`: love mode and the age
+        // Love mode and the age
         // timer both age unconditionally every tick — not gated on whether any
         // goal ran this tick, and not reset by anything below.
         if self.love_ticks > 0 {
@@ -2241,9 +2237,9 @@ impl<'w> NavigatingMob<'w> {
             }
         }
         // Vanilla ages both damage records every tick with
-        // no goal involvement: `lastHurtByMob` is dropped past 100 ticks
-        // (`LivingEntity::baseTick`) and `getLastDamageSource` self-clears past
-        // 40 (`LivingEntity::getLastDamageSource`). Same "integrate unconditionally"
+        // no goal involvement: the attacker record is dropped past 100 ticks
+        // and the damage source self-clears past
+        // 40. Same "integrate unconditionally"
         // placement as the age/love/swell counters above, and for the same
         // reason — a goal that stops running must not freeze the timer that
         // ends it.
@@ -3195,7 +3191,7 @@ impl NavigatingMob<'_> {
             target.z.floor() as i32,
         ));
         // Reuse the active path unless it finished or the goal now wants a
-        // different destination block (vanilla `PathNavigation.moveTo` reuse).
+        // different destination block (vanilla navigator reuse).
         let same_target = self.active_target_block == Some(block);
         let recompute = self.navigator.is_done() || !same_target;
         if !recompute {
@@ -3402,6 +3398,20 @@ impl MobController for NavigatingMob<'_> {
 
     fn mob_griefing(&self) -> bool {
         self.mob_griefing
+    }
+
+    fn can_open_doors(&self) -> bool {
+        self.shape.can_open_doors
+    }
+
+    fn difficulty(&self) -> lodestone_model::Difficulty {
+        self.difficulty
+    }
+
+    fn path_cells_near(&self) -> Option<Vec<(i32, i32, i32)>> {
+        let path = self.navigator.path().filter(|p| !p.is_done())?;
+        let end = (path.next_index() + 2).min(path.len());
+        Some((0..end).filter_map(|i| path.node(i)).map(|n| (n.x, n.y, n.z)).collect())
     }
 
     fn request_block_edit(&mut self, edit: crate::ai::BlockEdit) {
@@ -3809,7 +3819,7 @@ impl MobController for NavigatingMob<'_> {
     /// whose range cut
     /// is its own targeting-conditions test — a full 3-D
     /// `distanceToSqr` against `max(range * visibility, 2.0)`, with `range` =
-    /// `TargetGoal::getFollowDistance` = the `FOLLOW_RANGE` attribute.
+    /// the `FOLLOW_RANGE` attribute.
     ///
     /// **This used to return `self.attack_target` — the field the goal calling
     /// it exists to write.** `NearestTargetGoal::can_use`
@@ -3974,7 +3984,7 @@ impl MobController for NavigatingMob<'_> {
         MobController::stop_navigation(self);
     }
 
-    /// Vanilla `EnderMan::teleport(x, y, z)` + `LivingEntity::randomTeleport`'s
+    /// Vanilla's enderman teleport plus its
     /// landing search — see [`MobController::validate_teleport_landing`]'s own
     /// doc comment for why this lives here rather than inside
     /// [`teleport_to`](Self::teleport_to). Walks the `(target.x, target.z)`
@@ -4121,7 +4131,7 @@ impl MobController for NavigatingMob<'_> {
 ///
 /// Vanilla does not do that either: `Mob` has **one** body carrying both
 /// `goalSelector` and `brain`, and a `Villager` navigates with exactly the same
-/// `PathNavigation` a `Zombie` does. So the faithful shape is one body
+/// Navigator a `Zombie` does. So the faithful shape is one body
 /// implementing both seams, which is what this is. Both traits are narrow views
 /// of the same mob; the overlapping methods (`position`, `move_to`,
 /// `navigation_done`, `look_at`, the RNG) resolve to the same state, so a brain
@@ -4215,15 +4225,15 @@ impl BrainMob for NavigatingMob<'_> {
         self.nearest_player
     }
 
-    /// Vanilla `LandRandomPos.getPos`: a random destination within `max_xz`
+    /// Vanilla random land position: a random destination within `max_xz`
     /// horizontally.
     ///
     /// **Two disclosed cuts, both in the same direction as the goal system's
     /// existing [`random_stroll_target`](MobController::random_stroll_target),
     /// which this mirrors on purpose.**
     ///
-    /// * `max_y` is unused. Vanilla samples a vertical offset and then calls
-    ///   `PathfinderMob.getWalkTargetValue`/`isWalkable` to validate the result;
+    /// * `max_y` is unused. Vanilla samples a vertical offset and then validates
+    ///   the result with a walkability test;
     ///   this follower snaps `pos.y` to whatever floor the path resolves to, so a
     ///   random vertical offset would only produce unreachable targets.
     /// * The position is **not** pre-validated as land. Vanilla's `getPos` retries
@@ -4821,7 +4831,7 @@ mod tests {
     #[test]
     fn love_ticks_and_age_decay_unconditionally_each_advance() {
         // Vanilla ages both timers every entity tick regardless of what goals
-        // ran (`Animal::aiStep`/`AgeableMob::aiStep`) — exercised here with no
+        // ran — exercised here with no
         // goals attached at all, just repeated `advance()` calls.
         let world = Arena {
             walls: HashSet::new(),
@@ -4837,7 +4847,7 @@ mod tests {
         assert!(!mob.is_in_love());
 
         // A baby's age counts up from BABY_START_AGE to 0 at one tick per
-        // tick (`AgeableMob::aiStep`), so growing up takes exactly
+        // tick, so growing up takes exactly
         // `-BABY_START_AGE` advances — predicted, not just "eventually 0".
         mob.set_age(-10);
         assert!(mob.is_baby());
@@ -5082,7 +5092,7 @@ mod tests {
     }
 
     /// A jump already ascending must not be re-triggered by a second call
-    /// that still sees `dy > max_up_step` — vanilla's own `MoveControl` stays
+    /// that still sees `dy > max_up_step` — vanilla's own move control stays
     /// in its `JUMPING` operation (ignoring new jump requests) until the mob
     /// is back on the ground, and re-seeding `-JUMP_POWER` mid-arc would
     /// silently cancel the ascent already under way.
@@ -5265,7 +5275,7 @@ mod tests {
 
     #[test]
     fn is_in_view_cone_implements_vanillas_exact_tolerance() {
-        // Hand-computed from `LivingEntity::isLookingAtMe`: accept iff
+        // Hand-computed from the view-cone rule: accept iff
         // `look · dir > 1.0 - coneSize / (adjustForDistance ? dist : 1.0)`.
         // Every case below is a closed-form dot and distance, so the expected
         // verdict is exact rather than a re-derivation of the code.
@@ -5694,15 +5704,14 @@ mod tests {
         //    `10.0`;
         //  * threat 3 blocks away, inside the `6.0F` every vanilla
         //    `FleeEntityGoal` registration uses (`Creeper::registerGoals`,
-        //    `AbstractSkeleton::registerGoals`,
+        //    Skeleton,
         //    `Spider::registerGoals`).
         mob.set_nearest_player(Some(Vec3::new(3.5, 0.0, 0.5)))
             .set_temptation(Some(Vec3::new(4.5, 0.0, 0.5)))
             .set_avoid_threat(Some(Vec3::new(-2.5, 0.0, 0.5)))
             // One hit records both the retaliation target and the panic
-            // window, exactly as vanilla's single `hurtServer` call writes both
-            // records (`LivingEntity::hurtServer` and
-            // `LivingEntity::resolveMobResponsibleForDamage`).
+            // window, exactly as vanilla's single damage call writes both
+            // records.
             .note_hurt(Some(Vec3::new(2.5, 0.0, 0.5)));
 
         let got = six_verdicts(&mut mob);
@@ -5822,8 +5831,8 @@ mod tests {
             "a hurt mob must adopt its attacker as its attack target"
         );
 
-        // Vanilla forgets the attacker past `LAST_HURT_BY_TICKS`
-        // (`LivingEntity::baseTick`). Prove the decay is real and lands on the
+        // Vanilla forgets the attacker past `LAST_HURT_BY_TICKS`.
+        // Prove the decay is real and lands on the
         // predicted tick rather than merely "eventually": one `note_hurt`
         // followed by exactly that many `advance`s must clear it, and one
         // fewer must not.
@@ -5889,8 +5898,7 @@ mod tests {
     #[test]
     fn panic_expires_on_its_own_shorter_window_while_retaliation_persists() {
         // The two records decay independently and on *different* timers
-        // (40 vs 100 — `LivingEntity::getLastDamageSource` and
-        // `LivingEntity::baseTick`). A single
+        // (40 vs 100). A single
         // shared timer would satisfy "panics then stops panicking", so the
         // discriminating assertion is that at tick 40 the mob has stopped
         // panicking *and is still hunting*.

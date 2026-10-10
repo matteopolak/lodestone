@@ -3,7 +3,7 @@
 //! [`super::TrackedDragon`] lives in `mobs/mod.rs`, the behaviour lives
 //! here. Drives [`crate::dragon::phase::PhaseManager`] and
 //! [`crate::dragon::crystal`] (this crate's pure, world-free port of
-//! `EnderDragon`/`EnderDragonPhaseManager`) with real inputs pulled from this
+//! Ender dragon/dragon phase manager) with real inputs pulled from this
 //! sim's own state — the production wiring `docs/dragon-fight.md` names as
 //! the missing piece.
 //!
@@ -113,12 +113,12 @@ pub const MAX_HEALTH: f32 = 200.0;
 
 /// The simplified orbit's radius, in blocks — not a vanilla constant (there
 /// is no single "orbit radius" in the real node-graph flight); chosen to sit
-/// comfortably inside `EnderDragonFight`'s own `192.0`-block player-tracking
+/// comfortably inside dragon fight's own `192.0`-block player-tracking
 /// range and `ARENA_SIZE_CHUNKS` (`8`, i.e. 128 blocks) footprint.
 pub const ORBIT_RADIUS: f64 = 40.0;
 
 /// The simplified orbit's height above the fight origin — chosen near
-/// `EnderDragonFight.DRAGON_SPAWN_Y` (`128`) scaled down for a more visible
+/// Dragon fight (`128`) scaled down for a more visible
 /// default arena; not itself a vanilla constant (see [`ORBIT_RADIUS`]).
 pub const ORBIT_HEIGHT: f64 = 70.0;
 
@@ -139,7 +139,7 @@ pub(super) const DRAGON_PHASE_SEED: u64 = 0x4452_4147_4f4e_5048;
 /// fields — a single flat threshold standing in for vanilla's several
 /// different named ranges (`20.0` scan, `150.0` charge, `4096.0` strafe),
 /// since this sim's player perception has no per-purpose targeting
-/// conditions the way `TargetingConditions` does. Documented here rather
+/// conditions the way targeting conditions does. Documented here rather
 /// than silently reusing one vanilla constant for all three purposes.
 const NEARBY_PLAYER_RANGE_SQ: f64 = 64.0 * 64.0;
 
@@ -196,11 +196,11 @@ pub struct EndDragonFightInit {
 pub struct DragonDeathOutcome {
     /// The arena/podium origin — the same `origin` [`MobSim::spawn_end_dragon_fight`]
     /// was called with, floored to a [`BlockPos`]. `exit_portal_blocks` was
-    /// computed against this, and it is also `EndPodiumFeature.getLocation`,
-    /// the column [`fight::set_dragon_killed`]'s egg placement resolves a
+    /// computed against this, and it is also the column
+    /// that [`fight::set_dragon_killed`]'s egg placement resolves a
     /// heightmap against.
     pub origin: BlockPos,
-    /// `crate::dragon::fight::EnderDragonFight.setDragonKilled`'s own three
+    /// The kill's own three
     /// effects — see [`fight::DeathOutcome`]'s own doc for each field.
     pub outcome: fight::DeathOutcome,
     /// `crate::dragon::fight::exit_portal_blocks(origin, true)` — every block
@@ -223,7 +223,7 @@ pub struct DragonDeathOutcome {
 }
 
 impl<'w> MobSim<'w> {
-    /// `EnderDragonFight.createNewDragon` — spawns a fresh dragon at
+    /// Dragon fight — spawns a fresh dragon at
     /// `128` blocks above `origin` (`DRAGON_SPAWN_Y`), full health, starting
     /// in [`phase::Phase::HoldingPattern`]. Returns the new entity's network
     /// id.
@@ -702,11 +702,11 @@ impl<'w> MobSim<'w> {
         })
     }
 
-    /// `EnderDragonFight.setDragonKilled`, driven from a real kill for the
+    /// Dragon fight, driven from a real kill for the
     /// first time — the exact gap `crate::dragon`'s module doc names
     /// ("`dragon::fight::FightState` is ready to receive one whenever that
     /// lands"). Ensures a [`fight::FightState`] exists (lazily, matching
-    /// `EnderDragonFight.createDefault()` — nothing calls
+    /// Dragon fight — nothing calls
     /// [`crate::dragon::fight::scan_state`] yet, so a fresh state is the
     /// correct assumption for the *first* death this session ever sees),
     /// applies [`fight::set_dragon_killed`], and queues the result —
@@ -726,7 +726,7 @@ impl<'w> MobSim<'w> {
         let outcome = fight::set_dragon_killed(state);
         let block_pos = BlockPos::new(origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32);
         let exit_portal_blocks = fight::exit_portal_blocks(block_pos, true);
-        // `EnderDragonFight.init`'s lazy shuffle — the first death this
+        // Dragon fight's lazy shuffle — the first death this
         // session sees creates the pool, exactly matching `dragon_fight`'s
         // own lazy-creation shape just above.
         if self.dragon_gateways.is_none() {
@@ -757,7 +757,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// The live `FightState.dragon_killed` flag — `false` until this
-    /// session's first real kill (`EnderDragonFight.createDefault()`'s own
+    /// session's first real kill (dragon fight's own
     /// starting value), and re-asserted `true` by every subsequent one.
     /// Feeds [`boss_bars`](Self::boss_bars)/[`dragon_boss_bar`](Self::dragon_boss_bar),
     /// closing the "hardcoded `false`" gap [`boss_bars`](Self::boss_bars)'s
@@ -796,6 +796,7 @@ impl<'w> MobSim<'w> {
                 on_ground: false,
                 metadata: vec![crate::protocol::MetadataField::DragonPhase(d.phase.current().id())],
                 object_data: 0,
+                equipment: Vec::new(),
                 leash_link: None,
             });
         }
@@ -810,7 +811,7 @@ impl<'w> MobSim<'w> {
     /// # Two named simplifications
     ///
     /// * **The bar's id is the dragon's own entity uuid**, not a separate
-    ///   `Mth.createInsecureUUID` the way `EnderDragonFight.init` mints one.
+    ///   random uuid the way the fight mints one.
     ///   This sim tracks one bar per dragon 1:1 and nothing needs the two
     ///   identities to differ — see [`crate::protocol::BossBarSnapshot::id`]'s
     ///   own doc.
@@ -1277,7 +1278,7 @@ mod tests {
         assert!(deaths[0].outcome.place_dragon_egg);
     }
 
-    /// `EnderDragonFight.setDragonKilled`'s one-time egg: a *second* death in
+    /// Dragon fight's one-time egg: a *second* death in
     /// the same session (a respawned dragon killed again — modelled here as
     /// a second `spawn_dragon`/kill, since this file has no respawn
     /// integration yet) must not re-place it, even though the exit portal is

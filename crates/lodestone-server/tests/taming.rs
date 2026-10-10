@@ -281,7 +281,7 @@ fn the_wrong_item_and_an_untameable_species_are_both_left_alone() {
 ///
 /// Three arms, and the middle one is the point: the same player reconnecting with
 /// a **different runtime entity id** still owns their pet, because vanilla's
-/// `TamableAnimal.DATA_OWNERUUID_ID` is a uuid on the wire and in NBT alike. An
+/// owner reference is a uuid on the wire and in NBT alike. An
 /// implementation keyed on the entity id passes the first arm and fails the
 /// second, which is precisely the bug the two-field
 /// [`PlayerIdentity`] exists to avoid.
@@ -817,7 +817,7 @@ fn only_gold_breeds_a_horse_and_only_once_it_is_tame() {
 // The mob-mounts-mob passenger model
 // ---------------------------------------------------------------------------
 
-/// `AbstractHorse.doPlayerRide`: an empty-handed click on a tamed adult horse
+/// Horse: an empty-handed click on a tamed adult horse
 /// boards the actor rather than passing or re-rolling the tame attempt.
 #[test]
 fn an_empty_handed_click_on_a_tamed_adult_horse_mounts_it() {
@@ -859,7 +859,7 @@ fn a_second_player_cannot_board_an_already_mounted_horse() {
 }
 
 /// Vanilla's `isVehicle() || isBaby()` guard at the very top of
-/// `AbstractHorse.mobInteract` routes a baby straight to `Animal.mobInteract`,
+/// Horse routes a baby straight to `Animal.mobInteract`,
 /// which has no empty-handed arm — so a tame baby horse can be fed and bred
 /// but never boarded, even though [`MobSim::mount_mob`] itself has no age
 /// check of its own (that is `interact_horse`'s job, not the universal
@@ -1197,7 +1197,7 @@ fn taming_publishes_hearts_on_success_and_smoke_on_failure() {
 ///
 /// # Why the "not the other one" arm is the point
 ///
-/// Index 18 is a `BYTE` for `TamableAnimal.DATA_FLAGS_ID`, `AbstractHorse.DATA_ID_FLAGS`,
+/// Index 18 is a `BYTE` for tameables, horses,
 /// `Sheep.DATA_WOOL_ID` and `Shulker.DATA_COLOR_ID` (checked against the committed
 /// jar dump by `lodestone-v26-2`'s own `index_eighteen_tests`), and the tame bit is
 /// `0x04` on a tamable against `FLAG_TAME = 2` on a horse. One shared "tamed"
