@@ -1,6 +1,3 @@
-import java.util.ArrayList;
-import java.util.List;
-
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -8,66 +5,51 @@ import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Property;
 
 /**
- * Extracts, for every built-in block state, whether the state conducts
- * redstone power (a bat roosts only under such a block).
+ * Extracts, for every built-in block state of the running server, whether the
+ * state conducts redstone power (a bat roosts only under such a block).
  *
  * <pre>
  *   C &lt;stateCount&gt; &lt;blockCount&gt;
- *   B &lt;firstStateIdOfBlock&gt; &lt;blockName&gt;
- *   K &lt;countOfTrueStates&gt;
- *   P &lt;startStateId&gt; &lt;bitstring, up to 256 chars&gt;
+ *   S &lt;0|1&gt; &lt;namespaced state string, properties in registry order&gt;
  * </pre>
+ *
+ * States are named, not numbered, so the consumer joins them to its own ids.
  */
 public final class RedstoneConductorOracle {
     public static void main(String[] args) {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
 
-        StringBuilder blocks = new StringBuilder();
-        List<Boolean> bits = new ArrayList<>();
-        Block previousBlock = null;
+        StringBuilder rows = new StringBuilder();
         int count = 0;
-        int trues = 0;
         for (BlockState state : Block.BLOCK_STATE_REGISTRY) {
-            int id = Block.BLOCK_STATE_REGISTRY.getId(state);
-            if (id != count) {
-                throw new IllegalStateException(
-                        "BLOCK_STATE_REGISTRY is not iterating in ascending id order: expected "
-                                + count + ", got " + id);
-            }
-            if (state.getBlock() != previousBlock) {
-                previousBlock = state.getBlock();
-                blocks.append("B ").append(id).append(' ')
-                        .append(BuiltInRegistries.BLOCK.getKey(previousBlock)).append('\n');
-            }
             boolean conducts = state.isRedstoneConductor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
-            bits.add(conducts);
-            if (conducts) {
-                trues++;
+            rows.append("S ").append(conducts ? '1' : '0').append(' ')
+                    .append(BuiltInRegistries.BLOCK.getKey(state.getBlock()));
+            if (!state.getProperties().isEmpty()) {
+                rows.append('[');
+                boolean first = true;
+                for (Property<?> property : state.getProperties()) {
+                    if (!first) {
+                        rows.append(',');
+                    }
+                    first = false;
+                    rows.append(property.getName()).append('=').append(valueName(state, property));
+                }
+                rows.append(']');
             }
+            rows.append('\n');
             count++;
         }
+        System.out.print("# RedstoneConductorOracle dump from the real server.\n"
+                + "# C <stateCount> <blockCount>\n# S <conducts 0|1> <state>\n"
+                + "C " + count + " " + BuiltInRegistries.BLOCK.size() + "\n" + rows);
+    }
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("# RedstoneConductorOracle dump from the real 26.2 server (protocol 776).\n");
-        sb.append("# A bit is set when the state conducts redstone power.\n");
-        sb.append("# C <stateCount> <blockCount>\n");
-        sb.append("# B <firstStateIdOfBlock> <blockName>\n");
-        sb.append("# K <countOfTrueStates>\n");
-        sb.append("# P <startStateId> <bitstring up to 256 chars>\n");
-        sb.append("C ").append(count).append(' ').append(BuiltInRegistries.BLOCK.size()).append('\n');
-        sb.append(blocks);
-        sb.append("K ").append(trues).append('\n');
-        for (int start = 0; start < bits.size(); start += 256) {
-            int end = Math.min(start + 256, bits.size());
-            sb.append("P ").append(start).append(' ');
-            for (int state = start; state < end; state++) {
-                sb.append(bits.get(state) ? '1' : '0');
-            }
-            sb.append('\n');
-        }
-        System.out.print(sb);
+    private static <T extends Comparable<T>> String valueName(BlockState state, Property<T> property) {
+        return property.getName(state.getValue(property));
     }
 }

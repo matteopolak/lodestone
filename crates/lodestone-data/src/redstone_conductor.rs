@@ -2,13 +2,10 @@
 //!
 //! # What it is
 //!
-//! One bit per global block-state id, taken from a headless 26.2 server walk
-//! (`just oracle-redstone-conductor`). A bat roosts only under a conducting
-//! block, so a slab, glass, leaves or an extended piston do not count.
-//!
-//! Only the 26.2 state-id prefix is captured; the block-state table is an
-//! append-only union with later releases, so a state added after 26.2 is
-//! unknown here and the caller picks a fallback.
+//! One bit per global block-state id, taken from a headless server walk of the
+//! `mc-version` release (`just oracle-redstone-conductor`). A bat roosts only
+//! under a conducting block, so a slab, glass, leaves or an extended piston do
+//! not count.
 //!
 //! # How to change it
 //!
@@ -19,13 +16,9 @@ use crate::{block_states::StateId, generated_redstone_conductor as table};
 
 pub use table::STATE_COUNT;
 
-/// Whether the state conducts redstone power, or `None` for a state added
-/// after 26.2.
+/// Whether the state conducts redstone power.
 #[must_use]
-pub fn conducts(state: StateId) -> Option<bool> {
+pub fn conducts(state: StateId) -> bool {
     let id = state.raw() as usize;
-    if state.raw() >= STATE_COUNT {
-        return None;
-    }
-    Some(table::REDSTONE_CONDUCTOR[id / 64] >> (id % 64) & 1 != 0)
+    table::REDSTONE_CONDUCTOR[id / 64] >> (id % 64) & 1 != 0
 }

@@ -858,8 +858,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   each number together with whether it has been validated against this build's
   canonical item census or remains owned by a protocol/session registry.
 - [Redstone conductor table](./redstone-conductor.md) — A per-block-state bit for
-  "conducts redstone power", taken from the real 26.2 server. A bat roosts only under
-  such a block.
+  "conducts redstone power", taken from the real server of the `mc-version` release. A
+  bat roosts only under such a block.
 - [Redstone execution model](./redstone-execution.md) — How a redstone change is
   executed: the neighbour-notification cascade, the scheduled-tick drain, and the
   palette-derived reaction classification (`lodestone_server::redstone_graph`) that

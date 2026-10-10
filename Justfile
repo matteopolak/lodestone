@@ -272,18 +272,19 @@ oracle-face-occlusion:
         java -cp "/work:$CP" FaceOcclusionOracle
       ' > crates/lodestone-data/tests/support/face_occlusion_jvm.txt
 
-# Re-dump whether each 26.2 block state conducts redstone power (the bat's
-# roost test). Needs Apple `container`. Follow with `just regen-redstone-conductor`.
+# Re-dump whether each block state of the `mc-version` release conducts redstone
+# power (the bat's roost test). Needs Apple `container`. Follow with
+# `just regen-redstone-conductor`.
 oracle-redstone-conductor:
     #!/usr/bin/env bash
     set -euo pipefail
-    CACHE="$(cd .cache/mc/{{pinned_mc}} && pwd)"
+    CACHE="$(cd .cache/mc/{{mc_version}} && pwd)"
     HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
     container system start >/dev/null 2>&1 || true
     container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
       eclipse-temurin:25-jdk bash -c '
         set -e
-        CP="/mc/versions/{{pinned_mc}}/server-{{pinned_mc}}.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        CP="/mc/versions/{{mc_version}}/server-{{mc_version}}.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
         mkdir -p /work && cp /oracle/RedstoneConductorOracle.java /work/
         javac -cp "$CP" -d /work /work/RedstoneConductorOracle.java
         java -cp "/work:$CP" RedstoneConductorOracle
