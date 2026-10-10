@@ -87,7 +87,7 @@
 //! any new table the same way.
 
 use super::goal::Goal;
-use super::goals::{
+use super::goals::{LeapAtTargetGoal, 
     AvoidEntityGoal, BreedGoal, FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal,
     NearestAttackableTargetGoal, OwnerHurtByTargetGoal, OwnerHurtTargetGoal, RandomLookAroundGoal,
     RandomStrollGoal, SitWhenOrderedToGoal, SwellGoal,
@@ -385,6 +385,16 @@ pub fn owner_hurt_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// is a [`Coverage::Missing`] row.
 pub fn nearest_attackable_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(NearestAttackableTargetGoal::new())
+}
+
+/// A pounce with vertical velocity `0.4` (spider, wolf).
+pub fn leap_0_4(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(LeapAtTargetGoal::new(0.4))
+}
+
+/// A pounce with vertical velocity `0.3` (cat).
+pub fn leap_0_3(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(LeapAtTargetGoal::new(0.3))
 }
 
 /// The breed speed factor `1.0` — every farm animal registers it at exactly that value

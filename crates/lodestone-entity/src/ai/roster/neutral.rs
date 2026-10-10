@@ -163,7 +163,7 @@ use crate::ai::goals::{
 
 use super::{
     Registration, Selector, SpeciesContext, breed_1_0, float_goal, hurt_by_target,
-    look_at_player_8, melee_attack, owner_hurt_by_target, owner_hurt_target, random_look_around,
+    leap_0_4, look_at_player_8, melee_attack, owner_hurt_by_target, owner_hurt_target, random_look_around,
     sit_when_ordered, stroll,
 };
 
@@ -502,7 +502,7 @@ pub static WOLF: &[Registration] = &[
     // The remaining gap is a goal
     // *type*: no llama-strength roll exists in this crate, not the tame flag.
     Registration::missing(Selector::Goal, 3, "Wolf.WolfAvoidEntityGoal(Llama)"),
-    Registration::missing(Selector::Goal, 4, "LeapAtTargetGoal"),
+    Registration::goal(4, "LeapAtTargetGoal", leap_0_4),
     Registration::goal(5, "MeleeAttackGoal", melee_attack),
     // Vanilla's own follow-owner goal for this species. The
     // two distances are the wolf's own — a cat's are `(10, 5)` and a parrot's

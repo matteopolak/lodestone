@@ -125,7 +125,7 @@ use crate::ai::goals::{FleeSunGoal, MeleeAttackGoal, NearestAttackableTargetGoal
 
 use super::{
     Registration, Selector, SpeciesContext, avoid_entity, float_goal, hurt_by_target,
-    look_at_player_8, melee_attack, nearest_attackable_target, random_look_around, stroll, swell,
+    leap_0_4, look_at_player_8, melee_attack, nearest_attackable_target, random_look_around, stroll, swell,
 };
 
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
@@ -212,9 +212,7 @@ pub static SPIDER: &[Registration] = &[
     // The `isScared` filter is not modelled — see `mobs.rs`'s `avoided_species`,
     // which discloses it can only make a spider flee slightly more often.
     Registration::goal(2, "AvoidEntityGoal(Armadillo)", avoid_entity),
-    // Vanilla's own leap-at-target goal — no equivalent goal exists; a spider will
-    // walk into melee range instead of pouncing.
-    Registration::missing(Selector::Goal, 3, "LeapAtTargetGoal"),
+    Registration::goal(3, "LeapAtTargetGoal", leap_0_4),
     // Vanilla's own spider attack goal extends `MeleeAttackGoal`; its only
     // addition is
     // refusing to attack while the spider has a passenger, which this sim has no

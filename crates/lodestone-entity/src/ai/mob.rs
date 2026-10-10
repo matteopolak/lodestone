@@ -350,6 +350,22 @@ pub trait MobController {
         from_y
     }
 
+    /// Whether the mob stood on solid ground at its last move.
+    fn is_on_ground(&self) -> bool {
+        true
+    }
+
+    /// The mob's velocity in blocks per tick.
+    fn velocity(&self) -> Vec3 {
+        Vec3::new(0.0, 0.0, 0.0)
+    }
+
+    /// Replaces the mob's velocity with `velocity`: a horizontal part that
+    /// carries on under drag and a vertical part that launches it.
+    fn launch(&mut self, velocity: Vec3) {
+        let _ = velocity;
+    }
+
     /// The current attack target's position, if the mob has one.
     fn attack_target(&self) -> Option<Vec3> {
         None

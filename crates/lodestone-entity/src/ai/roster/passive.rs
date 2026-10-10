@@ -109,7 +109,7 @@ use crate::ai::goals::{
 
 use super::{
     LOOK_PROBABILITY, Registration, Selector, SpeciesContext, breed_1_0, float_goal,
-    look_at_player_6, look_at_player_8, random_look_around, sit_when_ordered, stroll,
+    leap_0_3, look_at_player_6, look_at_player_8, random_look_around, sit_when_ordered, stroll,
 };
 
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
@@ -343,9 +343,7 @@ pub static CAT: &[Registration] = &[
     // perch on, same host-computed-candidate shape as `CatLieOnBedGoal` above
     // (`MobController::cat_sit_target`).
     Registration::goal(7, "CatSitOnBlockGoal", cat_sit_on_block_0_8),
-    // Vanilla's own leap-at-target goal — pounces at its own attack
-    // target. No goal type here models a leap.
-    Registration::missing(Selector::Goal, 8, "LeapAtTargetGoal"),
+    Registration::goal(8, "LeapAtTargetGoal", leap_0_3),
     // `OcelotAttackGoal(this)` — an untamed cat's own chicken-stalking
     // hunt. It picks its target internally (a nearby-entities-of-class query) rather
     // than through `targetSelector`, so there is no companion target row to

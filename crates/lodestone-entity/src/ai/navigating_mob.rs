@@ -3297,6 +3297,18 @@ impl MobController for NavigatingMob<'_> {
         self.last_look = Some(Vec3::new(self.pos.x + dx, self.pos.y, self.pos.z + dz));
     }
 
+    fn is_on_ground(&self) -> bool {
+        self.on_ground
+    }
+
+    fn velocity(&self) -> Vec3 {
+        self.velocity
+    }
+
+    fn launch(&mut self, velocity: Vec3) {
+        self.apply_knockback(velocity);
+    }
+
     fn attack_target(&self) -> Option<Vec3> {
         self.attack_target
     }

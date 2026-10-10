@@ -174,3 +174,8 @@ mod locomotion_tests;
 #[cfg(test)]
 #[path = "tests/bees.rs"]
 mod bees_tests;
+
+/// The pounce goal: spider leaps, zombie does not.
+#[cfg(test)]
+#[path = "tests/leap.rs"]
+mod leap_tests;

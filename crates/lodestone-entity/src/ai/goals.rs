@@ -370,6 +370,64 @@ impl Goal for MeleeAttackGoal {
     }
 }
 
+/// A pounce: from 2 to 4 blocks away from its attack target and standing on
+/// the ground, the mob springs at it with a one-in-five chance per check.
+///
+/// The spring keeps a fifth of the current horizontal velocity, adds 0.4 blocks
+/// per tick toward the target, and sets the vertical velocity to the goal's own
+/// `lift`. The goal runs (holding the movement and jump flags) until the mob
+/// lands.
+#[derive(Debug)]
+pub struct LeapAtTargetGoal {
+    lift: f64,
+    target: Option<Vec3>,
+}
+
+impl LeapAtTargetGoal {
+    /// A pounce with the given vertical velocity.
+    #[must_use]
+    pub fn new(lift: f64) -> Self {
+        Self { lift, target: None }
+    }
+}
+
+impl Goal for LeapAtTargetGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Jump, Flag::Move])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        let Some(target) = mob.attack_target() else {
+            return false;
+        };
+        let d = distance_sqr(target, mob.position());
+        if !(4.0..=16.0).contains(&d) || !mob.is_on_ground() {
+            return false;
+        }
+        self.target = Some(target);
+        mob.next_i32(reduced_tick_delay(5)) == 0
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        !mob.is_on_ground()
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        let Some(target) = self.target else { return };
+        let at = mob.position();
+        let moving = mob.velocity();
+        let (mut dx, mut dz) = (target.x - at.x, target.z - at.z);
+        let len_sq = dx * dx + dz * dz;
+        if len_sq > 1.0e-7 {
+            let len = len_sq.sqrt();
+            dx = dx / len * 0.4 + moving.x * 0.2;
+            dz = dz / len * 0.4 + moving.z * 0.2;
+        }
+        mob.launch(Vec3::new(dx, self.lift, dz));
+    }
+}
+
+
 /// Swells toward detonation near its target, or backs off and shrinks
 /// otherwise.
 ///
