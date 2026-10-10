@@ -155,11 +155,11 @@ fn cooking_recipe(kind: &str, ingredient: &str) -> Option<CookingRecipe> {
     }
     // `charcoal.json`'s ingredient is the tag `#minecraft:logs_that_burn`
     // (the same nine-species log/wood tag `base_burn_duration` already
-    // resolves for fuel — `FLAMMABLE_WOOD_SPECIES`/`strip_species_suffix`,
+    // resolves for fuel — `wood_species`,
     // defined below) — any log or wood block of a flammable species smelts
     // into charcoal. Modeled as a fallback rather than 36 literal arms
     // (9 species x {log, wood, stripped_log, stripped_wood}).
-    if kind == "Smelting" && strip_species_suffix(ingredient, &["_log", "_wood"], FLAMMABLE_WOOD_SPECIES).is_some() {
+    if kind == "Smelting" && wood_species(ingredient, &["_log", "_wood"]).is_some() {
         return Some(CookingRecipe {
             result: "minecraft:charcoal",
             count: 1,
@@ -374,45 +374,16 @@ fn cooking_recipe_table(kind: &str, ingredient: &str) -> Option<CookingRecipe> {
     }
 }
 
-/// The nine flammable overworld wood species that appear across the
-/// planks/slabs/stairs/doors/etc. tags (`logs_that_burn.json` is the
-/// authoritative list minus bamboo, which has no log form but does appear in
-/// the other wood-product tags) — see the module doc comment.
-const FLAMMABLE_WOOD_SPECIES: &[&str] = &[
-    "oak",
-    "spruce",
-    "birch",
-    "jungle",
-    "acacia",
-    "dark_oak",
-    "pale_oak",
-    "mangrove",
-    "cherry",
-];
-
-/// Same as [`FLAMMABLE_WOOD_SPECIES`] plus bamboo, for the tags that include
-/// bamboo's plank-derived products (planks/slabs/stairs/doors/trapdoors/
-/// fences/fence_gates/pressure_plates/buttons/signs/hanging_signs/shelves —
-/// verified directly against each tag file, see the module doc comment).
-const FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO: &[&str] = &[
-    "oak",
-    "spruce",
-    "birch",
-    "jungle",
-    "acacia",
-    "dark_oak",
-    "pale_oak",
-    "mangrove",
-    "cherry",
-    "bamboo",
-];
-
-fn strip_species_suffix<'a>(item: &'a str, suffixes: &[&str], species: &[&str]) -> Option<&'a str> {
+/// The wood-species prefix of `item` when it is `<species>[stripped_]<suffix>`
+/// and `<species>_planks` is a real item. Deriving the species from the planks
+/// item keeps a newly added wood family (and bamboo) fuel without a name list;
+/// the non-flammable nether woods are excluded by the caller.
+fn wood_species<'a>(item: &'a str, suffixes: &[&str]) -> Option<&'a str> {
     let path = item.strip_prefix("minecraft:")?;
     for suffix in suffixes {
         if let Some(prefix) = path.strip_suffix(suffix) {
             let prefix = prefix.strip_prefix("stripped_").unwrap_or(prefix);
-            if species.contains(&prefix) {
+            if lodestone_data::item::Item::from_name(&format!("minecraft:{prefix}_planks")).is_some() {
                 return Some(prefix);
             }
         }
@@ -481,7 +452,7 @@ pub fn base_burn_duration(item: &str) -> i32 {
         }
         "minecraft:scaffolding" => return BASE / 4,
         "minecraft:azalea" | "minecraft:flowering_azalea" => return BASE / 2,
-        "minecraft:leaf_litter" => return BASE / 2,
+        "minecraft:leaf_litter" | "minecraft:mangrove_propagule" => return BASE / 2,
         _ => {}
     }
 
@@ -490,12 +461,16 @@ pub fn base_burn_duration(item: &str) -> i32 {
     }
 
     if let Some(path) = item.strip_prefix("minecraft:") {
-        if let Some(rest) = path.strip_suffix("_wool") {
-            let _ = rest;
+        if path.ends_with("_wool") || path.ends_with("_wool_stairs") {
             return BASE / 2;
         }
-        if let Some(rest) = path.strip_suffix("_carpet") {
-            let _ = rest;
+        if path.ends_with("_wool_slab") || path.ends_with("_cushion") {
+            return BASE / 4;
+        }
+        // Only the dyed carpets burn: moss carpets have no matching wool.
+        if let Some(dye) = path.strip_suffix("_carpet")
+            && lodestone_data::item::Item::from_name(&format!("minecraft:{dye}_wool")).is_some()
+        {
             return 1 + BASE / 3;
         }
         if let Some(rest) = path.strip_suffix("_banner") {
@@ -504,62 +479,61 @@ pub fn base_burn_duration(item: &str) -> i32 {
         }
     }
 
-    if strip_species_suffix(item, &["_log", "_wood"], FLAMMABLE_WOOD_SPECIES).is_some() {
+    if wood_species(item, &["_log", "_wood"]).is_some() {
         return BASE * 3 / 2;
     }
-    if strip_species_suffix(item, &["_sapling"], FLAMMABLE_WOOD_SPECIES).is_some() {
+    if wood_species(item, &["_sapling"]).is_some() {
         return BASE / 2;
     }
-    if strip_species_suffix(item, &["_planks"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_planks"]).is_some() {
         return BASE * 3 / 2;
     }
-    if strip_species_suffix(item, &["_stairs"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_stairs"]).is_some() {
         return BASE * 3 / 2;
     }
-    if strip_species_suffix(item, &["_slab"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_slab"]).is_some() {
         return BASE * 3 / 4;
     }
-    if strip_species_suffix(item, &["_trapdoor"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_trapdoor"]).is_some() {
         return BASE * 3 / 2;
     }
-    if strip_species_suffix(item, &["_pressure_plate"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO)
+    if wood_species(item, &["_pressure_plate"])
         .is_some()
     {
         return BASE * 3 / 2;
     }
-    if strip_species_suffix(item, &["_fence_gate"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_fence_gate"]).is_some() {
         return BASE * 3 / 2;
     }
-    if strip_species_suffix(item, &["_fence"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_fence"]).is_some() {
         return BASE * 3 / 2;
     }
-    if strip_species_suffix(item, &["_shelf"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_shelf"]).is_some() {
         return BASE * 3 / 2;
     }
-    if strip_species_suffix(item, &["_hanging_sign"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some()
+    if wood_species(item, &["_hanging_sign"]).is_some()
     {
         return BASE * 4;
     }
     // `_sign` must be checked after `_hanging_sign` for the same reason as
     // `_fence`/`_fence_gate` above.
-    if strip_species_suffix(item, &["_sign"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_sign"]).is_some() {
         return BASE;
     }
-    if strip_species_suffix(item, &["_door"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_door"]).is_some() {
         return BASE;
     }
-    if strip_species_suffix(item, &["_button"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
+    if wood_species(item, &["_button"]).is_some() {
         return BASE / 2;
     }
     // Boats are per-species items (`oak_boat`, ...) in the real fuel-value
     // table's boat entries; bamboo's boat is irregularly named `bamboo_raft`,
     // handled as its own concrete entry rather than the `_boat` suffix.
-    // Chest boats, nested inside the real boat tag, are not modeled — a
-    // narrower, documented gap (chest boats are a rare fuel source).
-    if item == "minecraft:bamboo_raft" {
+    // Chest boats burn like the plain boats.
+    if item == "minecraft:bamboo_raft" || item == "minecraft:bamboo_chest_raft" {
         return BASE * 6;
     }
-    if strip_species_suffix(item, &["_boat"], FLAMMABLE_WOOD_SPECIES).is_some() {
+    if wood_species(item, &["_boat", "_chest_boat"]).is_some() {
         return BASE * 6;
     }
 
@@ -1009,9 +983,38 @@ mod tests {
         assert!(f.output().is_none());
     }
 
+    /// Every registry item's burn time equals the reference table extracted from
+    /// the 26.3 item registrations (`furnace_fuel_reference.txt`), so a missing
+    /// fuel and a wrongly granted one both fail, new wood families and the
+    /// wool, cushion and chest-boat additions included.
+    #[test]
+    fn every_item_burns_for_its_reference_time() {
+        let reference: std::collections::HashMap<&str, i32> = include_str!("furnace_fuel_reference.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| {
+                let (item, ticks) = l.split_once(' ').expect("item and ticks");
+                (item, ticks.parse().expect("numeric ticks"))
+            })
+            .collect();
+        assert!(reference.len() > 250, "the reference table loaded");
+        let mut wrong = Vec::new();
+        for item in lodestone_data::item::Item::all() {
+            let want = reference.get(item.name()).copied().unwrap_or(0);
+            let got = base_burn_duration(item.name());
+            if got != want {
+                wrong.push(format!("{}: got {got}, reference {want}", item.name()));
+            }
+        }
+        assert!(wrong.is_empty(), "burn-time mismatches: {wrong:#?}");
+        for item in ["minecraft:poplar_planks", "minecraft:red_wool_stairs", "minecraft:blue_cushion"] {
+            assert!(base_burn_duration(item) > 0, "{item} is a fuel");
+        }
+    }
+
     #[test]
     fn base_burn_durations_match_fuel_values_java() {
-        // FuelValues.vanillaBurnTimes's .add chain, baseUnit = 200.
+        // Base unit 200, as in the reference fuel registrations.
         assert_eq!(base_burn_duration("minecraft:lava_bucket"), 20_000);
         assert_eq!(base_burn_duration("minecraft:coal_block"), 16_000);
         assert_eq!(base_burn_duration("minecraft:blaze_rod"), 2_400);

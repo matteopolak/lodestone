@@ -236,6 +236,12 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_lightning_fires)
     }
 
+    /// Drains the cushions a lightning bolt broke since the last call, for the
+    /// driver to publish their break sound and particles.
+    pub fn take_lightning_broken_cushions(&mut self) -> Vec<super::cushion::CushionBroken> {
+        std::mem::take(&mut self.pending_lightning_cushions)
+    }
+
     /// Drains every projectile-vs-block impact recorded since the last call —
     /// see [`ProjectileBlockHit`]'s own doc for why this sim hands the write
     /// to a driver rather than resolving it here. The driver is expected to

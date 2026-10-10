@@ -27,6 +27,8 @@ The End exit uses the same resolver with `consume` off: nothing is spent and no 
 
 `respawn::store` writes a `respawn` compound into the player file's preserved fields (`pos` int array, `dimension`, `yaw`, `pitch`, `forced` byte only when true), the reference layout, so files round-trip. `respawn::load` reads it at join; a malformed record or unhosted dimension loads as no point. The native loop stores every iteration (a cheap compare); the browser loop keeps the point for the session only.
 
+The straw bed never sets a respawn point and has a per-dimension rule (`world_spawn::straw_bed_rule`): in the Overworld a click lays the player down (`SleepVote::lay_down_straw`) and the bed's head cell is destroyed, with the break-leave sound, when they get up or a night skip wakes them (`SleepVote::take_vacated_straw_beds`, drained in `tick.rs`); in the Nether and End the click itself destroys the head. The foot is never removed. The dark-only sleep check is not modelled for any bed.
+
 ## How to change it
 
 - New respawn block: add a `Found` variant and a branch in `respawn::resolve_in`.

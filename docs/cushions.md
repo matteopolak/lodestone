@@ -10,6 +10,7 @@ The 26.3 cushion: a dyed, block-attached entity (1 x 0.25 slab) placed on the to
 * **State.** `MobSim` keeps cushions in a sidecar map (`TrackedCushion`), like minecarts. They stream from `push_cushion_snapshots` with `MetadataField::CushionColor` (index 8, dye serializer) so the 26.3 encoder writes the dump row.
 * **Seating.** Interact seats the player unless sneaking or occupied and sends a passenger list; shift or a break dismounts. The client seat is the generic attachment fallback in `lodestone_ecs::riding`, 0.35 below the feet.
 * **Breaking.** A survival or creative hit removes it; survival drops the coloured item. Every 101st tick a cushion, seated or not, breaks if fire is in its box or its support is gone (`plan_cushion_checks`, applied in `tick.rs` only after a complete world read). Breaking a seated cushion queues the rider's ejection, the queue a thrown-off mount uses, so the rider's connection sends the empty passenger list whoever broke it.
+* **Lightning.** A bolt that hits breaks every cushion meeting its strike volume (3 blocks each way horizontally, 3 below, 9 above), dropping the item and ejecting a rider (`MobSim::break_cushions_near_bolt`). The break queues in `take_lightning_broken_cushions`; `tick.rs` drains it into `publish_broken`.
 * **Persistence.** `saved_entities` writes each cushion as a `minecraft:cushion` record with a `color` dye name and a `block_pos` int array; `restore_saved` and `restore_native` bring it back with its uuid, so the owner-set tombstones remove a cushion broken after a save. Both the Anvil and the native stores take it through the generic record path.
 * **Sounds and particles.** `effects::cushion_sound` (place, sit, get up, break) and `effects::cushion_break_particles` (ten wool-textured particles, `WorldEffect::BlockParticles`) are published to every player by `cushion::publish_sound` / `publish_broken`; the shell predicts none of them. The block particle is the only particle with an option payload the encoder writes: the block-state wire id after the particle id.
 * **Drawing.** Corpus model `cushion` (`special::cushion_model`), pose `non_living_vehicle_placement("cushion")`, sheet chosen by `EntityVariant::Dyed` in `entity_appearance_sheet`. It is pickable and has no shadow.
@@ -18,7 +19,6 @@ The 26.3 cushion: a dyed, block-attached entity (1 x 0.25 slab) placed on the to
 
 * Rules: edit `cushion.rs` and its tests; the tick and interact wiring only call into it.
 * New metadata: `session.rs` `MetadataField` plus the 26.2 family encoder constants, checked against the jar dump in `crates/versions/26.3/tests/support`.
-* Not wired: destroy-on-leave straw-bed rules, and lightning breaking a cushion.
 
 ## Configuration
 

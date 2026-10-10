@@ -132,6 +132,11 @@ struct SleepVoteInner {
     /// `LOCAL_PLAYER_ENTITY_ID` otherwise (singleplayer) — so a multi-player
     /// roster never collides two connections under one key.
     sleepers: Vec<i32>,
+    /// The straw bed head each sleeper lies in, by player id.
+    straw_beds: Vec<(i32, lodestone_model::BlockPos)>,
+    /// Straw bed heads whose sleeper has left since the tick loop last drained
+    /// them; the loop destroys each.
+    vacated_straw_beds: Vec<lodestone_model::BlockPos>,
     /// The number of players who can vote. This crate has no spectator
     /// concept, so every connected player counts.
     active: u32,
@@ -153,15 +158,31 @@ impl SleepVote {
         }
     }
 
+    /// Records a player lying down in the straw bed whose head is at `head`;
+    /// the bed is queued for destruction when they get up or are woken.
+    pub fn lay_down_straw(&self, entity_id: i32, head: lodestone_model::BlockPos) {
+        self.lay_down(entity_id);
+        let mut inner = self.0.lock().expect("sleep vote lock poisoned");
+        if !inner.straw_beds.iter().any(|(id, _)| *id == entity_id) {
+            inner.straw_beds.push((entity_id, head));
+        }
+    }
+
+    /// Drains the straw bed heads whose sleepers have left.
+    pub(crate) fn take_vacated_straw_beds(&self) -> Vec<lodestone_model::BlockPos> {
+        std::mem::take(&mut self.0.lock().expect("sleep vote lock poisoned").vacated_straw_beds)
+    }
+
     /// Records a player getting up — `ServerBound::PlayerCommand`'s
     /// `STOP_SLEEPING` (action `0`), or the tick loop's wake-all
     /// ([`Self::clear`]).
     pub fn get_up(&self, entity_id: i32) {
-        self.0
-            .lock()
-            .expect("sleep vote lock poisoned")
-            .sleepers
-            .retain(|&id| id != entity_id);
+        let mut inner = self.0.lock().expect("sleep vote lock poisoned");
+        inner.sleepers.retain(|&id| id != entity_id);
+        if let Some(index) = inner.straw_beds.iter().position(|(id, _)| *id == entity_id) {
+            let (_, head) = inner.straw_beds.swap_remove(index);
+            inner.vacated_straw_beds.push(head);
+        }
     }
 
     /// Sets the number of players who can vote — the shared
@@ -184,7 +205,10 @@ impl SleepVote {
     /// Empties the roster after a skip so the next tick does not re-register
     /// the just-woken players.
     pub(crate) fn clear(&self) {
-        self.0.lock().expect("sleep vote lock poisoned").sleepers.clear();
+        let mut inner = self.0.lock().expect("sleep vote lock poisoned");
+        inner.sleepers.clear();
+        let woken = std::mem::take(&mut inner.straw_beds);
+        inner.vacated_straw_beds.extend(woken.into_iter().map(|(_, head)| head));
     }
 }
 
@@ -415,6 +439,25 @@ mod tests {
             state.sleepers[0].since_game_tick, state.sleepers[1].since_game_tick,
             "a stayer and a returnee must not share a clock"
         );
+    }
+
+    /// A straw bed is queued for destruction exactly when its sleeper gets up
+    /// or is woken by a skip, and not while they still lie in it.
+    #[test]
+    fn a_straw_bed_is_vacated_when_its_sleeper_leaves_or_is_woken() {
+        let head = lodestone_model::BlockPos::new(1, 64, 2);
+        let other = lodestone_model::BlockPos::new(9, 64, 9);
+        let vote = SleepVote::new();
+        vote.lay_down_straw(1, head);
+        vote.lay_down_straw(2, other);
+        assert!(vote.take_vacated_straw_beds().is_empty(), "still asleep");
+        vote.get_up(1);
+        assert_eq!(vote.take_vacated_straw_beds(), vec![head]);
+        assert!(vote.take_vacated_straw_beds().is_empty(), "drained once");
+        vote.clear();
+        assert_eq!(vote.take_vacated_straw_beds(), vec![other], "a skip wakes the rest");
+        vote.get_up(2);
+        assert!(vote.take_vacated_straw_beds().is_empty(), "already woken");
     }
 
     /// The roster round-trips the shared vote: `lay_down`/`get_up`/`set_active`

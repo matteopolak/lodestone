@@ -1840,6 +1840,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     let mut pending_block_edits: Vec<lodestone_entity::ai::BlockEdit> = Vec::new();
     let mut pending_projectile_block_hits: Vec<crate::mobs::ProjectileBlockHit> = Vec::new();
     let mut pending_lightning_fires: Vec<BlockPos> = Vec::new();
+    let mut pending_vacated_straw_beds: Vec<BlockPos> = Vec::new();
     let mut pending_falling_block_effects: Vec<crate::gravity_tick::FallingBlockEffect> = Vec::new();
     let mut pending_block_entity_effects: Vec<crate::block_entities::BlockEntityTickEffect> = Vec::new();
     let mut pending_reinforcement_calls: Vec<crate::mobs::ReinforcementCall> = Vec::new();
@@ -4515,6 +4516,29 @@ async fn run_tick_loop_with_weather_impl<W>(
         // only a frozen pathfinding snapshot (`take_lightning_fires`'s own
         // doc), so the live write happens here, gated exactly like
         // `LightningBolt.spawnFire` — air, and the fire block's can survive.
+        // A straw bed whose sleeper got up or was woken is destroyed (head cell
+        // only). A cell whose chunk is not resident is retried next tick.
+        pending_vacated_straw_beds.extend(sleep_vote.take_vacated_straw_beds());
+        for head in std::mem::take(&mut pending_vacated_straw_beds) {
+            match resident_tick_state_id(&*world, head.x, head.y, head.z) {
+                None => pending_vacated_straw_beds.push(head),
+                Some(old) if crate::world_spawn::is_straw_bed(old) => {
+                    let air = crate::chunk::air_state();
+                    if resident_tick_set_block(&*world, head.x, head.y, head.z, air) {
+                        block_tick_out.publish_change(head.x, head.y, head.z, old, air);
+                        if let Some(effect) = crate::effects::straw_bed_destroyed(head) {
+                            block_tick_out.publish_effect(effect);
+                        }
+                    } else {
+                        pending_vacated_straw_beds.push(head);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        for cushion in mobs.with(MobSim::take_lightning_broken_cushions) {
+            crate::cushion::publish_broken(&block_tick_out, cushion.position, cushion.color);
+        }
         pending_lightning_fires.extend(mobs.with(MobSim::take_lightning_fires));
         let mut lightning_fires = std::mem::take(&mut pending_lightning_fires).into_iter();
         while let Some(pos) = lightning_fires.next() {

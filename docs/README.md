@@ -430,6 +430,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `FriendsView`. `app::friends::FriendsApp` executes it (a named worker with its own
   current-thread runtime natively, a local-task handle in the browser).
   `menu::friends` is the presentation.
+- [Furnace fuel](./furnace-fuel.md) — Burn times for furnace-family fuel,
+  `lodestone_server::furnace::base_burn_duration`. The smoker and blast furnace halve
+  the result.
 - [Fuzz harness](./fuzz-harness.md) — `lodestone-fuzz` holds the hermetic decoder
   properties and the tick-aligned differential harness. The differential replay is a
   deterministic, bounded action script that compares a caller-named block-state region

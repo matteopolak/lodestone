@@ -229,6 +229,21 @@ pub fn cushion_sound(kind: CushionSound, pos: Vec3, seed: i64) -> Option<WorldEf
     })
 }
 
+/// The sound a straw bed gives off when its rule destroys it, at the block
+/// centre.
+#[must_use]
+pub fn straw_bed_destroyed(pos: lodestone_model::BlockPos) -> Option<WorldEffect> {
+    let name = "minecraft:block.straw_bed.break_leave";
+    sound_exists(name).then(|| WorldEffect::Sound {
+        sound: name.to_owned(),
+        category: SoundCategory::Block,
+        pos: Vec3::new(f64::from(pos.x) + 0.5, f64::from(pos.y) + 0.5, f64::from(pos.z) + 0.5),
+        volume: 1.0,
+        pitch: 1.0,
+        seed: i64::from(pos.x) ^ (i64::from(pos.z) << 20) ^ (i64::from(pos.y) << 40),
+    })
+}
+
 /// The burst of wool-textured particles a breaking cushion throws: ten of them,
 /// two thirds of the way up its 0.25 box, spread a quarter of its width and
 /// height, at speed 0.05. `color` is the dye ordinal.

@@ -88,6 +88,8 @@ use lodestone_model::{BlockPos, Difficulty, ResourceKey, Vec3};
 use crate::lightning::{self, BoltState, LightningEffect, Strike};
 use crate::mob_spawn::SpawnRng;
 
+use crate::cushion::Aabb;
+
 use super::MobSim;
 
 /// One live lightning sidecar — the lightning twin of [`super::orbs::OrbState`]:
@@ -354,6 +356,30 @@ impl<'w> MobSim<'w> {
             self.convert_species(id, new_type);
         }
         self.reap_dead();
+        self.break_cushions_near_bolt(bolt_pos);
+    }
+
+    /// A bolt breaks every cushion whose box meets the strike volume: 3 blocks
+    /// either side horizontally, 3 below and 9 above the strike. Each drops its
+    /// item, and a seated rider is ejected.
+    fn break_cushions_near_bolt(&mut self, bolt_pos: Vec3) {
+        let reach = lightning::DAMAGE_RADIUS;
+        let volume = Aabb {
+            min: [bolt_pos.x - reach, bolt_pos.y - reach, bolt_pos.z - reach],
+            max: [bolt_pos.x + reach, bolt_pos.y + 6.0 + reach, bolt_pos.z + reach],
+        };
+        let mut hit: Vec<i32> = self
+            .cushions
+            .iter()
+            .filter(|(_, c)| Aabb::cushion_at(c.position).intersects(&volume))
+            .map(|(&id, _)| id)
+            .collect();
+        hit.sort_unstable();
+        for id in hit {
+            if let Some(broken) = self.break_cushion(id, true) {
+                self.pending_lightning_cushions.push(broken);
+            }
+        }
     }
 
     /// Replaces mob `id` with a freshly built mob of `new_type` at the same
@@ -643,6 +669,30 @@ mod tests {
         );
         let far_health_after = sim.get(far).expect("still alive").health();
         assert_eq!(far_health_after, far_health_before, "a mob far outside DAMAGE_RADIUS must be untouched");
+    }
+
+    /// A bolt breaks a cushion inside its strike volume, dropping the item and
+    /// reporting the break for the driver; one outside the volume survives.
+    #[test]
+    fn a_hit_tick_breaks_a_nearby_cushion_and_spares_a_far_one() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let near = sim.spawn_cushion(Vec3::new(5.5, 1.0, 4.5), 0.0, 14);
+        let far = sim.spawn_cushion(Vec3::new(8.5, 1.0, 4.5), 0.0, 3);
+        assert!(sim.mount_cushion(near, 77, false));
+        sim.spawn_lightning_bolts(
+            vec![Strike { pos: BlockPos::new(4, 1, 4), visual_only: false }],
+            &mut rng(),
+        );
+        sim.tick_lightning(Difficulty::Peaceful, &mut rng());
+
+        assert!(!sim.is_cushion(near), "a cushion 1.5 blocks from the bolt breaks");
+        assert!(sim.is_cushion(far), "a cushion 4.5 blocks away is outside the 3-block reach");
+        let broken = sim.take_lightning_broken_cushions();
+        assert_eq!(broken.len(), 1);
+        assert_eq!((broken[0].color, broken[0].rider), (14, Some(77)));
+        assert!(sim.take_lightning_broken_cushions().is_empty(), "the drain empties the queue");
+        assert_eq!(sim.item_count(), 1, "the broken cushion drops its item");
     }
 
     /// The turtle species overrides the default with a lethal hit — a struck

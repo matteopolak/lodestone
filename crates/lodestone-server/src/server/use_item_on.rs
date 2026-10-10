@@ -597,8 +597,29 @@ where
         // this interaction; the 100-tick deep-sleep threshold prevents a
         // single daytime click from advancing the vote. Registration is
         // idempotent, so a repeat click does not double-count.
-        sleep_vote.lay_down(player_entity_id);
         let bed_dimension = source.dimension().unwrap_or(crate::dimension::Dimension::Overworld);
+        if crate::world_spawn::is_straw_bed(clicked_bed) {
+            let Some(head) = crate::world_spawn::straw_bed_head(pos, clicked_bed) else {
+                return Ok(());
+            };
+            match crate::world_spawn::straw_bed_rule(bed_dimension) {
+                crate::world_spawn::StrawBedRule::DestroyOnUse => {
+                    let head_state = source.block_state_id(head.x, head.y, head.z);
+                    if crate::world_spawn::is_straw_bed(head_state) {
+                        let air = crate::chunk::air_state();
+                        source.set_block(head.x, head.y, head.z, air);
+                        apply(conn, state, proto.encode_block_update(head.x, head.y, head.z, air)).await?;
+                        block_ticks.publish_change(head.x, head.y, head.z, head_state, air);
+                        if let Some(effect) = crate::effects::straw_bed_destroyed(head) {
+                            block_ticks.publish_effect(effect);
+                        }
+                    }
+                }
+                crate::world_spawn::StrawBedRule::DestroyOnLeave => sleep_vote.lay_down_straw(player_entity_id, head),
+            }
+            return Ok(());
+        }
+        sleep_vote.lay_down(player_entity_id);
         if is_bed_block(clicked_bed)
             && crate::respawn::bed_works_in(bed_dimension)
             && is_legal_bed_respawn(source, pos, player_pos)

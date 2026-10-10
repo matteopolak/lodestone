@@ -97,6 +97,7 @@ impl<'w> MobSim<'w> {
             trader_rng: SpawnRng::new(WANDERING_TRADER_SPAWN_SEED),
             lightning_bolts: HashMap::new(),
             pending_lightning_fires: Vec::new(),
+            pending_lightning_cushions: Vec::new(),
             pending_projectile_block_hits: Vec::new(),
             workstation_claims: villager::WorkstationClaims::new(),
             bed_claims: villager::BedClaims::new(),

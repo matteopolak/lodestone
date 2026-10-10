@@ -2732,6 +2732,9 @@ pub struct MobSim<'w> {
     /// live `ChunkStore`, so this sim cannot place the fire itself. Drained by
     /// [`take_lightning_fires`](Self::take_lightning_fires).
     pending_lightning_fires: Vec<BlockPos>,
+    /// Cushions a bolt broke this tick, awaiting the driver's sound and
+    /// particles. Drained by [`take_lightning_broken_cushions`](Self::take_lightning_broken_cushions).
+    pending_lightning_cushions: Vec<cushion::CushionBroken>,
     /// Every projectile-vs-block impact this tick's
     /// [`resolve_projectile_impacts`](Self::resolve_projectile_impacts) found,
     /// awaiting the driver — see [`ProjectileBlockHit`]'s own doc for why this

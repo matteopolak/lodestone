@@ -537,6 +537,36 @@ pub(crate) fn is_straw_bed(state: BlockStateId) -> bool {
     state.block() == Block::StrawBed
 }
 
+/// What a straw bed does to the player who uses it, per dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StrawBedRule {
+    /// Sleeping works (when dark) and the bed is destroyed when the sleeper leaves.
+    DestroyOnLeave,
+    /// Sleeping is refused and the bed is destroyed by the click itself.
+    DestroyOnUse,
+}
+
+/// The straw bed rule of `dimension`: the Overworld lets the sleeper in and
+/// destroys the bed on leaving; the Nether and the End destroy it on use.
+pub(crate) fn straw_bed_rule(dimension: crate::dimension::Dimension) -> StrawBedRule {
+    match dimension {
+        crate::dimension::Dimension::Overworld => StrawBedRule::DestroyOnLeave,
+        crate::dimension::Dimension::Nether | crate::dimension::Dimension::End => StrawBedRule::DestroyOnUse,
+    }
+}
+
+/// The head cell of the bed half at `pos`: `pos` itself for a head, one step
+/// along `facing` for a foot. Only the head is ever destroyed by the straw
+/// bed rule, leaving the foot standing.
+pub(crate) fn straw_bed_head(pos: lodestone_model::BlockPos, state: BlockStateId) -> Option<lodestone_model::BlockPos> {
+    let part = state.properties().iter().find_map(|(k, v)| (*k == "part").then_some(*v))?;
+    if part == "head" {
+        return Some(pos);
+    }
+    let (dx, dz) = bed_facing_steps(state)?;
+    Some(lodestone_model::BlockPos::new(pos.x + dx, pos.y, pos.z + dz))
+}
+
 /// Whether right-clicking the bed at `bed` should set the player's respawn
 /// point — beds/anchors need to be validated for a legal respawn spot before
 /// being accepted.
@@ -1278,6 +1308,20 @@ mod tests {
 
     /// The straw bed sleeps but never sets a spawn: it is outside the `beds` tag
     /// (the 26.3 tag file lists the sixteen dyed beds only) and is its own family.
+    #[test]
+    fn straw_bed_rules_and_head_cell() {
+        use crate::dimension::Dimension;
+        assert_eq!(straw_bed_rule(Dimension::Overworld), StrawBedRule::DestroyOnLeave);
+        assert_eq!(straw_bed_rule(Dimension::Nether), StrawBedRule::DestroyOnUse);
+        assert_eq!(straw_bed_rule(Dimension::End), StrawBedRule::DestroyOnUse);
+        let state = |value: &str| BlockStateId::from_state_str(value).expect("a real state");
+        let at = lodestone_model::BlockPos::new(4, 70, 4);
+        let foot = state("minecraft:straw_bed[part=foot,facing=east]");
+        let head = state("minecraft:straw_bed[part=head,facing=east]");
+        assert_eq!(straw_bed_head(at, foot), Some(lodestone_model::BlockPos::new(5, 70, 4)));
+        assert_eq!(straw_bed_head(at, head), Some(at));
+    }
+
     #[test]
     fn the_straw_bed_is_a_bed_that_does_not_set_a_spawn() {
         let state = |value: &str| BlockStateId::from_state_str(value).expect("a real state");
