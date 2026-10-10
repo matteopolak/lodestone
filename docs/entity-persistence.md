@@ -54,7 +54,7 @@ None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/` (
 
 ## Not persisted yet
 
-Tipped-arrow contents; active effects, burn time and piglin/warden/allay/sniffer/camel/armadillo/axolotl timers (carried verbatim from an import, but the sim's own values are not written); equipment, saddles and horse armour (carried, not modelled); all-black cats and lightning-brown mooshrooms; name-tag styling; passengers, boats and minecarts; projectiles on the native path other than via `fields`; villager trades the generated table lacks (replaced by table offers, use counts lost).
+Tipped-arrow contents; active effects, burn time and piglin/warden/allay/sniffer/camel/armadillo/axolotl timers (carried verbatim from an import, but the sim's own values are not written); saddles and horse armour (carried, not modelled); all-black cats and lightning-brown mooshrooms; name-tag styling; passengers, boats and minecarts; projectiles on the native path other than via `fields`; villager trades the generated table lacks (replaced by table offers, use counts lost).
 
 ## Dependencies
 

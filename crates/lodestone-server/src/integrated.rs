@@ -1048,16 +1048,21 @@ fn restore_entity_rosters(
         }
     };
     for dimension in Dimension::ALL {
-        match native.map(|storage| storage.load_live_entities(builtin_dimension(dimension))) {
+        match native.map(|storage| storage.load_live_roster(builtin_dimension(dimension))) {
             Some(Ok(Some(saved))) => {
-                let restored = if saved.is_empty() {
+                let restored = if saved.entities.is_empty() {
                     0
                 } else {
-                    population(dimension).with(|sim| sim.restore_native(&saved))
+                    population(dimension).with(|sim| sim.restore_native(&saved.entities))
+                };
+                let raids = if saved.raids.is_empty() {
+                    0
+                } else {
+                    population(dimension).with(|sim| sim.restore_native_raids(&saved.raids))
                 };
                 tracing::info!(
-                    "native entity load ({dimension:?}): restored {restored} of {} roster entries",
-                    saved.len()
+                    "native entity load ({dimension:?}): restored {restored} of {} roster entries and {raids} raids",
+                    saved.entities.len()
                 );
             }
             Some(Err(err)) if dimension == Dimension::Overworld => {
@@ -1223,7 +1228,13 @@ fn save_native_dirty_chunks(
             .filter_map(|dimension| {
                 let runtime = context.world_state.dimension_runtime(dimension)?;
                 let builtin = builtin_dimension(dimension);
-                Some((builtin, runtime.mobs().with(|sim| sim.native_entities(builtin))))
+                Some((
+                    builtin,
+                    runtime.mobs().with(|sim| crate::world_storage::NativeRoster {
+                        entities: sim.native_entities(builtin),
+                        raids: sim.native_raids(),
+                    }),
+                ))
             })
             .collect::<Vec<_>>();
         context.storage.replace_live_entity_rosters(rosters)?;
@@ -7352,7 +7363,27 @@ mod tests {
         pose_only.uuid = [0x83; 16];
         pose_only.state = crate::world_storage::NativeEntityState::default();
         let expected = vec![alive.clone(), pose_only];
-        storage.replace_live_entities(BuiltinDimension::Overworld, expected.clone()).unwrap();
+        let raid = lodestone_storage_schema::RaidRecord {
+            raid_uuid: vec![0x77; 16],
+            center_x: 4.5,
+            center_y: 64.0,
+            center_z: 4.5,
+            difficulty: 2,
+            omen_level: 1,
+            total_waves: 5,
+            groups_spawned: 1,
+            raider_uuids: vec![alive.uuid.to_vec()],
+            cooldown_ticks: 50,
+            ticks_active: 10,
+            status: lodestone_storage_schema::RaidStatus::Ongoing as i32,
+            ..Default::default()
+        };
+        storage
+            .replace_live_entity_rosters([(
+                BuiltinDimension::Overworld,
+                crate::world_storage::NativeRoster { entities: expected.clone(), raids: vec![raid.clone()] },
+            )])
+            .unwrap();
         let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
             LightSilent, directory.path(),
             CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
@@ -7389,6 +7420,12 @@ mod tests {
         ).expect("intentional partial restoration adopts the roster");
         server.entity_roster_adoption.as_ref().unwrap().set(adopted).unwrap();
         assert_eq!(server.mobs.as_ref().unwrap().with(|sim| sim.len()), 1);
+        assert_eq!(
+            server.mobs.as_ref().unwrap().with(|sim| sim.native_raids()),
+            vec![raid.clone()],
+            "the raid came back with its raider",
+        );
+        // An unchanged population, raid included, appends nothing.
         assert_eq!(server.save_native_now().unwrap(), 0);
         let saved = server.world_storage.as_ref().unwrap()
             .load_live_entities(BuiltinDimension::Overworld).unwrap().unwrap();
@@ -7443,7 +7480,7 @@ mod tests {
                 format_version: FORMAT_VERSION_V1,
                 record: Some(storage_record::Record::General(GeneralRecord {
                     record: Some(general_record::Record::EntityRoster(EntityRoster {
-                        dimension: dimension as i32, entity_uuids: vec![vec![0x91; 16]],
+                        dimension: dimension as i32, entity_uuids: vec![vec![0x91; 16]], raids: Vec::new(),
                     })),
                     extensions: Vec::new(),
                 })),

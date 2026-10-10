@@ -968,6 +968,7 @@ impl<'w> MobSim<'w> {
                         raw_damage: amount,
                         attacker_pos: impact.location,
                         poison_ticks: 0,
+                        damage_type: "indirect_magic",
                     }),
                     mob_effects::SplashEffect::Timed { effect_id, duration, amplifier } => {
                         self.pending_player_effects.push((identity.uuid, effect_id, duration, amplifier));

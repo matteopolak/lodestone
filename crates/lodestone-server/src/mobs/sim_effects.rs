@@ -66,7 +66,7 @@ impl<'w> MobSim<'w> {
         // from inside this `self.mobs.iter()` closure borrows disjointly —
         // both borrows are shared, so nothing here needs deferring the way
         // the mutable passes below do.
-        let dead: Vec<(i32, ResourceKey, Vec3, bool, bool, bool)> = self
+        let dead: Vec<(i32, ResourceKey, Vec3, bool, bool, bool, i32)> = self
             .mobs
             .iter()
             .filter(|m| m.health <= 0.0)
@@ -82,6 +82,7 @@ impl<'w> MobSim<'w> {
                     by_player && !m.is_baby(),
                     drops_ominous_bottle,
                     m.wears_banner,
+                    m.worn_item_count(),
                 )
             })
             .collect();
@@ -89,7 +90,7 @@ impl<'w> MobSim<'w> {
             return;
         }
         self.mobs.retain(|m| m.health > 0.0);
-        for (id, entity_type, position, drops_experience, drops_ominous_bottle, wore_banner) in dead {
+        for (id, entity_type, position, drops_experience, drops_ominous_bottle, wore_banner, worn_items) in dead {
             self.drop_death_loot(&entity_type, position);
             if drops_ominous_bottle {
                 self.drop_ominous_bottle(position);
@@ -106,7 +107,7 @@ impl<'w> MobSim<'w> {
             // Drop ordinary death loot before experience, so the two output
             // streams retain their stable ordering.
             if drops_experience {
-                self.drop_death_experience(&entity_type, position);
+                self.drop_death_experience(&entity_type, position, worn_items);
             }
             // A death posts an entity-die event at the dying mob's position,
             // carrying that mob's id as the source. Other event producers are
@@ -292,11 +293,12 @@ impl<'w> MobSim<'w> {
     /// stream: unlike a loot roll, an animal's `1 + nextInt(3)` has no reason to be
     /// reproducible from the death site, and putting it on the orb stream keeps every
     /// orb-related draw in one sequence.
-    fn drop_death_experience(&mut self, entity_type: &ResourceKey, position: Vec3) {
+    fn drop_death_experience(&mut self, entity_type: &ResourceKey, position: Vec3, worn_items: i32) {
         if !self.mob_drops {
             return;
         }
-        let reward = species::mob_experience_reward(entity_type, &mut self.orb_rng);
+        let reward = species::mob_experience_reward(entity_type, &mut self.orb_rng)
+            + (0..worn_items).map(|_| 1 + self.orb_rng.next_int(3)).sum::<i32>();
         if reward <= 0 {
             return;
         }

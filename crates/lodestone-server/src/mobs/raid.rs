@@ -787,6 +787,108 @@ fn spawn_wave(sim: &mut MobSim<'_>, id: i32, world: &super::ChunkWorld) {
     }
 }
 
+/// Raids in the native store's vocabulary: raiders, the captain and heroes are
+/// named by UUID because entity ids do not survive a restart.
+#[cfg(not(target_arch = "wasm32"))]
+impl<'w> MobSim<'w> {
+    /// Every raid in progress as storage records.
+    #[must_use]
+    pub fn native_raids(&self) -> Vec<lodestone_storage_schema::RaidRecord> {
+        use lodestone_storage_schema::{RaidRecord, RaidStatus as Stored};
+        let uuid_of = |id: i32| self.get(id).map(|m| m.uuid().as_bytes().to_vec());
+        let mut raids: Vec<_> = self
+            .raids
+            .values()
+            .map(|raid| RaidRecord {
+                raid_uuid: raid.uuid.as_bytes().to_vec(),
+                center_x: raid.center.x,
+                center_y: raid.center.y,
+                center_z: raid.center.z,
+                difficulty: match raid.difficulty {
+                    Difficulty::Peaceful => 0,
+                    Difficulty::Easy => 1,
+                    Difficulty::Normal => 2,
+                    Difficulty::Hard => 3,
+                },
+                omen_level: raid.omen_level.max(0) as u32,
+                total_waves: raid.total_waves.max(0) as u32,
+                groups_spawned: raid.groups_spawned.max(0) as u32,
+                raider_uuids: raid.raiders.iter().filter_map(|id| uuid_of(*id)).collect(),
+                captain_uuid: raid.captain.and_then(uuid_of).unwrap_or_default(),
+                cooldown_ticks: raid.cooldown_ticks.max(0) as u32,
+                ticks_active: raid.ticks_active,
+                status: match raid.status {
+                    RaidStatus::Ongoing => Stored::Ongoing,
+                    RaidStatus::Victory => Stored::Victory,
+                    RaidStatus::Loss => Stored::Loss,
+                } as i32,
+                post_raid_ticks: raid.post_raid_ticks.max(0) as u32,
+                celebration_ticks: raid.celebration_ticks.max(0) as u32,
+                hero_uuids: {
+                    let mut heroes: Vec<_> = raid.heroes.iter().map(|h| h.as_bytes().to_vec()).collect();
+                    heroes.sort();
+                    heroes
+                },
+            })
+            .collect();
+        raids.sort_by(|a, b| a.raid_uuid.cmp(&b.raid_uuid));
+        raids
+    }
+
+    /// Puts saved raids back, after the population they refer to has been
+    /// restored. A raider that did not come back is dropped from its raid, and
+    /// the captain is dropped with it; the captain wears the banner again.
+    /// Returns how many raids were restored.
+    pub fn restore_native_raids(&mut self, saved: &[lodestone_storage_schema::RaidRecord]) -> usize {
+        use lodestone_storage_schema::RaidStatus as Stored;
+        let ids: std::collections::HashMap<Uuid, i32> = self.mobs.iter().map(|m| (m.uuid(), m.id)).collect();
+        let lookup = |bytes: &[u8]| Uuid::from_slice(bytes).ok().and_then(|uuid| ids.get(&uuid).copied());
+        let mut restored = 0;
+        for record in saved {
+            let (Ok(uuid), Ok(status)) = (Uuid::from_slice(&record.raid_uuid), Stored::try_from(record.status)) else {
+                continue;
+            };
+            let difficulty = match record.difficulty {
+                0 => Difficulty::Peaceful,
+                1 => Difficulty::Easy,
+                2 => Difficulty::Normal,
+                _ => Difficulty::Hard,
+            };
+            let captain = lookup(&record.captain_uuid);
+            let id = self.next_raid_id;
+            self.next_raid_id += 1;
+            self.raids.insert(
+                id,
+                Raid {
+                    uuid,
+                    center: Vec3::new(record.center_x, record.center_y, record.center_z),
+                    difficulty,
+                    omen_level: record.omen_level as i32,
+                    total_waves: record.total_waves as i32,
+                    groups_spawned: record.groups_spawned as i32,
+                    raiders: record.raider_uuids.iter().filter_map(|u| lookup(u)).collect(),
+                    captain,
+                    cooldown_ticks: record.cooldown_ticks as i32,
+                    ticks_active: record.ticks_active,
+                    status: match status {
+                        Stored::Victory => RaidStatus::Victory,
+                        Stored::Loss => RaidStatus::Loss,
+                        _ => RaidStatus::Ongoing,
+                    },
+                    post_raid_ticks: record.post_raid_ticks as i32,
+                    heroes: record.hero_uuids.iter().filter_map(|h| Uuid::from_slice(h).ok()).collect(),
+                    celebration_ticks: record.celebration_ticks as i32,
+                },
+            );
+            if let Some(captain) = captain.and_then(|id| self.get_mut(id)) {
+                captain.wears_banner = true;
+            }
+            restored += 1;
+        }
+        restored
+    }
+}
+
 #[cfg(test)]
 mod raid_tests {
     use super::*;

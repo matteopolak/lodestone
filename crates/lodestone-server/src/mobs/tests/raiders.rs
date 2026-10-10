@@ -389,3 +389,57 @@ fn a_splash_potion_reaches_a_player_in_range() {
     assert!(outcome(0.5, "minecraft:harming").1 > 0.0, "harming hurts a player below the throw");
     assert_eq!(outcome(30.5, "minecraft:harming").1, 0.0);
 }
+
+/// A raid saved with its population comes back whole: same centre, waves,
+/// status and heroes, raiders and captain re-found by UUID under new entity ids,
+/// and the captain wearing the banner. A raider that was not saved is dropped
+/// from the restored raid (control).
+#[test]
+fn a_raid_survives_a_save_and_restore_by_raider_uuid() {
+    use lodestone_storage_schema::BuiltinDimension;
+
+    let world = field();
+    let (mut sim, raid) = spent_raid(&world);
+    let captain = enlist(&mut sim, raid, "pillager", Vec3::new(10.5, 1.0, 10.5));
+    let follower = enlist(&mut sim, raid, "vindicator", Vec3::new(-10.5, 1.0, 10.5));
+    let hero = uuid::Uuid::from_u128(0xBEEF);
+    {
+        let state = sim.raids.get_mut(&raid).expect("raid");
+        state.captain = Some(captain);
+        state.cooldown_ticks = 321;
+        state.ticks_active = 4567;
+        state.omen_level = 3;
+        state.heroes.insert(hero);
+    }
+    sim.get_mut(captain).expect("captain").wears_banner = true;
+    let captain_uuid = sim.get(captain).expect("captain").uuid();
+    let follower_uuid = sim.get(follower).expect("follower").uuid();
+
+    let raids = sim.native_raids();
+    let mut entities = sim.native_entities(BuiltinDimension::Overworld);
+    assert_eq!(raids.len(), 1);
+
+    let restore = |entities: &[crate::world_storage::NativeEntityRecord]| {
+        let mut fresh = MobSim::new(&world);
+        fresh.restore_native(entities);
+        assert_eq!(fresh.restore_native_raids(&raids), 1);
+        fresh
+    };
+    let fresh = restore(&entities);
+    let state = fresh.raids.values().next().expect("restored raid");
+    assert_eq!((state.center.x, state.center.z), (0.5, 0.5));
+    assert_eq!((state.cooldown_ticks, state.ticks_active, state.omen_level), (321, 4567, 3));
+    assert_eq!(state.total_waves, state.groups_spawned, "the spent waves stay spent");
+    assert!(state.heroes.contains(&hero));
+    let uuids: Vec<_> = state.raiders.iter().filter_map(|id| fresh.get(*id)).map(|m| m.uuid()).collect();
+    assert!(uuids.contains(&captain_uuid) && uuids.contains(&follower_uuid), "{uuids:?}");
+    let captain_now = fresh.get(state.captain.expect("captain restored")).expect("captain alive");
+    assert_eq!(captain_now.uuid(), captain_uuid);
+    assert!(captain_now.wears_banner, "the captain wears the banner again");
+
+    // Control: the follower was not saved, so the restored raid does not list it.
+    entities.retain(|e| e.uuid != *follower_uuid.as_bytes());
+    let fresh = restore(&entities);
+    let state = fresh.raids.values().next().expect("restored raid");
+    assert_eq!(state.raiders.len(), 1);
+}

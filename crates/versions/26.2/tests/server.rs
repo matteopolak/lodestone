@@ -49,6 +49,8 @@ mod server_take_item_entity;
 mod block_entities_live;
 #[path = "server/combat_live.rs"]
 mod combat_live;
+#[path = "server/mob_effects_reach_the_player.rs"]
+mod mob_effects_reach_the_player;
 #[path = "server/drowning.rs"]
 mod drowning;
 #[path = "server/entity_streaming_live.rs"]

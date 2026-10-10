@@ -119,12 +119,10 @@ fn address() -> ServerAddress {
 ///     0.5 = (-0.5, 0)`. `x' = 0.4/2 - (-0.5) = 0.7`, `y' = min(0.4/2 + 0.5,
 ///     0.4) = 0.4` (capped again), `z' = 0`. `v2 = (0.7, 0.4, 0.0)`.
 ///
-///   `NavigatingMob::apply_knockback` applies this as a direct one-shot
-///   position displacement (no drag/decay — see that method's own doc
-///   comment), so the target's expected post-hit position is
-///   `(1, 64, 0) + (0.7, 0.4, 0.0) = (1.7, 64.4, 0.0)`: pushed *away* from
-///   the attacker (positive x, growing past the target's starting `1.0`),
-///   not toward it.
+///   `NavigatingMob::apply_knockback` sets this as the mob's velocity, and the
+///   hit tick's velocity packet carries it, so the client's expected motion is
+///   `(0.7, 0.4, 0.0)`: pushed *away* from the attacker (positive x), not
+///   toward it. The position moves on later ticks, which this test does not run.
 ///
 ///   A previous version of this doc comment predicted `(0.5, 64.4, 0.0)` —
 ///   the target moving *toward* the attacker — from `dx = 1` (attacker→target,
@@ -273,21 +271,21 @@ async fn real_client_attacks_a_live_mob_and_the_server_applies_damage_and_knockb
     }
 
     // The **client's own** read model must independently converge on the
-    // exact predicted post-knockback position — the proof this reaches a
+    // exact predicted knockback velocity — the proof this reaches a
     // real client over the real wire, not just the server's internal state.
-    let expected_pos = Vec3::new(1.7, 64.4, 0.0);
+    let expected_velocity = Vec3::new(0.7, 0.4, 0.0);
     let move_deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut last_seen = seen_before;
+    let mut last_seen = Vec3::new(0.0, 0.0, 0.0);
     loop {
         if let Some(view) = handle.entity_from_wire(mob_id) {
-            last_seen = view.position;
-            if (last_seen - expected_pos).length() < 1e-3 {
+            last_seen = view.velocity.unwrap_or(last_seen);
+            if (last_seen - expected_velocity).length() < 2e-3 {
                 break;
             }
         }
         assert!(
             std::time::Instant::now() < move_deadline,
-            "client never observed the predicted knockback position {expected_pos:?}, last saw {last_seen:?}"
+            "client never observed the predicted knockback velocity {expected_velocity:?}, last saw {last_seen:?}"
         );
         // Nudge more traffic through so the entity-streaming pass (driven by
         // every inbound packet) has something to react to.
@@ -414,8 +412,8 @@ async fn no_attack_means_no_movement() {
 ///   `x' = 0.24/2 - (-0.3) = 0.42`, `z' = 0.32/2 - (-0.4) = 0.56`, `y' =
 ///   min(0.4/2 + 0.5, 0.4) = 0.4`. `v2 = (0.42, 0.4, 0.56)`.
 ///
-/// `apply_knockback` adds this directly to position (one-shot, no drag):
-/// `(3, 64, 4) + (0.42, 0.4, 0.56) = (3.42, 64.4, 4.56)`. A per-axis-scale
+/// `apply_knockback` sets this as the mob's velocity, which the client
+/// receives as `(0.42, 0.4, 0.56)`. A per-axis-scale
 /// implementation would instead produce `deltaVector = (dx * power, dz *
 /// power)` unnormalized — wildly different numbers (stage 1 alone would be
 /// `(-1.2, -1.6)` instead of `(-0.24, -0.32)`) — so this input fails loudly
@@ -522,19 +520,19 @@ async fn real_client_attacks_a_live_mob_off_axis_and_knockback_is_normalized_not
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let expected_pos = Vec3::new(3.42, 64.4, 4.56);
+    let expected_velocity = Vec3::new(0.42, 0.4, 0.56);
     let move_deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut last_seen = seen_before;
+    let mut last_seen = Vec3::new(0.0, 0.0, 0.0);
     loop {
         if let Some(view) = handle.entity_from_wire(mob_id) {
-            last_seen = view.position;
-            if (last_seen - expected_pos).length() < 1e-3 {
+            last_seen = view.velocity.unwrap_or(last_seen);
+            if (last_seen - expected_velocity).length() < 2e-3 {
                 break;
             }
         }
         assert!(
             std::time::Instant::now() < move_deadline,
-            "client never observed the predicted off-axis knockback position {expected_pos:?}, last saw {last_seen:?}"
+            "client never observed the predicted off-axis knockback velocity {expected_velocity:?}, last saw {last_seen:?}"
         );
         let _ = handle.chat("poke");
         tokio::time::sleep(Duration::from_millis(20)).await;

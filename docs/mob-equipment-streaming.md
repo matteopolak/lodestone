@@ -14,7 +14,7 @@ The wire encoding is `ServerProtocol::encode_set_equipment` (default `None`, so 
 
 - A new equipped item component needs an arm in `write_item_component_patch` (`crates/versions/26.2/src/server_protocol.rs`).
 - A new `EntitySnapshot` constructor must set `equipment` (use `Vec::new()` when the entity has none).
-- Players are not streamed this way.
+- Other players use the same path: `PlayerRegistry::view_typed` fills `equipment` from the mirrored inventory, and `CarriedItemChanged` republishes it so a hotbar switch reaches observers.
 
 ## Tests
 

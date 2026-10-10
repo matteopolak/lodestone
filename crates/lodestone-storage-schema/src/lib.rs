@@ -13,7 +13,7 @@ pub use prost::Message;
 
 pub use generated::{
     BiomeSection, BuiltinBiome, BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord,
-    EntityRoster, ExtensionTable, ExtensionValue, GameMode, GeneralRecord, ItemEntityState,
+    EntityRoster, RaidRecord, RaidStatus, ExtensionTable, ExtensionValue, GameMode, GeneralRecord, ItemEntityState,
     LightData, LightSection, LivingEntityState, PlayerInventory, PlayerInventorySlot, PlayerRecord,
     PlayerRuntimeState, RegisteredExtension, ScheduledTick, ScheduledTickKind,
     ScheduledTickPriority, StorageRecord, StructureBox, StructurePiece, StructureReference,
@@ -377,7 +377,22 @@ fn validate_entity_roster(roster: &EntityRoster) -> Result<(), ValidationError> 
             return Err(ValidationError::DuplicateEntityRosterUuid);
         }
     }
-    Ok(())
+    roster.raids.iter().try_for_each(validate_raid)
+}
+
+fn validate_raid(raid: &RaidRecord) -> Result<(), ValidationError> {
+    let uuids_ok = |uuids: &[Vec<u8>]| uuids.iter().all(|uuid| uuid.len() == 16);
+    let valid = raid.raid_uuid.len() == 16
+        && uuids_ok(&raid.raider_uuids)
+        && uuids_ok(&raid.hero_uuids)
+        && (raid.captain_uuid.is_empty() || raid.captain_uuid.len() == 16)
+        && [raid.center_x, raid.center_y, raid.center_z].iter().all(|c| c.is_finite())
+        && raid.difficulty <= 3
+        && matches!(
+            RaidStatus::try_from(raid.status),
+            Ok(RaidStatus::Ongoing | RaidStatus::Victory | RaidStatus::Loss)
+        );
+    if valid { Ok(()) } else { Err(ValidationError::InvalidRaidRecord) }
 }
 
 fn validate_player(player: &PlayerRecord) -> Result<(), ValidationError> {
@@ -480,6 +495,9 @@ pub enum ValidationError {
     InvalidLivingEntityHealth,
     InvalidItemEntityState,
     DuplicateEntityRosterUuid,
+    /// A raid record with a malformed UUID, non-finite centre, unknown status
+    /// or difficulty above hard.
+    InvalidRaidRecord,
     UnknownBuiltinDimension(i32),
     UnknownPlayerGameMode(i32),
     InvalidPlayerHealth,
@@ -589,6 +607,7 @@ impl std::fmt::Display for ValidationError {
             Self::DuplicateEntityRosterUuid => {
                 formatter.write_str("entity roster repeats a UUID")
             }
+            Self::InvalidRaidRecord => formatter.write_str("invalid raid record"),
             Self::UnknownBuiltinDimension(id) => {
                 write!(formatter, "unknown built-in dimension {id}")
             }

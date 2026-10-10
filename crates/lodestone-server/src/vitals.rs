@@ -1234,6 +1234,20 @@ mod tests {
         assert_eq!(v.health(), MAX_HEALTH - 3.0);
     }
 
+    /// A splash potion's instant damage is magic damage: diamond armour that cuts
+    /// a mob hit from 10 to 3 does not touch it. Both arms use the damage type
+    /// name a `PlayerHit` carries.
+    #[test]
+    fn splash_magic_damage_ignores_armour_while_a_mob_hit_does_not() {
+        let defenses = lodestone_entity::Defenses { armor: 20.0, armor_toughness: 8.0, ..Default::default() };
+        let hit = |damage_type: &str| {
+            let flags = lodestone_entity::DamageFlags::for_damage_type_name(damage_type).expect("real damage type");
+            PlayerVitals::default().apply_damage(10.0, &defenses, flags)
+        };
+        assert_eq!(hit("mob_attack"), Some(3.0), "control: armour reduces a mob hit");
+        assert_eq!(hit("indirect_magic"), Some(10.0), "magic reaches health unreduced");
+    }
+
     /// The invulnerability-frame gate is real and **separate** from
     /// drowning's/fall's own cadence: a weaker follow-up inside the 20-tick
     /// window is ignored (`None`, health untouched), the identical

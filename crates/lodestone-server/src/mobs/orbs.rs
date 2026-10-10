@@ -1449,6 +1449,22 @@ mod experience_orb_tests {
         );
     }
 
+    /// A mob's worn spawn item adds `1 + nextInt(3)` points on top of its species
+    /// reward. A wither skeleton always spawns with exactly one item, a stone sword,
+    /// so its reward is `5 + 1..=3`; the zombie above, with no gear, is the control.
+    #[test]
+    fn a_worn_spawn_item_adds_to_the_experience_reward() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:wither_skeleton".parse().expect("valid key"), above_floor())
+            .id();
+        assert_eq!(sim.get(id).expect("spawned").worn_item_count(), 1, "the stone sword");
+        sim.attack(id, Vec3::new(6.0, 1.0, 8.0), 1_000.0, DamageFlags::default(), 0.0);
+        let points = sim.orb_points_outstanding();
+        assert!((6..=8).contains(&points), "5 base plus one worn item's 1..=3, got {points}");
+    }
+
     /// A **baby** drops nothing, however it died — `shouldDropExperience()` is
     /// `!isBaby()`.
     ///

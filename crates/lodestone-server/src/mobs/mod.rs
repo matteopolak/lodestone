@@ -3111,6 +3111,9 @@ pub struct PlayerHit {
     pub attacker_pos: Vec3,
     /// Ticks of poison the hit also applies (0 for none).
     pub poison_ticks: i32,
+    /// The damage type's registry name, which decides whether armour,
+    /// enchantments and effects reduce the hit.
+    pub damage_type: &'static str,
 }
 
 /// One vanilla zombie hurt-handler reinforcement roll that passed — the *decision*

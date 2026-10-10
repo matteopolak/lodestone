@@ -858,6 +858,23 @@ impl<'w> SimMob<'w> {
         &self.entity_type
     }
 
+    /// How many spawn-equipment slots hold an item. The raid banner is not
+    /// counted: it never drops, so it adds no experience.
+    #[must_use]
+    pub fn worn_item_count(&self) -> i32 {
+        [
+            self.equipment.main_hand,
+            self.equipment.off_hand,
+            self.equipment.head,
+            self.equipment.chest,
+            self.equipment.legs,
+            self.equipment.feet,
+        ]
+        .iter()
+        .filter(|slot| slot.is_some())
+        .count() as i32
+    }
+
     /// Copies the six equipment slots assigned by the species spawn path.
     /// Empty slots remain explicit so observers can distinguish an empty mob
     /// slot from an unavailable snapshot, and no simulation-owned value

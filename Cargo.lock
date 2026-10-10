@@ -3929,6 +3929,7 @@ dependencies = [
  "lodestone-core",
  "lodestone-data",
  "lodestone-ecs",
+ "lodestone-entity",
  "lodestone-game",
  "lodestone-macros",
  "lodestone-mc-cache",

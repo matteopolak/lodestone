@@ -429,12 +429,54 @@ pub struct ItemEntityState {
 }
 /// The roster is the atomic liveness boundary for a dimension. Entity records
 /// omitted from the latest roster are stale and never restored.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EntityRoster {
     #[prost(enumeration = "BuiltinDimension", tag = "1")]
     pub dimension: i32,
     #[prost(bytes = "vec", repeated, tag = "2")]
     pub entity_uuids: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    /// Raids in progress in this dimension. They share the roster's commit
+    /// because they name raiders by entity UUID.
+    #[prost(message, repeated, tag = "3")]
+    pub raids: ::prost::alloc::vec::Vec<RaidRecord>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RaidRecord {
+    #[prost(bytes = "vec", tag = "1")]
+    pub raid_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(double, tag = "2")]
+    pub center_x: f64,
+    #[prost(double, tag = "3")]
+    pub center_y: f64,
+    #[prost(double, tag = "4")]
+    pub center_z: f64,
+    /// Game difficulty ordinal: 0 peaceful, 1 easy, 2 normal, 3 hard.
+    #[prost(uint32, tag = "5")]
+    pub difficulty: u32,
+    #[prost(uint32, tag = "6")]
+    pub omen_level: u32,
+    #[prost(uint32, tag = "7")]
+    pub total_waves: u32,
+    #[prost(uint32, tag = "8")]
+    pub groups_spawned: u32,
+    /// Live raiders of the current wave, by entity UUID.
+    #[prost(bytes = "vec", repeated, tag = "9")]
+    pub raider_uuids: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    #[prost(bytes = "vec", tag = "10")]
+    pub captain_uuid: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "11")]
+    pub cooldown_ticks: u32,
+    #[prost(uint64, tag = "12")]
+    pub ticks_active: u64,
+    #[prost(enumeration = "RaidStatus", tag = "13")]
+    pub status: i32,
+    #[prost(uint32, tag = "14")]
+    pub post_raid_ticks: u32,
+    #[prost(uint32, tag = "15")]
+    pub celebration_ticks: u32,
+    /// Players credited with a killing blow, by UUID.
+    #[prost(bytes = "vec", repeated, tag = "16")]
+    pub hero_uuids: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 /// Extension registrations are the one place the format carries names. Core
 /// records retain only local_id, so an extension payload never repeats its
@@ -833,6 +875,38 @@ impl BuiltinBiome {
             "BUILTIN_BIOME_WINDSWEPT_SAVANNA" => Some(Self::WindsweptSavanna),
             "BUILTIN_BIOME_WOODED_BADLANDS" => Some(Self::WoodedBadlands),
             "BUILTIN_BIOME_DAPPLED_FOREST" => Some(Self::DappledForest),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RaidStatus {
+    Unspecified = 0,
+    Ongoing = 1,
+    Victory = 2,
+    Loss = 3,
+}
+impl RaidStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RAID_STATUS_UNSPECIFIED",
+            Self::Ongoing => "RAID_STATUS_ONGOING",
+            Self::Victory => "RAID_STATUS_VICTORY",
+            Self::Loss => "RAID_STATUS_LOSS",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RAID_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "RAID_STATUS_ONGOING" => Some(Self::Ongoing),
+            "RAID_STATUS_VICTORY" => Some(Self::Victory),
+            "RAID_STATUS_LOSS" => Some(Self::Loss),
             _ => None,
         }
     }

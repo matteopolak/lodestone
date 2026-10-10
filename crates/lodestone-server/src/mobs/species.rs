@@ -474,9 +474,8 @@ pub(super) fn tame_feed_heal(species: &str) -> f32 {
 ///
 /// # What is deliberately not modelled
 ///
-/// * **The equipment bonus.** The base reward adds `1 + nextInt(3)` per
-///   droppable equipped item. Nothing in this sim equips a mob, so the sum is always
-///   over an empty set.
+/// * **Equipment is not in this function.** Each worn spawn item adds
+///   `1 + nextInt(3)`; the caller adds that from the mob's own slots.
 /// * **`Zombie`'s baby ×2.5.** It is real and it is unreachable: `dropExperience`
 ///   requires `shouldDropExperience()`, which is `!isBaby()`, so no baby ever reaches
 ///   the multiplier on death. Modelling it would be modelling dead code.

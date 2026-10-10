@@ -410,20 +410,6 @@ fn file_kind(path: &Path) -> Option<FileKind> {
 // Comment/prose masking -- see the module doc for the design rationale.
 // ---------------------------------------------------------------------
 
-/// Copies any newline characters in `chars[start..end]` into `out` at the
-/// same index, leaving every other position untouched (already masked to
-/// `' '` by the caller's initial fill). Used whenever a whole span (a
-/// string literal, a char literal) is skipped without visiting each
-/// character through the main loop, so line numbering downstream never
-/// desyncs from the real file.
-fn preserve_newlines(chars: &[char], out: &mut [char], start: usize, end: usize) {
-    for i in start..end.min(chars.len()) {
-        if chars[i] == '\n' {
-            out[i] = '\n';
-        }
-    }
-}
-
 /// Attempts to parse a string-literal-shaped span (`"..."`, `b"..."`,
 /// `r"..."`/`r#"..."#`/.., `br"..."`/`br#"..."#`/..) starting at `start`.
 /// Returns the exclusive end index on success. A `\x`/`\u{..}` escape is

@@ -559,6 +559,7 @@ impl<'w> MobSim<'w> {
                                 raw_damage: m.puff.sting_damage(),
                                 attacker_pos: here,
                                 poison_ticks: m.puff.sting_poison_ticks(),
+                                damage_type: "mob_attack",
                             });
                         }
                     }
@@ -938,6 +939,7 @@ impl<'w> MobSim<'w> {
                     raw_damage,
                     attacker_pos,
                     poison_ticks: 0,
+                    damage_type: "mob_attack",
                 });
                 // A tamed pet retaliates against the source that hurt its
                 // owner. The event carries the attacker's position rather than

@@ -14,6 +14,7 @@ const EXTENSIONS_V1: &str = include_str!("fixtures/extensions-v1.hex");
 const PLAYER_RUNTIME_V1: &str = include_str!("fixtures/player-runtime-v1.hex");
 const PLAYER_INVENTORY_V1: &str = include_str!("fixtures/player-inventory-v1.hex");
 const ENTITY_ROSTER_V1: &str = include_str!("fixtures/entity-roster-v1.hex");
+const ENTITY_ROSTER_RAID_V1: &str = include_str!("fixtures/entity-roster-raid-v1.hex");
 
 #[test]
 fn entity_roster_fixture_is_the_atomic_liveness_set() {
@@ -42,6 +43,37 @@ fn entity_roster_fixture_is_the_atomic_liveness_set() {
         validate_record(&record),
         Err(ValidationError::DuplicateEntityRosterUuid)
     );
+}
+
+/// The fixture bytes were assembled by hand from the wire format (field
+/// numbers, varints and little-endian doubles), not produced by the encoder.
+#[test]
+fn entity_roster_raid_fixture_decodes_and_validates_and_a_bad_raid_is_refused() {
+    let expected = fixture(ENTITY_ROSTER_RAID_V1);
+    let roster = EntityRoster::decode(expected.as_slice()).unwrap();
+    assert_eq!(roster.raids.len(), 1);
+    let raid = &roster.raids[0];
+    assert_eq!(raid.raid_uuid, vec![0x33; 16]);
+    assert_eq!((raid.center_x, raid.center_y, raid.center_z), (1.0, 2.0, -1.0));
+    assert_eq!((raid.difficulty, raid.omen_level, raid.total_waves, raid.groups_spawned), (2, 1, 5, 2));
+    assert_eq!(raid.raider_uuids, vec![vec![0x22; 16]]);
+    assert_eq!(raid.captain_uuid, vec![0x22; 16]);
+    assert_eq!((raid.cooldown_ticks, raid.ticks_active), (44, 1000));
+    assert_eq!(raid.status, lodestone_storage_schema::RaidStatus::Ongoing as i32);
+    assert_eq!(raid.hero_uuids, vec![vec![0x44; 16]]);
+    assert_eq!(roster.encode_to_vec(), expected);
+
+    let record = |roster: EntityRoster| StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            extensions: Vec::new(),
+            record: Some(general_record::Record::EntityRoster(roster)),
+        })),
+    };
+    validate_record(&record(roster.clone())).unwrap();
+    let mut bad = roster;
+    bad.raids[0].difficulty = 4;
+    assert_eq!(validate_record(&record(bad)), Err(ValidationError::InvalidRaidRecord));
 }
 
 #[test]

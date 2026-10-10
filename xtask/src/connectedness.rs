@@ -2227,6 +2227,37 @@ pub(crate) fn serverbound_variant_is_connected(dispatch_source: &str, variant: &
     Ok(false)
 }
 
+/// The serverbound dispatch source: `server.rs` plus every non-test module
+/// under `server/`, where the match arms live. Test modules are left out
+/// because they construct variants without consuming them.
+fn read_dispatch_source(server_rs: &Path) -> Result<String> {
+    fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+            let path = entry?.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if name != "tests" {
+                    collect(&path, out)?;
+                }
+            } else if name.ends_with(".rs") && name != "tests.rs" {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut files = vec![server_rs.to_path_buf()];
+    if let Some(dir) = server_rs.parent().map(|p| p.join("server")).filter(|p| p.is_dir()) {
+        collect(&dir, &mut files)?;
+    }
+    files.sort();
+    let mut source = String::new();
+    for file in files {
+        source.push_str(&std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?);
+        source.push('\n');
+    }
+    Ok(source)
+}
+
 /// Builds the serverbound decode axis for one family: `NotApplicable` if it
 /// has no `src/server_protocol.rs` (only `v770` implements `ServerProtocol`
 /// today), otherwise a full [`ServerboundDecodeSummary`] joined against
@@ -2264,14 +2295,7 @@ fn serverbound_decode_summary(
         .with_context(|| format!("classify {}", server_protocol_path.display()))?;
 
     let dispatch_path = workspace_root.join("crates/lodestone-server/src/server.rs");
-    let dispatch_source = if dispatch_path.exists() {
-        Some(
-            std::fs::read_to_string(&dispatch_path)
-                .with_context(|| format!("read {}", dispatch_path.display()))?,
-        )
-    } else {
-        None
-    };
+    let dispatch_source = if dispatch_path.exists() { Some(read_dispatch_source(&dispatch_path)?) } else { None };
 
     let mut decoded = 0usize;
     let mut connected = 0usize;

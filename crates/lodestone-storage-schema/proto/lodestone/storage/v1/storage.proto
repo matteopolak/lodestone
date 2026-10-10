@@ -397,6 +397,38 @@ message ItemEntityState {
 message EntityRoster {
   BuiltinDimension dimension = 1;
   repeated bytes entity_uuids = 2;
+  // Raids in progress in this dimension. They share the roster's commit
+  // because they name raiders by entity UUID.
+  repeated RaidRecord raids = 3;
+}
+
+message RaidRecord {
+  bytes raid_uuid = 1;
+  double center_x = 2;
+  double center_y = 3;
+  double center_z = 4;
+  // Game difficulty ordinal: 0 peaceful, 1 easy, 2 normal, 3 hard.
+  uint32 difficulty = 5;
+  uint32 omen_level = 6;
+  uint32 total_waves = 7;
+  uint32 groups_spawned = 8;
+  // Live raiders of the current wave, by entity UUID.
+  repeated bytes raider_uuids = 9;
+  bytes captain_uuid = 10;
+  uint32 cooldown_ticks = 11;
+  uint64 ticks_active = 12;
+  RaidStatus status = 13;
+  uint32 post_raid_ticks = 14;
+  uint32 celebration_ticks = 15;
+  // Players credited with a killing blow, by UUID.
+  repeated bytes hero_uuids = 16;
+}
+
+enum RaidStatus {
+  RAID_STATUS_UNSPECIFIED = 0;
+  RAID_STATUS_ONGOING = 1;
+  RAID_STATUS_VICTORY = 2;
+  RAID_STATUS_LOSS = 3;
 }
 
 enum BuiltinDimension {

@@ -611,6 +611,8 @@ where
             // slot without this packet.
             *item_in_use = None;
             apply_carried_item_changed(inventory, slot);
+            // The selected slot is the main hand other players see.
+            republish_inventory(players, player_uuid, inventory);
         }
         ServerBound::ContainerClicked {
             window_id,

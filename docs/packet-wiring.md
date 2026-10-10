@@ -58,7 +58,7 @@ Vetoes stop a verb before its effect is computed, so client state never diverges
 
 ## How to change it
 
-- **New `ServerBound` variant**: `serverbound_wiring.rs` fails until a decode arm constructs it; never add an exemption. Lifting a packet out of `Ignored` touches three crates: the variant (`lodestone-server::protocol`), the decode arm (`v26-2::server_protocol`) and a `dispatch_play_packet` arm plus consumer. Missing the third strands it per `connectedness`; missing the second kills the consumer per the wiring gate.
+- **New `ServerBound` variant**: `serverbound_wiring.rs` fails until a decode arm constructs it; never add an exemption. Lifting a packet out of `Ignored` touches three crates: the variant (`lodestone-server::protocol`), the decode arm (`v26-2::server_protocol`) and a `dispatch_play_packet` arm plus consumer. Missing the third strands it per `connectedness`, which scans `server.rs` and every non-test file under `server/`; missing the second kills the consumer per the wiring gate.
 - **New `ClientEvent` variant**: write the `route()` arm and update the island count in `event-routing.md` in the same commit.
 - **Raw observation**: add the bus plugin and read with `MessageReader`. Mutation and cancellation belong to a version-typed adapter decorator, not here. Set explicit limits for bursty outbound readers; overflow drops the observation, never the packet. `OutboundPacketLoggerPlugin` is the example.
 - Expected values for any wiring gate must come from outside the code under test (captured bytes, registry report), never `decode(encode(x)) == x`.

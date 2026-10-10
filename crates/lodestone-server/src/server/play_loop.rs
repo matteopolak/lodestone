@@ -1885,10 +1885,8 @@ where
                             if hit.identity.uuid != player_uuid {
                                 continue;
                             }
-                            let flags = lodestone_entity::DamageFlags::for_damage_type_name(
-                                "mob_attack",
-                            )
-                            .expect("mob_attack is a real damage type");
+                            let flags = lodestone_entity::DamageFlags::for_damage_type_name(hit.damage_type)
+                                .expect("a player hit names a real damage type");
                             if vitals
                                 .apply_damage(
                                     hit.raw_damage,

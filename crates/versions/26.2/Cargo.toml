@@ -95,6 +95,9 @@ lodestone-worldgen = { path = "../../lodestone-worldgen" }
 # `lodestone-physics` engine to walk a player and asserts the real server never
 # corrects us. Test-only; production code never depends on physics.
 lodestone-physics = { path = "../../lodestone-physics" }
+# Test-only: the mob-effect delivery test throws a splash potion through the
+# simulation's projectile API.
+lodestone-entity = { path = "../../lodestone-entity" }
 # Test-only, and it must stay that way: `lodestone-ecs` is where the plugin
 # `CommandRegistry`, `dispatch` and `Permissions` live, and issues #48/#464
 # exist precisely because `lodestone-server` must never link it (see

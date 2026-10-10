@@ -755,7 +755,7 @@ impl PlayerRegistry {
                         // add-entity-packet builder, so the
                         // Object Data field is `0`.
                         object_data: 0,
-                        equipment: Vec::new(),
+                        equipment: p.inventory.equipment_snapshot(),
                         // The real leashable interface is never implemented by
                         // the player entity — a
                         // player cannot be the *leashed* end of a lead, only a holder

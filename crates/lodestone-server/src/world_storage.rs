@@ -198,6 +198,16 @@ pub enum NativeGeneralRecord {
     EntityRoster(EntityRoster),
 }
 
+/// One dimension's live population: its entity records and the raids in
+/// progress, which name their raiders by entity UUID.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NativeRoster {
+    /// Every live entity of the dimension.
+    pub entities: Vec<NativeEntityRecord>,
+    /// Raids in progress.
+    pub raids: Vec<lodestone_storage_schema::RaidRecord>,
+}
+
 /// One source-column batch in a reviewed resident-entity import.
 ///
 /// The column and vertical extent remain part of the input, so every pose is
@@ -1527,7 +1537,10 @@ impl WorldStorage {
         dimension: BuiltinDimension,
         entities: impl IntoIterator<Item = NativeEntityRecord>,
     ) -> Result<usize, Error> {
-        self.replace_live_entity_rosters([(dimension, entities.into_iter().collect())])
+        self.replace_live_entity_rosters([(
+            dimension,
+            NativeRoster { entities: entities.into_iter().collect(), raids: Vec::new() },
+        )])
     }
 
     /// Replaces several dimensions' live rosters in one commit. Dimensions not
@@ -1538,12 +1551,12 @@ impl WorldStorage {
     /// dimensions is refused.
     pub fn replace_live_entity_rosters(
         &self,
-        rosters: impl IntoIterator<Item = (BuiltinDimension, Vec<NativeEntityRecord>)>,
+        rosters: impl IntoIterator<Item = (BuiltinDimension, NativeRoster)>,
     ) -> Result<usize, Error> {
         let mut rosters: Vec<_> = rosters.into_iter().collect();
         let mut dimensions = HashSet::new();
         let mut seen = HashSet::new();
-        for (dimension, entities) in &mut rosters {
+        for (dimension, NativeRoster { entities, .. }) in &mut rosters {
             validate_entity_dimension(*dimension as i32)?;
             if !dimensions.insert(*dimension) {
                 return Err(GeneralRecordError::EntityRoster(
@@ -1568,7 +1581,7 @@ impl WorldStorage {
         };
         let mut native = native.lock().expect("world storage lock poisoned");
         let mut writes = Vec::new();
-        for (dimension, entities) in &rosters {
+        for (dimension, NativeRoster { entities, raids }) in &rosters {
             for entity in entities {
                 let key = entity_key(entity.uuid);
                 if is_reserved_general_key(key) {
@@ -1583,8 +1596,11 @@ impl WorldStorage {
                     writes.push(RecordWrite::new(key, encoded));
                 }
             }
-            let roster =
-                encode_entity_roster(*dimension, entities.iter().map(|entity| entity.uuid));
+            let roster = encode_entity_roster(
+                *dimension,
+                entities.iter().map(|entity| entity.uuid),
+                raids.clone(),
+            );
             let roster_key = entity_roster_key(*dimension);
             let existing_roster = native.get(roster_key)?;
             if let Some(record) = existing_roster.clone() {
@@ -1615,6 +1631,12 @@ impl WorldStorage {
         &self,
         dimension: BuiltinDimension,
     ) -> Result<Option<Vec<NativeEntityRecord>>, Error> {
+        Ok(self.load_live_roster(dimension)?.map(|roster| roster.entities))
+    }
+
+    /// [`load_live_entities`](Self::load_live_entities) with the raids in
+    /// progress as well.
+    pub fn load_live_roster(&self, dimension: BuiltinDimension) -> Result<Option<NativeRoster>, Error> {
         validate_entity_dimension(dimension as i32)?;
         let Some(native) = &self.native else {
             return Err(Error::AnvilDoesNotAcceptTypedRecords);
@@ -1650,7 +1672,7 @@ impl WorldStorage {
             }
             entities.push(entity);
         }
-        Ok(Some(entities))
+        Ok(Some(NativeRoster { entities, raids: roster.raids }))
     }
 
     /// Atomically saves one complete dirty chunk through the native typed
@@ -2880,6 +2902,7 @@ fn is_reserved_general_key(key: RecordKey) -> bool {
 fn encode_entity_roster(
     dimension: BuiltinDimension,
     uuids: impl IntoIterator<Item = [u8; 16]>,
+    raids: Vec<lodestone_storage_schema::RaidRecord>,
 ) -> StorageRecord {
     StorageRecord {
         format_version: FORMAT_VERSION_V1,
@@ -2887,6 +2910,7 @@ fn encode_entity_roster(
             record: Some(general_record::Record::EntityRoster(EntityRoster {
                 dimension: dimension as i32,
                 entity_uuids: uuids.into_iter().map(Vec::from).collect(),
+                raids,
             })),
             extensions: Vec::new(),
         })),
@@ -3907,7 +3931,7 @@ mod tests {
                     RecordWrite::new(entity_key([0x31; 16]), living),
                     RecordWrite::new(
                         entity_roster_key(BuiltinDimension::Overworld),
-                        encode_entity_roster(BuiltinDimension::Overworld, [[0x31u8; 16]]),
+                        encode_entity_roster(BuiltinDimension::Overworld, [[0x31u8; 16]], Vec::new()),
                     ),
                 ])
                 .expect("write old-format records");
@@ -3968,6 +3992,59 @@ mod tests {
             decode_entity(entity.uuid, corrupt),
             Err(EntityRecordError::InvalidStateNbt(_))
         ));
+    }
+
+    #[test]
+    fn a_roster_carries_its_raids_and_refuses_a_malformed_one() {
+        use lodestone_storage_schema::{RaidRecord, RaidStatus as Stored};
+        let unique = lodestone_time::epoch_duration().as_nanos();
+        let directory = std::env::temp_dir().join(format!("lodestone-native-raids-{}-{unique}", std::process::id()));
+        let entity = native_entity(lodestone_model::Vec3::new(0.5, 64.0, 0.5));
+        let raid = RaidRecord {
+            raid_uuid: vec![7; 16],
+            center_x: 10.5,
+            center_y: 64.0,
+            center_z: -3.5,
+            difficulty: 3,
+            omen_level: 2,
+            total_waves: 7,
+            groups_spawned: 3,
+            raider_uuids: vec![entity.uuid.to_vec()],
+            captain_uuid: entity.uuid.to_vec(),
+            cooldown_ticks: 100,
+            ticks_active: 9000,
+            status: Stored::Ongoing as i32,
+            post_raid_ticks: 0,
+            celebration_ticks: 0,
+            hero_uuids: vec![vec![9; 16]],
+        };
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative { directory: directory.clone() })
+            .expect("open native store");
+        storage
+            .replace_live_entity_rosters([(
+                BuiltinDimension::Overworld,
+                NativeRoster { entities: vec![entity.clone()], raids: vec![raid.clone()] },
+            )])
+            .expect("publish roster with a raid");
+        drop(storage);
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative { directory: directory.clone() })
+            .expect("reopen");
+        let loaded = reopened.load_live_roster(BuiltinDimension::Overworld).unwrap().expect("roster");
+        assert_eq!(loaded.raids, vec![raid.clone()]);
+        assert_eq!(loaded.entities, vec![entity.clone()]);
+
+        // Control: a raid whose uuid is the wrong length is refused before it is written.
+        let bad = RaidRecord { raid_uuid: vec![1; 4], ..raid };
+        assert!(
+            reopened
+                .replace_live_entity_rosters([(
+                    BuiltinDimension::Overworld,
+                    NativeRoster { entities: vec![entity], raids: vec![bad] },
+                )])
+                .is_err(),
+            "a malformed raid must not be stored"
+        );
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

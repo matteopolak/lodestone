@@ -29,7 +29,7 @@ Pillager patrols wander toward villages and start raids; a raid sends waves of r
 
 ## Known gaps
 
-- Raid state is not persisted (a raid in progress is lost on restart); celebration sounds, enchantment-odds loot and per-player boss-bar gating are not modelled.
+- A raid in progress is saved in the dimension's `EntityRoster` as `RaidRecord`s keyed by raider UUID and restored after the roster (`MobSim::native_raids` / `restore_native_raids`); raiders that no longer exist are dropped. Celebration sounds, enchantment-odds loot and per-player boss-bar gating are not modelled.
 - Spawn placement is a coarse ring, not a village-boundary search.
 
 ## Configuration

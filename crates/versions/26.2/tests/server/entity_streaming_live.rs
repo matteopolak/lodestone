@@ -292,3 +292,68 @@ async fn a_real_client_sees_mob_equipment_on_spawn_and_after_a_change() {
     drop(handle);
     server.shutdown().await;
 }
+
+/// Another player's held item and armour reach a real client, and a later
+/// change to the registry's copy of that player's inventory reaches it too.
+/// Control: the observer's own inventory never appears as an entity.
+#[tokio::test]
+async fn a_real_client_sees_another_players_held_item_and_armour() {
+    use lodestone_model::{EquipmentSlot, ItemStack};
+    use lodestone_server::{NoEntities, PlayerAwareSource, PlayerRegistry};
+    use lodestone_server::PlayerInventory;
+
+    let key = |s: &str| ResourceKey::from_str(s).unwrap();
+    let registry = PlayerRegistry::new();
+    let remote_uuid = Uuid::new_v4();
+    let remote = registry.join("Remote", remote_uuid, Vec3::new(8.5, 1.0, 8.5));
+    let mut inventory = PlayerInventory::new();
+    inventory.set_native(0, Some(ItemStack::new(key("minecraft:diamond_sword"), 1)));
+    inventory.set_native(39, Some(ItemStack::new(key("minecraft:iron_helmet"), 1)));
+    registry.set_inventory(remote_uuid, &inventory);
+
+    let source = StoneFloorSource::new(-64, 384, 0);
+    let (server, client_io) = IntegratedServer::open_in_memory_with_entities(
+        V770ServerProtocol,
+        source,
+        PlayerAwareSource::new(NoEntities, registry.clone()),
+        0,
+    );
+    let (handle, _events) =
+        ClientBuilder::new(address(), profile(), Box::new(adapter())).connect_with(client_io);
+
+    let remote_id = remote.entity_id();
+    let held = |slot: EquipmentSlot| {
+        handle
+            .entity_from_wire(remote_id)
+            .and_then(|view| view.equipment.into_iter().find(|e| e.slot == slot))
+            .and_then(|e| e.item)
+    };
+    macro_rules! wait {
+        ($what:expr, $done:expr) => {{
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            while !$done {
+                assert!(std::time::Instant::now() < deadline, $what);
+                let _ = handle.chat("poke");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }};
+    }
+    wait!(
+        "the remote player's sword never reached the client",
+        held(EquipmentSlot::MainHand).is_some_and(|i| i.item == key("minecraft:diamond_sword"))
+    );
+    assert_eq!(held(EquipmentSlot::Head).map(|i| i.item), Some(key("minecraft:iron_helmet")));
+    assert!(held(EquipmentSlot::Chest).is_none(), "an empty slot stays empty");
+
+    inventory.set_native(38, Some(ItemStack::new(key("minecraft:diamond_chestplate"), 1)));
+    inventory.set_native(39, None);
+    registry.set_inventory(remote_uuid, &inventory);
+    wait!(
+        "the new chestplate never reached the client",
+        held(EquipmentSlot::Chest).is_some_and(|i| i.item == key("minecraft:diamond_chestplate"))
+    );
+    wait!("the removed helmet stayed on the client", held(EquipmentSlot::Head).is_none());
+
+    drop(handle);
+    server.shutdown().await;
+}
