@@ -44,6 +44,16 @@ The enderman stare test is `look.dot(dir) > 1.0 - 0.025 / dist`, so required pre
 
 Five primitives back this on `MobController`: anger deadline and target, gaze test (per-player view vector), instant teleport, self-damage (through `apply_damage`, i-frames included) and ownership (from `PlayerIdentity`).
 
+### Entity-class targets, home, universal anger
+
+Targets are positions, so a goal that hunts or watches a non-player asks for a `TargetClass` (`ai/target_class.rs`: villager, iron golem, baby turtle on land, axolotl, piglin, rabbit, wolf prey, skeleton, endermite, guardian, hostile). `Goal::target_class` declares it; `SimMob::add_goal` collects the set, and `feed_perception` answers only those: the nearest live member inside the follow range horizontally and 4 blocks vertically (12 for the guardian look-at), through `class_contains` in `sim_tick_perception.rs`. `NearestAttackableTargetGoal::of_class(class, must_see)` applies the registration's own sight flag; `.untamed_only()` is the untamed-random-target form, and `LookAtPlayerGoal::of_class` is the guardian look-at.
+
+A melee hit needs an entity, not a point: the feed also records `(position, id)` per candidate and `SimMob::bind_attack_target_id` (run just before the attack drain) resolves the goal-chosen attack target back to the id, so `attack_target_id` damages that mob. A target that is not one of the candidates (a player) clears an id the binder wrote, and never one a plugin wrote.
+
+Home restriction: `NavigatingMob::restriction` is a block and radius; `MoveTowardsRestrictionGoal` walks to a random point within a quarter turn of the direction home when the mob stands outside it (`random_target_towards`, the flee search aimed the other way). Only an elder guardian has a home (set to its own block, radius 16, on its first tick); it persists as `home_pos` and `home_radius`.
+
+Universal anger: `ResetUniversalAngerGoal` answers each player hit (`last_hurt_by_player_stamp`, bumped in `MobSim::attack`) while the `universal_anger` rule is on by forgetting the target and recording a reset; `MobSim::tick` then replaces the grudge with one that has neither target nor attacker, and for an alerting species does the same to those of its kind inside the follow range and 10 blocks vertically. `feed_perception` reads a grudge with no target and no attacker, under the rule, as the nearest player. A zombie that kills a villager does not yet convert it to a zombie villager.
+
 ### Ranged attacks
 
 A goal never spawns an entity: it computes the aiming maths and calls `MobController::launch_projectile`; `NavigatingMob` accumulates launches and the host drains them once per tick into `ProjectileRegistry` via `MobSim::spawn_projectile`. Shapes: a 20-tick-draw bow attack, a no-draw interval ranged attack, and the blaze burst (three fireballs 6 ticks apart, 60-tick wind-up, 100-tick pause, melee under 2 blocks). Arrows, tridents, snowballs and potions launch at power 1.6 plus arc lift; small fireballs at 0.1 with no lift and accelerate in flight.

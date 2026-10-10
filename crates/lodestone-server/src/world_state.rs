@@ -711,6 +711,12 @@ impl WorldStateHandle {
         self.with(|state| state.rules.mob_griefing())
     }
 
+    /// `universal_anger` — whether a hurt neutral mob turns on every player.
+    #[must_use]
+    pub fn universal_anger(&self) -> bool {
+        self.with(|state| state.rules.universal_anger())
+    }
+
     /// `keep_inventory` — whether a player keeps their items through death.
     #[must_use]
     pub fn keep_inventory(&self) -> bool {

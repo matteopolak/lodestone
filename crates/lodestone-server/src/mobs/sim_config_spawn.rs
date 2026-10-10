@@ -68,6 +68,7 @@ impl<'w> MobSim<'w> {
             mob_drops: true,
             piglin_safe: true,
             difficulty: lodestone_model::Difficulty::Normal,
+            universal_anger: false,
             vehicles: HashMap::new(),
             tnt: HashMap::new(),
             eyes: HashMap::new(),
@@ -124,6 +125,12 @@ impl<'w> MobSim<'w> {
     /// between attempts is also asserting how many draws each mechanism makes.
     pub fn set_tame_rng(&mut self, rng: SpawnRng) -> &mut Self {
         self.tame_rng = rng;
+        self
+    }
+
+    /// Sets the `universal_anger` game rule the mobs' reset goal and anger feed read.
+    pub fn set_universal_anger(&mut self, on: bool) -> &mut Self {
+        self.universal_anger = on;
         self
     }
 
@@ -525,6 +532,9 @@ impl<'w> MobSim<'w> {
             hurt_cooldown: HurtCooldown::default(),
             ambient_sound_time: 0,
             attack_target_id: None,
+            target_classes: lodestone_entity::ai::TargetClassSet::EMPTY,
+            class_target_ids: Vec::new(),
+            class_bound_target: false,
             owner: None,
             tame: false,
             ordered_to_sit: false,

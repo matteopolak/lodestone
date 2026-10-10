@@ -2108,6 +2108,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // reinforcement-roll gate alongside the `hard` flag just above.
             sim.set_spawn_monsters_enabled(world_state.spawn_mobs());
             sim.set_difficulty(world_state.difficulty().0);
+            sim.set_universal_anger(world_state.universal_anger());
         });
         let players: Vec<lodestone_model::Vec3> =
             mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());

@@ -31,6 +31,7 @@ use lodestone_model::{BlockPos, Vec3};
 use super::goal::GoalSelector;
 use super::locomotion;
 use super::mob::{EatenBlock, MobController, ProjectileLaunch, SwoopState, distance_sqr};
+use super::target_class::TargetClass;
 use crate::brain::BrainMob;
 use crate::pathfinding::{
     Aabb, BlockCues, MobShape, NavMode, SwimRule, PathFinder, PathNavigator, PathParams, PathStart, PathType,
@@ -469,6 +470,17 @@ pub struct MobBody {
     /// goal still applies its own `lookDistance` cut-off on top, so a host
     /// that over-reports is merely wasteful, not wrong.
     nearest_player: Option<Vec3>,
+    /// Host-fed: the nearest entity of each [`TargetClass`] this mob's goals
+    /// ask for, indexed by [`TargetClass::index`].
+    class_targets: [Option<Vec3>; TargetClass::COUNT],
+    /// The block and radius the mob is restricted to, if any.
+    restriction: Option<(BlockPos, i32)>,
+    /// Host-fed: whether the universal-anger game rule is on.
+    universal_anger: bool,
+    /// Rises on every player hit; see [`MobController::last_hurt_by_player_stamp`].
+    player_hurt_stamp: u64,
+    /// A pending universal-anger reset, carrying whether to alert the group.
+    universal_anger_reset: Option<bool>,
     /// Host-fed, phantoms only: players inside the scan box, highest first.
     players_by_height: Vec<Vec3>,
     /// Host-fed, phantoms only: a cat within 16 blocks of the body.
@@ -873,6 +885,11 @@ impl<'w> NavigatingMob<'w> {
             ignited: false,
             detonated: false,
             nearest_player: None,
+            class_targets: [None; TargetClass::COUNT],
+            restriction: None,
+            universal_anger: false,
+            player_hurt_stamp: 0,
+            universal_anger_reset: None,
             players_by_height: Vec::new(),
             cat_near: false,
             scary_near: false,
@@ -1402,6 +1419,50 @@ impl<'w> NavigatingMob<'w> {
     pub fn set_nearest_player(&mut self, player: Option<Vec3>) -> &mut Self {
         self.nearest_player = player;
         self
+    }
+
+    /// Host injection point: the nearest entity of `class`, already filtered
+    /// by the class's own predicate.
+    pub fn set_class_target(&mut self, class: TargetClass, target: Option<Vec3>) -> &mut Self {
+        self.class_targets[class.index()] = target;
+        self
+    }
+
+    /// Restricts the mob to within `radius` blocks of `centre`, or lifts the
+    /// restriction.
+    pub fn set_restriction(&mut self, restriction: Option<(BlockPos, i32)>) -> &mut Self {
+        self.restriction = restriction;
+        self
+    }
+
+    /// The block and radius the mob is restricted to.
+    #[must_use]
+    pub fn restriction(&self) -> Option<(BlockPos, i32)> {
+        self.restriction
+    }
+
+    /// Host injection point: the universal-anger game rule.
+    pub fn set_universal_anger(&mut self, on: bool) -> &mut Self {
+        self.universal_anger = on;
+        self
+    }
+
+    /// Records that a player just damaged the mob.
+    pub fn note_hurt_by_player(&mut self) {
+        self.player_hurt_stamp += 1;
+    }
+
+    /// Forgets who last hurt the mob and what it was attacking.
+    pub fn stop_being_angry(&mut self) {
+        self.last_hurt_by = None;
+        self.hurt_by_ticks = 0;
+        MobController::set_attack_target(self, None);
+    }
+
+    /// Drains a pending universal-anger reset, carrying whether it alerts the
+    /// surrounding group.
+    pub fn take_universal_anger_reset(&mut self) -> Option<bool> {
+        self.universal_anger_reset.take()
     }
 
     /// Host injection point: whether a pufferfish has something scary near.
@@ -3110,6 +3171,42 @@ impl MobController for NavigatingMob<'_> {
 
     fn nearest_player(&self) -> Option<Vec3> {
         self.nearest_player
+    }
+
+    fn nearest_of_class(&self, class: TargetClass) -> Option<Vec3> {
+        self.class_targets[class.index()]
+    }
+
+    fn home_centre(&self) -> Option<Vec3> {
+        self.restriction.map(|(at, _)| Vec3::new(f64::from(at.x) + 0.5, f64::from(at.y), f64::from(at.z) + 0.5))
+    }
+
+    fn is_within_home(&self) -> bool {
+        self.restriction.is_none_or(|(at, radius)| {
+            let here = self.block_position();
+            let (dx, dy, dz) = (at.x - here.x, at.y - here.y, at.z - here.z);
+            f64::from(dx * dx + dy * dy + dz * dz) < f64::from(radius) * f64::from(radius)
+        })
+    }
+
+    fn random_target_towards(&mut self, towards: Vec3) -> Option<Vec3> {
+        // The search aims away from a point, so aim away from the mirror image
+        // of the destination.
+        let away = Vec3::new(2.0 * self.pos.x - towards.x, self.pos.y, 2.0 * self.pos.z - towards.z);
+        self.stroll_search(Some(away))
+    }
+
+    fn universal_anger_enabled(&self) -> bool {
+        self.universal_anger
+    }
+
+    fn last_hurt_by_player_stamp(&self) -> u64 {
+        self.player_hurt_stamp
+    }
+
+    fn reset_universal_anger(&mut self, alert_others: bool) {
+        self.stop_being_angry();
+        self.universal_anger_reset = Some(alert_others);
     }
 
     fn players_by_height(&self) -> &[Vec3] {

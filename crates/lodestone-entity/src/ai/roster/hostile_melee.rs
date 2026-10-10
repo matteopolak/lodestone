@@ -77,9 +77,9 @@
 //!   vanilla's own behaviour-goals helper does, and the goal's own `can_use` gates on
 //!   [`crate::ai::MobController::main_hand_item`] rather than on
 //!   registration.
-//! * **Nothing in the sim is a villager, iron golem, armadillo or piglin**, so every target registration naming one is [`Coverage::Missing`]
-//!   rather than a goal that would search for an entity class that cannot be
-//!   spawned.
+//! * **Target rows naming another species ask the host for a
+//!   [`TargetClass`](crate::ai::TargetClass).** The host answers with the nearest
+//!   member's position, and a melee hit on that position lands on the mob.
 //! * **Vanilla's own same-owner alert-others flag is not modelled** — our
 //!   `HurtByTargetGoal` retaliates but never propagates anger to nearby mobs.
 //!   That needs a sim-side census of nearby same-species mobs this repo does
@@ -124,8 +124,10 @@ use crate::ai::mob::MobController;
 use crate::ai::goals::{FleeSunGoal, MeleeAttackGoal, NearestAttackableTargetGoal, RandomStrollGoal};
 
 use super::{
-    Registration, Selector, SpeciesContext, avoid_entity, float_goal, hurt_by_target,
-    leap_0_4, look_at_player_8, melee_attack, nearest_attackable_target, random_look_around, stroll, swell,
+    Registration, Selector, SpeciesContext, avoid_entity, float_goal, hurt_by_target, leap_0_4,
+    look_at_player_8, melee_attack, nearest_attackable_target, random_look_around, stroll,
+    swell, target_axolotl, target_baby_turtle, target_iron_golem, target_piglin,
+    target_villager_unseen,
 };
 
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
@@ -226,7 +228,7 @@ pub static SPIDER: &[Registration] = &[
     // `NearestAttackableTargetGoal`, adding only a daylight brightness penalty to
     // the search radius.
     Registration::target(2, "Spider.SpiderTargetGoal(Player)", nearest_attackable_target),
-    Registration::missing(Selector::Target, 3, "Spider.SpiderTargetGoal(IronGolem)"),
+    Registration::target(3, "Spider.SpiderTargetGoal(IronGolem)", target_iron_golem),
 ];
 
 /// Vanilla's own zombie goal registration plus its own behaviour-goals
@@ -261,9 +263,9 @@ pub static ZOMBIE: &[Registration] = &[
     // retaliation is modelled; the alert propagation to nearby mobs is not.
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     Registration::target(2, "NearestAttackableTargetGoal(Player)", nearest_attackable_target),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(AbstractVillager)"),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(IronGolem)"),
-    Registration::missing(Selector::Target, 5, "NearestAttackableTargetGoal(Turtle)"),
+    Registration::target(3, "NearestAttackableTargetGoal(AbstractVillager)", target_villager_unseen),
+    Registration::target(3, "NearestAttackableTargetGoal(IronGolem)", target_iron_golem),
+    Registration::target(5, "NearestAttackableTargetGoal(Turtle)", target_baby_turtle),
 ];
 
 /// Vanilla's own zombie goal registration plus the drowned's own
@@ -280,8 +282,8 @@ pub static ZOMBIE: &[Registration] = &[
 /// `ZombieAttackGoal`, `MoveThroughVillageGoal` and a water-avoiding stroll that
 /// vanilla never registers on it, and lose all six goals that make it amphibious.
 ///
-/// The go-to-water, swim-up, melee and player-target rows are modelled; the
-/// beach goal and the target rows naming other species stay `Missing`.
+/// The go-to-water, swim-up, melee and every target row are modelled; the
+/// beach goal stays `Missing`.
 pub static DROWNED: &[Registration] = &[
     // -- inherited from vanilla's own zombie registration ---------------------
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
@@ -315,10 +317,10 @@ pub static DROWNED: &[Registration] = &[
     // and nothing yet makes one drowned hurt another.
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     Registration::target(2, "NearestAttackableTargetGoal(Player)", drowned_player_target),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(AbstractVillager)"),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(IronGolem)"),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(Axolotl)"),
-    Registration::missing(Selector::Target, 5, "NearestAttackableTargetGoal(Turtle)"),
+    Registration::target(3, "NearestAttackableTargetGoal(AbstractVillager)", target_villager_unseen),
+    Registration::target(3, "NearestAttackableTargetGoal(IronGolem)", target_iron_golem),
+    Registration::target(3, "NearestAttackableTargetGoal(Axolotl)", target_axolotl),
+    Registration::target(5, "NearestAttackableTargetGoal(Turtle)", target_baby_turtle),
 ];
 
 /// A drowned goes for a target only in water, or at night wherever it is.
@@ -401,8 +403,8 @@ pub static SKELETON: &[Registration] = &[
     Registration::goal(6, "RandomLookAroundGoal", random_look_around),
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     Registration::target(2, "NearestAttackableTargetGoal(Player)", nearest_attackable_target),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(IronGolem)"),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(Turtle)"),
+    Registration::target(3, "NearestAttackableTargetGoal(IronGolem)", target_iron_golem),
+    Registration::target(3, "NearestAttackableTargetGoal(Turtle)", target_baby_turtle),
 ];
 
 /// Vanilla's own wither-skeleton goal registration — one extra target
@@ -414,19 +416,17 @@ pub static SKELETON: &[Registration] = &[
 /// the base registration, which is why the piglin row comes first here.
 /// Vanilla's ordering is observable only among rows of equal priority, and this
 /// row shares priority 3
-/// with two others, so transcribing the order matters even though all three are
-/// unmodelled.
+/// with two others, so transcribing the order matters.
 ///
-/// This table used to be [`SKELETON`], shared, with a comment conceding it was
-/// "knowingly not a complete transcription" because the extra row is `Missing`
-/// either way. Splitting it costs eleven duplicated lines and buys a table that a
-/// multiset gate can actually check against the jar — and
+/// This table used to be [`SKELETON`], shared. Splitting it costs eleven
+/// duplicated lines and buys a table that a multiset gate can actually check
+/// against the jar — and
 /// `wither_skeleton_is_the_base_table_plus_the_piglin_row` pins the duplication so
 /// the two cannot drift.
 pub static WITHER_SKELETON: &[Registration] = &[
     // Vanilla's own wither-skeleton registration adds a targeting goal for
-    // the abstract-piglin class. No piglin can exist in this sim.
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(AbstractPiglin)"),
+    // the abstract-piglin class.
+    Registration::target(3, "NearestAttackableTargetGoal(AbstractPiglin)", target_piglin),
     // -- vanilla's own base registration plus the
     // -- weapon `else` branch --------------------------------------------
     Registration::goal(2, "RestrictSunGoal", restrict_sun),
@@ -444,8 +444,8 @@ pub static WITHER_SKELETON: &[Registration] = &[
     Registration::goal(6, "RandomLookAroundGoal", random_look_around),
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     Registration::target(2, "NearestAttackableTargetGoal(Player)", nearest_attackable_target),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(IronGolem)"),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(Turtle)"),
+    Registration::target(3, "NearestAttackableTargetGoal(IronGolem)", target_iron_golem),
+    Registration::target(3, "NearestAttackableTargetGoal(Turtle)", target_baby_turtle),
 ];
 
 /// The stroll speed factor `0.8` — the creeper's own registration

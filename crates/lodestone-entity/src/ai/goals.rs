@@ -8,6 +8,7 @@
 
 use super::goal::{Flag, FlagSet, Goal, reduced_tick_delay};
 use super::mob::{EatenBlock, MobController, distance_sqr};
+use super::target_class::TargetClass;
 use lodestone_model::Vec3;
 
 /// Swims: repeatedly requests a jump while in water or lava so the mob floats.
@@ -33,6 +34,105 @@ impl Goal for FloatGoal {
 
     fn requires_update_every_tick(&self) -> bool {
         true
+    }
+}
+
+/// Walks back inside the mob's home radius when it has strayed out of it.
+///
+/// Vanilla's own move-towards-restriction goal (flag MOVE): a random point up
+/// to 16 blocks out, within a quarter turn of the direction to the home centre.
+#[derive(Debug)]
+pub struct MoveTowardsRestrictionGoal {
+    speed: f64,
+    wanted: Option<Vec3>,
+    claims_look: bool,
+}
+
+impl MoveTowardsRestrictionGoal {
+    /// Creates the goal; `speed` multiplies the mob's movement speed.
+    #[must_use]
+    pub fn new(speed: f64) -> Self {
+        Self {
+            speed,
+            wanted: None,
+            claims_look: false,
+        }
+    }
+
+    /// Also claims the LOOK flag, as the guardian's registration does.
+    #[must_use]
+    pub fn claiming_look(mut self) -> Self {
+        self.claims_look = true;
+        self
+    }
+}
+
+impl Goal for MoveTowardsRestrictionGoal {
+    fn flags(&self) -> FlagSet {
+        if self.claims_look {
+            FlagSet::of(&[Flag::Move, Flag::Look])
+        } else {
+            FlagSet::of(&[Flag::Move])
+        }
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if mob.is_within_home() {
+            return false;
+        }
+        let Some(centre) = mob.home_centre() else {
+            return false;
+        };
+        self.wanted = mob.random_target_towards(centre);
+        self.wanted.is_some()
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        !mob.navigation_done()
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        if let Some(t) = self.wanted {
+            mob.move_to(t, self.speed);
+        }
+    }
+}
+
+/// Re-angers a mob against every player once a player has hurt it.
+///
+/// Vanilla's own reset-universal-anger goal (no flags). Under the
+/// universal-anger rule a player's hit drops the specific grudge and leaves
+/// the anger timer running, so any player becomes a valid target; with
+/// `alert_others` the surrounding same-species mobs do the same.
+#[derive(Debug)]
+pub struct ResetUniversalAngerGoal {
+    alert_others: bool,
+    answered_stamp: u64,
+}
+
+impl ResetUniversalAngerGoal {
+    /// Creates the goal.
+    #[must_use]
+    pub fn new(alert_others: bool) -> Self {
+        Self {
+            alert_others,
+            answered_stamp: 0,
+        }
+    }
+}
+
+impl Goal for ResetUniversalAngerGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        mob.universal_anger_enabled() && mob.last_hurt_by_player_stamp() > self.answered_stamp
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        self.answered_stamp = mob.last_hurt_by_player_stamp();
+        mob.reset_universal_anger(self.alert_others);
     }
 }
 
@@ -110,6 +210,8 @@ pub struct LookAtPlayerGoal {
     probability: f32,
     look_time: i32,
     target: Option<Vec3>,
+    /// The non-player class to watch instead of the nearest player.
+    class: Option<TargetClass>,
 }
 
 impl LookAtPlayerGoal {
@@ -121,6 +223,23 @@ impl LookAtPlayerGoal {
             probability,
             look_time: 0,
             target: None,
+            class: None,
+        }
+    }
+
+    /// Watches the nearest member of `class` rather than a player.
+    #[must_use]
+    pub fn of_class(look_distance: f64, probability: f32, class: TargetClass) -> Self {
+        Self {
+            class: Some(class),
+            ..Self::new(look_distance, probability)
+        }
+    }
+
+    fn watched(&self, mob: &dyn MobController) -> Option<Vec3> {
+        match self.class {
+            Some(class) => mob.nearest_of_class(class),
+            None => mob.nearest_player(),
         }
     }
 }
@@ -130,11 +249,15 @@ impl Goal for LookAtPlayerGoal {
         FlagSet::of(&[Flag::Look])
     }
 
+    fn target_class(&self) -> Option<TargetClass> {
+        self.class
+    }
+
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
         if mob.next_f32() >= self.probability {
             return false;
         }
-        match mob.nearest_player() {
+        match self.watched(mob) {
             Some(p)
                 if distance_sqr(p, mob.position()) <= self.look_distance * self.look_distance =>
             {
@@ -149,7 +272,7 @@ impl Goal for LookAtPlayerGoal {
         if self.look_time <= 0 {
             return false;
         }
-        match (self.target, mob.nearest_player()) {
+        match (self.target, self.watched(mob)) {
             (Some(_), Some(p)) => {
                 self.target = Some(p);
                 distance_sqr(p, mob.position()) <= self.look_distance * self.look_distance
@@ -700,7 +823,8 @@ impl Goal for FleeSunGoal {
             let dy = f64::from(mob.next_i32(6) - 3);
             let dz = f64::from(mob.next_i32(20) - 10);
             let spot = Vec3::new(bx + dx + 0.5, by + dy, bz + dz + 0.5);
-            if !mob.sees_sky_at(spot) {
+            // A cell inside the ground also sees no sky but is no place to stand.
+            if !mob.sees_sky_at(spot) && mob.air_at(spot) {
                 self.hide = Some(spot);
                 return true;
             }
@@ -1184,6 +1308,12 @@ pub struct NearestAttackableTargetGoal {
     unseen_ticks: i32,
     /// Candidates this rejects are not acquired.
     filter: Option<TargetFilter>,
+    /// The non-player class this goal hunts; `None` hunts players.
+    class: Option<TargetClass>,
+    /// Whether the target must be in sight to be acquired and kept.
+    must_see: bool,
+    /// Whether a tamed mob never acquires through this registration.
+    untamed_only: bool,
 }
 
 /// Ticks a held target may stay out of sight before the goal drops it.
@@ -1205,7 +1335,36 @@ impl NearestAttackableTargetGoal {
             anger_gated: false,
             unseen_ticks: 0,
             filter: None,
+            class: None,
+            must_see: true,
+            untamed_only: false,
         }
+    }
+
+    /// Hunts the nearest member of `class` instead of a player. `must_see`
+    /// is vanilla's own sight requirement for the registration.
+    #[must_use]
+    pub fn of_class(class: TargetClass, must_see: bool) -> Self {
+        Self {
+            class: Some(class),
+            must_see,
+            ..Self::new()
+        }
+    }
+
+    /// Never acquires while the mob is tame.
+    #[must_use]
+    pub fn untamed_only(mut self) -> Self {
+        self.untamed_only = true;
+        self
+    }
+
+    /// The nearest member of the goal's class inside follow range, sight
+    /// aside.
+    fn class_candidate(class: TargetClass, mob: &mut dyn MobController) -> Option<Vec3> {
+        let t = mob.nearest_of_class(class)?;
+        let range = mob.follow_range();
+        (distance_sqr(mob.position(), t) <= range * range).then_some(t)
     }
 
     /// Acquires only a candidate `filter` accepts.
@@ -1259,11 +1418,20 @@ impl Goal for NearestAttackableTargetGoal {
         FlagSet::of(&[Flag::Target])
     }
 
+    fn target_class(&self) -> Option<TargetClass> {
+        self.class
+    }
+
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if self.untamed_only && mob.is_tame() {
+            return false;
+        }
         if self.random_interval > 1 && mob.next_i32(self.random_interval) != 0 {
             return false;
         }
-        self.target = if self.anger_gated {
+        self.target = if let Some(class) = self.class {
+            Self::class_candidate(class, mob).filter(|&t| !self.must_see || mob.has_line_of_sight(t))
+        } else if self.anger_gated {
             mob.angry_target()
         } else {
             mob.find_nearest_target()
@@ -1308,7 +1476,9 @@ impl Goal for NearestAttackableTargetGoal {
         // Vanilla's live-reference position, resolved the way the seam can: ask
         // the same source `can_use` did. `None` covers both of vanilla's exits —
         // the candidate is gone, or the range re-test failed.
-        let live = if self.anger_gated {
+        let live = if let Some(class) = self.class {
+            mob.nearest_of_class(class)
+        } else if self.anger_gated {
             mob.angry_target()
         } else {
             mob.nearest_in_range()
@@ -1324,7 +1494,7 @@ impl Goal for NearestAttackableTargetGoal {
         if distance_sqr(mob.position(), target) > within * within {
             return false;
         }
-        if mob.has_line_of_sight(target) {
+        if !self.must_see || mob.has_line_of_sight(target) {
             self.unseen_ticks = 0;
         } else {
             self.unseen_ticks += 1;

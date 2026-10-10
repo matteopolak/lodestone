@@ -87,11 +87,13 @@
 //! any new table the same way.
 
 use super::goal::Goal;
-use super::goals::{LeapAtTargetGoal, 
-    AvoidEntityGoal, BreedGoal, FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal,
-    NearestAttackableTargetGoal, OwnerHurtByTargetGoal, OwnerHurtTargetGoal, RandomLookAroundGoal,
-    RandomStrollGoal, SitWhenOrderedToGoal, SwellGoal,
+use super::goals::{
+    AvoidEntityGoal, BreedGoal, FloatGoal, HurtByTargetGoal, LeapAtTargetGoal, LookAtPlayerGoal,
+    MeleeAttackGoal, MoveTowardsRestrictionGoal, NearestAttackableTargetGoal, OwnerHurtByTargetGoal,
+    OwnerHurtTargetGoal, RandomLookAroundGoal, RandomStrollGoal, ResetUniversalAngerGoal,
+    SitWhenOrderedToGoal, SwellGoal,
 };
+use super::target_class::TargetClass;
 
 pub mod aerial;
 pub mod amphibious;
@@ -387,6 +389,86 @@ pub fn nearest_attackable_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(NearestAttackableTargetGoal::new())
 }
 
+/// Hunts the nearest villager or wandering trader without needing to see it.
+pub fn target_villager_unseen(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Villager, false))
+}
+
+/// Hunts the nearest iron golem it can see.
+pub fn target_iron_golem(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::IronGolem, true))
+}
+
+/// Hunts the nearest baby turtle out of water that it can see.
+pub fn target_baby_turtle(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::BabyLandTurtle, true))
+}
+
+/// Hunts the nearest axolotl it can see.
+pub fn target_axolotl(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Axolotl, true))
+}
+
+/// Hunts the nearest piglin or piglin brute it can see.
+pub fn target_piglin(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Piglin, true))
+}
+
+/// Hunts the nearest endermite it can see.
+pub fn target_endermite(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Endermite, true))
+}
+
+/// Hunts the nearest skeleton variant without needing to see it.
+pub fn target_skeleton_unseen(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Skeleton, false))
+}
+
+/// Hunts the nearest hostile mob it can see.
+pub fn target_hostile(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Hostile, true))
+}
+
+/// An untamed hunter's random pick among sheep, rabbits and foxes.
+pub fn untamed_target_prey(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::WolfPrey, false).untamed_only())
+}
+
+/// An untamed hunter's random pick of a baby turtle out of water.
+pub fn untamed_target_baby_turtle(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::BabyLandTurtle, false).untamed_only())
+}
+
+/// An untamed hunter's random pick of a rabbit.
+pub fn untamed_target_rabbit(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::of_class(TargetClass::Rabbit, false).untamed_only())
+}
+
+/// Watches the nearest other guardian: distance `12.0`, chance `0.01`.
+pub fn look_at_guardian(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(LookAtPlayerGoal::of_class(12.0, 0.01, TargetClass::Guardian))
+}
+
+/// Walks back inside the home radius at the mob's full speed.
+pub fn move_towards_restriction(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(MoveTowardsRestrictionGoal::new(ctx.speed))
+}
+
+/// The guardian's form of the same goal, which also holds the LOOK flag.
+pub fn guardian_move_towards_restriction(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(MoveTowardsRestrictionGoal::new(ctx.speed).claiming_look())
+}
+
+/// Universal-anger reset that also alerts the surrounding group.
+pub fn reset_universal_anger_alerting(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(ResetUniversalAngerGoal::new(true))
+}
+
+/// Universal-anger reset for the mob alone.
+pub fn reset_universal_anger_solo(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(ResetUniversalAngerGoal::new(false))
+}
+
 /// A pounce with vertical velocity `0.4` (spider, wolf).
 pub fn leap_0_4(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(LeapAtTargetGoal::new(0.4))
@@ -604,8 +686,10 @@ mod tests {
                 let flags = build(&ctx).flags();
                 checked += 1;
                 match r.selector {
+                    // A target-selector goal may claim no flag at all (the
+                    // universal-anger reset does not), but never a goal-side one.
                     Selector::Target => assert!(
-                        flags == FlagSet::of(&[Flag::Target]),
+                        ![Flag::Move, Flag::Look, Flag::Jump].iter().any(|&f| flags.contains(f)),
                         "{species}'s {} is on the target selector but claims \
                          flags other than TARGET; vanilla's two priority \
                          namespaces would now collide",

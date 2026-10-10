@@ -1845,6 +1845,17 @@ pub struct SimMob<'w> {
     /// `Vec3` (which only drives movement — the goal/navigation seam has no
     /// entity identity, just positions).
     attack_target_id: Option<i32>,
+    /// The non-player classes this mob's goals look for; the perception feed
+    /// answers only these.
+    target_classes: lodestone_entity::ai::TargetClassSet,
+    /// Where each candidate the feed offered this tick stands, with its
+    /// entity id, so a goal-chosen attack target position resolves back to a
+    /// mob.
+    class_target_ids: Vec<(Vec3, i32)>,
+    /// Whether [`attack_target_id`](Self::attack_target_id) was written from
+    /// `class_target_ids` and so must be cleared when the target changes to
+    /// something else.
+    class_bound_target: bool,
     /// Who owns this mob, if anyone — the ownership relation. A tamed animal's
     /// owner is a **player** uuid, which is expressible here:
     /// [`PerceivedPlayer`] carries a [`PlayerIdentity`] at the perception seam. The
@@ -2617,6 +2628,8 @@ pub struct MobSim<'w> {
     piglin_safe: bool,
     /// World difficulty, which scales how far a hunting mob will path down a drop.
     difficulty: lodestone_model::Difficulty,
+    /// The `universal_anger` game rule.
+    universal_anger: bool,
     /// Live rideable **vehicles** — every `AbstractBoat` a player has placed,
     /// keyed by network entity id.
     ///

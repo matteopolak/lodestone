@@ -14,9 +14,11 @@ pub mod locomotion;
 pub mod mob;
 pub mod navigating_mob;
 pub mod roster;
+pub mod target_class;
 
 pub use goal::{Flag, FlagSet, Goal, GoalId, GoalSelector, MobAi, reduced_tick_delay};
 pub use roster::{SpeciesContext, goals_for};
+pub use target_class::{TargetClass, TargetClassSet};
 pub use mob::{MobController, ProjectileKind, ProjectileLaunch, SwoopState};
 pub use navigating_mob::{
     BABY_START_AGE, LOVE_TICKS, MAX_SWELL, MainHandItem, NavigatingMob,

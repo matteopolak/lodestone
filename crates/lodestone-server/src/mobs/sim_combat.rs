@@ -88,6 +88,7 @@ impl<'w> MobSim<'w> {
             // `PLAYER_HURT_EXPERIENCE_TIME` ticks; the death-loot path uses this
             // deadline when deciding whether to award experience.
             mob.hurt_by_player_until = Some(now + PLAYER_HURT_EXPERIENCE_TIME);
+            mob.mob.note_hurt_by_player();
             if damage_dealt > 0.0 && mob.health() > 0.0 {
                 let target_pos = mob.position();
                 // Vector from the target to the attacker; the impulse moves the

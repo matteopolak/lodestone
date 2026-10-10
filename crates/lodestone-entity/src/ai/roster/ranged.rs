@@ -69,7 +69,8 @@ use lodestone_model::Vec3;
 
 use super::{
     Registration, Selector, SpeciesContext, avoid_entity, float_goal, hurt_by_target,
-    look_at_player_6, look_at_player_8, nearest_attackable_target, random_look_around, stroll,
+    look_at_player_6, look_at_player_8, move_towards_restriction, nearest_attackable_target,
+    random_look_around, stroll, target_hostile, target_iron_golem, target_villager_unseen,
 };
 use crate::ai::goal::{Flag, FlagSet, Goal};
 use crate::ai::goals::LongDistancePatrolGoal;
@@ -811,11 +812,8 @@ pub static BLAZE: &[Registration] = &[
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     Registration::target(2, "NearestAttackableTargetGoal", nearest_attackable_target),
     Registration::goal(4, "Blaze.BlazeAttackGoal", blaze_fireball),
-    // A blaze wanders back toward its spawn restriction point. Nothing in this
-    // repo gives a mob a home position, so there is no approximation to make —
-    // and unlike the stroll goal it is not a *simplification* of something we
-    // have.
-    Registration::missing(Selector::Goal, 5, "MoveTowardsRestrictionGoal"),
+    // A blaze walks back inside its home radius, if it has one.
+    Registration::goal(5, "MoveTowardsRestrictionGoal", move_towards_restriction),
     Registration::goal(7, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::goal(8, "LookAtPlayerGoal", look_at_player_8),
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
@@ -823,20 +821,8 @@ pub static BLAZE: &[Registration] = &[
 
 /// Vanilla's own snow-golem goal registration. No base-class call.
 pub static SNOW_GOLEM: &[Registration] = &[
-    // Vanilla's own snow-golem target-acquisition goal
-    // (vanilla's own snow-golem registration) — a snow golem hunts *hostile mobs*, not players. Our
-    // `NearestAttackableTargetGoal` resolves through
-    // `MobController::find_nearest_target`, which the server answers with the
-    // nearest **player**, so substituting it here would make snow golems shoot
-    // the player: not a simplification, an inversion. Per `super`'s rule, a
-    // registration naming another class is a `Missing` row.
-    //
-    // The consequence is worth stating plainly: with no target feed, a snow
-    // golem's `RangedAttackGoal` below cannot fire in production. It is
-    // registered because vanilla registers it, and because the day
-    // `find_nearest_target` learns about mob-vs-mob hostility this
-    // row starts working with no change here.
-    Registration::missing(Selector::Target, 1, "NearestAttackableTargetGoal"),
+    // A snow golem hunts hostile mobs, not players.
+    Registration::target(1, "NearestAttackableTargetGoal", target_hostile),
     Registration::goal(1, "RangedAttackGoal", snowball_attack),
     Registration::goal(2, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::goal(3, "LookAtPlayerGoal", look_at_player_6),
@@ -928,14 +914,9 @@ pub static PILLAGER: &[Registration] = &[
     Registration::covered(Selector::Goal, 10, "LookAtPlayerGoal", "LookAtPlayerGoal"),
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     Registration::target(2, "NearestAttackableTargetGoal", nearest_attackable_target),
-    // The two priority-3 target rows name `AbstractVillager` and `IronGolem`
-    // (vanilla's own pillager registration). Both are mob-vs-mob targeting, which `find_nearest_target`
-    // answers with the nearest *player* — substituting ours would make a pillager
-    // shoot the player under a villager's priority, which is not a simplification
-    // but a duplicate of the row above. `Missing`, for the same reason the snow
-    // golem's target row is.
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal"),
-    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal"),
+    // The two priority-3 rows hunt villagers (unseen is fine) and iron golems.
+    Registration::target(3, "NearestAttackableTargetGoal", target_villager_unseen),
+    Registration::target(3, "NearestAttackableTargetGoal", target_iron_golem),
 ];
 
 /// The registry path a [`ProjectileKind`] spawns as.
@@ -1473,15 +1454,10 @@ mod tests {
     /// `MobSim::spawn_species` calls.
     #[test]
     fn both_species_install_goals_through_the_production_entry_point() {
-        // The witch builds 7 of its 13 rows and the pillager 8 of its 16 — every
-        // `Modelled` row and no `Missing` or `CoveredBy` one, which is what makes the
-        // raid rows honest bookkeeping rather than silently-registered no-ops. The
-        // pillager's second `LookAtPlayerGoal` is `CoveredBy`, so 16 rows minus 8
-        // uncovered gives 8: the pillager patrol's `LongDistancePatrolGoal` row is the one
-        // that moved from `Missing` to `Modelled` and is why the pillager's count is
-        // no longer the same as the witch's identical inherited-row count.
+        // Every `Modelled` row builds and no `Missing` or `CoveredBy` one does, which is
+        // what makes the raid rows honest bookkeeping rather than silent no-ops.
         for (species, expected_built) in
-            [("blaze", 6), ("snow_golem", 4), ("witch", 7), ("pillager", 8)]
+            [("blaze", 7), ("snow_golem", 5), ("witch", 7), ("pillager", 10)]
         {
             let ctx = SpeciesContext::new(0.23);
             let built = goals_for(species, &ctx);

@@ -120,6 +120,49 @@ pub trait MobController {
         None
     }
 
+    /// The position of the nearest entity of `class` the host knows of,
+    /// already filtered by the class's own predicate and with no range cut
+    /// (a goal applies its own).
+    fn nearest_of_class(&self, class: crate::ai::TargetClass) -> Option<Vec3> {
+        let _ = class;
+        None
+    }
+
+    /// The bottom centre of the mob's home, if it is restricted to one.
+    fn home_centre(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Whether the mob stands inside its home radius; always true without a
+    /// home.
+    fn is_within_home(&self) -> bool {
+        true
+    }
+
+    /// A destination up to 16 blocks out, within a quarter turn of the
+    /// direction toward `towards`. Defaults to the plain stroll search.
+    fn random_target_towards(&mut self, towards: Vec3) -> Option<Vec3> {
+        let _ = towards;
+        self.random_stroll_target()
+    }
+
+    /// Whether the universal-anger game rule is on.
+    fn universal_anger_enabled(&self) -> bool {
+        false
+    }
+
+    /// A counter that rises each time a player damages the mob, so a goal can
+    /// tell a hit it has not yet answered.
+    fn last_hurt_by_player_stamp(&self) -> u64 {
+        0
+    }
+
+    /// Asks the host to drop the mob's grudge and re-anger it against every
+    /// player, and the same-species mobs around it when `alert_others`.
+    fn reset_universal_anger(&mut self, alert_others: bool) {
+        let _ = alert_others;
+    }
+
     /// Players inside a phantom's scan box (16 blocks horizontally, 64
     /// vertically), highest first. Empty for every other species.
     fn players_by_height(&self) -> &[Vec3] {

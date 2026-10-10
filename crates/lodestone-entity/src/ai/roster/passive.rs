@@ -108,8 +108,9 @@ use crate::ai::goals::{
 };
 
 use super::{
-    LOOK_PROBABILITY, Registration, Selector, SpeciesContext, breed_1_0, float_goal,
-    leap_0_3, look_at_player_6, look_at_player_8, random_look_around, sit_when_ordered, stroll,
+    LOOK_PROBABILITY, Registration, Selector, SpeciesContext, breed_1_0, float_goal, leap_0_3,
+    look_at_player_6, look_at_player_8, random_look_around, sit_when_ordered, stroll,
+    untamed_target_baby_turtle, untamed_target_rabbit,
 };
 
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
@@ -352,13 +353,10 @@ pub static CAT: &[Registration] = &[
     Registration::goal(10, "BreedGoal", breed_0_8),
     Registration::goal(11, "WaterAvoidingRandomStrollGoal", cat_stroll),
     Registration::goal(12, "LookAtPlayerGoal(Player)", look_at_player_10),
-    // Vanilla's own untamed-random-target goal for rabbits —
-    // an untamed cat hunting a random nearby rabbit. Unrelated to ownership;
-    // no goal type here models a random-same-class target search.
-    Registration::missing(Selector::Target, 1, "NonTameRandomTargetGoal(Rabbit)"),
-    // Vanilla's own untamed-random-target goal for baby turtles on land
-    // — same gap as the row above, narrowed to baby turtles on land.
-    Registration::missing(Selector::Target, 1, "NonTameRandomTargetGoal(Turtle)"),
+    // An untamed cat hunting a random nearby rabbit.
+    Registration::target(1, "NonTameRandomTargetGoal(Rabbit)", untamed_target_rabbit),
+    // The same hunt, narrowed to baby turtles on land.
+    Registration::target(1, "NonTameRandomTargetGoal(Turtle)", untamed_target_baby_turtle),
 ];
 
 /// Vanilla's own parrot goal registration.

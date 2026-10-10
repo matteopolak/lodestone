@@ -47,6 +47,8 @@ pub(super) const OWNED_FIELDS: &[&str] = &[
     "TicksSincePollination",
     "CannotEnterHiveTicks",
     "CropsGrownSincePollination",
+    "home_pos",
+    "home_radius",
 ];
 
 /// Species with a persistent grudge: the ones whose saves carry
@@ -229,6 +231,11 @@ impl<'w> MobSim<'w> {
                     fields.push((name.to_owned(), int_array_pos(BlockPos::new(x, y, z))));
                 }
             }
+        }
+
+        if let Some((at, radius)) = mob.mob.restriction() {
+            fields.push(("home_radius".to_owned(), Nbt::Int(radius)));
+            fields.push(("home_pos".to_owned(), int_array_pos(at)));
         }
 
         for (name, value) in &mob.passthrough {
@@ -452,6 +459,12 @@ impl<'w> MobSim<'w> {
             }
         }
         pending.owner = read_uuid(get("Owner"));
+
+        if let (Some(at), Some(radius)) = (read_pos(get("home_pos")), int_of(get("home_radius")))
+            && radius >= 0
+        {
+            self.mobs[index].mob.set_restriction(Some((at, radius)));
+        }
 
         if species == "bee" {
             let cell = |name: &str| read_pos(get(name)).map(|p| (p.x, p.y, p.z));

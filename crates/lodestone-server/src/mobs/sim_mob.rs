@@ -16,8 +16,37 @@ impl<'w> SimMob<'w> {
     /// Adds a prioritised goal (higher priority preempts lower on shared flags),
     /// returning `&mut self` so goals can be chained at spawn.
     pub fn add_goal(&mut self, priority: i32, goal: Box<dyn Goal>) -> &mut Self {
+        if let Some(class) = goal.target_class() {
+            self.target_classes.insert(class);
+        }
         self.goals.add(priority, goal);
         self
+    }
+
+    /// Names the mob the attack target position resolves to, among the
+    /// candidates this tick's perception feed offered, so a melee hit lands on
+    /// that mob rather than looking for a player. A target that is not one of
+    /// them (a player) clears an id this method wrote earlier.
+    pub(super) fn bind_attack_target_id(&mut self) {
+        let Some(target) = self.mob.attack_target() else {
+            return;
+        };
+        let found = self
+            .class_target_ids
+            .iter()
+            .find(|(at, _)| dist_sqr(*at, target) < 1e-9)
+            .map(|&(_, id)| id);
+        match found {
+            Some(id) => {
+                self.attack_target_id = Some(id);
+                self.class_bound_target = true;
+            }
+            None if self.class_bound_target => {
+                self.attack_target_id = None;
+                self.class_bound_target = false;
+            }
+            None => {}
+        }
     }
 
     /// Sets the mob's current attack target.

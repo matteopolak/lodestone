@@ -138,6 +138,11 @@ pub trait Goal: Send {
         false
     }
 
+    /// The entity class this goal asks the host to feed, if it looks for one.
+    fn target_class(&self) -> Option<super::TargetClass> {
+        None
+    }
+
     /// A delay in game ticks, expressed in this goal's own tick rate.
     fn adjusted_tick_delay(&self, ticks: i32) -> i32 {
         if self.requires_update_every_tick() { ticks } else { reduced_tick_delay(ticks) }

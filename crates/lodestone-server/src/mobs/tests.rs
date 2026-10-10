@@ -179,3 +179,8 @@ mod bees_tests;
 #[cfg(test)]
 #[path = "tests/leap.rs"]
 mod leap_tests;
+
+/// Mob-class targets, the guardian look-at, home restriction, universal anger.
+#[cfg(test)]
+#[path = "tests/class_targets.rs"]
+mod class_targets_tests;

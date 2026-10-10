@@ -290,7 +290,7 @@ pub const GAME_RULES: &[GameRuleSpec] = &[
     GameRuleSpec::boolean("spread_vines", true),
     GameRuleSpec::boolean("tnt_explodes", true),
     GameRuleSpec::boolean("tnt_explosion_drop_decay", false),
-    GameRuleSpec::boolean("universal_anger", false),
+    GameRuleSpec::boolean(UNIVERSAL_ANGER, false),
     GameRuleSpec::boolean("water_source_conversion", true),
 ];
 
@@ -299,6 +299,8 @@ pub const GAME_RULES: &[GameRuleSpec] = &[
 pub const ADVANCE_TIME: &str = "advance_time";
 /// `GameRules.MOB_GRIEFING`.
 pub const MOB_GRIEFING: &str = "mob_griefing";
+/// `universal_anger` game rule.
+pub const UNIVERSAL_ANGER: &str = "universal_anger";
 /// `GameRules.RANDOM_TICK_SPEED`.
 pub const RANDOM_TICK_SPEED: &str = "random_tick_speed";
 /// `GameRules.SPAWN_MOBS` — pre-26.2's `doMobSpawning`.
@@ -460,6 +462,12 @@ impl GameRules {
     #[must_use]
     pub fn mob_griefing(&self) -> bool {
         self.boolean(MOB_GRIEFING)
+    }
+
+    /// `universal_anger` — whether a hurt neutral mob turns on every player.
+    #[must_use]
+    pub fn universal_anger(&self) -> bool {
+        self.boolean(UNIVERSAL_ANGER)
     }
 
     /// `spawn_mobs` — whether natural mob spawning runs. Read by
@@ -625,6 +633,12 @@ impl GameRulesHandle {
     #[must_use]
     pub fn mob_griefing(&self) -> bool {
         self.with(|r| r.mob_griefing())
+    }
+
+    /// [`GameRules::universal_anger`] through the shared store.
+    #[must_use]
+    pub fn universal_anger(&self) -> bool {
+        self.with(|r| r.universal_anger())
     }
 
     /// [`GameRules::spawn_mobs`] through the shared store.

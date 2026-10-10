@@ -96,8 +96,8 @@ use crate::ai::goal::{Flag, FlagSet, Goal};
 use crate::ai::mob::{MobController, distance_sqr};
 
 use super::{
-    Registration, Selector, SpeciesContext, look_at_player_8, nearest_attackable_target,
-    random_look_around, stroll,
+    Registration, SpeciesContext, guardian_move_towards_restriction, look_at_guardian,
+    look_at_player_8, nearest_attackable_target, random_look_around, stroll,
 };
 
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
@@ -336,21 +336,14 @@ pub fn elder_guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// checked, not assumed, because two species in this family (`vex`, `ravager`) do
 /// call `super` and are excluded for exactly that reason.
 ///
-/// Three rows are not modelled or are narrowed, and none of them is the beam:
+/// Three rows are narrowed, and none of them is the beam:
 ///
-/// * **`MoveTowardsRestrictionGoal`** at 5 walks a mob back inside its
-///   `restrictTo` home radius. Nothing here has a home position, so there is
-///   no seam to approximate — [`Coverage::Missing`](super::Coverage::Missing).
-/// * **The second `LookAtPlayerGoal`** at 8 targets the guardian class at
-///   12.0 blocks with a 0.01 probability — guardians eyeing each other. Ours takes
-///   no target class and resolves through
-///   [`MobController::nearest_player`], so it is `Missing`, **not** `CoveredBy`.
-///   That is a different call from the creeper's two `AvoidEntityGoal` rows, which
-///   collapse into one because the server's `avoided_species` feed already
-///   resolves *both* classes into the one perception method. There is no
-///   equivalent feed making `nearest_player` return a guardian, so installing a
-///   second instance of our goal would duplicate the `Player` row rather than add
-///   this one.
+/// * **`MoveTowardsRestrictionGoal`** at 5 walks a mob back inside its home
+///   radius. Only an elder guardian has one (it restricts itself to 16 blocks
+///   around where it first ticks), so a plain guardian's row never fires.
+/// * **The second `LookAtPlayerGoal`** at 8 watches the nearest other guardian
+///   within 12.0 blocks with a 0.01 probability, through a
+///   [`TargetClass::Guardian`](crate::ai::TargetClass::Guardian) feed.
 /// * **The target row** at 1 is filtered by
 ///   vanilla's own guardian attack-target selector — `Player`, `Squid` or `Axolotl`, further
 ///   than 3 blocks. Ours resolves to the nearest player, which is the selector's
@@ -369,10 +362,10 @@ pub fn elder_guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// where vanilla's cannot.
 pub static GUARDIAN: &[Registration] = &[
     Registration::goal(4, "Guardian.GuardianAttackGoal", guardian_beam),
-    Registration::missing(Selector::Goal, 5, "MoveTowardsRestrictionGoal"),
+    Registration::goal(5, "MoveTowardsRestrictionGoal", guardian_move_towards_restriction),
     Registration::goal(7, "RandomStrollGoal", stroll),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::missing(Selector::Goal, 8, "LookAtPlayerGoal(Guardian)"),
+    Registration::goal(8, "LookAtPlayerGoal(Guardian)", look_at_guardian),
     Registration::goal(9, "RandomLookAroundGoal", random_look_around),
     Registration::target(
         1,
@@ -400,10 +393,10 @@ pub static GUARDIAN: &[Registration] = &[
 /// is for.
 pub static ELDER_GUARDIAN: &[Registration] = &[
     Registration::goal(4, "Guardian.GuardianAttackGoal", elder_guardian_beam),
-    Registration::missing(Selector::Goal, 5, "MoveTowardsRestrictionGoal"),
+    Registration::goal(5, "MoveTowardsRestrictionGoal", guardian_move_towards_restriction),
     Registration::goal(7, "RandomStrollGoal", stroll),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
-    Registration::missing(Selector::Goal, 8, "LookAtPlayerGoal(Guardian)"),
+    Registration::goal(8, "LookAtPlayerGoal(Guardian)", look_at_guardian),
     Registration::goal(9, "RandomLookAroundGoal", random_look_around),
     Registration::target(
         1,
@@ -471,7 +464,7 @@ mod tests {
 
     use lodestone_model::Vec3;
 
-    use super::super::{goals_for, is_fallback, registrations_for};
+    use super::super::{Selector, goals_for, is_fallback, registrations_for};
     use super::*;
     use crate::ai::goal::GoalSelector;
     use crate::ai::navigating_mob::NavigatingMob;

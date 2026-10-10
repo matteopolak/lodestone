@@ -408,6 +408,7 @@ impl<'w> MobSim<'w> {
         // resolving either needs a second look at `self.mobs`/`self.players`
         // after the per-mob loop releases its borrow).
         let mut gift_requests: Vec<i32> = Vec::new();
+        let mut universal_anger_resets: Vec<(i32, bool)> = Vec::new();
         let mut shoulder_requests: Vec<i32> = Vec::new();
         let tick_count = self.tick_count;
         // Compatibility perception may omit identity. The world runtime also
@@ -556,6 +557,12 @@ impl<'w> MobSim<'w> {
                     }
                 }
             }
+            // An elder guardian restricts itself to 16 blocks around wherever
+            // it first ticks.
+            if m.health > 0.0 && m.entity_type.path() == "elder_guardian" && m.mob.restriction().is_none() {
+                let at = m.mob.block_position();
+                m.mob.set_restriction(Some((at, 16)));
+            }
             // `allay_liked_noteblock`'s cooldown countdown, and
             // `allay_duplication_cooldown`'s — see both fields' own docs.
             // Cleared outright at zero rather than left as `Some((pos, 0))`,
@@ -583,6 +590,10 @@ impl<'w> MobSim<'w> {
                 if m.camel_dash_cooldown > 0 {
                     m.camel_dash_cooldown -= 1;
                 }
+            }
+            m.bind_attack_target_id();
+            if let Some(alert_others) = m.mob.take_universal_anger_reset() {
+                universal_anger_resets.push((m.id, alert_others));
             }
             let new_attacks = m.mob.take_new_attacks();
             // A bee's sting connects when its attack event is emitted. Only the
@@ -786,6 +797,32 @@ impl<'w> MobSim<'w> {
                     other.anger = Some(Anger {
                         end_time: tick_count + grudge_ticks(&mut other.mob),
                         target: Some(target_pos),
+                        attacker: None,
+                    });
+                }
+            }
+        }
+        // A player's hit under `universal_anger` drops the grudge's specific
+        // target and keeps the timer running, so every player becomes a valid
+        // target; an alerting mob does the same to its species nearby.
+        for (id, alert_others) in universal_anger_resets {
+            let Some(source) = self.mobs.iter().find(|m| m.id == id) else {
+                continue;
+            };
+            let (species, at, within) = (source.entity_type.clone(), source.position(), source.mob.follow_range());
+            for other in &mut self.mobs {
+                let p = other.position();
+                let affected = other.id == id
+                    || (alert_others
+                        && other.entity_type == species
+                        && (p.x - at.x).abs() <= within
+                        && (p.z - at.z).abs() <= within
+                        && (p.y - at.y).abs() <= 10.0);
+                if affected {
+                    other.mob.stop_being_angry();
+                    other.anger = Some(Anger {
+                        end_time: tick_count + grudge_ticks(&mut other.mob),
+                        target: None,
                         attacker: None,
                     });
                 }

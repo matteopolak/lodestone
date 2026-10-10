@@ -162,9 +162,10 @@ use crate::ai::goals::{
 };
 
 use super::{
-    Registration, Selector, SpeciesContext, breed_1_0, float_goal, hurt_by_target,
-    leap_0_4, look_at_player_8, melee_attack, owner_hurt_by_target, owner_hurt_target, random_look_around,
-    sit_when_ordered, stroll,
+    Registration, Selector, SpeciesContext, breed_1_0, float_goal, hurt_by_target, leap_0_4,
+    look_at_player_8, melee_attack, owner_hurt_by_target, owner_hurt_target, random_look_around,
+    reset_universal_anger_alerting, reset_universal_anger_solo, sit_when_ordered, stroll,
+    target_endermite, target_skeleton_unseen, untamed_target_baby_turtle, untamed_target_prey,
 };
 
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
@@ -243,24 +244,9 @@ pub static ENDERMAN: &[Registration] = &[
     // landing check on the teleport).
     Registration::target(1, "EnderMan.EndermanLookForPlayerGoal", look_for_player),
     Registration::target(2, "HurtByTargetGoal", hurt_by_target),
-    // No endermite can exist in this sim.
-    Registration::missing(
-        Selector::Target,
-        3,
-        "NearestAttackableTargetGoal(Endermite)",
-    ),
-    // Vanilla's own universal-anger reset goal. Re-verified rather than
-    // assumed: both an anger timer (`SimMob::anger`) and a `universal_anger`
-    // gamerule (`game_rules.rs`, default `false`, matching vanilla) exist now
-    // — an earlier version of this comment said neither did, and that was
-    // stale. Still `Missing` because the behaviour itself has nowhere to
-    // land: under `universal_anger`, vanilla's own reset step
-    // nulls the *specific* target identity while keeping the timer alive, so
-    // any nearby player becomes valid — but this crate's anger state
-    // (`Anger { end_time, target: Vec3 }`) has no target-identity concept to
-    // null, only a stored position. Building this needs that model change
-    // first, for a gamerule vanilla ships off by default.
-    Registration::missing(Selector::Target, 4, "ResetUniversalAngerTargetGoal"),
+    Registration::target(3, "NearestAttackableTargetGoal(Endermite)", target_endermite),
+    // Under `universal_anger` a player's hit leaves the mob angry at every player.
+    Registration::target(4, "ResetUniversalAngerTargetGoal", reset_universal_anger_solo),
 ];
 
 /// Vanilla's own zombie goal-registration method's three rows **plus**
@@ -335,7 +321,7 @@ pub static ZOMBIFIED_PIGLIN: &[Registration] = &[
         "NearestAttackableTargetGoal(Player,isAngryAt)",
         anger_gated_target,
     ),
-    Registration::missing(Selector::Target, 3, "ResetUniversalAngerTargetGoal"),
+    Registration::target(3, "ResetUniversalAngerTargetGoal", reset_universal_anger_alerting),
 ];
 
 /// Vanilla's own bee goal-registration method.
@@ -425,7 +411,7 @@ pub static BEE: &[Registration] = &[
     // `false` on the very next tick without this row needing its own copy of
     // the flag.
     Registration::target(2, "Bee.BeeBecomeAngryTargetGoal", anger_gated_target),
-    Registration::missing(Selector::Target, 3, "ResetUniversalAngerTargetGoal"),
+    Registration::target(3, "ResetUniversalAngerTargetGoal", reset_universal_anger_alerting),
 ];
 
 /// Vanilla's own wolf goal-registration method.
@@ -536,14 +522,10 @@ pub static WOLF: &[Registration] = &[
         "NearestAttackableTargetGoal(Player,isAngryAt)",
         anger_gated_target,
     ),
-    Registration::missing(Selector::Target, 5, "NonTameRandomTargetGoal(Animal)"),
-    Registration::missing(Selector::Target, 6, "NonTameRandomTargetGoal(Turtle)"),
-    Registration::missing(
-        Selector::Target,
-        7,
-        "NearestAttackableTargetGoal(AbstractSkeleton)",
-    ),
-    Registration::missing(Selector::Target, 8, "ResetUniversalAngerTargetGoal"),
+    Registration::target(5, "NonTameRandomTargetGoal(Animal)", untamed_target_prey),
+    Registration::target(6, "NonTameRandomTargetGoal(Turtle)", untamed_target_baby_turtle),
+    Registration::target(7, "NearestAttackableTargetGoal(AbstractSkeleton)", target_skeleton_unseen),
+    Registration::target(8, "ResetUniversalAngerTargetGoal", reset_universal_anger_alerting),
 ];
 
 // -- local builders ----------------------------------------------------------

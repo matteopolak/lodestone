@@ -1,5 +1,7 @@
 //! Host-side mob perception and social behavior passes.
 
+use lodestone_entity::ai::TargetClass;
+
 use super::*;
 
 impl<'w> MobSim<'w> {
@@ -630,6 +632,8 @@ impl<'w> MobSim<'w> {
         // an allay's own delivery target, fed to its `DELIVER`
         // brain activity.
         let mut delivery_target = vec![None; n];
+        // the nearest member of each class a mob's goals hunt or watch.
+        let mut class_targets: Vec<Vec<(TargetClass, i32, Vec3)>> = vec![Vec::new(); n];
 
         // --- persistent anger (the anger deadline) -------------------------------
         //
@@ -679,6 +683,7 @@ impl<'w> MobSim<'w> {
             .collect();
 
         let grudge_positions = self.grudge_positions();
+        let universal_anger_rule = self.universal_anger;
         for (i, me) in self.mobs.iter_mut().enumerate() {
             if me.anger.is_some_and(|a| now >= a.end_time) {
                 me.anger = None;
@@ -693,7 +698,16 @@ impl<'w> MobSim<'w> {
             // this `or` can never both be `Some` for the same mob, so this
             // is a merge of disjoint producers, not a priority order between
             // two that could disagree.
-            let target = me.anger.and_then(|a| a.target).or(warden_pursuit_target[i]);
+            let target = me.anger.and_then(|a| a.target).or(warden_pursuit_target[i]).or_else(|| {
+                // `universal_anger`: a live grudge with no specific offender
+                // is held against every player, so the nearest one is the
+                // target.
+                let universal = universal_anger_rule
+                    && me.anger.is_some_and(|a| a.target.is_none() && a.attacker.is_none());
+                universal
+                    .then(|| nearest_by(&self.players, me.mob.position(), |p| p.perception.position, |_| true, None))
+                    .flatten()
+            });
             me.mob.set_angry_target(target);
         }
 
@@ -925,6 +939,30 @@ impl<'w> MobSim<'w> {
                 );
             }
 
+            // --- nearest member of each requested entity class ----------------
+            // Vanilla searches an area of the mob's follow range horizontally
+            // and 4 blocks vertically; a look-at goal brings its own distance.
+            for class in TargetClass::ALL {
+                if !me.target_classes.contains(class) {
+                    continue;
+                }
+                let reach = class_search_reach(class, me.mob.follow_range());
+                let nearest = self
+                    .mobs
+                    .iter()
+                    .filter(|other| other.id != me.id && class_contains(class, other))
+                    .filter(|other| {
+                        let p = other.position();
+                        (p.x - pos.x).abs() <= reach.0
+                            && (p.z - pos.z).abs() <= reach.0
+                            && (p.y - pos.y).abs() <= reach.1
+                    })
+                    .min_by(|a, b| dist_sqr(a.position(), pos).total_cmp(&dist_sqr(b.position(), pos)));
+                if let Some(other) = nearest {
+                    class_targets[i].push((class, other.id, other.position()));
+                }
+            }
+
             // --- allay delivery target  -------------------------
             // Vanilla's own "get item deposit position" helper's note-block half
             // (its own "should deposit items at liked noteblock" check): only offered once
@@ -1018,6 +1056,7 @@ impl<'w> MobSim<'w> {
         // reuses (`tick_count`) — `self.mobs.iter_mut()` only borrows the
         // `mobs` field, so this and that are disjoint borrows regardless.
         let day_time = self.day_time;
+        let universal_anger = self.universal_anger;
         let block_center = |p: BlockPos| {
             Vec3::new(f64::from(p.x) + 0.5, f64::from(p.y) + 0.5, f64::from(p.z) + 0.5)
         };
@@ -1072,8 +1111,52 @@ impl<'w> MobSim<'w> {
                 // host-computed-candidate field here already is.
                 .set_sniffer_dig_target(m.sniffer_dig_target)
                 .set_ticks_since_shoulder_dismount(shoulder_dismount_ticks)
-                .set_day_time(day_time);
+                .set_day_time(day_time)
+                .set_universal_anger(universal_anger);
+            m.class_target_ids.clear();
+            for class in TargetClass::ALL {
+                if m.target_classes.contains(class) {
+                    m.mob.set_class_target(class, None);
+                }
+            }
+            for &(class, id, at) in &class_targets[i] {
+                m.mob.set_class_target(class, Some(at));
+                m.class_target_ids.push((at, id));
+            }
         }
     }
 
 }
+
+/// Whether `other` belongs to `class`.
+fn class_contains(class: TargetClass, other: &SimMob) -> bool {
+    if other.health <= 0.0 {
+        return false;
+    }
+    let species = other.entity_type().path();
+    match class {
+        TargetClass::Villager => matches!(species, "villager" | "wandering_trader"),
+        TargetClass::IronGolem => species == "iron_golem",
+        TargetClass::BabyLandTurtle => species == "turtle" && other.is_baby() && !other.in_water(),
+        TargetClass::Axolotl => species == "axolotl",
+        TargetClass::Piglin => matches!(species, "piglin" | "piglin_brute"),
+        TargetClass::Rabbit => species == "rabbit",
+        TargetClass::WolfPrey => matches!(species, "sheep" | "rabbit" | "fox"),
+        TargetClass::Skeleton => {
+            matches!(species, "skeleton" | "stray" | "wither_skeleton" | "bogged" | "parched")
+        }
+        TargetClass::Endermite => species == "endermite",
+        TargetClass::Guardian => matches!(species, "guardian" | "elder_guardian"),
+        TargetClass::Hostile => species::is_hostile_species(other.entity_type()),
+    }
+}
+
+/// The horizontal and vertical half-extents of the box searched for `class`.
+fn class_search_reach(class: TargetClass, follow_range: f64) -> (f64, f64) {
+    match class {
+        // A look-at goal brings its own distance, a sphere.
+        TargetClass::Guardian => (12.0, 12.0),
+        _ => (follow_range, 4.0),
+    }
+}
+
