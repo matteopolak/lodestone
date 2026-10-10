@@ -330,6 +330,7 @@ use super::*;
                 holder_id: 0,
                 dimension_type: Some(dim_type("overworld", true)),
                 is_flat: false,
+                sea_level: 63,
             },
         );
         let folded = app
@@ -351,6 +352,7 @@ use super::*;
                 holder_id: 3,
                 dimension_type: Some(dim_type("the_nether", false)),
                 is_flat: false,
+                sea_level: 63,
             },
         );
         let nether = app
@@ -375,6 +377,7 @@ use super::*;
                 holder_id: 99,
                 dimension_type: None,
                 is_flat: false,
+                sea_level: 63,
             },
         );
         assert_eq!(

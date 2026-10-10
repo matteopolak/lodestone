@@ -1179,30 +1179,11 @@ pub enum ClientEvent {
         holder_id: i32,
         /// The resolved dimension type, or `None` — see above.
         dimension_type: Option<DimensionTypeInfo>,
-        /// Whether the level uses the **flat** world generator — the login and
-        /// respawn packets' own `is_flat` boolean.
-        ///
-        /// # Its provenance is not the other two fields'
-        ///
-        /// `holder_id` and `dimension_type` come from the registry; this comes
-        /// straight off the packet, and there is nothing in the
-        /// `minecraft:dimension_type` registry that could supply it. It rides
-        /// this event only because this event is emitted from exactly the two
-        /// packets that carry it, and because every consumer that wants one
-        /// wants the other: vanilla keeps both in its own client-level-data side by
-        /// side, where its own void-darkness-onset-range query reads its own
-        /// "is flat" flag and
-        /// its own min-Y query reads the dimension type.
-        ///
-        /// It is deliberately **not** a field of [`DimensionTypeInfo`], which
-        /// is a decode of one registry entry and must stay so — a struct with
-        /// two sources is how a field ends up populated on one path and
-        /// defaulted on another.
-        ///
-        /// `false` when the sending family has no such field (only `v26-2`
-        /// emits this event today), which is also the non-flat answer, so a
-        /// legacy session behaves exactly as it did.
+        /// Whether the level uses the flat world generator. Packet-sourced,
+        /// not part of [`DimensionTypeInfo`], which decodes one registry entry.
         is_flat: bool,
+        /// The level's sea level, straight off the same packet.
+        sea_level: i32,
     },
     /// The per-biome visual attributes the server declared in the Configuration
     /// `registry_data`, **indexed by biome holder id**.

@@ -124,6 +124,7 @@ impl V770Adapter {
                     holder_id: body.dimension_type,
                     dimension_type,
                     is_flat: body.is_flat,
+                    sea_level: body.sea_level,
                 }),
                 Directive::Emit(ClientEvent::BiomeVisuals {
                     sky_colors: biome_sky_colors,

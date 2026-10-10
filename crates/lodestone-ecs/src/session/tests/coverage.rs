@@ -64,6 +64,7 @@ use super::*;
             holder_id: 0,
             dimension_type: None,
             is_flat: false,
+            sea_level: 63,
         }));
         assert!(handles_event(&ClientEvent::BiomeVisuals {
             sky_colors: Vec::new(),

@@ -56,6 +56,9 @@ use uuid::Uuid;
 /// server-only, and this crate must stay reachable from a browser build.
 const MOTION_BLOCKING_HEIGHTMAP_TYPE_ID: u32 = 4;
 
+/// The sea level every family whose join packet carries none fixes it at.
+pub const LEGACY_SEA_LEVEL: i32 = 63;
+
 /// An immutable snapshot of the local player's state.
 ///
 /// Fields are `Option` where the server has not told us yet: `position` and
@@ -1114,6 +1117,15 @@ impl SharedState {
     /// server sent at login — so any loaded column is authoritative; `height` is
     /// `section_count * 16`.
     #[must_use]
+    pub(crate) fn sea_level(&self) -> i32 {
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            world
+                .get::<ServerDimensionType>(self.session)
+                .and_then(|d| d.sea_level)
+                .unwrap_or(LEGACY_SEA_LEVEL)
+        })
+    }
+
     pub(crate) fn world_extent(&self) -> Option<(i32, u32)> {
         let world = self.world.read().unwrap_or_else(|e| e.into_inner());
         let column = &world.values().next()?.column;

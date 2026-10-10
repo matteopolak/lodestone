@@ -677,6 +677,7 @@ async fn live_precipitation_matches_vanillas_own_threshold_for_real_biomes() {
         light: 1.0,
         handle: Some(Arc::clone(&handle)),
         biome_climates: Some(Arc::clone(&climates)),
+        sea_level: handle.sea_level(),
         // One `section_at` per distinct chunk column rather than per call — this
         // gate samples 16 different columns, so it fetches 16 sections and reuses
         // none, which is exactly the memo's contract.
@@ -716,7 +717,7 @@ async fn live_precipitation_matches_vanillas_own_threshold_for_real_biomes() {
         // weather`: vanilla's own height falloff
         // (its own height-adjusted-temperature computation)
         // and its own rain/snow threshold (`0.15F`).
-        let above = (y - crate::dimension_environment::SEA_LEVEL) as f32;
+        let above = (y - handle.sea_level()) as f32;
         let adjusted = if above > 0.0 {
             temperature - above * 0.05 / 40.0
         } else {

@@ -457,7 +457,7 @@ impl Sim {
         let temperature = lodestone_render::weather::height_adjusted_temperature(
             climate.temperature?,
             y,
-            crate::dimension_environment::SEA_LEVEL,
+            handle.sea_level(),
         );
         Some(lodestone_render::precipitation_for_temperature(
             climate.has_precipitation?,

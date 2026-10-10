@@ -10,26 +10,10 @@ mod release_controls;
 
 /// Clientbound `login` (game-join) packet.
 ///
-/// Only the prefix needed to surface a canonical login event is modelled; the
-/// trailing fields (last death location, portal cooldown, sea level, and the
-/// secure-chat booleans) are swallowed by the final [`rest`](GameLogin::rest)
-/// field since they are not needed yet.
-///
-/// Modelled wire layout: signed int entity id, boolean hardcore, a
-/// varint-prefixed list of dimension names, varint max players, varint view
-/// distance, varint simulation distance, boolean reduced debug info, boolean
-/// show death screen, boolean limited crafting, then the spawn info prefix of
-/// varint dimension-type holder id, string dimension name, big-endian 64-bit
-/// hashed seed, current and previous game modes,
-/// boolean is-debug, and boolean is-flat.
-/// Protocol 776 uses byte modes; 777 uses a VarInt current mode and an
-/// optional VarInt previous mode (`0` absent, otherwise mode plus 1).
-///
-/// The three fields after `game_type` use the same spawn-information
-/// prefix [`Respawn`] carries, and are modelled for the same reason: `is_flat`
-/// is what vanilla's own void-darkness onset-range calculation reads, so
-/// swallowing it into `rest` left the client unable to tell a superflat world
-/// from a normal one and applying a 32-block void fade in both.
+/// Protocol 776 uses byte game modes; 777 uses a VarInt current mode and an
+/// optional VarInt previous mode (`0` absent, otherwise mode plus 1). The
+/// spawn-info block from `dimension_type` to `sea_level` is laid out as in
+/// [`Respawn`].
 #[derive(Debug, Clone, PartialEq, Eq, Packet)]
 #[mc(name = "minecraft:login", state = Play, bound = Client)]
 pub struct GameLogin {
@@ -71,9 +55,16 @@ pub struct GameLogin {
     /// vanilla's own void-darkness onset-range calculation — `1.0` when flat,
     /// `32.0` otherwise — and so the whole void-fog curve.
     pub is_flat: bool,
-    /// Remaining spawn-info bytes that are not modelled yet.
-    #[mc(remaining)]
-    pub rest: Vec<u8>,
+    /// Last death location, if the server tracks one.
+    pub last_death_location: Option<GlobalPos>,
+    /// Remaining portal cooldown in ticks.
+    pub portal_cooldown: i32,
+    /// Sea level of the dimension.
+    pub sea_level: i32,
+    /// Whether the server authenticates players.
+    pub online_mode: bool,
+    /// Whether the server requires signed chat.
+    pub enforces_secure_chat: bool,
 }
 
 fn normalized_game_mode(raw: i32) -> u8 {
@@ -125,11 +116,15 @@ impl WireDecode for GameLogin {
         let (game_type, previous_game_type) = read_spawn_modes(reader, ctx)?;
         let is_debug = reader.bool()?;
         let is_flat = reader.bool()?;
-        let rest = reader.bytes(reader.remaining())?.to_vec();
         Ok(Self {
             entity_id, hardcore, levels, max_players, view_distance, simulation_distance,
             reduced_debug_info, show_death_screen, do_limited_crafting, dimension_type,
-            dimension, seed, game_type, previous_game_type, is_debug, is_flat, rest,
+            dimension, seed, game_type, previous_game_type, is_debug, is_flat,
+            last_death_location: Option::<GlobalPos>::decode(reader, ctx)?,
+            portal_cooldown: reader.var_i32()?,
+            sea_level: reader.var_i32()?,
+            online_mode: reader.bool()?,
+            enforces_secure_chat: reader.bool()?,
         })
     }
 }
@@ -154,7 +149,11 @@ impl WireEncode for GameLogin {
         write_spawn_modes(writer, ctx, self.game_type, self.previous_game_type);
         writer.bool(self.is_debug);
         writer.bool(self.is_flat);
-        writer.bytes(&self.rest);
+        self.last_death_location.encode(writer, ctx)?;
+        writer.var_i32(self.portal_cooldown);
+        writer.var_i32(self.sea_level);
+        writer.bool(self.online_mode);
+        writer.bool(self.enforces_secure_chat);
         Ok(())
     }
 }

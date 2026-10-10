@@ -114,7 +114,7 @@ pub use lodestone_game::scoreboard::{
     Visibility as TeamVisibility,
 };
 pub use lodestone_game::tablist::{GameProfile, TabList};
-pub use state::{EntityView, OpenMenuSnapshot, PlayerSnapshot};
+pub use state::{EntityView, LEGACY_SEA_LEVEL, OpenMenuSnapshot, PlayerSnapshot};
 
 // The world read-model hands out owned section and light snapshots; re-export the
 // section and light types so consumers can name `Arc<ChunkSection>` and

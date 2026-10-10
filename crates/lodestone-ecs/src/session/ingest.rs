@@ -416,10 +416,12 @@ pub fn apply_local_player_state(
                 ClientEvent::DimensionTypeChanged {
                     dimension_type: info,
                     is_flat,
+                    sea_level,
                     ..
                 } => {
                     dimension_type.info = info.clone();
                     dimension_type.is_flat = *is_flat;
+                    dimension_type.sea_level = Some(*sea_level);
                 }
                 // Assigned unconditionally for the same reason the
                 // arm above is: an empty table must **clear** the previous one.

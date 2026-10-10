@@ -2013,20 +2013,6 @@ fn encode_rotate_head(entity_id: i32, head_yaw: f32) -> Vec<u8> {
     w.into_vec()
 }
 
-/// Encodes the trailing `GameLogin::rest` bytes: the spawn-info fields not
-/// modelled as named struct fields (see that struct's doc comment for why).
-/// None of these are consumed by `V770Adapter::handle_play`'s `LOGIN` arm, so
-/// their exact values only need to be well-formed, not vanilla-authentic.
-fn encode_game_login_rest() -> Vec<u8> {
-    let mut w = Writer::default();
-    w.bool(false); // has_last_death_location
-    w.var_i32(0); // portal_cooldown
-    w.var_i32(OVERWORLD_SEA_LEVEL); // sea_level
-    w.bool(false); // online_mode (no auth in the integrated server)
-    w.bool(false); // enforces_secure_chat
-    w.into_vec()
-}
-
 /// Converts one `lodestone-server` [`ServerChunkColumn`] into the
 /// format, driving `lodestone-server`'s [`ServerProtocol`] seam.
 ///
@@ -3588,7 +3574,11 @@ impl ServerProtocol for V770ServerProtocol {
             // integrated world would have to set this, not just generate flat
             // terrain: the client has no other way to know.
             is_flat: false,
-            rest: encode_game_login_rest(),
+            last_death_location: None,
+            portal_cooldown: 0,
+            sea_level: OVERWORLD_SEA_LEVEL,
+            online_mode: false,
+            enforces_secure_chat: false,
         };
 
         let spawn_block_x = spawn.x.floor() as i32;

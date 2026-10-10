@@ -606,6 +606,13 @@ impl ClientHandle {
         self.state.column_heightmap(pos)
     }
 
+    /// The current level's sea level, or [`LEGACY_SEA_LEVEL`](crate::LEGACY_SEA_LEVEL)
+    /// for a family whose join packet does not carry one.
+    #[must_use]
+    pub fn sea_level(&self) -> i32 {
+        self.state.sea_level()
+    }
+
     /// Returns the connected dimension's vertical extent, or `None` before the
     /// dimension's terrain is known (pre-login / pre-first-chunk).
     ///

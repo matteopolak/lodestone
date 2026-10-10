@@ -46,16 +46,16 @@ fn respawn_modes_select_bytes_without_misaligning_tail() {
 }
 
 #[test]
-fn login_modes_select_bytes_and_preserve_the_opaque_tail() {
+fn login_modes_select_bytes_and_decode_the_spawn_tail() {
     for (version, literal) in [
-        (776, "0000012300010a746573743a776f726c648101070300010181010a746573743a776f726c640123456789abcdef02ff01000081013f00"),
-        (777, "0000012300010a746573743a776f726c648101070300010181010a746573743a776f726c640123456789abcdef020001000081013f00"),
+        (776, "0000012300010a746573743a776f726c648101070300010181010a746573743a776f726c640123456789abcdef02ff01000081013f0000"),
+        (777, "0000012300010a746573743a776f726c648101070300010181010a746573743a776f726c640123456789abcdef020001000081013f0000"),
     ] {
         let bytes = hex(literal);
         let body = GameLogin::decode(&mut Reader::new(&bytes), Ctx { version }).unwrap();
         assert_eq!((body.entity_id, body.max_players, body.dimension_type), (291, 129, 129));
         assert_eq!((body.game_type, body.previous_game_type, body.is_debug, body.is_flat), (2, -1, true, false));
-        assert_eq!(body.rest, [0, 0x81, 1, 63, 0]);
+        assert_eq!((&body.last_death_location, body.portal_cooldown, body.sea_level), (&None, 129, 63));
         let mut writer = Writer::default();
         body.encode(&mut writer, Ctx { version }).unwrap();
         assert_eq!(writer.into_vec(), bytes);

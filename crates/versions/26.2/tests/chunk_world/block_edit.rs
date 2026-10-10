@@ -123,10 +123,20 @@ async fn dig_and_place_persist_through_forget_and_reload() {
         .wait_for_spawn(Duration::from_secs(30))
         .await
         .expect("client never spawned");
+    // Spawn search puts the player on land, away from this ocean fixture; move
+    // onto its floor so the column streams and the edits are within reach.
     handle
-        .wait_for_chunks(1, Duration::from_secs(30))
+        .move_to(
+            lodestone_model::Vec3::new(0.5, 39.0, 0.5),
+            Rotation::new(0.0, 0.0),
+            false,
+            false,
+        )
+        .expect("move to the edit fixture");
+    handle
+        .wait_for_chunk(ChunkPos { x: 0, z: 0 }, Duration::from_secs(30))
         .await
-        .expect("initial column never arrived");
+        .expect("the edited column never arrived");
 
     // The server validates interaction distance before applying either break
     // phase. Move to the ocean floor before issuing the edits; the original
@@ -168,18 +178,6 @@ async fn dig_and_place_persist_through_forget_and_reload() {
          fluid, the case the old collapse mapped to air rather than stone), got {}",
         base_name_at(&handle, target_pos)
     );
-
-    // The fallback spawn is intentionally above the ocean. Move down to the
-    // floor before exercising the interaction wire path; the server's reach
-    // check is authoritative and would correctly ignore an edit from y=64.
-    handle
-        .move_to(
-            lodestone_model::Vec3::new(0.5, 39.0, 0.5),
-            Rotation::new(0.0, 0.0),
-            false,
-            false,
-        )
-        .expect("move to the edit fixture");
 
     // --- Sequence control: Start then Abort must NOT break the block. There
     // is no event to wait on for "nothing happened", so a later, observable

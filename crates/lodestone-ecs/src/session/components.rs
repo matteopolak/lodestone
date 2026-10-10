@@ -485,17 +485,9 @@ pub struct ServerDimension(pub Option<DimensionId>);
 /// nothing usable, and every consumer has to state its own fallback — see
 /// `lodestone_shell::mesher::sky_default_for_dimension`, which keeps its
 /// original name match for exactly this case.
-/// # Why the flat-world flag lives here too
 ///
-/// `is_flat` is not part of the `minecraft:dimension_type` registry entry —
-/// it comes straight off the login/respawn packet. It is folded into the same
-/// component because it arrives on the same event, changes on exactly the same
-/// edges, and every consumer that wants one wants the other: vanilla keeps
-/// both in its own client-level-data side by side, where its own
-/// void-darkness-onset-range query
-/// reads its own "is flat" flag and the void-fog span reads the dimension type's `min_y`.
-/// It is deliberately **not** a field of [`DimensionTypeInfo`], which is a
-/// decode of one registry entry and must stay one-sourced.
+/// `is_flat` and `sea_level` come off the login/respawn packet rather than the
+/// registry entry, so they sit beside [`DimensionTypeInfo`], not in it.
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct ServerDimensionType {
     /// The resolved dimension type, or `None` when the holder id did not
@@ -504,6 +496,8 @@ pub struct ServerDimensionType {
     pub info: Option<DimensionTypeInfo>,
     /// Whether the level uses the flat world generator.
     pub is_flat: bool,
+    /// The level's sea level; `None` until a family that sends it has.
+    pub sea_level: Option<i32>,
 }
 
 /// Every biome's `minecraft:visual/sky_color` as the server declared it in the

@@ -1581,6 +1581,7 @@ impl WindowApp {
                                 policy.get(),
                             )
                         });
+                    let handle = self.sim.net().and_then(|n| n.shared_handle().get().cloned());
                     let probe = ShellWeatherProbe {
                         light: lodestone_render::light::light_term(
                             packed.unwrap_or(lodestone_render::ENTITY_FULLBRIGHT),
@@ -1591,7 +1592,10 @@ impl WindowApp {
                         // `ShellWeatherProbe`'s doc) — there is deliberately no
                         // camera-level "can I see the sky" gate here any more,
                         // matching vanilla's own weather effect renderer.
-                        handle: self.sim.net().and_then(|n| n.shared_handle().get().cloned()),
+                        sea_level: handle
+                            .as_ref()
+                            .map_or(lodestone_client::LEGACY_SEA_LEVEL, |h| h.sea_level()),
+                        handle,
                         biome_climates: self.sim.net().map(crate::net::NetClient::shared_biome_climates),
                         // Fresh every frame, by construction — see the field doc.
                         memo: Default::default(),

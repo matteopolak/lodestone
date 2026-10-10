@@ -217,6 +217,42 @@ fn anchor_mentions(source: &str) -> Vec<String> {
     out
 }
 
+/// The anchor mentions inside `( ... ).chain()` tuples, in source order. A
+/// system placed `.in_set(TickSet::Input)` names an anchor without ordering it,
+/// so only chained tuples count.
+fn chained_mentions(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(found) = source[from..].find(".chain()") {
+        let dot = from + found;
+        from = dot + ".chain()".len();
+        let Some(close) = source[..dot].trim_end().len().checked_sub(1) else { continue };
+        if bytes[close] != b')' {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut open = None;
+        for i in (0..=close).rev() {
+            match bytes[i] {
+                b')' => depth += 1,
+                b'(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(open) = open {
+            out.extend(anchor_mentions(&source[open..=close]));
+        }
+    }
+    out
+}
+
 /// Render the whole anchor surface as the text that gets committed.
 fn generate() -> String {
     let sets = read(&crate_root().join("src/sets.rs"));
@@ -245,7 +281,7 @@ fn generate() -> String {
     }
 
     out.push_str("\n[chain] src/plugin.rs, source order of anchor mentions\n");
-    for (n, mention) in anchor_mentions(&plugin).iter().enumerate() {
+    for (n, mention) in chained_mentions(&plugin).iter().enumerate() {
         out.push_str(&format!("{n:03} {mention}\n"));
     }
     out
@@ -355,9 +391,13 @@ pub enum Unrelated {
 fn the_chain_scanner_distinguishes_a_reordering_from_the_original() {
     let before = "(TickSet::Input, TickSet::Intent, TickSet::Physics).chain()";
     let after = "(TickSet::Input, TickSet::Physics, TickSet::Intent).chain()";
-    let a = anchor_mentions(before);
-    let b = anchor_mentions(after);
+    let a = chained_mentions(before);
+    let b = chained_mentions(after);
     assert_eq!(a, vec!["TickSet::Input", "TickSet::Intent", "TickSet::Physics"]);
+    assert!(
+        chained_mentions(&format!("{before}; system.in_set(TickSet::Send)")) == a,
+        "a mention outside a chained tuple must not enter the snapshot"
+    );
     assert_ne!(a, b, "a reordering must change the snapshot, or the gate is blind to it");
 }
 
@@ -374,7 +414,7 @@ fn the_chain_scanner_distinguishes_a_reordering_from_the_original() {
 fn every_declared_anchor_is_chained_or_a_known_gap() {
     let sets = read(&crate_root().join("src/sets.rs"));
     let plugin = read(&crate_root().join("src/plugin.rs"));
-    let chained = anchor_mentions(&plugin);
+    let chained = chained_mentions(&plugin);
 
     let mut unchained = Vec::new();
     for name in ANCHOR_ENUMS {
@@ -406,7 +446,7 @@ fn every_declared_anchor_is_chained_or_a_known_gap() {
 #[test]
 fn the_real_core_plugin_still_configures_every_anchor_enum() {
     let plugin = read(&crate_root().join("src/plugin.rs"));
-    let mentions = anchor_mentions(&plugin);
+    let mentions = chained_mentions(&plugin);
     assert!(
         mentions.len() >= 20,
         "expected CorePlugin to name many anchors, found {} ({mentions:?})",

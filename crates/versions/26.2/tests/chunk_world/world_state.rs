@@ -128,6 +128,7 @@ fn handle_play_respawn_emits_respawned_event() {
                 holder_id,
                 dimension_type,
                 is_flat,
+                sea_level,
             }),
             Directive::Emit(ClientEvent::Respawned {
                 dimension,
@@ -149,6 +150,7 @@ fn handle_play_respawn_emits_respawned_event() {
                  and must not silently become the overworld"
             );
             assert_eq!(dimension.to_string(), "minecraft:the_nether");
+            assert_eq!(*sea_level, 63, "the golden respawn's sea-level varint");
             assert_eq!(*game_mode, lodestone_model::GameMode::Survival);
             assert_eq!(*previous_game_mode, None);
             assert_eq!(*last_death_location, None);

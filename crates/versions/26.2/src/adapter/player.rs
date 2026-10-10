@@ -200,6 +200,7 @@ impl V770Adapter {
                     holder_id: respawn.dimension_type,
                     dimension_type,
                     is_flat: respawn.is_flat,
+                    sea_level: respawn.sea_level,
                 }),
                 Directive::Emit(ClientEvent::Respawned {
                     dimension,

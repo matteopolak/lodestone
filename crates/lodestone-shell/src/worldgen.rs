@@ -35,7 +35,7 @@ pub const MIN_Y: i32 = 0;
 /// surface ≈ y64–90 with headroom).
 pub const SECTION_COUNT: usize = 6;
 /// Non-solid blocks below sea level are water.
-pub const SEA_LEVEL: i32 = crate::dimension_environment::SEA_LEVEL;
+pub const SEA_LEVEL: i32 = 63;
 
 /// Exclusive top of the rendered window in world Y.
 const TOP_Y: i32 = MIN_Y + (SECTION_COUNT as i32) * 16;

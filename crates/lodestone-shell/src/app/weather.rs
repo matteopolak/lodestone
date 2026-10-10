@@ -240,6 +240,8 @@ pub(super) struct ShellWeatherProbe {
     /// by [`crate::net::forward`]'s `BiomeClimates` arm. `None` off a live
     /// connection.
     pub(super) biome_climates: Option<crate::net::SharedBiomeClimates>,
+    /// The level's sea level, which the temperature height falloff measures from.
+    pub(super) sea_level: i32,
     /// This frame's cache of the three world reads above.
     ///
     /// **A probe must not outlive the frame it was built for.** The memo is
@@ -421,6 +423,7 @@ impl ProbeMemo {
             usize,
         ) -> Option<Arc<lodestone_client::ChunkSection>>,
         climate: impl FnOnce(u32) -> Option<crate::net::BiomeClimateEntry>,
+        sea_level: i32,
     ) -> Option<lodestone_render::Precipitation> {
         let dims = self.dimensions(dimensions)?;
         let (chunk, si) = section_key(&dims, x, y, z)?;
@@ -439,7 +442,7 @@ impl ProbeMemo {
         let temperature = lodestone_render::weather::height_adjusted_temperature(
             climate.temperature?,
             y,
-            crate::dimension_environment::SEA_LEVEL,
+            sea_level,
         );
         Some(lodestone_render::weather::precipitation_for_temperature(
             climate.has_precipitation?,
@@ -511,6 +514,7 @@ impl ShellWeatherProbe {
             || handle.world_dimensions(),
             |chunk, si| handle.section_at(chunk, si),
             |biome| climates.get(usize::try_from(biome).ok()?),
+            self.sea_level,
         )
     }
 
@@ -773,6 +777,7 @@ mod tests {
                             has_precipitation: Some(true),
                         })
                     },
+                    lodestone_client::LEGACY_SEA_LEVEL,
                 )
                 // The same fallback `ShellWeatherProbe::precipitation` applies.
                 .unwrap_or(Precipitation::Rain)
