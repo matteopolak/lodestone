@@ -347,7 +347,7 @@ mod tests {
         let saved: Vec<_> = sim
             .saved_entities()
             .into_iter()
-            .map(|entity| crate::entity_storage::SavedEntity::from_nbt(&entity.to_nbt()).expect("reads back"))
+            .map(|entity| crate::entity_record::SavedEntity::from_nbt(&entity.to_nbt()).expect("reads back"))
             .collect();
         let mut reloaded = MobSim::new(&world);
         assert_eq!(reloaded.restore_saved(&saved), 1);

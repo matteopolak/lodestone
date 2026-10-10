@@ -1,5 +1,5 @@
 use super::*;
-use crate::entity_storage::SavedEntity;
+use crate::entity_record::SavedEntity;
 use lodestone_core::Nbt;
 use super::appearance::MobVariant;
 

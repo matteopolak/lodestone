@@ -439,7 +439,6 @@ mod sim_combat;
 mod sim_spawning;
 mod sim_entities;
 mod sim_persistence;
-#[cfg(not(target_arch = "wasm32"))]
 mod sim_persistence_state;
 mod appearance;
 mod sim_effects;
@@ -2033,7 +2032,6 @@ pub struct SimMob<'w> {
     /// [`MobSim::saved_entities`] so a save/load cycle does not strip them.
     /// Fields the sim *does* model are removed before storing — see
     /// `sim_persistence::OWNED_FIELDS`.
-    #[cfg(not(target_arch = "wasm32"))]
     passthrough: Vec<(String, lodestone_core::Nbt)>,
     /// Wool and collar dye, custom name and spawn variant — see
     /// [`appearance`]. Real state: streamed as metadata and persisted.

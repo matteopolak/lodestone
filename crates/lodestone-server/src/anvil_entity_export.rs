@@ -7,7 +7,8 @@ use std::{
 
 use crate::{
     dimension::Dimension,
-    entity_storage::{EntityStorage, SavedEntity},
+    entity_record::SavedEntity,
+    entity_storage::EntityStorage,
     world_storage::{NativeEntityRecord, NativeGeneralRecord, WorldStorage},
 };
 

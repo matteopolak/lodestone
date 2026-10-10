@@ -5710,7 +5710,7 @@ mod tests {
         let nest = StateId::from_state_str("minecraft:bee_nest[facing=south,honey_level=0]").unwrap();
         world.set_block_id(3, 0, 0, nest);
         let mobs = MobHandle::new(world.clone());
-        let entity_data = crate::entity_storage::SavedEntity {
+        let entity_data = crate::entity_record::SavedEntity {
             id: lodestone_model::ResourceKey::from_str("minecraft:bee").expect("static key"),
             uuid: uuid::Uuid::from_u128(0xBEE),
             pos: lodestone_model::Vec3::new(3.5, 0.5, 0.5),

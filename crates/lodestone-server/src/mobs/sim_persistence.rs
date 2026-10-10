@@ -18,14 +18,13 @@ impl<'w> MobSim<'w> {
     /// [`saved_projectiles`](Self::saved_projectiles), and reach both record
     /// paths: their saved fields are the state
     /// [`native_entities`](Self::native_entities) keeps.
-    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
-    pub fn saved_entities(&self) -> Vec<crate::entity_storage::SavedEntity> {
-        let mut out: Vec<crate::entity_storage::SavedEntity> =
+    pub fn saved_entities(&self) -> Vec<crate::entity_record::SavedEntity> {
+        let mut out: Vec<crate::entity_record::SavedEntity> =
             self.mobs.iter().map(|mob| self.saved_mob(mob)).collect();
         for (&id, state) in &self.item_state {
             let lifecycle = self.items.get(id).copied().unwrap_or_default();
-            out.push(crate::entity_storage::SavedEntity {
+            out.push(crate::entity_record::SavedEntity {
                 id: item_entity_type(),
                 uuid: state.uuid,
                 pos: state.motion.position,
@@ -43,9 +42,8 @@ impl<'w> MobSim<'w> {
     }
 
     /// One mob as the record [`crate::entity_storage`] persists.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn saved_mob(&self, mob: &SimMob<'_>) -> crate::entity_storage::SavedEntity {
-        crate::entity_storage::SavedEntity {
+    pub(super) fn saved_mob(&self, mob: &SimMob<'_>) -> crate::entity_record::SavedEntity {
+        crate::entity_record::SavedEntity {
             id: mob.entity_type.clone(),
             uuid: mob.uuid,
             pos: mob.position(),
@@ -117,7 +115,7 @@ impl<'w> MobSim<'w> {
         let saved: Vec<_> = entities
             .iter()
             .filter(|entity| !entity.state.is_empty())
-            .map(|entity| crate::entity_storage::SavedEntity {
+            .map(|entity| crate::entity_record::SavedEntity {
                 id: entity.entity_type.clone(),
                 uuid: Uuid::from_bytes(entity.uuid),
                 pos: entity.position,
@@ -146,8 +144,7 @@ impl<'w> MobSim<'w> {
     /// uuid identity: a fresh uuid on load would make the next save unable to
     /// recognise its own entity, and the mob would be duplicated on every
     /// restart.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn restore_saved(&mut self, entities: &[crate::entity_storage::SavedEntity]) -> usize {
+    pub fn restore_saved(&mut self, entities: &[crate::entity_record::SavedEntity]) -> usize {
         let mut restored = 0usize;
         let mut pending = Vec::new();
         // Projectiles resolve their shooter by uuid, so they restore after
@@ -218,7 +215,6 @@ impl<'w> MobSim<'w> {
 /// while a baby, positive as the post-breeding cooldown) and the
 /// golden-dandelion lock. Written only when either differs from its default,
 /// which is lossless because a missing field reads back as that default.
-#[cfg(not(target_arch = "wasm32"))]
 fn growth_fields(mob: &SimMob<'_>) -> Vec<(String, lodestone_core::Nbt)> {
     use lodestone_core::Nbt;
     let mut fields = Vec::new();
@@ -233,7 +229,6 @@ fn growth_fields(mob: &SimMob<'_>) -> Vec<(String, lodestone_core::Nbt)> {
 
 /// Applies [`growth_fields`] back to a freshly spawned mob. Goes through
 /// [`SimMob::set_age`] so a restored baby also gets its baby hitbox and step.
-#[cfg(not(target_arch = "wasm32"))]
 fn restore_growth(mob: &mut SimMob<'_>, extra: &[(String, lodestone_core::Nbt)]) {
     use lodestone_core::Nbt;
     for (name, value) in extra {

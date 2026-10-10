@@ -10,7 +10,8 @@ use std::collections::HashSet;
 
 use lodestone_core::Nbt;
 use lodestone_model::{Rotation, Vec3};
-use lodestone_server::entity_storage::{EntityStorage, SavedEntity};
+use lodestone_server::entity_record::SavedEntity;
+use lodestone_server::entity_storage::EntityStorage;
 use tempfile::tempdir;
 use uuid::Uuid;
 

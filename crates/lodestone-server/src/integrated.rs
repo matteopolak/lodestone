@@ -7414,7 +7414,7 @@ mod tests {
         ).unwrap();
         let open_anvil = || crate::entity_storage::DimensionEntityStores::new(directory.path()).unwrap();
         let anvil = open_anvil();
-        let saved = crate::entity_storage::SavedEntity {
+        let saved = crate::entity_record::SavedEntity {
             id: "minecraft:cow".parse().unwrap(), uuid: uuid::Uuid::from_u128(19),
             pos: lodestone_model::Vec3::new(0.5, 6.25, 0.5),
             motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
@@ -7574,17 +7574,17 @@ mod tests {
     /// this fail.
     #[cfg(not(target_arch = "wasm32"))]
     fn every_entity_kind_survived(
-        before: &[crate::entity_storage::SavedEntity],
-        after: &[crate::entity_storage::SavedEntity],
+        before: &[crate::entity_record::SavedEntity],
+        after: &[crate::entity_record::SavedEntity],
     ) -> Result<(), String> {
         use lodestone_core::Nbt;
-        let field = |records: &[crate::entity_storage::SavedEntity], id: &str, name: &str| {
+        let field = |records: &[crate::entity_record::SavedEntity], id: &str, name: &str| {
             records
                 .iter()
                 .find(|r| r.id.to_string() == id)
                 .map(|r| r.extra.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()))
         };
-        let find = |records: &[crate::entity_storage::SavedEntity], id: &str| {
+        let find = |records: &[crate::entity_record::SavedEntity], id: &str| {
             records.iter().find(|r| r.id.to_string() == id).cloned()
         };
         for (kind, id, fields) in [

@@ -15,15 +15,12 @@
 //! family, `DealtDamage` on a trident; `Item` (a stack with components) on a
 //! thrown item.
 
-#[cfg(not(target_arch = "wasm32"))]
 use lodestone_core::Nbt;
 use lodestone_data::block_states::StateId;
-#[cfg(not(target_arch = "wasm32"))]
 use lodestone_data::potion::{PotionId, potion_name};
 
 use super::*;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::entity_storage::{SavedEntity, field, read_uuid, uuid_to_ints};
+use crate::entity_record::{SavedEntity, field, read_uuid, uuid_to_ints};
 
 /// Ticks a stuck arrow lives before it despawns.
 pub const ARROW_LIFETIME_TICKS: i16 = 1200;
@@ -150,7 +147,6 @@ fn throwable_item(path: &str) -> &str {
     path
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn stack_nbt(item: &ResourceKey, potion: Option<PotionId>) -> Nbt {
     let mut fields = vec![
         ("id".to_owned(), Nbt::String(item.to_string())),
@@ -170,7 +166,6 @@ fn stack_nbt(item: &ResourceKey, potion: Option<PotionId>) -> Nbt {
 
 /// The potion a saved stack's `components` name, accepting both the bare
 /// string and the object form `{potion: ...}`.
-#[cfg(not(target_arch = "wasm32"))]
 fn potion_of_stack(stack: &Nbt) -> Option<PotionId> {
     let contents = field(field(stack, "components")?, "minecraft:potion_contents")?;
     match contents {
@@ -183,7 +178,6 @@ fn potion_of_stack(stack: &Nbt) -> Option<PotionId> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn byte(flag: bool) -> Nbt {
     Nbt::Byte(i8::from(flag))
 }
@@ -299,7 +293,6 @@ impl<'w> MobSim<'w> {
 
     /// The disk records of every arrow, trident and thrown item in flight or
     /// stuck in a block.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn saved_projectiles(&self) -> Vec<SavedEntity> {
         let mut out = Vec::new();
         for tracked in self.projectiles.iter() {
@@ -364,7 +357,6 @@ impl<'w> MobSim<'w> {
 
     /// Re-creates one saved projectile. Returns `false` when the record is
     /// not a projectile this sim models.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn restore_projectile(&mut self, saved: &SavedEntity) -> bool {
         use lodestone_entity::projectile::Projectile;
         let path = saved.id.path();

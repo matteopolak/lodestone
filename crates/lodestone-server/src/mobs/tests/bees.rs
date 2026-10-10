@@ -1,7 +1,7 @@
 use super::*;
 use crate::beehive::{Occupant, Released};
 use lodestone_data::block_states::StateId;
-use crate::entity_storage::SavedEntity;
+use crate::entity_record::SavedEntity;
 use crate::mobs::bees::HiveEntry;
 
 const HIVE: (i32, i32, i32) = (24, 1, 10);

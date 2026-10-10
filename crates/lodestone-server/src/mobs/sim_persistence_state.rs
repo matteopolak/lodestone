@@ -13,7 +13,7 @@
 use lodestone_core::Nbt;
 
 use super::*;
-use crate::entity_storage::{field, read_uuid, uuid_to_ints};
+use crate::entity_record::{field, read_uuid, uuid_to_ints};
 
 /// Saved fields decoded onto sim state. They are removed from the verbatim
 /// carry so a stale copy can never be written beside the live value.
@@ -507,27 +507,33 @@ impl<'w> MobSim<'w> {
         mob.profession = profession;
         mob.villager_level = level;
         mob.villager_xp = xp;
-        // The claim is re-acquired, not trusted: the saved job site only counts
-        // if the block there still hands out this profession and a ticket is
-        // free. A villager whose station is unloaded or gone keeps its
-        // profession and searches again from `tick_villager_professions`.
-        if let Some(pos) = job_site
-            && profession.has_job_site()
-            && villager::claim_workstation_at(pos, profession, world, &mut self.workstation_claims)
+        // Job-site, bed and bell claims live in the native point-of-interest
+        // ledgers; without them the browser build keeps the profession and
+        // searches again.
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            mob.workstation = Some(pos);
-        }
-        if let Some(pos) = home
-            && villager::is_bed_state(world.block_state_id(pos.x, pos.y, pos.z))
-            && self.bed_claims.try_claim(pos)
-        {
-            mob.bed = Some(pos);
-        }
-        if let Some(pos) = meeting
-            && villager::is_bell_state(world.block_state_id(pos.x, pos.y, pos.z))
-            && self.bell_claims.try_claim(pos)
-        {
-            mob.meeting_point = Some(pos);
+            // The claim is re-acquired, not trusted: the saved job site only counts
+            // if the block there still hands out this profession and a ticket is
+            // free. A villager whose station is unloaded or gone keeps its
+            // profession and searches again from `tick_villager_professions`.
+            if let Some(pos) = job_site
+                && profession.has_job_site()
+                && villager::claim_workstation_at(pos, profession, world, &mut self.workstation_claims)
+            {
+                mob.workstation = Some(pos);
+            }
+            if let Some(pos) = home
+                && villager::is_bed_state(world.block_state_id(pos.x, pos.y, pos.z))
+                && self.bed_claims.try_claim(pos)
+            {
+                mob.bed = Some(pos);
+            }
+            if let Some(pos) = meeting
+                && villager::is_bell_state(world.block_state_id(pos.x, pos.y, pos.z))
+                && self.bell_claims.try_claim(pos)
+            {
+                mob.meeting_point = Some(pos);
+            }
         }
 
         if let Some(Nbt::List { elements, .. }) = get("Gossips") {

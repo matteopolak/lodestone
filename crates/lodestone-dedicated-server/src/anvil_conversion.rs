@@ -1321,7 +1321,7 @@ mod tests {
         let second: uuid::Uuid = "00000000-0000-0002-0000-000000000012"
             .parse()
             .expect("canonical second entity UUID");
-        let entity = |uuid, x, z| lodestone_server::entity_storage::SavedEntity {
+        let entity = |uuid, x, z| lodestone_server::entity_record::SavedEntity {
             id: "minecraft:cow".parse().expect("canonical entity type"),
             uuid,
             pos: lodestone_model::Vec3::new(x, 64.0, z),

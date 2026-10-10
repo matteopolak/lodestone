@@ -2,7 +2,7 @@
 //! plus `angry_at`) and, after a load, points at the offender again.
 
 use super::*;
-use crate::entity_storage::SavedEntity;
+use crate::entity_record::SavedEntity;
 use lodestone_core::Nbt;
 
 fn flat_world() -> ChunkWorld {
@@ -74,7 +74,7 @@ fn a_grudge_survives_a_reload_and_follows_its_offender() {
     let Some(Nbt::IntArray(uuid)) = saved_field(&sim, "wolf", "angry_at") else {
         panic!("the offender is saved as a uuid");
     };
-    assert_eq!(uuid, crate::entity_storage::uuid_to_ints(alice().uuid));
+    assert_eq!(uuid, crate::entity_record::uuid_to_ints(alice().uuid));
 
     // The offender has moved by the time the world is loaded and rejoined.
     let mut restored = reload(&sim, &world);
@@ -112,7 +112,7 @@ fn grudge_controls() {
             record.extra.push(("anger_end_time".to_owned(), Nbt::Long(0)));
             record.extra.push((
                 "angry_at".to_owned(),
-                Nbt::IntArray(crate::entity_storage::uuid_to_ints(alice().uuid)),
+                Nbt::IntArray(crate::entity_record::uuid_to_ints(alice().uuid)),
             ));
         }
     }

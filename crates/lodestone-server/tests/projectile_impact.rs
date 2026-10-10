@@ -394,6 +394,9 @@ fn a_skeleton_with_a_target_shoots_an_arrow_that_damages_it() {
         }
     }
     let mut sim = MobSim::new(&world);
+    // Night: a skeleton under open sky by day ignites, and that burn damage
+    // would read as the shooter being hurt.
+    sim.set_day_time(18000);
 
     let victim_pos = Vec3::new(6.0, 0.0, 0.0);
     let victim = spawn_cow(&mut sim, victim_pos);

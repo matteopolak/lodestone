@@ -12,7 +12,8 @@ use lodestone_server::{
         EntityImportAuthorization, EntityImportBlocker, EntityLossDecision, Error,
         import_entity_chunk, preflight_entities,
     },
-    entity_storage::{EntityStorage, SavedEntity},
+    entity_record::SavedEntity,
+    entity_storage::EntityStorage,
     world_storage::{NativeEntityRecord, WorldStorage, WorldStorageBackend},
 };
 use lodestone_storage_schema::BuiltinDimension;

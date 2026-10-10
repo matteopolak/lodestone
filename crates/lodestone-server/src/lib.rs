@@ -466,6 +466,7 @@ pub mod live_save;
 /// Per-chunk entity persistence — the `entities/` region set that
 /// makes a mob and a dropped item survive a restart. Native only, like
 /// `player_data` and `region_source`.
+pub mod entity_record;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod entity_storage;
 /// Per-section point-of-interest persistence — the

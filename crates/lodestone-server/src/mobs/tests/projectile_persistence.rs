@@ -3,7 +3,7 @@
 //! stuck, keeps its pickup rule and can still be taken.
 
 use super::*;
-use crate::entity_storage::SavedEntity;
+use crate::entity_record::SavedEntity;
 use lodestone_core::Nbt;
 use lodestone_data::potion::PotionId;
 use lodestone_entity::projectile::Projectile;
@@ -87,7 +87,7 @@ fn a_stuck_arrow_reloads_embedded_with_its_pickup_rule() {
     assert!(state.contains(&("Name".to_owned(), Nbt::String("minecraft:stone".into()))));
     assert_eq!(
         get(record, "Owner"),
-        Some(&Nbt::IntArray(crate::entity_storage::uuid_to_ints(alice())))
+        Some(&Nbt::IntArray(crate::entity_record::uuid_to_ints(alice())))
     );
 
     let mut restored = reload(&sim, &world);

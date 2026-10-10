@@ -1,7 +1,7 @@
 //! Authorization-gated import of one Anvil entity-sidecar chunk.
 //!
 //! The existing [`crate::entity_storage::EntityStorage`] codec owns the
-//! `entities/` region layout and decodes complete [`crate::entity_storage::SavedEntity`]
+//! `entities/` region layout and decodes complete [`crate::entity_record::SavedEntity`]
 //! values. This module is its deliberately narrow native consumer: it imports
 //! one selected overworld chunk's entity state into
 //! [`crate::world_storage::NativeEntityRecord`], saved fields included.
@@ -12,7 +12,8 @@ use std::{
 };
 
 use crate::{
-    entity_storage::{EntityStorage, SavedEntity},
+    entity_record::SavedEntity,
+    entity_storage::EntityStorage,
     world_storage::{NativeDirtyEntityChunk, NativeEntityRecord, WorldStorage},
 };
 use lodestone_storage_schema::BuiltinDimension;

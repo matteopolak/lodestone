@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 use lodestone_anvil::region::RegionFile;
 use lodestone_core::{Nbt, Reader, read_named_nbt};
-use lodestone_server::entity_storage::SavedEntity;
+use lodestone_server::entity_record::SavedEntity;
 
 /// The oracle world's overworld entity region directory.
 fn entities_dir() -> PathBuf {

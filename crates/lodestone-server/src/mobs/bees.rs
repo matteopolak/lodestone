@@ -46,7 +46,6 @@ impl<'w> MobSim<'w> {
     /// Turns each `(mob id, hive)` entry into a [`HiveEntry`] and removes the
     /// bee. A hive that is gone or already holds three bees refuses the bee,
     /// which keeps flying.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn resolve_hive_entries(&mut self, entries: Vec<(i32, (i32, i32, i32))>) {
         for (id, cell) in entries {
             let Some(&held) = self.hives.get(&cell) else { continue };
@@ -66,17 +65,12 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// Without persistence a bee cannot be stored, so it stays out.
-    #[cfg(target_arch = "wasm32")]
-    pub(super) fn resolve_hive_entries(&mut self, _entries: Vec<(i32, (i32, i32, i32))>) {}
-
     /// Puts a bee back into the world beside `hive`, which faces `facing`.
     ///
     /// The bee leaves the hive centre, offset past the hive's face unless that
     /// face is blocked. Its age and love timers run down by its time inside,
     /// it adopts the hive as home, and a bee that delivered nectar drops it.
     /// Returns whether the saved bee could be restored.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn release_bee(
         &mut self,
         hive: BlockPos,
@@ -87,7 +81,7 @@ impl<'w> MobSim<'w> {
         adopt_flower: bool,
     ) -> bool {
         let occupant = &released.occupant;
-        let Some(mut saved) = crate::entity_storage::SavedEntity::from_nbt(&occupant.entity_data) else {
+        let Some(mut saved) = crate::entity_record::SavedEntity::from_nbt(&occupant.entity_data) else {
             return false;
         };
         saved.pos = Vec3::new(f64::from(hive.x) + 0.5, f64::from(hive.y) + 0.5, f64::from(hive.z) + 0.5);
@@ -126,20 +120,6 @@ impl<'w> MobSim<'w> {
             bee.drop_off_nectar();
         }
         true
-    }
-
-    /// Without entity persistence a stored bee cannot be restored.
-    #[cfg(target_arch = "wasm32")]
-    pub fn release_bee(
-        &mut self,
-        _hive: BlockPos,
-        _facing: (i32, i32),
-        _front_blocked: bool,
-        _released: &crate::beehive::Released,
-        _hive_flower: Option<BlockPos>,
-        _adopt_flower: bool,
-    ) -> bool {
-        false
     }
 }
 

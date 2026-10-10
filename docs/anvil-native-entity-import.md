@@ -28,4 +28,4 @@ There are no environment variables. Library callers supply source coordinates an
 
 ## Dependencies
 
-The importer depends on `lodestone_server::entity_storage::EntityStorage` and `SavedEntity` for Anvil sidecar discovery and decoding, `lodestone_server::world_storage::WorldStorage`, `NativeEntityRecord`, and `NativeDirtyEntityChunk` for the typed destination, and `lodestone-storage-schema` for the built-in overworld dimension value.
+The importer depends on `lodestone_server::entity_storage::EntityStorage` and `lodestone_server::entity_record::SavedEntity` for Anvil sidecar discovery and decoding, `lodestone_server::world_storage::WorldStorage`, `NativeEntityRecord`, and `NativeDirtyEntityChunk` for the typed destination, and `lodestone-storage-schema` for the built-in overworld dimension value.

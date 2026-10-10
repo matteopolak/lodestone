@@ -23,7 +23,7 @@ Bees find blooms, carry nectar to a hive, live inside it, and tend crops on the 
 - Timers and radii are constants at the top of `bee.rs` and `beehive.rs`.
 - Hives are found through `MobSim::set_hives` (block cell to occupant count), refreshed every tick from the registry.
 
-Gotchas: wasm has no entity persistence, so there `resolve_hive_entries` does nothing and bees never enter. Not modelled: smoke sedation, the roll animation, bees turning on the player when their hive is broken.
+Not modelled: smoke sedation, the roll animation, bees turning on the player when their hive is broken.
 
 ## Configuration
 
@@ -31,4 +31,4 @@ None; weather and time reach the bees through `MobSim::set_environment` and `set
 
 ## Dependencies
 
-`lodestone-entity` pathfinding and goals, `lodestone-data` block tags and states, `crate::entity_storage` (bee records), `crate::block_entities`.
+`lodestone-entity` pathfinding and goals, `lodestone-data` block tags and states, `crate::entity_record` (bee records), `crate::block_entities`.

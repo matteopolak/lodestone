@@ -6,6 +6,8 @@ How a live mob survives a world reload: `MobSim::saved_entities` writes each mob
 
 ## How it works
 
+`SavedEntity` and its NBT codec live in `entity_record` (compiled for wasm too: a bee stored in a hive is a `SavedEntity` compound); only the region-file I/O in `entity_storage`, the native store conversions and the villager point-of-interest claims are native-only.
+
 `SavedEntity::extra` (built in `mobs/sim_persistence.rs` and `sim_persistence_state.rs`) combines **owned fields** (state the sim models, decoded onto `SimMob` and re-encoded on save) and **carried fields** (everything else in the incoming record, kept verbatim in `SimMob::passthrough`, which keeps variants, colours, shear state, equipment, attributes and unmodelled brain memories alive). `OWNED_FIELDS` is the dividing line: a listed field is dropped from the carried set so a stale copy never sits beside the live value. Names and encodings are the real server's, pinned against a vanilla-written corpus in `crates/lodestone-server/tests/entity_nbt_vanilla_oracle.rs` (`a_real_vanilla_mob_keeps_its_modeled_state_through_the_sim`, ignored; reads `.cache/mc/survival/world`).
 
 | State | NBT field(s) | Notes |

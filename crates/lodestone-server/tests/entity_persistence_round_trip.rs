@@ -558,7 +558,8 @@ async fn player_inventory_and_position_survive_a_disconnect() {
 #[test]
 fn a_mob_that_changes_chunk_is_moved_not_duplicated() {
     use lodestone_model::Rotation;
-    use lodestone_server::entity_storage::{EntityStorage, SavedEntity};
+    use lodestone_server::entity_record::SavedEntity;
+use lodestone_server::entity_storage::EntityStorage;
 
     let dir = tempdir("stale");
     let storage = EntityStorage::new(&dir).expect("storage");
@@ -614,7 +615,8 @@ fn a_mob_that_changes_chunk_is_moved_not_duplicated() {
 #[test]
 fn a_save_does_not_delete_entities_this_session_never_owned() {
     use lodestone_model::Rotation;
-    use lodestone_server::entity_storage::{EntityStorage, SavedEntity};
+    use lodestone_server::entity_record::SavedEntity;
+use lodestone_server::entity_storage::EntityStorage;
 
     let dir = tempdir("foreign");
     let storage = EntityStorage::new(&dir).expect("storage");
