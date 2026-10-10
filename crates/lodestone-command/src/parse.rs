@@ -51,7 +51,7 @@ impl CommandTree {
     ///
     /// A node whose [`crate::Node::permission`] `filter` rejects is treated as
     /// absent, together with its whole subtree — vanilla's
-    /// `fillUsableCommands` semantics, see [`crate::filter`]. When a token
+    /// usable-command filtering, see [`crate::filter`]. When a token
     /// matched such a node and nothing else could take it, the error is
     /// [`ParseErrorKind::NoPermission`] naming the node required, **not**
     /// `UnknownCommand`: Bukkit tells the player the command is not theirs

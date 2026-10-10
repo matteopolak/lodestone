@@ -14,7 +14,7 @@ Three translation points, all by name or by registry rather than by number:
 - **Incoming packets.** `decode_release` maps the wire id to a name; the bodies that changed (`punch`, `accept_teleportation`, `sign_update`) use the layouts in `packets::release_layout`, everything else is translated to its 26.2 id and decoded as before.
 - **Ids inside bodies.** `server_protocol::wire::Wire` converts block states, items, biomes, block-entity, entity, menu, particle, sound, data-component, attribute, command-parser and custom-stat ids. Chunks keep light computed over canonical states; `encode_column_body` rebuilds the column in the release's block-state (16-bit direct palette) and biome (7-bit) ids and writes the byte-array light `BitSet`.
 
-Body layouts that differ and are written by the encoders under `Wire::is_latest`: `explode` (trailing `playSound`), `level_particles` (particle first, three speeds, distribution kind), `animate` (renumbered; arm swings are the separate `swing_animation` packet) and the recipe `tag` slot display (a holder set).
+Body layouts that differ and are written by the encoders under `Wire::is_latest`: `explode` (trailing sound), `level_particles` (particle first, three speeds, distribution kind), `animate` (renumbered; arm swings are the separate `swing_animation` packet) and the recipe `tag` slot display (a holder set).
 
 Configuration replays the release's captured burst (`ServerRelease::config`): 32 `registry_data` packets in the vanilla server's own order, then `update_tags`. Biome holder ids come from the captured biome registry.
 

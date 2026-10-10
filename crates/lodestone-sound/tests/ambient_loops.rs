@@ -167,7 +167,7 @@ fn the_biome_attribute_replaces_the_dimensions_rather_than_merging() {
 /// which this test performs inline for both widths.
 ///
 /// Vanilla lands on 6001 too — `moodiness` is a Java `float` and the expression is the
-/// same `(float)(brightness - 1) / tickDelay` — so 6001 is the behaviour to match and
+/// same `(brightness - 1) as f32 / tick_delay` — so 6001 is the behaviour to match and
 /// the naive 6000 is the idealisation.
 #[test]
 fn the_mood_sound_needs_exactly_tick_delay_dark_ticks() {

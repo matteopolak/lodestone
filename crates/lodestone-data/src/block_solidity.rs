@@ -14,7 +14,7 @@
 //! if (properties.forceSolidOn)  return true;
 //! if (properties.forceSolidOff) return false;
 //! if (cache == null)            return false;          // dynamic-shape blocks
-//! if (collisionShape.isEmpty()) return false;
+//! if (collision shape is empty) return false;
 //! return bounds.getSize() >= 0.7291666666666666 || bounds's get ysize >= 1.0;
 //! ```
 //!

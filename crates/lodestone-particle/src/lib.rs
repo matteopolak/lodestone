@@ -1091,7 +1091,7 @@ pub enum Behaviour {
         y_start: f64,
         /// The column's top — `y_start + plume_height - 1`.
         y_max: f64,
-        /// `(waterBlocks == 1 ? 1.5 : 1.0) * plumeHeight * 1.45` — also the
+        /// `(if water_blocks == 1 { 1.5 } else { 1.0 }) * plume_height * 1.45` — also the
         /// magnitude of the initial `gravity` (negated, since this behaviour
         /// rises).
         initial_propulsion: f32,

@@ -787,7 +787,7 @@ fn overlaps(a: (usize, usize), b: (usize, usize)) -> bool {
 /// Scans one already-masked line, returning `(kind, char_start, char_end)`
 /// triples. `before this change` is checked first so its nested `this
 /// change` is suppressed -- one comment, one finding.
-fn scan_line(masked_line: &str, names: &ReferenceNames) -> Vec<(PatternKind, usize, usize)> {
+fn scan_line(masked_line: &str, names: &ReferenceNames, bare_members: bool) -> Vec<(PatternKind, usize, usize)> {
     let lower = masked_line.to_lowercase();
     let mut out = Vec::new();
 
@@ -818,7 +818,7 @@ fn scan_line(masked_line: &str, names: &ReferenceNames) -> Vec<(PatternKind, usi
             out.push((PatternKind::VanillaGoalName, span.0, span.1));
         }
     }
-    if !names.classes.is_empty() || !names.members.is_empty() {
+    if !names.all_classes.is_empty() || !names.members.is_empty() {
         let chars: Vec<char> = masked_line.chars().collect();
         let mut start = 0;
         while start < chars.len() {
@@ -833,7 +833,9 @@ fn scan_line(masked_line: &str, names: &ReferenceNames) -> Vec<(PatternKind, usi
             let token: String = chars[start..end].iter().collect();
             if names.classes.contains(&token) {
                 out.push((PatternKind::VanillaClassName, start, end));
-            } else if names.members.contains(&token) && is_member_use(&chars, start, end) {
+            } else if (names.members.contains(&token) && ((bare_members && is_camel_case(&token)) || is_member_use(&chars, start, end)))
+                || (bare_members && is_reference_constant(&chars, start, &token, names))
+            {
                 out.push((PatternKind::VanillaMemberName, start, end));
             }
             start = end;
@@ -843,10 +845,32 @@ fn scan_line(masked_line: &str, names: &ReferenceNames) -> Vec<(PatternKind, usi
     out
 }
 
+/// Whether `token` is camelCase with an interior capital (`setBlockState`, not
+/// `tick`): such a listed name is a citation even when written bare, since a
+/// data key spelled the same way is exempted by [`own_member_tokens`].
+fn is_camel_case(token: &str) -> bool {
+    token.chars().next().is_some_and(char::is_lowercase) && token.chars().any(char::is_uppercase)
+}
+
+/// Whether the token at `chars[start..]` is a Java-style constant reached
+/// through a reference class (`Class.UPPER_CASE`). The class name is checked
+/// against the full reference list, since our own type may share its name.
+fn is_reference_constant(chars: &[char], start: usize, token: &str, names: &ReferenceNames) -> bool {
+    if token.len() < 2 || !token.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+        return false;
+    }
+    let Some(dot) = start.checked_sub(1).filter(|&i| chars[i] == '.') else { return false };
+    let mut class_start = dot;
+    while class_start > 0 && (chars[class_start - 1].is_alphanumeric() || chars[class_start - 1] == '_') {
+        class_start -= 1;
+    }
+    let class: String = chars[class_start..dot].iter().collect();
+    names.all_classes.contains(&class)
+}
+
 /// Whether the identifier at `chars[start..end]` is written the way a method
 /// or field of another codebase is cited: called (`name(`), or reached through
-/// a type or receiver (`Type.name`, `Type::name`, `Type#name`). A bare camelCase
-/// word is not enough, since a comment may legitimately quote a data key.
+/// a type or receiver (`Type.name`, `Type::name`, `Type#name`).
 fn is_member_use(chars: &[char], start: usize, end: usize) -> bool {
     if chars.get(end) == Some(&'(') {
         return true;
@@ -859,6 +883,22 @@ fn is_member_use(chars: &[char], start: usize, end: usize) -> bool {
     };
     qualified
 }
+
+/// Paths whose comments still spell bare camelCase reference members or
+/// `Class.CONSTANT` forms, and so are checked only for the called or qualified
+/// member forms until each is rewritten. Only shrinks:
+/// a path absent here is held to the bare rule.
+const BARE_MEMBER_PENDING: &[&str] = &[
+    "crates/lodestone-assets/",
+    "crates/lodestone-entity/",
+    "crates/lodestone-game/",
+    "crates/lodestone-physics/",
+    "crates/lodestone-render/",
+    "crates/lodestone-server/",
+    "crates/lodestone-shell/",
+    "crates/lodestone-worldgen/",
+    "crates/versions/",
+];
 
 /// Where the goal-name table lives; the only file allowed to spell a
 /// reference goal-class name.
@@ -875,6 +915,10 @@ const CLASS_NAMES_PATH: &str = "xtask/vanilla-class-names.txt";
 /// workspace's own code never spells it.
 const MEMBER_NAMES_PATH: &str = "xtask/vanilla-member-names.txt";
 
+/// Member names that also belong to a third-party API we interoperate with
+/// (one per line, `#` comments), subtracted from [`MEMBER_NAMES_PATH`].
+const THIRD_PARTY_MEMBER_NAMES_PATH: &str = "xtask/third-party-member-names.txt";
+
 /// Reference names a comment or doc must not spell.
 #[derive(Debug, Default)]
 struct ReferenceNames {
@@ -884,8 +928,11 @@ struct ReferenceNames {
     /// Reference class names matched case-sensitively as whole identifiers.
     classes: BTreeSet<String>,
     /// Reference method and field names, matched like [`Self::classes`] but
-    /// only in a cited form.
+    /// only in a cited or camelCase form.
     members: BTreeSet<String>,
+    /// Every reference class name, including those our own code also uses;
+    /// qualifies a Java-style constant.
+    all_classes: BTreeSet<String>,
 }
 
 /// Identifiers that appear in this workspace's own code: a reference class
@@ -954,25 +1001,22 @@ fn reference_names(workspace_root: &Path, rust_sources: &[String]) -> ReferenceN
             }
         }
     }
-    let classes = std::fs::read_to_string(workspace_root.join(CLASS_NAMES_PATH))
-        .map(|list| {
-            list.lines()
-                .map(str::trim)
-                .filter(|name| !name.is_empty() && !own.contains(*name))
-                .map(str::to_owned)
-                .collect()
-        })
+    let all_classes: BTreeSet<String> = std::fs::read_to_string(workspace_root.join(CLASS_NAMES_PATH))
+        .map(|list| list.lines().map(str::trim).filter(|name| !name.is_empty()).map(str::to_owned).collect())
         .unwrap_or_default();
+    let classes = all_classes.iter().filter(|name| !own.contains(*name)).cloned().collect();
+    let third_party = std::fs::read_to_string(workspace_root.join(THIRD_PARTY_MEMBER_NAMES_PATH)).unwrap_or_default();
+    let third_party: BTreeSet<&str> = third_party.lines().map(str::trim).filter(|l| !l.starts_with('#')).collect();
     let members = std::fs::read_to_string(workspace_root.join(MEMBER_NAMES_PATH))
         .map(|list| {
             list.lines()
                 .map(str::trim)
-                .filter(|name| !name.is_empty() && !own_members.contains(*name))
+                .filter(|name| !name.is_empty() && !own_members.contains(*name) && !third_party.contains(*name))
                 .map(str::to_owned)
                 .collect()
         })
         .unwrap_or_default();
-    ReferenceNames { goals: goals.into_iter().collect(), classes, members }
+    ReferenceNames { goals: goals.into_iter().collect(), classes, members, all_classes }
 }
 
 // ---------------------------------------------------------------------
@@ -985,12 +1029,13 @@ fn scan_file(rel_path: &str, kind: FileKind, src: &str, names: &ReferenceNames) 
         FileKind::Wgsl => mask_to_wgsl_comments(src),
         FileKind::Markdown => mask_to_markdown_prose(src),
     };
+    let bare_members = !BARE_MEMBER_PENDING.iter().any(|prefix| rel_path.starts_with(prefix));
     let mut hits = Vec::new();
     for (idx, line) in masked.split('\n').enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        for (kind, start, end) in scan_line(line, names) {
+        for (kind, start, end) in scan_line(line, names, bare_members) {
             let snippet: String = line.chars().skip(start.saturating_sub(20)).take(80).collect();
             hits.push(Hit {
                 file: rel_path.to_owned(),
@@ -1311,18 +1356,22 @@ mod tests {
     #[test]
     fn a_reference_member_name_fails_only_when_cited_and_not_when_the_workspace_spells_it() -> Result<()> {
         let ws = Workspace::new()?;
-        ws.write(MEMBER_NAMES_PATH, "setBlockState\nlastHurtByMob\ndataKey\n")?;
+        ws.write(MEMBER_NAMES_PATH, "setBlockState\nlastHurtByMob\ndataKey\ntick\n")?;
+        ws.write(CLASS_NAMES_PATH, "MoonPhase\n")?;
         ws.write(
             "crates/fixture/src/lib.rs",
             concat!(
                 "/// Calls `setBlockState(pos, state)` here.\n",
                 "// Reads Entity.lastHurtByMob directly.\n",
                 "/// Mirrors Level::setBlockState and Level#setBlockState.\n",
-                "// A bare setBlockState word is a quoted data key, not a citation.\n",
+                "// A bare camelCase setBlockState is still a citation.\n",
                 "// The snake_case set_block_state( is ours.\n",
                 "// An unlisted otherName() call is fine.\n",
                 "// The workspace spells dataKey() in a string below.\n",
+                "// A bare lowercase tick is plain English.\n",
+                "// MoonPhase.PHASE_LENGTH is a reference constant; MoonPhase.new is ours.\n",
                 "pub fn f() -> &'static str { \"dataKey\" }\n",
+                "pub struct MoonPhase;\n",
             ),
         )?;
         let report = scan_fixture(ws.root())?;
@@ -1332,7 +1381,7 @@ mod tests {
             .filter(|h| h.kind == PatternKind::VanillaMemberName)
             .map(|h| h.line)
             .collect();
-        assert_eq!(hits, vec![1, 2, 3, 3], "{:#?}", report.hits);
+        assert_eq!(hits, vec![1, 2, 3, 3, 4, 9], "{:#?}", report.hits);
         Ok(())
     }
 

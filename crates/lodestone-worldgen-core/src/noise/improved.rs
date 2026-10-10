@@ -122,7 +122,7 @@ impl ImprovedNoise {
     }
 
 
-    /// Samples the noise at `(x, y, z)` (the `yScale = yFudge = 0` path).
+    /// Samples the noise at `(x, y, z)` (the path with zero y scale and y fudge).
     #[inline]
     #[must_use]
     pub fn noise(&self, px: f64, py: f64, pz: f64) -> f64 {

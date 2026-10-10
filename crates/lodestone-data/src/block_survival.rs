@@ -5,7 +5,7 @@
 //! empty block getter at the origin; this is the same no-neighbour convention
 //! used by the collision and snow-support censuses.
 //!
-//! `fire_flammable` is the fire block's exact `canBurn` answer. The complete
+//! `fire_flammable` is the fire block's exact can-burn answer. The complete
 //! ignite and burn odds remain available through [`crate::block_blast`] for
 //! consumers that need probabilities rather than this survival predicate.
 

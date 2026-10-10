@@ -80,7 +80,7 @@ impl XoroshiroRandomSource {
     }
 
     /// Seeds from a raw `(lo, hi)` pair without upgrade/mix (used by positional
-    /// factories, matching the `(seedLo, seedHi)` constructor).
+    /// factories, matching the two-word seed constructor).
     #[must_use]
     pub fn from_128bit(lo: i64, hi: i64) -> Self {
         Self {

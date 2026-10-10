@@ -62,7 +62,7 @@ pub fn random_between<R: RandomSource>(random: &mut R, min: f32, max_exclusive: 
     random.next_float() * (max_exclusive - min) + min
 }
 
-/// Vanilla's own math-helper random-between-inclusive at `(random, min, maxInclusive)`.
+/// Vanilla's own math-helper random-between-inclusive at `(random, min, max_inclusive)`.
 #[must_use]
 pub fn random_between_inclusive<R: RandomSource>(
     random: &mut R,

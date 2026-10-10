@@ -140,7 +140,7 @@ impl<R: RandomSource> WorldgenRandom<R> {
         self.count
     }
 
-    /// `setDecorationSeed(seed, blockX, blockZ)` — returns and installs the
+    /// Seeds decoration for `(seed, block_x, block_z)`: returns and installs the
     /// per-chunk decoration seed.
     pub fn set_decoration_seed(&mut self, seed: i64, block_x: i32, block_z: i32) -> i64 {
         self.set_seed(seed);

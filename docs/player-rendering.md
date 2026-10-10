@@ -39,7 +39,7 @@ An armour piece is a second mesh posed off the wearer's part matrices (`ArmourMe
 | legs | `body`, both legs | 0.5 / 0.4 (inner bake, legs 0.1 texel thinner) |
 | feet | both legs | 0.9 |
 
-Outer (1.0) and inner (0.5) bakes keep chestplate and leggings from z-fighting on the same torso cube. Sheets are 64x32. An item carries an `assetId` keying a per-layer texture list (`golden_helmet` maps to `gold`). Dye (leather only) multiplies in gamma space; a dye of exactly `0` reads as undyed, matching the protocol.
+Outer (1.0) and inner (0.5) bakes keep chestplate and leggings from z-fighting on the same torso cube. Sheets are 64x32. An item carries an asset id keying a per-layer texture list (`golden_helmet` maps to `gold`). Dye (leather only) multiplies in gamma space; a dye of exactly `0` reads as undyed, matching the protocol.
 
 Trim is a texture overlay batched by sprite, drawn right after its slot's layers in an ordered list (coplanar depth test), untinted; sprites are baked at load from a greyscale index PNG plus an 8-colour palette strip per material. Slot order is fixed `chest, legs, feet, head`, with a `LessEqual` depth comparison so leather's base and overlay resolve correctly.
 

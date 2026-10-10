@@ -332,7 +332,7 @@ impl LevelDat {
     /// [`Self::for_new_world`]: every real 26.2 `level.dat` this crate has
     /// measured (this module's own doc) omits `enabled_features` entirely,
     /// because every measured world had no experiment turned on — the
-    /// vanilla codec's `lenientOptionalFieldOf` default. Writing the field
+    /// vanilla codec treats it as an optional field with a default. Writing the field
     /// only when the player actually chose something keeps that parity for
     /// the common case instead of adding a field vanilla itself would not.
     #[must_use]

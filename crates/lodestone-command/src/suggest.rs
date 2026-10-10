@@ -8,7 +8,7 @@
 //! earlier token just stops the walk where it is and suggests from whatever
 //! node was last successfully reached, matching vanilla's own tolerance (you
 //! can still get suggestions after a typo elsewhere in the line, because
-//! `getCompletionSuggestions` operates on the best-effort `ParseResults`
+//! completion runs on the best-effort parse result
 //! rather than requiring `execute`'s stricter success).
 
 use crate::filter::{AllowAll, PermissionFilter};

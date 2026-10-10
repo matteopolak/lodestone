@@ -478,7 +478,7 @@ fn parse_name_or_uuid(reader: &mut StringReader) -> Result<EntitySelector, Parse
 /// **`@s` is exempt from `players_only`.** Vanilla's own condition requires
 /// the selector to include entities, be players-only, and not be the
 /// self-selector. `@s` sets
-/// `includesEntities = true` (the caller might not be a player), so without the
+/// its include-entities flag (the caller might not be a player), so without the
 /// exemption `/gamemode creative @s` — a `players()` argument — is refused. That
 /// is exactly what the first run of `the_six_selector_kinds…` caught.
 fn enforce(

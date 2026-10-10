@@ -450,7 +450,7 @@ pub enum MoveKind {
     /// constructors, and both hold that invariant.
     WalkDiagonal(Dir4, Dir4),
     /// A single-cell vertical move within a climbable column (a ladder or a
-    /// vine — both are `BlockTags.CLIMBABLE` and `handle_on_climbable`/
+    /// vine — both are in `#minecraft:climbable` and `handle_on_climbable`/
     /// `travel_in_air`'s climb override treats them identically, so one kind
     /// covers both real block families). No horizontal displacement: `x`
     /// and `z` are unchanged, which is exactly what forces this to be a

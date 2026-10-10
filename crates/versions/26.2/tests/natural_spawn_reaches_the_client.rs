@@ -27,7 +27,11 @@ use lodestone_v26_2::{V770ServerProtocol, adapter};
 use uuid::Uuid;
 
 const FLOOR: i32 = 70;
-const TICK_BOUND: u64 = 400;
+// Creature spawning opens once per 400 ticks and a cycle yields a candidate
+// only when a random start lands exactly on the grass-top layer, so one
+// window of 400 ticks is not a guarantee: allow several cycles.
+const TICK_BOUND: u64 = 2000;
+const SPAWN_WALL_BOUND: Duration = Duration::from_secs(150);
 const WALL_BOUND: Duration = Duration::from_secs(40);
 // External 26.2 packet report: Play clientbound AddEntity = 1;
 // Play serverbound movement = 30..=33 and PlayerLoaded = 44.
@@ -288,6 +292,7 @@ async fn stationary_natural_spawning_crosses_real_wire_and_shared_ecs() {
         }
     }
     let start_tick = server.tick_stats().unwrap().tick_count;
+    let deadline = tokio::time::Instant::now() + SPAWN_WALL_BOUND;
     server.world_state().set_rule("spawn_mobs", "true").unwrap();
     let mut accepted = None;
     loop {

@@ -151,7 +151,7 @@ const COMPARED_B: i32 = 8;
 ///
 /// Handing vanilla a *fragment* of a world means every chunk on the fragment's
 /// edge acquires brand-new neighbours, and **vanilla decorates a newly generated
-/// chunk into its already-existing neighbours**: `applyBiomeDecoration` places
+/// chunk into its already-existing neighbours**: biome decoration places
 /// features over a 3x3 chunk region, so an ore vein or a tree rooted in a new
 /// chunk writes cells into ours. This repo already tracks the same mechanism from
 /// the other side — `crates/lodestone-server/tests/decoration_seam_spill.rs`.

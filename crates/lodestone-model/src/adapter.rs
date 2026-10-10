@@ -648,7 +648,7 @@ pub struct BlockPhysics {
     /// `WEAVING` mob `(0.5, 0.25, 0.5)` instead, and sweet berry bush exempts
     /// foxes and bees.
     pub stuck_multiplier: Option<[f64; 3]>,
-    /// Membership of `BlockTags.CLIMBABLE` — ladder, vine, scaffolding, the four
+    /// Membership of the `#minecraft:climbable` block tag — ladder, vine, scaffolding, the four
     /// nether vine blocks and both cave-vine blocks. Nine in 26.2.
     ///
     /// Scaffolding is in the tag but holds differently when sneaking, a

@@ -367,7 +367,7 @@ impl AsyncTaskPool {
     /// the **tick thread**, with `&mut World`, inside
     /// [`drain_completed_tasks`].
     ///
-    /// This is the issue's `runTaskAsynchronously` + `runTask` pair, and it is
+    /// This is Bukkit's `runTaskAsynchronously` + `runTask` pair, and it is
     /// the recommended shape: `work` takes no arguments, so it cannot reach the
     /// `World`; `hand_back` gets the `World` but never runs concurrently with a
     /// tick.

@@ -573,7 +573,7 @@ fn a_replacing_selection_takes_the_min_of_two_draws() {
 
     // Now the End boss starts: END_BOSS is replacing (vanilla's own END_BOSS
     // music constant) and is a
-    // different track, so canReplace is true.
+    // different track, so it may replace the current one.
     let boss = MusicSituation {
         end_boss_active: true,
         ..in_biome(jungle)

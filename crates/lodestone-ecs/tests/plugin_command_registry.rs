@@ -392,7 +392,7 @@ fn a_permitted_child_of_a_denied_parent_is_invisible() {
     // node, so completion falls back to the last node it did reach. That is
     // vanilla-consistent — the client was never sent `admin`, so its own
     // best-effort parse would stop in exactly the same place and
-    // `getCompletionSuggestions` would offer the same set. Asserted rather than
+    // completion would offer the same set. Asserted rather than
     // left as "empty", which is what this test wrongly expected at first.
     assert_eq!(
         denied,

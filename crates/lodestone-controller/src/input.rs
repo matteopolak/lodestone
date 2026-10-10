@@ -417,9 +417,9 @@ pub fn movement_intent_with_food(state: &InputState, sprint_allowed_by_food: boo
 /// its own is-using-item query/[`UseEffects`] for two *separate* purposes, and both are
 /// applied here:
 ///
-/// * The sprint veto — `canStartSprinting`'s `isSprintingPossible` ANDs in
-///   `!is_slow_due_to_using_item()`, where `isSlowDueToUsingItem = is_using_item() &&
-///   !useEffects.can_sprint()`. This is a **second, independent** conjunct
+/// * The sprint veto — whether sprinting is possible ANDs in "not slowed by
+///   using an item", where that slowdown is `is_using_item() && !can_sprint`
+///   of the item's use effects. This is a **second, independent** conjunct
 ///   alongside the food gate (`sprint_allowed_by_food`): either one alone can
 ///   veto sprint, and neither replaces the other — a spear (`can_sprint =
 ///   true`) does not override a starving player, and full food does not let
@@ -430,7 +430,7 @@ pub fn movement_intent_with_food(state: &InputState, sprint_allowed_by_food: boo
 ///   that knows *where* in the transform pipeline the scale applies (between
 ///   the `0.98` term and the sneak scale). Setting the field here and
 ///   applying it in physics keeps the two clauses split exactly the way
-///   vanilla splits them across `modifyInput` and `canStartSprinting`.
+///   vanilla splits them between its input modifier and its sprint check.
 ///
 /// A third function rather than a parameter on [`movement_intent_with_food`]:
 /// same reasoning that function's own doc gives for not folding into

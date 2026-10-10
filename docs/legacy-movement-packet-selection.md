@@ -37,7 +37,7 @@ The source evidence is Mojang client bytecode: 1.8.9 `bew.p()` and 1.12.2
 resolved through Mojang's `piston-meta` version manifest and `piston-data`
 download endpoint. That client JAR's SHA-1 is
 `37fd3c903861eeff3bc24b71eed48f828b5269c8`; Mojang's official client mappings
-resolve `LocalPlayer -> dzm` and `sendPosition -> O`. The tests in each
+resolve the local player to `dzm` and its position-send method to `O`. The tests in each
 protocol crate pin decoded packet bodies and wire bytes, rather than only
 individual packet ids.
 

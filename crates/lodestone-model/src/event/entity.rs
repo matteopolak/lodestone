@@ -757,7 +757,7 @@ pub struct EntityMetadataUpdate {
     pub display_background_color: Option<i32>,
     /// The text display's text-opacity field, a signed byte (
     /// default `-1`, i.e. fully opaque once read as the top byte of an ARGB
-    /// colour: `textOpacity << 24 | 0xFFFFFF`). Present only for a
+    /// colour: `opacity << 24 | 0xFFFFFF`). Present only for a
     /// `text_display` that has reported it.
     pub display_text_opacity: Option<i8>,
     /// The text display's style-flags field: bit `0x01` shadow, `0x02`

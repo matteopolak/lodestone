@@ -64,7 +64,7 @@ pub struct RawInput(pub InputState);
 /// "not moving slowly, or underwater"
 /// and its own should-stop-swim-sprinting check explicitly *keeps* a swim-sprint alive while
 /// shift is held. Shift is how you steer downward
-/// while swimming (`goDownInWater`), so vetoing sprint on it means a submerged
+/// while swimming, so vetoing sprint on it means a submerged
 /// player cannot swim and descend at the same time — they stop dead.
 ///
 /// Implemented by re-running the gate on a copy of the input with sneak
@@ -114,7 +114,7 @@ pub fn swim_adjusted_intent(
 ///   nothing changes at all. The difference is confined to stalls.
 ///
 /// The one-tick lag on submersion is deliberate and is vanilla's own:
-/// `baseTick` computes submersion before `aiStep` reads it.
+/// the base tick computes submersion before the movement step reads it.
 ///
 /// # The food gate
 ///

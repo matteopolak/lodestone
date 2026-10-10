@@ -70,7 +70,7 @@ pub const MOVE_DIST_SCALE: f32 = 0.6;
 pub const INITIAL_NEXT_STEP: f32 = 1.0;
 
 /// Vanilla's own play-step-sound routine's volume multiplier on the block's sound type
-/// (`soundType.get_volume() * 0.15F`).
+/// (`volume * 0.15`).
 pub const STEP_VOLUME_SCALE: f32 = 0.15;
 
 /// Vanilla's own muffled-step-sound routine's multipliers

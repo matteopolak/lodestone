@@ -34,7 +34,7 @@ Drag distribution is `QuickCraftType::{Even, One, Clone}`. `Menu::do_click` vali
 
 Quick-move destination order is per menu kind: a generic container moves into the player inventory backwards (hotbar first) and out forwards; a crafting table loads its grid first; the player inventory has eight steps (result, craft grid, armour, auto-equip armour/offhand, main to hotbar, rest) where auto-equip must be reachable from every source slot including the offhand. The furnace family has one override: if the recipe-book sync declares the item's numeric id in the screen's cooking-input property set, prediction targets slot 0 only, with no fuel guessing (a non-input item or missing set keeps generic order; an input that cannot fit waits for server reconciliation). Brewing stand routing stays generic.
 
-The input protocol (`MenuInput`: press/drag/release/keyPress) is a separate layer, and a correct machine can still have no caller. Number keys 1-9 in a container are `Swap` on the hovered slot (the hotbar binding is swallowed while any screen is open). `Q` in a container is a click with server correction; `Q` in gameplay (`DropSelectedItem`/`DropSelectedItemStack`) has no confirmation packet and must predict locally or the count never updates.
+The input protocol (`MenuInput`: press/drag/release/key press) is a separate layer, and a correct machine can still have no caller. Number keys 1-9 in a container are `Swap` on the hovered slot (the hotbar binding is swallowed while any screen is open). `Q` in a container is a click with server correction; `Q` in gameplay (`DropSelectedItem`/`DropSelectedItemStack`) has no confirmation packet and must predict locally or the count never updates.
 
 ### Cost screens (anvil, grindstone, smithing, enchanting)
 

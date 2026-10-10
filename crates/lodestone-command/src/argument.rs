@@ -200,7 +200,7 @@ impl ArgumentType for DoubleArgument {
 }
 
 /// `BoolArgumentType`. The one built-in type with non-empty suggestions:
-/// vanilla's `listSuggestions` offers `"true"`/`"false"` unconditionally and
+/// the bool argument's suggestion list offers `"true"`/`"false"` unconditionally and
 /// relies on the generic prefix filter to narrow them — this does the same.
 #[derive(Debug, Default)]
 pub struct BoolArgument;

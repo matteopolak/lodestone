@@ -1,0 +1,14 @@
+# Names in xtask/vanilla-member-names.txt that also belong to an API this
+# workspace interoperates with, and so may be spelled in comments and docs.
+# Bukkit scheduler and world API.
+runTask
+spawnEntity
+# DOM mouse events.
+offsetX
+offsetY
+# LZ4 frame format.
+blockSize
+# Litematica schematic format.
+bitsPerEntry
+# Session-service profile JSON.
+publicKeySignature
