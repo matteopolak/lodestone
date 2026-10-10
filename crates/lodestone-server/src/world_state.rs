@@ -272,6 +272,10 @@ pub struct WorldStateHandle {
     /// `teams`/`nbt_storage` for the identical reason. See
     /// `crate::commands::stopwatch_store`'s module doc.
     stopwatches: crate::commands::stopwatch_store::StopwatchHandle,
+    /// This world's filled maps, shared by every connection: a map held by two
+    /// players is one record. Persistence is attached by the first connection
+    /// whose source is a world on disk. See `crate::maps`.
+    maps: crate::maps::MapHandle,
     /// This world's plugin-facing crafting-station (anvil/grindstone/
     /// smithing/loom/stonecutter) result hooks, a sibling of
     /// `state`/`scoreboard`/`teams`/`nbt_storage`/`stopwatches` for the
@@ -585,6 +589,12 @@ impl WorldStateHandle {
     #[must_use]
     pub fn stopwatches(&self) -> &crate::commands::stopwatch_store::StopwatchHandle {
         &self.stopwatches
+    }
+
+    /// This world's filled maps.
+    #[must_use]
+    pub fn maps(&self) -> &crate::maps::MapHandle {
+        &self.maps
     }
 
     /// This world's crafting-station plugin hooks — see [`Self`]'s own field

@@ -1,0 +1,231 @@
+//! The per-block-state map colour table generated into `src/generated/map_colors.rs`.
+//!
+//! `tests/support/map_colors_jvm.txt` is a dump of the real server's block-state
+//! registry (`oracle-java/MapColorOracle.java`): for every state its map colour
+//! id, whether it holds a fluid, and the colour id of the fluid block shown in
+//! its place when its top face is not sturdy, plus the colour palette. The dump
+//! is indexed by the server's own state order and carries each state's resource
+//! name and properties; the table is indexed by canonical id, joined by identity.
+//!
+//! Refresh: `just oracle-map-colors`, then `just regen-map-colors`.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
+use lodestone_data::block_states::{self, StateId};
+use lodestone_data::map_colors;
+
+const DUMP: &str = include_str!("support/map_colors_jvm.txt");
+const HEADER: &str = "# MapColorOracle 26.3 protocol=777";
+const FLUID_BIT: u8 = 0x80;
+
+struct Row {
+    id: usize,
+    name: String,
+    color: u8,
+    fluid: bool,
+    surface: u8,
+    properties: BTreeMap<String, String>,
+}
+
+struct Dump {
+    palette: [u32; 64],
+    rows: Vec<Row>,
+}
+
+fn parse_row(line: &str) -> Result<Row, String> {
+    let fields: Vec<_> = line.split_whitespace().collect();
+    if fields.len() != 6 {
+        return Err(format!("expected six state columns: {line:?}"));
+    }
+    let number = |text: &str| text.parse::<usize>().map_err(|_| format!("bad number in {line:?}"));
+    let (color, fluid, surface) = (number(fields[2])?, number(fields[3])?, number(fields[4])?);
+    if color > 63 || surface > 63 || fluid > 1 {
+        return Err(format!("map colour field out of range: {line:?}"));
+    }
+    let mut properties = BTreeMap::new();
+    if fields[5] != "-" {
+        for pair in fields[5].split(',') {
+            let (key, value) = pair.split_once('=').ok_or("invalid property")?;
+            if properties.insert(key.to_owned(), value.to_owned()).is_some() {
+                return Err(format!("duplicate property in {line:?}"));
+            }
+        }
+    }
+    Ok(Row {
+        id: number(fields[0])?,
+        name: fields[1].to_owned(),
+        color: color as u8,
+        fluid: fluid == 1,
+        surface: surface as u8,
+        properties,
+    })
+}
+
+fn parse_dump(text: &str) -> Result<Dump, String> {
+    if text.lines().next() != Some(HEADER) {
+        return Err("dump must identify Minecraft 26.3 / protocol 777".to_owned());
+    }
+    let mut lines = text.lines().filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let census = lines.next().ok_or("missing census")?;
+    let (states, _blocks) = census
+        .strip_prefix("C ")
+        .and_then(|rest| rest.split_once(' '))
+        .ok_or("bad census")?;
+    let states: usize = states.parse().map_err(|_| "bad state count")?;
+    let mut palette = [0u32; 64];
+    let mut rows = Vec::with_capacity(states);
+    let mut completed = false;
+    for line in lines {
+        if completed {
+            return Err("data after the trailer".to_owned());
+        }
+        if line == format!("E {}", census.strip_prefix("C ").unwrap()) {
+            completed = true;
+        } else if let Some(entry) = line.strip_prefix("P ") {
+            let (id, rgb) = entry.split_once(' ').ok_or("bad palette row")?;
+            let id: usize = id.parse().map_err(|_| "bad palette id")?;
+            *palette.get_mut(id).ok_or("palette id out of range")? = rgb.parse().map_err(|_| "bad rgb")?;
+        } else {
+            let row = parse_row(line)?;
+            if row.id != rows.len() {
+                return Err(format!("state {}: expected dense id {}", row.id, rows.len()));
+            }
+            rows.push(row);
+        }
+    }
+    if !completed || rows.len() != states {
+        return Err(format!("incomplete dump: {} of {states} states", rows.len()));
+    }
+    Ok(Dump { palette, rows })
+}
+
+/// Joins the dump to canonical ids: `(colour, surface | fluid bit)` per id.
+fn join(dump: &Dump) -> Result<Vec<(u8, u8)>, String> {
+    let mut table = vec![None; block_states::STATE_COUNT as usize];
+    for row in &dump.rows {
+        let state = StateId::from_exact_parts(&row.name, &row.properties)
+            .ok_or_else(|| format!("state {} {} {:?}: not a canonical state", row.id, row.name, row.properties))?;
+        let slot = &mut table[state.index()];
+        if slot.is_some() {
+            return Err(format!("canonical state {} claimed twice", state.raw()));
+        }
+        *slot = Some((row.color, row.surface | if row.fluid { FLUID_BIT } else { 0 }));
+    }
+    table
+        .into_iter()
+        .enumerate()
+        .map(|(id, entry)| entry.ok_or_else(|| format!("canonical state {id} is absent from the dump")))
+        .collect()
+}
+
+fn generate(dump: &Dump, joined: &[(u8, u8)]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "// @generated by `cargo test -p lodestone-data --test map_colors` (LODESTONE_REGEN=1)\n\
+         // from tests/support/map_colors_jvm.txt, a MapColorOracle capture of the 26.3 server.\n\
+         // DO NOT EDIT BY HAND.\n\n",
+    );
+    writeln!(out, "/// Number of block states (ids are `0..STATE_COUNT`).").unwrap();
+    writeln!(out, "pub const STATE_COUNT: u32 = {};\n", joined.len()).unwrap();
+    out.push_str("/// Palette id to `0x00RRGGBB`; undefined ids are `0`.\n");
+    out.push_str("pub static PALETTE: [u32; 64] = [\n");
+    for chunk in dump.palette.chunks(8) {
+        out.push_str("    ");
+        for rgb in chunk {
+            write!(out, "{rgb}, ").unwrap();
+        }
+        out.pop();
+        out.push('\n');
+    }
+    out.push_str("];\n\n");
+    for (name, doc, pick) in [
+        ("COLOR", "Per canonical state: the palette id the state paints.", 0usize),
+        ("SURFACE", "Per canonical state: the surface palette id, bit 7 set when the state holds a fluid.", 1),
+    ] {
+        writeln!(out, "/// {doc}").unwrap();
+        writeln!(out, "pub static {name}: [u8; {}] = [", joined.len()).unwrap();
+        for chunk in joined.chunks(32) {
+            out.push_str("    ");
+            for entry in chunk {
+                write!(out, "{}, ", if pick == 0 { entry.0 } else { entry.1 }).unwrap();
+            }
+            out.pop();
+            out.push('\n');
+        }
+        out.push_str("];\n\n");
+    }
+    out.pop();
+    out
+}
+
+#[test]
+fn committed_table_matches_dump() {
+    let dump = parse_dump(DUMP).expect("committed dump parses");
+    let joined = join(&dump).expect("dump joins the canonical census");
+    let generated = generate(&dump, &joined);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/generated/map_colors.rs");
+    if std::env::var_os("LODESTONE_REGEN").is_some() {
+        std::fs::write(&path, generated).expect("write generated map colour table");
+    } else {
+        assert_eq!(generated, std::fs::read_to_string(path).unwrap(), "stale; run `just regen-map-colors`");
+    }
+}
+
+#[test]
+fn lookups_agree_with_the_dump_for_every_state() {
+    let dump = parse_dump(DUMP).unwrap();
+    assert_eq!(map_colors::STATE_COUNT, block_states::STATE_COUNT);
+    for row in &dump.rows {
+        let state = StateId::from_exact_parts(&row.name, &row.properties).unwrap();
+        assert_eq!(map_colors::map_color(state), row.color, "{} {:?}", row.name, row.properties);
+        assert_eq!(map_colors::holds_fluid(state), row.fluid, "{} {:?}", row.name, row.properties);
+        assert_eq!(map_colors::surface_map_color(state), row.surface, "{} {:?}", row.name, row.properties);
+    }
+}
+
+/// Ids and RGB values read off the palette's own definition, and block colours
+/// read off the block registrations, not off the dump.
+#[test]
+fn witnesses_from_the_definitions() {
+    let state = |text: &str| StateId::from_state_str(text).expect(text);
+    let colour = |text: &str| map_colors::map_color(state(text));
+    assert_eq!(colour("minecraft:air"), 0);
+    assert_eq!(colour("minecraft:grass_block[snowy=false]"), 1);
+    assert_eq!(colour("minecraft:sand"), 2);
+    assert_eq!(colour("minecraft:lava[level=0]"), 4);
+    assert_eq!(colour("minecraft:snow_block"), 8);
+    assert_eq!(colour("minecraft:dirt"), 10);
+    assert_eq!(colour("minecraft:stone"), 11);
+    assert_eq!(colour("minecraft:bedrock"), 11);
+    assert_eq!(colour("minecraft:water[level=0]"), 12);
+    assert_eq!(colour("minecraft:oak_planks"), 13);
+    assert_eq!(map_colors::palette_rgb(1), 8_368_696);
+    assert_eq!(map_colors::palette_rgb(12), 4_210_943);
+    assert_eq!(map_colors::palette_rgb(11), 7_368_816);
+    assert_eq!(map_colors::palette_rgb(61), 8_365_974);
+    assert_eq!(map_colors::palette_rgb(62), 0);
+    // A fluid-holding state shows the fluid unless its top face is sturdy.
+    let kelp = state("minecraft:kelp[age=0]");
+    assert!(map_colors::holds_fluid(kelp));
+    assert_eq!(map_colors::surface_map_color(kelp), 12);
+    let bottom_slab = state("minecraft:oak_slab[type=bottom,waterlogged=true]");
+    assert_eq!((map_colors::map_color(bottom_slab), map_colors::surface_map_color(bottom_slab)), (13, 12));
+    let top_slab = state("minecraft:oak_slab[type=top,waterlogged=true]");
+    assert_eq!(map_colors::surface_map_color(top_slab), 13);
+    assert!(!map_colors::holds_fluid(state("minecraft:stone")));
+}
+
+/// Controls: the parser and the join must refuse a damaged dump, or the checks
+/// above would pass on anything.
+#[test]
+fn damaged_dumps_are_refused() {
+    assert!(parse_dump(&DUMP.replace("protocol=777", "protocol=776")).is_err());
+    let truncated: Vec<_> = DUMP.lines().filter(|line| !line.starts_with("E ")).collect();
+    assert!(parse_dump(&truncated.join("\n")).is_err());
+    let renamed = DUMP.replacen(" minecraft:stone ", " minecraft:no_such_block ", 1);
+    assert!(join(&parse_dump(&renamed).unwrap()).is_err());
+    let duplicated = DUMP.replacen(" minecraft:granite ", " minecraft:stone ", 1);
+    assert!(join(&parse_dump(&duplicated).unwrap()).is_err());
+}

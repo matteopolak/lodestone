@@ -162,8 +162,14 @@ fn every_stack_writes_back_to_what_the_server_saved() {
 /// not cover says so instead of passing as whole.
 #[test]
 fn a_component_without_a_saved_form_is_reported() {
-    let trimmed = stack("minecraft:diamond_chestplate", 1, |s| s.components.map_id = Some(4));
-    assert!(!stack_to_nbt(&trimmed).complete);
+    let decorated = stack("minecraft:decorated_pot", 1, |s| {
+        s.components.pot_decorations = Some(lodestone_model::item::PotDecorations::default());
+    });
+    assert!(!stack_to_nbt(&decorated).complete);
+    let mapped = stack("minecraft:filled_map", 1, |s| s.components.map_id = Some(4));
+    assert!(stack_to_nbt(&mapped).complete, "a map id is saved");
+    let back = stack_from_nbt(&Nbt::Compound(stack_to_nbt(&mapped).fields));
+    assert_eq!(back.and_then(|stack| stack.components.map_id), Some(4), "and read back");
     let unread = stack("minecraft:stick", 1, |s| s.components.has_unmodeled = true);
     assert!(!stack_to_nbt(&unread).complete);
 }

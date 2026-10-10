@@ -61,6 +61,8 @@ pub(crate) mod generated_item_prototypes;
 pub(crate) mod generated_items;
 #[path = "generated/light_props.rs"]
 pub(crate) mod generated_light_props;
+#[path = "generated/map_colors.rs"]
+pub(crate) mod generated_map_colors;
 #[path = "generated/menus.rs"]
 pub(crate) mod generated_menus;
 #[path = "generated/mob_effect_colors.rs"]
@@ -119,6 +121,7 @@ pub mod item;
 pub mod item_rarity;
 pub mod item_prototypes;
 pub mod light_props;
+pub mod map_colors;
 pub mod menus;
 pub mod mob_effects;
 pub mod movement;

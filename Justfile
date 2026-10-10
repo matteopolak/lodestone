@@ -254,6 +254,29 @@ oracle-snow-support:
         java -cp "/work:$CP" SnowSupportOracle
       ' > crates/lodestone-data/tests/support/snow_support_jvm.txt
 
+# Re-dump every block state's map colour (and its fluid-surface colour) plus the
+# 64-entry map colour palette from the `mc-version` server. Needs Apple
+# `container`. Follow with `just regen-map-colors`.
+oracle-map-colors:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VER="$(tr -d '[:space:]' < mc-version)"
+    CACHE="$(cd .cache/mc/$VER && pwd)"
+    HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
+    container system start >/dev/null 2>&1 || true
+    container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -e MC_VERSION="$VER" -w /work \
+      eclipse-temurin:25-jdk bash -c '
+        set -e
+        CP="/mc/versions/$MC_VERSION/server-$MC_VERSION.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        mkdir -p /work && cp /oracle/MapColorOracle.java /work/
+        javac -cp "$CP" -d /work /work/MapColorOracle.java
+        java -cp "/work:$CP" MapColorOracle
+      ' > crates/lodestone-data/tests/support/map_colors_jvm.txt
+
+# Regenerate crates/lodestone-data's map colour table from the committed dump.
+regen-map-colors:
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test map_colors committed_table_matches_dump -- --nocapture
+
 # Re-dump the six-direction effective face-occlusion mask for every 26.2
 # block state. Needs Apple `container` (see docs/oracles-and-benchmarks.md).
 # Follow with `just regen-face-occlusion`.

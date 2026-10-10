@@ -1833,6 +1833,14 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes the map item data packet: the dirty colour rectangle and/or the decoration list
+    /// of one filled map for one carrier. The default emits nothing, so a protocol without maps
+    /// leaves them blank.
+    fn encode_map_item_data(&self, update: &crate::maps::MapUpdate) -> ServerDirective {
+        let _ = update;
+        ServerDirective::None
+    }
+
     /// Encodes the recipe-book-add packet (26.2) — the packet that
     /// **hands out recipe display ids**.
     ///
@@ -2408,6 +2416,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_award_stats(&self, stats: &[(crate::advancements::StatKey, i32)]) -> ServerDirective {
         (**self).encode_award_stats(stats)
+    }
+
+    fn encode_map_item_data(&self, update: &crate::maps::MapUpdate) -> ServerDirective {
+        (**self).encode_map_item_data(update)
     }
 
     fn encode_select_advancements_tab(&self, tab: Option<&str>) -> ServerDirective {

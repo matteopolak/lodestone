@@ -51,6 +51,8 @@ mod join_trace;
 pub(crate) use self::join_trace::*;
 mod lighting;
 use self::lighting::*;
+mod map_tick;
+use self::map_tick::*;
 mod online_mode;
 pub use self::online_mode::*;
 mod open_containers;

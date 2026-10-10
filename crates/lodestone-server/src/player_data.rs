@@ -422,6 +422,7 @@ impl PlayerData {
 #[derive(Debug, Clone)]
 pub struct PlayerDataStore {
     dir: std::sync::Arc<PathBuf>,
+    world: std::sync::Arc<PathBuf>,
 }
 
 impl PlayerDataStore {
@@ -439,7 +440,14 @@ impl PlayerDataStore {
         std::fs::create_dir_all(&dir).map_err(lodestone_anvil::Error::Io)?;
         Ok(Self {
             dir: std::sync::Arc::new(dir),
+            world: std::sync::Arc::new(world_dir.to_path_buf()),
         })
+    }
+
+    /// The world folder this store is rooted at.
+    #[must_use]
+    pub fn world_dir(&self) -> &Path {
+        &self.world
     }
 
     /// The file `uuid`'s data lives in.

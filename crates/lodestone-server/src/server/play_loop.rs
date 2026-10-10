@@ -335,6 +335,7 @@ where
     // Resolve the per-player store once from the source. `player_uuid` is the
     // key for the stored file, and the loop reuses this handle for its saves.
     let player_store = player_store(source.get());
+    let mut map_session = start_map_session(world, source.get(), player_uuid, &username);
     let saved_player = player_store
         .as_ref()
         .and_then(|store| store.read(player_uuid).ok().flatten());
@@ -1433,6 +1434,20 @@ where
                         source.dimension(),
                     );
                 }
+
+                tick_maps(
+                    conn,
+                    proto,
+                    &mut state,
+                    &mut map_session,
+                    world,
+                    source.get(),
+                    source.dimension(),
+                    player_pos,
+                    player_rot,
+                    &inventory,
+                )
+                .await?;
 
                 // Advance deferred block breaks on each 50 ms vitals tick. This
                 // completes hold-and-release digs whose stop packet leaves
@@ -3404,6 +3419,7 @@ where
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
     let mut inventory = PlayerInventory::default();
+    let mut map_session = start_map_session(world, source.get(), player_uuid, &username);
     republish_inventory(entities.players(), player_uuid, &inventory);
     apply(
         conn,
@@ -3656,6 +3672,19 @@ where
                         mobs,
                         block_ticks,
                         block_entities,
+                    )
+                    .await?;
+                    tick_maps(
+                        conn,
+                        proto,
+                        &mut state,
+                        &mut map_session,
+                        world,
+                        source.get(),
+                        source.dimension(),
+                        player_pos,
+                        player_rot,
+                        &inventory,
                     )
                     .await?;
                     travel.tick(

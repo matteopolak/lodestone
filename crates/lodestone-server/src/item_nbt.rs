@@ -179,6 +179,9 @@ fn components_to_nbt(item: &ResourceKey, components: &ItemComponents) -> (Vec<(S
     if let Some(color) = rest.dyed_color.take() {
         put("dyed_color", Nbt::Int(color as i32));
     }
+    if let Some(map_id) = rest.map_id.take() {
+        put("map_id", Nbt::Int(map_id));
+    }
     if rest.repair_cost > 0 {
         match i32::try_from(rest.repair_cost) {
             Ok(cost) => put("repair_cost", Nbt::Int(cost)),
@@ -259,6 +262,10 @@ fn read_component(components: &mut ItemComponents, name: &str, value: &Nbt) -> b
         }
         ("dyed_color", Nbt::Int(color)) => {
             components.dyed_color = Some(*color as u32);
+            true
+        }
+        ("map_id", Nbt::Int(id)) => {
+            components.map_id = Some(*id);
             true
         }
         ("potion_contents", value) => read_potion_contents(components, value),

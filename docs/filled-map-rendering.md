@@ -42,7 +42,8 @@ Pictures batch per distinct map; every visible frame's icons merge into one mesh
 
 ## Gaps
 
-- The integrated server has no map saved data and sends no `MAP_ITEM_DATA`: singleplayer maps never fill in. The chain after the wire is exercised by the gates above; no live-server run has covered it.
+- The server draws no frame markers: it has no item frames, so a framed map never gains a marker.
+- Cartography zoom and lock are absent.
 - A decoration's custom name label is not drawn.
 - The paper `map_background` behind a held map and the player's arms around it are not drawn.
 - Held maps use full-bright light instead of the hand's sampled light.

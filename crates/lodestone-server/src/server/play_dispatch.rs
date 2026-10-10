@@ -531,46 +531,53 @@ where
             // open consumes this, but it is drawn unconditionally so opening one
             // does not depend on which block was clicked last.
             let enchant_seed_roll = i64::from(drops_rng.next_int(i32::MAX));
-            apply_use_item_on(
-                conn,
-                proto,
-                // The block write is immediate; its light update may be queued.
-                source.get(),
-                state,
-                pending_relights.as_deref_mut(),
-                pos,
-                face,
-                cursor,
-                // The player's position, for the bed reach test —
-                // `None` until a `PlayerMoved` packet carries one.
-                player_pos.as_ref().map(|&(x, y, z)| Vec3::new(x, y, z)),
-                respawn,
-                // The placing player's yaw and pitch, so
-                // `apply_use_item_on` can give directional blocks their
-                // placement facing. `None` until a packet carrying angles
-                // arrives — placement then uses the block's default state.
-                player_rot.map(|rotation| rotation.yaw),
-                player_rot.map(|rotation| rotation.pitch),
-                *sneaking,
-                player_uuid,
-                inventory,
-                block_entities,
-                next_window_id,
-                open_container,
-                container_sync,
-                mobs,
-                roll,
-                block_ticks,
-                sleep_vote,
-                player_entity_id,
-                bone_meal_rng,
-                world.difficulty().0,
-                *game_mode,
-                enchant_seed_roll,
-                hand,
-                world.crafting_hooks(),
-            )
-            .await?;
+            let held_native = if hand == 1 {
+                crate::inventory::OFFHAND_NATIVE
+            } else {
+                usize::from(inventory.selected_hotbar_slot())
+            };
+            if !filled_map_banner_click(world, source.get(), inventory, held_native, pos) {
+                apply_use_item_on(
+                    conn,
+                    proto,
+                    // The block write is immediate; its light update may be queued.
+                    source.get(),
+                    state,
+                    pending_relights.as_deref_mut(),
+                    pos,
+                    face,
+                    cursor,
+                    // The player's position, for the bed reach test —
+                    // `None` until a `PlayerMoved` packet carries one.
+                    player_pos.as_ref().map(|&(x, y, z)| Vec3::new(x, y, z)),
+                    respawn,
+                    // The placing player's yaw and pitch, so
+                    // `apply_use_item_on` can give directional blocks their
+                    // placement facing. `None` until a packet carrying angles
+                    // arrives — placement then uses the block's default state.
+                    player_rot.map(|rotation| rotation.yaw),
+                    player_rot.map(|rotation| rotation.pitch),
+                    *sneaking,
+                    player_uuid,
+                    inventory,
+                    block_entities,
+                    next_window_id,
+                    open_container,
+                    container_sync,
+                    mobs,
+                    roll,
+                    block_ticks,
+                    sleep_vote,
+                    player_entity_id,
+                    bone_meal_rng,
+                    world.difficulty().0,
+                    *game_mode,
+                    enchant_seed_roll,
+                    hand,
+                    world.crafting_hooks(),
+                )
+                .await?;
+            }
         }
         ServerBound::DifficultyChanged { difficulty } => {
             // A difficulty change requires permission level `2`. A locked world
@@ -1516,6 +1523,33 @@ where
                             proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
                         )
                         .await?;
+                    }
+                }
+                *bow_draw = None;
+                *item_in_use = None;
+                return Ok(());
+            }
+            // An empty map becomes a filled one centred on the player. Before
+            // `apply_use_item`, which has no world handle to allocate an id from.
+            if let Some((px, py, pz)) = *player_pos
+                && inventory.native(boat_native).is_some_and(|stack| stack.item.path() == "map")
+            {
+                let touched = use_empty_map(
+                    world,
+                    mobs,
+                    block_ticks,
+                    inventory,
+                    boat_native,
+                    *game_mode,
+                    Vec3::new(px, py, pz),
+                    *player_rot,
+                    drops_rng,
+                    source.dimension(),
+                );
+                for native in touched {
+                    if let Some(menu_slot) = window_zero_menu_slot(native) {
+                        let current = inventory.native(native).cloned();
+                        apply(conn, state, proto.encode_container_slot(0, 0, menu_slot, current.as_ref())).await?;
                     }
                 }
                 *bow_draw = None;

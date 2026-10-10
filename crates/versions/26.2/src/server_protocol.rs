@@ -1187,6 +1187,56 @@ fn encode_award_stats_body(wire: Wire, stats: &[(StatKey, i32)]) -> Vec<u8> {
     w.into_vec()
 }
 
+/// Body of the map item data packet: map id, scale, locked flag, an optional decoration list (a
+/// boolean, a count, then per icon its type id, three signed bytes for x, y and rotation, and an
+/// optional name), then the optional colour patch spelled width, height, start x, start y, bytes.
+/// An absent patch is a zero width byte with no flag. A decoration type this release has no id for
+/// is left out.
+fn encode_map_item_data_body(wire: Wire, update: &lodestone_server::maps::MapUpdate) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(update.map_id);
+    w.i8(update.scale);
+    w.bool(update.locked);
+    match &update.decorations {
+        None => w.bool(false),
+        Some(decorations) => {
+            let resolved: Vec<_> = decorations
+                .iter()
+                .filter_map(|decoration| {
+                    let canonical = crate::adapter::inventory::MAP_DECORATION_TYPE_IDS
+                        .iter()
+                        .position(|name| *name == decoration.kind.path())?;
+                    let id = wire.fixed(FixedRegistryKind::MapDecoration, i32::try_from(canonical).ok()?)?;
+                    Some((id, decoration))
+                })
+                .collect();
+            w.bool(true);
+            w.var_i32(i32::try_from(resolved.len()).unwrap_or(i32::MAX));
+            for (id, decoration) in resolved {
+                w.var_i32(id);
+                w.i8(decoration.x);
+                w.i8(decoration.y);
+                w.i8((decoration.rotation & 15) as i8);
+                w.bool(decoration.name.is_some());
+                if let Some(name) = &decoration.name {
+                    write_text_nbt(&mut w, name);
+                }
+            }
+        }
+    }
+    match &update.patch {
+        None => w.u8(0),
+        Some(patch) => {
+            w.u8(patch.width);
+            w.u8(patch.height);
+            w.u8(patch.start_x);
+            w.u8(patch.start_y);
+            w.var_bytes(&patch.colors).expect("a map patch is at most 16384 bytes");
+        }
+    }
+    w.into_vec()
+}
+
 /// Hand-written encoder for the clientbound `system_chat` packet, which has no
 /// existing struct because it is currently only ever *decoded* (see
 /// `V770Adapter::handle_play`'s `SYSTEM_CHAT` arm). Wire layout (mirrors the
@@ -1562,6 +1612,9 @@ fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemCompo
                 w.var_i32(color);
             }
         });
+    }
+    if let Some(map_id) = components.map_id {
+        entry("minecraft:map_id", &|w| w.var_i32(map_id));
     }
     if let Some(color) = components.dyed_color {
         // A bare fixed-width INT, unlike the VarInt scalars around it.
@@ -5868,6 +5921,14 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::AWARD_STATS,
             payload: encode_award_stats_body(self.wire, stats),
+        }
+    }
+
+    /// See [`ServerProtocol::encode_map_item_data`]'s trait doc comment.
+    fn encode_map_item_data(&self, update: &lodestone_server::maps::MapUpdate) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::MAP_ITEM_DATA,
+            payload: encode_map_item_data_body(self.wire, update),
         }
     }
 

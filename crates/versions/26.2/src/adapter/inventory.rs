@@ -2913,7 +2913,7 @@ fn decode_show_dialog(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 }
 
 /// Base-release names used when the dialect has no fixed-name callback.
-const MAP_DECORATION_TYPE_IDS: &[&str] = &[
+pub(crate) const MAP_DECORATION_TYPE_IDS: &[&str] = &[
     "player",
     "frame",
     "red_marker",

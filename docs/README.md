@@ -980,6 +980,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Server-side light](./server-light.md) — How the integrated server computes the
   sky and block light it puts on the wire for a served chunk, and keeps that light
   current after an edit.
+- [Server-side maps](./server-maps.md) — The integrated server's map saved data:
+  using an empty map creates a filled map, held maps are sampled from loaded terrain,
+  and each holder is sent colour patches and decorations in `map_item_data` packets.
+  Lives in `lodestone_server::maps`; the client side is
+  [filled-map-rendering](./filled-map-rendering.md).
 - [Server driver module layout](./server-module-layout.md) —
   `crates/lodestone-server/src/server.rs` is the facade of the per-connection driver:
   shared constants, public error and summary types, disconnect reasons, and one

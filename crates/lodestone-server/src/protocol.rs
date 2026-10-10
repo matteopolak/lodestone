@@ -398,6 +398,9 @@ mod tests {
         fn encode_select_advancements_tab(&self, tab: Option<&str>) -> ServerDirective {
             send(1900 + tab.map_or(0, |t| t.len() as i32))
         }
+        fn encode_map_item_data(&self, update: &crate::maps::MapUpdate) -> ServerDirective {
+            send(2000 + update.map_id)
+        }
         fn worldgen_scope(&self) -> WorldgenScope {
             // Non-default on purpose: this is the value that proves the box
             // forward works rather than both sides silently using the trait
@@ -654,6 +657,15 @@ mod tests {
             boxed.encode_award_stats(&stats),
             direct.encode_award_stats(&stats)
         );
+        let map_update = crate::maps::MapUpdate {
+            map_id: 4,
+            scale: 0,
+            locked: false,
+            decorations: None,
+            patch: None,
+        };
+        assert_eq!(boxed.encode_map_item_data(&map_update), direct.encode_map_item_data(&map_update));
+        assert_ne!(direct.encode_map_item_data(&map_update), ServerDirective::None);
         assert_eq!(
             boxed.encode_select_advancements_tab(Some("minecraft:story/root")),
             direct.encode_select_advancements_tab(Some("minecraft:story/root"))

@@ -230,6 +230,8 @@ pub mod smithing;
 /// scratch-menu shape `smithing`/`anvil` already use for a non-block-entity
 /// station.
 pub mod loom;
+/// Filled-map saved data, terrain sampling and the per-carrier update stream.
+pub mod maps;
 /// The stonecutter's recipe list, read straight off
 /// [`crafting::recipe_book`]'s already-loaded corpus.
 pub mod stonecutting;
