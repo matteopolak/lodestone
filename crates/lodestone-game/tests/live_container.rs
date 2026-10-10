@@ -294,8 +294,8 @@ impl Session {
 
         let mut session = Self { conn };
         session.drive_to_play().await;
-        // The server gates block interaction (`handleUseItemOn`) on
-        // has client loaded, so announce we've loaded before opening a chest.
+        // The server gates block interaction on
+        // the client having loaded, so announce we've loaded before opening a chest.
         session
             .conn
             .write_packet(pkt::play_sb::PLAYER_LOADED, &[])

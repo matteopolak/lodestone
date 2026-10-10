@@ -16,7 +16,7 @@
 //! fill the result slot**. Vanilla computes the result server-side:
 //! the crafting menu's slots-changed hook runs the grid-changed update, which sends a
 //! `container_set_slot` for slot 0 — and a *client's* crafting menu is built with
-//! a null level access, so its `slotsChanged` does nothing at all. Our
+//! a null level access, so its slots-changed hook does nothing at all. Our
 //! `RecipeBook`/`predicted_craft_result` exist for the recipe book, ghost
 //! previews and offline play, and are deliberately not used here. Every
 //! result-slot assertion below therefore reads a value that **originated on the
@@ -71,9 +71,9 @@
 //!   the block is a crafting table *and* within 4.0 reach on every
 //!   click, so the table is placed adjacent to the player and the player never
 //!   moves.
-//! - **`handleUseItemOn` is gated on has client loaded** and the real driver
+//! - **Use-item-on is gated on the client having loaded** and the real driver
 //!   never sends `player_loaded`, so the server auto-loads us only after ~60 ticks.
-//!   Opening the table is retried. `handleContainerClick` has **no** such gate.
+//!   Opening the table is retried. Container clicks have **no** such gate.
 //! - **Clicks carry the server's `state_id`.** If they carried a locally bumped
 //!   one, every click would arrive stale and the server would answer
 //!   broadcast full state — which would make this whole test vacuous, since the
@@ -141,7 +141,7 @@ const TABLE: &str = "minecraft:crafting_table";
 const PROBE_MAIN: &str = "minecraft:diamond";
 const PROBE_HOTBAR: &str = "minecraft:emerald";
 
-/// A `state_id` the server can never be holding, so `handleContainerClick` takes
+/// A `state_id` the server can never be holding, so the container-click handler takes
 /// its broadcast full state branch. Vanilla ids live in `0..=32767`.
 const STALE_STATE_ID: i32 = 30_000;
 
@@ -272,7 +272,7 @@ async fn send_click(shared: &Shared, handle: &ClientHandle, click: Click) -> (i3
 /// the click handler's clone branch is gated on
 /// the player having infinite materials, so no branch matches and nothing mutates —
 /// unlike the `-999 PICKUP` probe the other live tests use, which throws a loaded
-/// cursor into the world. The stale id makes `handleContainerClick` take
+/// cursor into the world. The stale id makes the container-click handler take
 /// broadcast full state.
 async fn server_full_state(shared: &Shared, handle: &ClientHandle, window: i32) -> FullState {
     let before = lock(shared).content_generation;

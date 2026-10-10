@@ -48,16 +48,16 @@
 //!
 //! # How to change it
 //!
-//! Add a species by reading its own `populateDefaultEquipmentSlots` override in
+//! Add a species by reading its own default-equipment override in
 //! the decompiled 26.2 source: note whether it calls
-//! `super` (meaning it gets [`base_armor_roll`] first) and transcribe whatever
+//! the base roll (meaning it gets [`base_armor_roll`] first) and transcribe whatever
 //! it does after that in the same call order the roll functions read RNG in,
 //! since a reordered pair of `next_f32`/`next_int` calls changes what a fixed
 //! seed produces even though nothing here promises byte-identical RNG streams
 //! with a real vanilla server (`SpawnRng` is a different generator).
 //!
 //! An unmodelled RNG-derived rarity is a known gap for the general roll:
-//! `populateDefaultEquipmentEnchantments` (enchanted spawn gear) is not
+//! enchanted spawn gear is not
 //! transcribed at all — there is no enchantment model in this workspace, the
 //! same disclosed gap [`crate::equipment`]'s own module doc names.
 //!

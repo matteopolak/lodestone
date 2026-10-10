@@ -889,13 +889,8 @@ fn is_member_use(chars: &[char], start: usize, end: usize) -> bool {
 /// member forms until each is rewritten. Only shrinks:
 /// a path absent here is held to the bare rule.
 const BARE_MEMBER_PENDING: &[&str] = &[
-    "crates/lodestone-assets/",
-    "crates/lodestone-entity/",
-    "crates/lodestone-game/",
-    "crates/lodestone-physics/",
     "crates/lodestone-server/",
     "crates/lodestone-shell/",
-    "crates/lodestone-worldgen/",
     "crates/versions/",
 ];
 

@@ -423,7 +423,7 @@ pub(super) fn cat_coat_texture(v: EntityVariant) -> &'static str {
 /// `real_head` child with four boxes (main head, two identically-textured
 /// ear boxes placed by origin sign rather than mirroring, and a snout); `body`
 /// and `upper_body` are independent, both rotated `PI/2`; four legs share two
-/// cube-list builders (`leftLeg`/`rightLeg`, the latter mirrored) reused
+/// cube-list builders (left and right leg, the latter mirrored) reused
 /// across hind and front pairs, exactly like vanilla's own blaze model's ring reuse; `tail`
 /// (empty, pivot-only) holds a `real_tail` child. Sheet 64×32, unscaled
 /// (vanilla's own layer-definitions table's wolf body layer has no mesh transformer).

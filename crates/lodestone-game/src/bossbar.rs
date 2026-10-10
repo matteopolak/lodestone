@@ -57,7 +57,7 @@ impl BossBarColor {
 
     /// The GUI atlas sprite id for this colour's **background** plate —
     /// vanilla's own background-sprites table.
-    /// Each colour is a distinct pre-baked sprite; vanilla's `blitSprite` call
+    /// Each colour is a distinct pre-baked sprite; vanilla's sprite blit
     /// for it passes no tint (`color = -1`, i.e. opaque white), so a renderer
     /// must select the sprite by id rather than tint a shared greyscale one.
     #[must_use]

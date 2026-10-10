@@ -482,7 +482,7 @@ impl Menus {
             ClientEvent::InventorySlotChanged { slot, item } => {
                 if let Ok(native) = usize::try_from(*slot) {
                     // Vanilla's container id `-2` writes straight into the one
-                    // `Inventory` (`handleContainerSetSlot`'s `-2` arm), so this
+                    // player inventory, so this
                     // goes to whichever menu owns it, not unconditionally to
                     // window 0.
                     self.inventory_owner_mut()
@@ -762,7 +762,7 @@ impl Menus {
 ///
 /// * Vanilla's own furnace-family quick-move step routes by *item kind*: smeltables to slot
 ///   0, fuel to slot 1, and only otherwise the main↔hotbar hop. Both predicates
-///   (`canSmelt` → the cooking-recipe input set, `isFuel` → the fuel-value
+///   (can-smelt → the cooking-recipe input set, is-fuel → the fuel-value
 ///   registry) are server data this tree does not have. Modelling the structure
 ///   without them would just move the guess.
 /// * Vanilla's own brewing-stand quick-move step does the same for blaze powder, brewing

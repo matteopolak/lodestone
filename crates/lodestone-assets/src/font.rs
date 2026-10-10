@@ -466,7 +466,7 @@ fn decode_hex(index: usize, b: u8) -> Result<u8, FontError> {
     match b {
         b'0'..=b'9' => Ok(b - b'0'),
         b'A'..=b'F' => Ok(b - b'A' + 10),
-        // Vanilla's `decodeHex` accepts uppercase only; lowercase is accepted
+        // Vanilla's hex decoding accepts uppercase only; lowercase is accepted
         // here because it cannot be ambiguous and a hand-written pack may use
         // it. Vanilla's own files are uppercase.
         b'a'..=b'f' => Ok(b - b'a' + 10),
@@ -765,7 +765,7 @@ impl UnihexGlyph {
     /// Whether the texel at `(tx, ty)` of the trimmed bitmap is ink.
     ///
     /// `tx` walks the *trimmed* columns, `0..width()`. Vanilla's
-    /// `unpackBitsToBytes` emits one texel per bit index from `32 - left - 1`
+    /// Vanilla's bit-unpacking emits one texel per bit index from `32 - left - 1`
     /// down to `32 - right - 1`, writing 0 for any index outside `0..32` — so a
     /// `size_overrides` bound wider than the source (or negative) pads with
     /// blank columns rather than reading a neighbour's bits. That guard is
@@ -1857,11 +1857,11 @@ impl GlyphRaster<'_> {
 
     /// Whether the texel at `(tx, ty)` within the cell is ink.
     ///
-    /// For a sheet glyph, vanilla's `getActualGlyphWidth` tests
+    /// For a sheet glyph, vanilla's actual-glyph-width scan tests
     /// `get_luminance_or_alpha() != 0` on an image read as RGBA, i.e. the alpha
     /// channel — the same test used here, so coverage and advance agree by
     /// construction rather than by coincidence. For a unihex glyph it is
-    /// [`UnihexGlyph::is_ink`], the bit `unpackBitsToBytes` would have written.
+    /// [`UnihexGlyph::is_ink`], the bit vanilla's bit-unpacking would have written.
     /// For a `ttf` glyph it is the rasterised coverage byte against
     /// [`TTF_INK_THRESHOLD`] — see that constant for why this is a threshold
     /// and not a `!= 0` test.

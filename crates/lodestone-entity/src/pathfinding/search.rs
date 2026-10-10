@@ -330,7 +330,7 @@ impl<'a> Search<'a> {
         f64::from(y - 1) + self.world.collision_top(x, y - 1, z)
     }
 
-    // ---- version-free path-type classification (getPathTypeStatic etc.) ----
+    // ---- version-free path-type classification ----
 
     fn path_type_static(&self, x: i32, y: i32, z: i32) -> PathType {
         let bt = self.world.base_path_type(x, y, z);

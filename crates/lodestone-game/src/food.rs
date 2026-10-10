@@ -10,7 +10,7 @@
 //! `FOODS` table, which this crate cannot see (`pub(crate)`, a different
 //! crate). What this module carries is the **one flag** a client-side
 //! prediction needs to agree with that gate before it *looks* like eating
-//! started: vanilla's own always-eat flag (its own `alwaysEdible` field),
+//! started: vanilla's own always-eat flag,
 //! per item.
 //!
 //! Without this, [`crate::consumable::consumable_for_item`] alone treats every
@@ -29,14 +29,14 @@
 //! only source, exactly as `lodestone_server::item_use::FOODS` and
 //! `lodestone_game::consumable::CONSUMABLES` already transcribe it twice each
 //! for their own disjoint fields. This is a third, disjoint slice of the same
-//! 40-row source: only the `alwaysEdible` column,
+//! 40-row source: only the always-edible column,
 //! because nutrition/saturation stay server-side and the consume duration is
 //! `minecraft:consumable`'s column, already carried in `consumable.rs`.
 //!
 //! # How to change it
 //!
 //! Adding a food is one row in [`ALWAYS_EAT`], kept sorted for the binary
-//! search — check vanilla's own `alwaysEdible` argument for the new item
+//! search — check vanilla's always-edible argument for the new item
 //! (`false` unless it is a golden apple, honey bottle, chorus fruit or
 //! suspicious stew; vanilla's own food-properties table has had exactly five `true` rows since food
 //! components were introduced, matching [`tests::exactly_five_items_are_always_edible`]).
@@ -65,8 +65,8 @@ pub fn always_eat_for_food(item: &str) -> Option<bool> {
         .map(|index| ALWAYS_EAT[index].1)
 }
 
-/// Vanilla's own can-eat check — `abilities.invulnerable || canAlwaysEat ||
-/// foodData.needs_food()`, where needs food is `foodLevel < 20`. Mirrors
+/// Vanilla's own can-eat check — `abilities.invulnerable || can_always_eat ||
+/// food_data.needs_food()`, where needs food is `food_level < 20`. Mirrors
 /// `lodestone_server::item_use::can_eat` so a client prediction of "am I
 /// about to eat" agrees with what the server will actually accept.
 #[must_use]
@@ -74,7 +74,7 @@ pub fn can_eat(always_eat: bool, food_level: i32, invulnerable: bool) -> bool {
     invulnerable || always_eat || food_level < MAX_FOOD
 }
 
-/// Every `minecraft:food` item in 26.2 and its `alwaysEdible` flag,
+/// Every `minecraft:food` item in 26.2 and its always-edible flag,
 /// sorted by id for [`always_eat_for_food`]'s
 /// binary search. Cross-checked against `lodestone_server::item_use::FOODS`'s
 /// 40 rows and its own five `can_always_eat: true` entries — the two tables

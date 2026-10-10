@@ -75,8 +75,8 @@ pub trait MobController {
         false
     }
 
-    /// Ticks the mob has spent taking no deliberate action (vanilla's
-    /// `getNoActionTime`), used by strolling to yield when idle-throttled.
+    /// Ticks the mob has spent taking no deliberate action, used by strolling
+    /// to yield when idle-throttled.
     fn no_action_time(&self) -> i32 {
         0
     }
@@ -984,7 +984,7 @@ pub trait MobController {
     /// `dot > 1.0 - coneSize / dist` test, and the line-of-sight half is a
     /// world raycast — the same disclosed gap
     /// [`find_nearest_target`](MobController::find_nearest_target) names for
-    /// its own `hasLineOfSight`, omitted rather than faked, erring permissive.
+    /// its own line-of-sight test, omitted rather than faked, erring permissive.
     ///
     /// Defaults to `false` (nobody staring). The two consumers are the
     /// enderman's [`EndermanFreezeUnderGazeGoal`](crate::ai::goals::EndermanFreezeUnderGazeGoal)
@@ -1006,8 +1006,8 @@ pub trait MobController {
 
     /// Selects and remembers a free breeding partner — another in-love animal of
     /// the same kind, within range and not panicking — returning its position if
-    /// one was found. Mirrors vanilla's `getFreePartner`: the host performs the
-    /// version/type-specific `canMate` filter and holds the chosen partner so
+    /// one was found. Mirrors vanilla's free-partner search: the host performs the
+    /// version/type-specific can-mate filter and holds the chosen partner so
     /// [`love_partner_position`] can track it.
     ///
     /// [`love_partner_position`]: MobController::love_partner_position
@@ -1023,7 +1023,7 @@ pub trait MobController {
     }
 
     /// Spawns a child from this animal and its partner and clears love mode on
-    /// both (vanilla's `spawnChildFromBreeding`).
+    /// both.
     fn breed(&mut self) {}
 
     /// Forgets the currently-selected breeding partner (called when the goal
@@ -1195,8 +1195,8 @@ pub trait MobController {
     ///
     /// # Why the two architectures meet here
     ///
-    /// 26.2 ships both AI systems and vanilla's `Mob` carries **both** fields:
-    /// `goalSelector` and `brain`, ticked in the same `customServerAiStep`. This
+    /// 26.2 ships both AI systems and a vanilla mob carries **both**: a goal
+    /// selector and a brain, ticked in the same server AI step. This
     /// repo had only half of that: [`GoalSelector`](crate::ai::GoalSelector)
     /// reached production through [`NavigatingMob`](crate::ai::NavigatingMob) and
     /// `MobSim`, while [`Brain`](crate::brain::Brain) had no production caller at
@@ -1287,7 +1287,7 @@ pub enum ProjectileKind {
 ///
 /// Carries a resolved `origin` and `velocity` rather than a target, because
 /// vanilla's aiming maths is **per species** — the skeleton adds
-/// `horizontalDistance * 0.2` to the vertical component and shoots at power
+/// `horizontal_distance * 0.2` to the vertical component and shoots at power
 /// `1.6`, the blaze normalises a
 /// triangle-jittered direction and scales by its own acceleration power `0.1`
 /// (vanilla's own directional-movement assignment and its own acceleration-
@@ -1374,7 +1374,7 @@ pub fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
 /// The full vanilla test is this cone *and* line of sight
 /// (target's has line of sight, a world raycast) — the same disclosed
 /// gap [`find_nearest_target`](MobController::find_nearest_target) names for
-/// its own `hasLineOfSight`, omitted here rather than faked, erring permissive.
+/// its own line-of-sight test, omitted here rather than faked, erring permissive.
 ///
 /// One deliberate divergence: a viewer whose eye is **at** `target` (distance
 /// below `1e-9`) reads `false`. Vanilla's own formula divides by `dist` and

@@ -274,7 +274,7 @@ fn try_place_pile_block<R: RandomSource>(
     if !air_at(grid, pos.x, pos.y, pos.z) {
         return;
     }
-    // `mayPlaceOn`: dirt_path is a coin flip, anything else must be face-sturdy.
+    // May-place-on: dirt_path is a coin flip, anything else must be face-sturdy.
     // The draw happens on the dirt_path branch only, exactly as vanilla.
     let below = base_at(grid, pos.x, pos.y - 1, pos.z);
     let ok = if below == Block::DirtPath {
@@ -290,8 +290,8 @@ fn try_place_pile_block<R: RandomSource>(
     }
 }
 
-/// `MultifaceGrowthConfiguration`'s `validDirections`, in its own build order:
-/// ceiling (UP), floor (DOWN), then `Plane.HORIZONTAL` (N, E, S, W). The order is
+/// The multiface-growth config's valid directions, in its own build order:
+/// ceiling (UP), floor (DOWN), then the horizontal plane (N, E, S, W). The order is
 /// the shuffle's input, so it decides the output.
 #[derive(Clone, Copy)]
 struct DirectionList {

@@ -111,7 +111,7 @@ pub enum PoolElement {
         decoded: Arc<StructureTemplate>,
         /// True for `legacy_single_pool_element`.
         legacy: bool,
-        /// The element's own processors, in `addProcessor` order — **without** the
+        /// The element's own processors, in add order — **without** the
         /// leading ignore/jigsaw-replacement pair and without the projection's,
         /// both of which are appended at placement time.
         processors: Arc<Vec<super::processor::Processor>>,
@@ -148,7 +148,7 @@ pub enum PoolElement {
         /// `projection`.
         projection: Projection,
     },
-    /// `empty_pool_element` — terminates a branch. `getShuffledTemplates`
+    /// `empty_pool_element` — terminates a branch. The shuffled-template walk
     /// **breaks** on it rather than skipping it, so its position in a pool
     /// matters.
     Empty,
@@ -401,10 +401,10 @@ pub fn shuffle<T, R: RandomSource>(list: &mut [T], random: &mut R) {
 pub struct TemplatePool {
     /// `fallback`, as a pool id.
     pub fallback: String,
-    /// The **weight-expanded** element list — what `getRandomTemplate` indexes
-    /// and `getShuffledTemplates` shuffles. See the module doc.
+    /// The **weight-expanded** element list — what the random-template pick indexes
+    /// and the shuffled-template walk shuffles. See the module doc.
     pub expanded: Vec<Arc<PoolElement>>,
-    /// `getMaxSize`, computed on first use exactly as vanilla caches it.
+    /// The maximum size, computed on first use exactly as vanilla caches it.
     max_size: std::sync::OnceLock<i32>,
 }
 
@@ -597,7 +597,7 @@ impl PoolStore {
                 if elements.is_empty() {
                     return Err("list_pool_element with no elements".to_string());
                 }
-                // `setProjectionOnEachElement` — the list's projection wins.
+                // The list's projection wins over each element's.
                 for element in &mut elements {
                     match element {
                         PoolElement::Single { projection: p, .. }

@@ -413,8 +413,8 @@ fn fixture(with_ttf_bytes: bool) -> ResourceManager {
     src.insert("assets/minecraft/font/default.json", font_json().into_bytes());
     src.insert("assets/minecraft/textures/font/sheet.png", sheet_png());
     if with_ttf_bytes {
-        // Vanilla's own true-type-glyph-provider-definition load step: `resourceManager.open(this.location.with_prefix("font/"))`
-        // — the `file` field itself carries no `font/` prefix, unlike `unihex`'s `hex_file`.
+        // Vanilla opens the ttf under a `font/` prefix; the `file` field itself
+        // carries no `font/` prefix, unlike `unihex`'s `hex_file`.
         src.insert("assets/minecraft/font/fixture.ttf", fixture_font_bytes());
     }
     ResourceManager::new(vec![Box::new(src)])

@@ -78,7 +78,7 @@ impl FluidState {
     };
 
     /// Vanilla's own "is in water" check — the box intersects water
-    /// (`getFluidHeight > 0`).
+    /// (fluid height `> 0`).
     #[must_use]
     pub fn in_water(&self) -> bool {
         self.water_height > 0.0
@@ -127,7 +127,7 @@ pub fn compute_fluid_state(
     eye_height: f32,
     view: &dyn CollisionView,
 ) -> FluidState {
-    // Vanilla's own fluid-interaction box = `boundingBox.deflate(0.001)`.
+    // Vanilla's own fluid-interaction box = the bounding box deflated by 0.001.
     // The cell range is `floor(min) ..= ceil(max) - 1` of that deflated box.
     let d = 0.001;
     let x0 = mth::floor(bounding_box.min_x + d);

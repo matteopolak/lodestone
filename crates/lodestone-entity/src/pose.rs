@@ -96,7 +96,7 @@ pub fn swing_duration(base: i32, haste_amplifier: Option<u32>, mining_fatigue: O
 }
 
 /// The target limb-swing amplitude for a given horizontal distance moved this
-/// tick: `min(distance * 4, 1)`, exactly as `updateWalkAnimation`.
+/// tick: `min(distance * 4, 1)`, exactly as vanilla's walk-animation update.
 #[must_use]
 pub fn walk_target_speed(distance: f32) -> f32 {
     (distance * 4.0).min(1.0)
@@ -211,9 +211,9 @@ pub struct RenderPose {
     pub limb_swing: f32,
     /// Walk-cycle amplitude (`limbSwingAmount`) in `0.0..=1.0`.
     pub limb_swing_amount: f32,
-    /// Attack-swing progress in `0.0..=1.0` (`attackTime`).
+    /// Attack-swing progress in `0.0..=1.0`.
     pub attack_anim: f32,
-    /// Continuous idle age in ticks (`ageInTicks = tickCount + partialTick`),
+    /// Continuous idle age in ticks (`tick_count + partial_tick`),
     /// driving head bob and other idle motion.
     pub age: f32,
 }
@@ -280,7 +280,7 @@ impl EntityPose {
     ///
     /// The "not already past its half-way point" test is what makes a held
     /// mine look like continuous swinging rather than a stutter: vanilla's
-    /// `continueAttack` calls `swing` **every tick**, and all but every third
+    /// continued-attack path calls swing **every tick**, and all but every third
     /// call is swallowed here.
     ///
     /// # One deliberate divergence: the duration is latched
@@ -318,7 +318,7 @@ impl EntityPose {
         }
         self.attack_anim = self.swing_time.max(0) as f32 / self.swing_duration as f32;
 
-        // Walk cycle (calculateEntityAnimation, useY = false for ground mobs).
+        // Walk cycle (horizontal distance only, for ground mobs).
         let dx = x - self.prev_x;
         let dz = z - self.prev_z;
         let distance = ((dx * dx + dz * dz) as f32).sqrt();
@@ -391,8 +391,8 @@ impl EntityPose {
     /// Vanilla wraps a *negative* delta forward by one whole swing:
     ///
     /// ```text
-    /// diff = attackAnim - oAttackAnim;  if (diff < 0) diff++;
-    /// return oAttackAnim + diff * partialTick;
+    /// diff = attack_anim - prev_attack_anim;  if (diff < 0) diff++;
+    /// return prev_attack_anim + diff * partial_tick;
     /// ```
     ///
     /// `attack_anim` is a sawtooth — it climbs to `(duration-1)/duration` and

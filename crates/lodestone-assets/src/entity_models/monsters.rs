@@ -1271,7 +1271,7 @@ pub fn witch_model() -> EntityModelDef {
         .with_cube(cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 22.0]).mirrored());
 
     // Witch head: the villager head cube, the witch hat (with the villager brim
-    // inherited beneath it via addOrReplaceChild's child merge), and the nose+mole.
+    // inherited beneath it via the child-merge of a same-named part), and the nose+mole.
     let hat4 = PartDef::new(PartPose::offset_and_rotation(
         1.75,
         -2.0,

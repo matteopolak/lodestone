@@ -514,7 +514,7 @@ impl Menu {
         };
         if let Some(taken) = self.try_remove(index, amount, i32::MAX) {
             outcome.dropped.push(taken);
-            // Slot's safe take = `tryRemove` + `onTake`; dropping the result of a
+            // A slot's safe take is remove + on-take; dropping the result of a
             // craft with `Q` consumes the grid exactly like picking it up does.
             self.on_take(index);
         }
@@ -776,7 +776,7 @@ impl Menu {
     /// * the machine's set is grown one `ADD` at a time through
     ///   [`can_drag_place`](Self::can_drag_place);
     /// * the screen's set is grown by `MenuInput::dragged` through vanilla's
-    ///   `shouldAddSlotToQuickCraft`.
+    ///   should-add-slot test.
     ///
     /// Those two predicates are the *same three conditions*, evaluated against the
     /// same menu, over sets grown in the same order — so they stay equal at every
@@ -786,9 +786,9 @@ impl Menu {
     /// rather than leaving it as an argument.
     ///
     /// Reading every cell up front is equivalent to vanilla's interleaved loop
-    /// because that loop never mutates what it reads: it re-reads get carried
-    /// per iteration (`:378`) but only calls `setCarried` *after* the loop
-    /// (`:393`), and the painted set is deduplicated
+    /// because that loop never mutates what it reads: it re-reads the carried
+    /// stack per iteration but only sets it *after* the loop,
+    /// and the painted set is deduplicated
     /// ([`push_quick_craft_slot`](Self::push_quick_craft_slot)) so no two
     /// iterations touch the same slot.
     #[must_use]
@@ -896,7 +896,7 @@ impl Menu {
             && enough
     }
 
-    // --- Slot primitives (Slot's safe insert / tryRemove) ---
+    // --- Slot primitives (safe insert / remove) ---
 
     /// Inserts up to `increment` items from `stack` into `menu_index`, returning
     /// the leftover cursor. Mirrors vanilla Slot's safe insert.
@@ -938,7 +938,7 @@ impl Menu {
             return None;
         }
         let current = self.slot_item_cloned(menu_index)?;
-        // allowModification = mayPickup && mayPlace(item); when false, a partial
+        // Modification is allowed when pickup and place are both permitted; when not, a partial
         // take (max_take < count) is refused.
         let allow_modification = self.may_place(menu_index, &current);
         if !allow_modification && max_take < current.count() {
@@ -972,7 +972,7 @@ impl Menu {
     /// own free-slot search scans only its own item list, which it sizes at exactly 36;
     /// slot 40 only ever participates via the merge
     /// check. The loop re-derives the target from scratch every pass (as
-    /// vanilla's `add` does by calling `addResource` repeatedly) so a stack
+    /// vanilla's add does by repeating its per-slot add) so a stack
     /// bigger than one cap can spread across several slots.
     fn give_to_player(&mut self, mut stack: ItemStack, selected_hotbar_slot: usize) -> bool {
         loop {
@@ -1018,9 +1018,8 @@ impl Menu {
 
     /// Returns `Some(native_index)` when the native slot already holds a
     /// same-item-same-components, stackable stack with spare room for `stack`.
-    /// Mirrors vanilla Inventory's has remaining space for item (`Inventory.
-    /// java:95-100`), which is what `getSlotWithRemainingSpace` calls at each
-    /// candidate slot.
+    /// Mirrors vanilla's remaining-space test, which its slot search applies at
+    /// each candidate slot.
     fn mergeable_native(&self, native_index: usize, stack: &ItemStack) -> Option<usize> {
         let existing = self.player_native(native_index)?;
         (ItemStack::is_same_item_same_components(existing, stack)
@@ -1104,7 +1103,7 @@ fn quick_craft_mask_typed(header: i32, kind: QuickCraftType) -> i32 {
 }
 
 /// Whether `stack` may be quick-replaced into `slot` — empty, or the same item
-/// with room. Mirrors vanilla `canItemQuickReplace`.
+/// with room. Mirrors vanilla's quick-replace test.
 #[must_use]
 pub fn can_item_quick_replace(
     slot: Option<&ItemStack>,

@@ -116,8 +116,8 @@ pub(crate) const PORTAL_TERRAIN_REACH: i32 = 14;
 /// Runs against the **real** per-chunk grid at placement time (see
 /// [`crate::structure::PieceRefinement::BuriedTreasureChest`]'s own doc for
 /// why this cannot be an eager, start-time list like every other coded piece).
-/// Draws no random: vanilla's own `random` argument is spent only inside
-/// `createChest` on the loot-table roll seed, which is out of scope here the
+/// Draws no random: vanilla's own random argument is spent only on the
+/// chest's loot-table roll seed, which is out of scope here the
 /// same way every other structure's container loot is (see the
 /// `template:block_entity_nbt`/`coded:chests` ledger rows) — the **block** is
 /// what this places.

@@ -617,7 +617,7 @@ mod tests {
 
     /// The fourth byte's turn at the same trap, and the collision that actually
     /// exists on the wire (not merely a hypothetical): `0x04` is `aggressive` in
-    /// [`MobFlags`] and `showArms` in [`ArmorStandFlags`], both `BYTE` at
+    /// [`MobFlags`] and show-arms in [`ArmorStandFlags`], both `BYTE` at
     /// metadata index 15. A decorative armour stand with arms shown must never
     /// read as an aggressive mob, and vice versa.
     #[test]

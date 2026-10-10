@@ -479,7 +479,7 @@ fn diagonal_walk_matches_golden() {
 
 #[test]
 fn analog_strafe_matches_golden() {
-    // Asymmetric analog input exercises modifyInput's two-term length; the
+    // Asymmetric analog input exercises the two-term input length; the
     // golden is validated bit-for-bit against the real JVM (oracle-java).
     let world = World::flat_floor(8);
     let state = grounded(0.5, 1.0, 0.5);
@@ -684,8 +684,8 @@ fn slow_falling_water_matches_golden() {
 
 #[test]
 fn swim_sprint_matches_golden() {
-    // Sprint-swimming with forward input: the swimming branch of travelInWater
-    // (slowDown = 0.9F), which the vertical-only water_sink never exercised.
+    // Sprint-swimming with forward input: the swimming branch of travel in water
+    // (slow_down = 0.9), which the vertical-only water_sink never exercised.
     let mut world = World::default();
     for y in 80..=100 {
         for x in -2..=2 {
@@ -917,7 +917,7 @@ fn water_current_push_matches_golden() {
 #[test]
 fn soul_sand_walk_matches_golden() {
     // Full collision cube carrying block speed factor 0.4. The player rests at
-    // y=1.0 so block position is air (1.0) and getBlockSpeedFactor falls through
+    // y=1.0 so block position is air (1.0) and the block speed factor falls through
     // to the block below — the here==1.0 fallback branch no other scenario hits.
     let mut world = World::flat_floor(8);
     for x in -8..=8 {
@@ -969,8 +969,8 @@ fn jump_boost_matches_golden() {
 
 #[test]
 fn honey_jump_matches_golden() {
-    // Block jump factor 0.5 scales jump velocity to 0.42*0.5 = 0.21F. Verifies the
-    // block-jump-factor term in getJumpPower reduces jump height (honey behaviour).
+    // Block jump factor 0.5 scales jump velocity to 0.42*0.5 = 0.21. Verifies the
+    // block-jump-factor term in the jump power reduces jump height (honey behaviour).
     let mut world = World::flat_floor(4);
     for x in -4..=4 {
         for z in -4..=4 {
@@ -1003,7 +1003,7 @@ fn honey_jump_matches_golden() {
 
 #[test]
 fn slime_bounce_matches_golden() {
-    // Free-fall onto slime (bounce_restitution 1.0): restituteMovementAfterCollisions
+    // Free-fall onto slime (bounce_restitution 1.0): the post-collision restitution
     // reverses vy through the block-bounciness branch instead of zeroing it.
     let mut world = World::flat_floor(4);
     for x in -4..=4 {
@@ -1028,7 +1028,7 @@ fn slime_bounce_matches_golden() {
 
 #[test]
 fn slime_bounce_sneak_matches_golden() {
-    // Holding sneak (isSuppressingBounce) vetoes the block-bounce branch, so the
+    // Holding sneak (suppressing bounce) vetoes the block-bounce branch, so the
     // player lands and rests (vy -> 0 path) instead of bouncing.
     let mut world = World::flat_floor(4);
     for x in -4..=4 {

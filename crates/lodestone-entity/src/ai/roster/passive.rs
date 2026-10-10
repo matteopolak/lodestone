@@ -531,9 +531,9 @@ fn cat_lie_on_bed_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
 }
 
 /// The cat's own relax-on-owner goal, from vanilla's own cat registration. No
-/// constructor speed argument in the jar (the goal's own `moveTo` calls
-/// hardcode `1.1F`); `ctx.speed` still scales it, matching every other
-/// builder here, since `1.1F` is itself a `speedModifier` multiplier on the
+/// constructor speed argument in the jar (the goal's own move-to calls
+/// hardcode `1.1`); `ctx.speed` still scales it, matching every other
+/// builder here, since `1.1` is itself a speed multiplier on the
 /// mob's own movement-speed attribute, not a literal blocks/tick figure.
 fn cat_relax_on_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(CatSettleOnOwnerGoal::new(ctx.speed * 1.1))

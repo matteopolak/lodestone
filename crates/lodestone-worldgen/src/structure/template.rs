@@ -529,7 +529,7 @@ fn rotate_direction(dir: &str, turns: u32) -> Option<&'static str> {
 /// A vertical component is invariant, which makes this a per-component rewrite
 /// rather than a 12-entry table. **Load-bearing for jigsaw assembly**: the front
 /// facing of a rotated jigsaw block is the direction the connection points in,
-/// and getting it wrong makes every `canAttach` fail — a village that silently
+/// and getting it wrong makes every attach test fail — a village that silently
 /// consists of its town centre alone.
 fn rotate_orientation(orientation: &str, turns: u32) -> Option<String> {
     let (front, top) = orientation.split_once('_')?;
@@ -649,7 +649,7 @@ pub struct PlaceSettings {
     pub mirror: Mirror,
     /// Rotation pivot.
     pub pivot: [i32; 3],
-    /// The processor chain, in `addProcessor` order.
+    /// The processor chain, in add order.
     pub processors: Vec<Processor>,
     /// Whether dry waterloggable blocks should be waterlogged.
     pub waterlogging: bool,

@@ -84,14 +84,14 @@ pub struct BreakInputs {
     pub submerged_mining_speed: f32,
     /// Whether the player is on the ground. Off-ground mining is 5× slower.
     pub on_ground: bool,
-    /// `Abilities.instabuild` — true for a creative-mode player.
+    /// True for a creative-mode player (the instant-build ability).
     ///
     /// This is **not** an input to the break-time formula at all; vanilla's
-    /// `getDestroyProgress`/`progress_per_tick` never consult it. It bypasses
+    /// destroy progress and `progress_per_tick` never consult it. It bypasses
     /// the formula entirely, at the [`Mining`] state-machine level: both
-    /// `startDestroyBlock` and `continueDestroyBlock` check
-    /// get abilities's get abilities *before* ever reading hardness or
-    /// dig speed, and when it is set they call `destroyBlock(pos)`
+    /// start-destroy and continue-destroy check
+    /// the abilities *before* ever reading hardness or
+    /// dig speed, and when it is set they destroy the block
     /// immediately — no accumulation, no hardness check, not even an
     /// unbreakable-block check (a creative player breaks bedrock in one
     /// click). See [`Mining::start`]'s own doc for where this is consulted.
@@ -162,7 +162,7 @@ impl BreakInputs {
     ///
     /// An unbreakable block (`hardness == -1.0`) yields `0.0`. A zero-hardness
     /// block yields `+inf`, which the state machine reads as an instant break —
-    /// this matches vanilla, where such blocks satisfy `getDestroyProgress >= 1.0`
+    /// this matches vanilla, where such blocks satisfy a destroy progress `>= 1.0`
     /// on the first tick.
     #[must_use]
     pub fn progress_per_tick(&self) -> f32 {
@@ -179,7 +179,7 @@ impl BreakInputs {
     ///
     /// * `Some(0)` — instant break: `progress_per_tick >= 1.0`, so the block
     ///   breaks on the `START_DESTROY_BLOCK` tick with no accumulation.
-    /// * `Some(n)` — `n` `continueDestroyBlock` ticks after the start tick.
+    /// * `Some(n)` — `n` continued-dig ticks after the start tick.
     /// * `None` — the block never breaks (unbreakable or non-positive speed).
     #[must_use]
     pub fn ticks_to_break(&self) -> Option<u32> {
@@ -232,7 +232,7 @@ pub fn dig_speed_effect_multiplier(
 struct Active {
     target: BlockPos,
     progress: f32,
-    /// The item held when this dig began. Vanilla's `sameDestroyTarget` requires
+    /// The item held when this dig began. Vanilla's same-dig-target test requires
     /// the held item to be unchanged, so swapping tools mid-dig restarts.
     tool: Option<ItemStack>,
 }
@@ -264,10 +264,10 @@ pub struct Mining {
     /// # Why the machine reports destruction instead of callers reading the packets
     ///
     /// This is vanilla's shape. Its own client-side game-mode handler has exactly one destroy
-    /// funnel — `destroyBlock(pos)` — and **four** call sites reach it
+    /// funnel — destroy-block — and **four** call sites reach it
     /// in 26.2: the two creative branches, the
-    /// instant-break branch inside `startDestroyBlock`, and the
-    /// progress-reached-`1.0` branch inside `continueDestroyBlock`. Everything
+    /// instant-break branch inside start-destroy, and the
+    /// progress-reached-`1.0` branch inside continue-destroy. Everything
     /// keyed on a block actually breaking hangs off that funnel, not off any
     /// one of the four: the client's block break runs the block's will-destroy
     /// hook, then its destroy-particle spawn, then level event 2001 for the
@@ -359,8 +359,8 @@ impl Mining {
         }
     }
 
-    /// Begin (or retarget) a dig, mirroring `startDestroyBlock`'s survival path
-    /// **and** its `instabuild` (creative) branch.
+    /// Begin (or retarget) a dig, mirroring vanilla's survival path
+    /// **and** its creative branch.
     ///
     /// Sends `START_DESTROY_BLOCK` and swings the arm. If the target changed
     /// while another dig was live, an `ABORT` for the old target is sent first.
@@ -389,8 +389,8 @@ impl Mining {
                 ));
             }
             let seq = self.take_sequence();
-            // Vanilla's `instabuild` (creative) branch never reaches
-            // `getDestroyProgress`/hardness at all — it is a separate check
+            // Vanilla's creative branch never reaches the
+            // destroy-progress/hardness formula at all — it is a separate check
             // ahead of the formula, not a value the formula happens to
             // produce (vanilla's own instabuild ability flag, checked
             // in its own start-destroy-block step before any block-state read). A
@@ -441,12 +441,12 @@ impl Mining {
         out
     }
 
-    /// Advance a held dig one tick, mirroring `continueDestroyBlock`.
+    /// Advance a held dig one tick, mirroring vanilla's continued dig.
     ///
     /// Accumulates `progress_per_tick` and, on reaching `>= 1.0`, sends
     /// `STOP_DESTROY_BLOCK` and starts the 5-tick post-break cooldown. During the
     /// cooldown the arm still swings but no block action is sent (vanilla returns
-    /// `true`, so `continueAttack` swings). Retargeting to a different block
+    /// `true`, so the continued attack swings). Retargeting to a different block
     /// delegates to [`start`](Self::start); mining air cancels silently with no
     /// swing.
     pub fn continue_(
@@ -479,8 +479,7 @@ impl Mining {
             if finished {
                 let seq = self.take_sequence();
                 // STOP carries the block being finished and the face the input
-                // loop is aiming at (vanilla passes `continueDestroyBlock`'s
-                // `direction`).
+                // loop is aiming at.
                 out.push(block_action(
                     BlockActionKind::StopDestroy,
                     pos,
@@ -489,7 +488,7 @@ impl Mining {
                 ));
                 self.state = None;
                 self.delay = 5;
-                // Vanilla's `continueDestroyBlock` calls `this.destroyBlock(pos)`
+                // Vanilla's continued dig calls destroy-block
                 // here — the same funnel the instant-break branch of `start`
                 // reaches. One latch, both paths.
                 self.destroyed = Some(pos);
@@ -501,7 +500,7 @@ impl Mining {
         }
     }
 
-    /// Release the dig, mirroring `stopDestroyBlock`.
+    /// Release the dig, mirroring vanilla's stop-destroy.
     ///
     /// Sends `ABORT_DESTROY_BLOCK` for the live target (vanilla uses
     /// the down direction for this abort) and clears progress. No arm swing. A
@@ -1275,7 +1274,7 @@ mod tests {
         let shovel = ItemStack::new(ident("minecraft:wooden_shovel"), 1);
 
         m.start(p, BlockFace::Up, &inputs, Some(pick.clone()));
-        // Same block, different held item -> not sameDestroyTarget -> restart
+        // Same block, different held item -> not the same dig target -> restart
         // (START again), not a progress continuation.
         let acts = m.continue_(p, BlockFace::Up, &inputs, Some(shovel));
         assert!(

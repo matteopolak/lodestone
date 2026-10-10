@@ -28,8 +28,8 @@ use super::*;
     }
 
     /// The same item carrying a `minecraft:custom_name`, i.e. same item,
-    /// *different* components — the pair vanilla `isSameItemSameComponents` must
-    /// refuse to merge. The payload shape matches what
+    /// *different* components — the pair vanilla's same-item-same-components
+    /// test must refuse to merge. The payload shape matches what
     /// [`ItemStack::from`] produces for a wire stack that carried a custom name,
     /// so these are the components an adapter would really hand us.
     fn named(name: &str, count: i32, label: &str) -> ItemStack {

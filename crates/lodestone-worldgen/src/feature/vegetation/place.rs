@@ -236,9 +236,9 @@ pub(super) fn place_tree<R: RandomSource>(
     if !accepted {
         return;
     }
-    // `clippedTreeHeight` — real vanilla passes THIS, not the original
-    // `treeHeight`, to its own trunk-placer place-trunk (`foliageHeight`/`leafRadius`
-    // above already used the original, pre-clip `treeHeight`, matching
+    // The clipped tree height — real vanilla passes THIS, not the original
+    // tree height, to its own trunk-placer place-trunk (foliage height and leaf radius
+    // above already used the original, pre-clip height, matching
     // vanilla's own evaluation order). For every species other than fancy
     // oak, `clipped == tree_height` is the only way `accepted` can be true,
     // so this substitution changes nothing for them; fancy oak is the first
@@ -248,7 +248,7 @@ pub(super) fn place_tree<R: RandomSource>(
     // Marks where this tree's own writes begin, so `update_leaf_distances`
     // can later derive its bbox from exactly this tree's own `roots ∪ trunks
     // ∪ foliage ∪ decorations` — see that function's own doc comment on why
-    // the bbox must be this narrow (real vanilla's `updateLeaves` is scoped
+    // the bbox must be this narrow (real vanilla's leaf-distance update is scoped
     // the same way, to one tree at a time, not the whole grid). Captured
     // BEFORE root placement, which is the first thing that can write.
     let dirty_start = grid.dirty_len();

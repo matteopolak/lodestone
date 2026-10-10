@@ -3,12 +3,12 @@
 //! A path is not consumed instantly: a mob walks toward the current waypoint,
 //! advances when it gets close enough, and the navigation is periodically
 //! recomputed and can fail. [`PathNavigator`] models that lifecycle, mirroring
-//! vanilla's navigator / `doStuckDetection`: the
+//! vanilla's navigator and stuck detection: the
 //! close-enough radius scales with the mob's width, and a mob that stops making
 //! progress for 100 ticks is declared stuck and its path dropped.
 //!
-//! The corner-cutting shortcut in vanilla's `followThePath`
-//! (`shouldTargetNextNodeInDirection`) needs a world raycast and is intentionally
+//! Vanilla's corner-cutting shortcut when following a path
+//! needs a world raycast and is intentionally
 //! left out here; its absence makes a mob hug waypoints slightly more tightly,
 //! never less safely.
 
@@ -125,7 +125,7 @@ impl PathNavigator {
     }
 
     fn follow(&mut self, mob_pos: Vec3) {
-        // maxDistanceToWaypoint scales with width (vanilla followThePath).
+        // The waypoint-reach distance scales with width.
         self.max_distance_to_waypoint = if self.width > 0.75 {
             self.width / 2.0
         } else {

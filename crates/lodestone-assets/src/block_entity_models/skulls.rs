@@ -171,7 +171,7 @@ pub fn dragon_head_model() -> EntityModelDef {
 /// vanilla's own shared abstract-piglin add-head helper, with no deformation, verbatim:
 ///
 /// ```text
-/// head  PartPose.ZERO
+/// head  zero pose
 ///   (-5, -8, -4)  10x8x8  texOffs( 0, 0)     the wide snouted skull
 ///   (-2, -4, -5)   4x4x1  texOffs(31, 1)     the snout plate
 ///   ( 2, -2, -5)   1x2x1  texOffs( 2, 4)     left tusk

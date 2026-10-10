@@ -71,11 +71,11 @@
 //!   *instant-break* step doubles as the load-clear: it retries START until the
 //!   slime block vanishes, and only then are the timed digs attempted. (This is
 //!   the same gate the drop test in `live_inventory.rs` waits on, and a different
-//!   one from `handleContainerClick`, which is *not* gated — do not harmonise the
+//!   one from container clicks, which are *not* gated — do not harmonise the
 //!   waits.)
 //! - **Single START + single STOP is enough.** On STOP the server breaks when
-//!   `getDestroyProgress * (ticksSpentDestroying + 1) >= 0.7`; if that is not yet
-//!   met it sets `hasDelayedDestroy` and finishes the block on its own subsequent
+//!   `destroy_progress * (ticks_spent_destroying + 1) >= 0.7`; if that is not yet
+//!   met it sets a delayed-destroy flag and finishes the block on its own subsequent
 //!   `tick()`s once cumulative progress `>= 1.0`. Either way the block breaks
 //!   after one STOP, so we drive the machine to the STOP it emits and then poll.
 //!

@@ -361,18 +361,18 @@ pub fn vanilla_tint_kind(
         // index 1 grass.
         ("pink_petals" | "wildflowers", 0) => TintKind::None,
         ("pink_petals" | "wildflowers", 1) => TintKind::Grass,
-        // Foliage colormap (getAverageFoliageColor) — mangrove and vine included.
+        // Foliage colormap — mangrove and vine included.
         (
             "oak_leaves" | "jungle_leaves" | "acacia_leaves" | "dark_oak_leaves" | "vine"
             | "mangrove_leaves",
             0,
         ) => TintKind::Foliage,
-        // Dry-foliage colormap (getAverageDryFoliageColor).
+        // Dry-foliage colormap.
         ("leaf_litter", 0) => TintKind::DryFoliage,
         // Constant-colour leaves (no biome tint).
         ("spruce_leaves", 0) => TintKind::Constant(colors::FOLIAGE_EVERGREEN),
         ("birch_leaves", 0) => TintKind::Constant(colors::FOLIAGE_BIRCH),
-        // Water: biome water colour (getAverageWaterColor). The fluid *surface*
+        // Water: biome water colour. The fluid *surface*
         // is tinted the same way via the fluid model's tint source.
         ("water_cauldron", 0) => TintKind::Water,
         // Redstone wire power ramp.

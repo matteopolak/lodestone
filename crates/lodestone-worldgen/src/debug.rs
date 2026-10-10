@@ -17,17 +17,17 @@
 //!   the state grid above it is always reachable by falling onto it.
 //! * `HEIGHT` (`70`): [`DebugLevelSource::state_for`] decides, per world
 //!   `(x, z)`, whether this Y is one state from the ordered list or air.
-//! * Everywhere else is air — `fillFromNoise` is a no-op and
-//!   `getBaseColumn` returns an empty column, so nothing but
+//! * Everywhere else is air — noise fill is a no-op and
+//!   the base column is empty, so nothing but
 //!   the decoration step's two rows ever writes a block.
 //! * The biome is fixed to `minecraft:plains` everywhere
 //!   (a fixed-biome source of plains) — [`DEBUG_BIOME`].
 //!
 //! Vanilla's own "get block state for"'s index math (its own math-helper
-//! absolute-value over `worldX * GRID_WIDTH + worldZ`
+//! absolute-value over `world_x * grid_width + world_z`
 //! after halving both coordinates) is transcribed in [`DebugLevelSource::state_for`]
 //! verbatim, including that absolute-value call — it is a no-op under the guard
-//! that reaches it (`worldX > 0 && worldZ > 0` before halving keeps both
+//! that reaches it (`world_x > 0 && world_z > 0` before halving keeps both
 //! halves non-negative), but a divergent transcription is exactly the trap
 //! CLAUDE.md's evidence-standards section names, so the port keeps it rather
 //! than "simplifying" the formula.
@@ -124,9 +124,9 @@ pub struct DebugLevelSource {
     /// `lodestone_data::block_states`, whose ids are documented as that same
     /// wire/global-palette order.
     states: std::sync::Arc<[StateId]>,
-    /// `DebugLevelSource.GRID_WIDTH` — `ceil(sqrt(states.len()))`.
+    /// Grid width — `ceil(sqrt(states.len()))`.
     grid_width: i32,
-    /// `DebugLevelSource.GRID_HEIGHT` — `ceil(states.len() / grid_width)`.
+    /// Grid height — `ceil(states.len() / grid_width)`.
     grid_height: i32,
     min_y: i32,
     height: i32,
@@ -137,8 +137,8 @@ impl DebugLevelSource {
     /// `height` are the dimension's vertical bounds (e.g. -64/384 for the
     /// overworld) — see [`crate::flat::FlatLevelSource::new`]'s doc for why
     /// this crate takes them as a parameter rather than the vanilla
-    /// `getMinY`/`getGenDepth` constants (0/384), which are an unrelated
-    /// `ChunkGenerator` abstract-method answer, not where blocks are placed.
+    /// min-y and gen-depth constants (0/384), which are an unrelated
+    /// generator answer, not where blocks are placed.
     ///
     /// # Panics
     /// Panics if `states` is empty — `GRID_WIDTH`/`GRID_HEIGHT` are

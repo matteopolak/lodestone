@@ -50,13 +50,13 @@
 //! # Texture resolution
 //!
 //! An armour item does not name its texture. It carries
-//! `minecraft:equippable`, whose `assetId` is a key into the
+//! `minecraft:equippable`, whose `asset_id` is a key into the
 //! `equipment_asset` registry, and
 //! the client reads `assets/<ns>/equipment/<asset>.json` for a per-**layer-type**
 //! list of texture layers. Vanilla's own equipment-texture-location query then builds
 //! `textures/entity/equipment/<layer_type>/<texture>.png`.
 //!
-//! **`assetId` is not on the wire and not in the item-prototype census** (see
+//! **`asset_id` is not on the wire and not in the item-prototype census** (see
 //! `docs/item-prototypes.md`: only `equippable.slot()` is carried), so the
 //! item → asset mapping is a table here, transcribed from vanilla's own
 //! per-material armour-item registrations.
@@ -262,8 +262,8 @@ pub struct ArmourAsset {
     /// The `humanoid` layer list, in draw order.
     pub humanoid: &'static [ArmourLayer],
     /// The `humanoid_leggings` layer list, in draw order. Empty when the asset
-    /// declares none — `turtle_scute` is the real case, and `getLayers` returns
-    /// `List.of()` for it rather than falling back to `humanoid`.
+    /// declares none — `turtle_scute` is the real case, and the layer lookup
+    /// returns an empty list for it rather than falling back to `humanoid`.
     pub humanoid_leggings: &'static [ArmourLayer],
     /// The `humanoid_baby` layer list, in draw order.
     pub humanoid_baby: &'static [ArmourLayer],
@@ -548,9 +548,9 @@ fn base_armour_root(inflation: f32) -> PartDef {
 pub fn humanoid_armour_model(slot: ArmourSlot) -> EntityModelDef {
     let mut root = base_armour_root(slot.inflation());
     match slot {
-        // `retainPartsAndChildren`, so `head` keeps `hat`.
+        // Retain the named parts and their children, so `head` keeps `hat`.
         ArmourSlot::Head => retain_with_children(&mut root, &["head"]),
-        // `retainExactParts` for the other three.
+        // Exactly the named parts for the other three.
         ArmourSlot::Chest => retain_exact(&mut root, &["body", "left_arm", "right_arm"]),
         ArmourSlot::Legs => retain_exact(&mut root, &["left_leg", "right_leg", "body"]),
         ArmourSlot::Feet => retain_exact(&mut root, &["left_leg", "right_leg"]),
@@ -807,7 +807,7 @@ mod tests {
     }
 
     /// The helmet is the only slot with a `hat` cube, and the head slot is the
-    /// only one that uses `retainPartsAndChildren`. If someone "simplifies"
+    /// only one that retains children. If someone "simplifies"
     /// the head arm to `retain_exact`, `hat` silently vanishes.
     #[test]
     fn only_the_helmet_retains_the_hat_child() {

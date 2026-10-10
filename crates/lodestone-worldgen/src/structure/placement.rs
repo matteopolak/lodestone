@@ -23,7 +23,7 @@
 //!   real draw; `legacy_type_3` (mineshafts) draws a `nextDouble` — two
 //!   `next_bits` calls — where the others draw a `nextFloat`.
 //! * A `frequency` of `1.0` skips the reducer entirely
-//!   (`applyAdditionalChunkRestrictions`'s `!(frequency < 1.0F)`), so 18 of the
+//!   (the extra chunk restriction's `!(frequency < 1.0)`), so 18 of the
 //!   20 bundled sets never draw for frequency at all. Do not "simplify" that to
 //!   an unconditional draw-then-compare: it would consume RNG that vanilla does
 //!   not, but only for the sets that currently skip it, and the effect is
@@ -276,7 +276,7 @@ impl Placement {
         Some((grid_x * spacing + spread_x, grid_z * spacing + spread_z))
     }
 
-    /// `applyAdditionalChunkRestrictions` — the `frequency` gate, skipped
+    /// The additional chunk restriction — the `frequency` gate, skipped
     /// entirely (no draw) when `frequency >= 1.0`.
     #[must_use]
     pub fn passes_frequency(&self, seed: i64, source_x: i32, source_z: i32) -> bool {
@@ -287,7 +287,7 @@ impl Placement {
             .should_generate(seed, self.salt, source_x, source_z, self.frequency)
     }
 
-    /// `isPlacementChunk` for the grid placements this engine implements, with
+    /// The is-placement-chunk test for the grid placements this engine implements, with
     /// **no** frequency or exclusion-zone gate — those are
     /// [`Self::passes_frequency`] and the registry's exclusion walk.
     ///
@@ -422,7 +422,7 @@ mod tests {
         }
     }
 
-    /// `getPotentialStructureChunk` lands inside its own cell, is constant across
+    /// The potential structure chunk lands inside its own cell, is constant across
     /// the whole cell, and is reached from a negative source chunk by
     /// **floor** division — `-1 / 24 == 0` in Rust, which would put chunk -1 in
     /// cell 0 and place two structures in adjacent cells near the origin.

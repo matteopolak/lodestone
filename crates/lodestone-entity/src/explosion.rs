@@ -30,7 +30,7 @@
 //! player's add delta movement — an **additive** impulse to current
 //! velocity, not a replacement (contrast attack knockback, which partially
 //! overwrites horizontal velocity). So the seam for player explosion knockback
-//! is: decode the explode packet's `playerKnockback` and hand that exact vector
+//! is: decode the explode packet's player-knockback vector and hand that exact vector
 //! to physics to *add*; the client does **not** recompute it from the blast (the
 //! server already did, using the distinct `EXPLOSION_KNOCKBACK_RESISTANCE`
 //! attribute — not attack's `KNOCKBACK_RESISTANCE`). [`knockback_power`] here is
@@ -85,7 +85,7 @@ impl RayView for OpenAir {
     }
 }
 
-/// The fraction of an entity exposed to a blast, `getSeenPercent`: fires the
+/// The fraction of an entity exposed to a blast: fires the
 /// box-size-dependent grid of rays and returns hits/total. Returns `0.0` for a
 /// degenerate box.
 #[must_use]
@@ -135,7 +135,7 @@ fn lerp(t: f64, a: f64, b: f64) -> f64 {
     a + t * (b - a)
 }
 
-/// The blast damage an entity takes, `getEntityDamageAmount`. `radius` is the
+/// The blast damage an entity takes. `radius` is the
 /// explosion radius (TNT is `4.0`), `distance` is the entity's distance from the
 /// centre and `exposure` its [`seen_percent`].
 #[must_use]

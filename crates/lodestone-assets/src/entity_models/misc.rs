@@ -417,7 +417,7 @@ pub fn arrow_model() -> EntityModelDef {
 /// Vanilla draws a second `entityGlint` pass over this mesh when
 /// Vanilla's own thrown-trident is-foil query. Not modelled: enchantment glint needs its own render
 /// type (a scrolling additive layer), which nothing in this engine has, and
-/// `isFoil` is not decoded on this side of the wire either.
+/// the foil flag is not decoded on this side of the wire either.
 pub fn trident_model() -> EntityModelDef {
     let pole = PartDef::new(PartPose::ZERO)
         .with_cube(cube([-0.5, 2.0, -0.5], [1.0, 25.0, 1.0], [0.0, 6.0]))
@@ -603,7 +603,7 @@ pub fn llama_spit_model() -> EntityModelDef {
 /// documents for its own three-axis tumble), so both parts are baked at their
 /// rest pose. And unlike every other entry in this table,
 /// Vanilla's own wind-charge-renderer submit step applies **neither** `scale(-1, -1, 1)` nor any
-/// `mulPose` rotation — it submits the model at the dispatcher's bare
+/// facing rotation — it submits the model at the dispatcher's bare
 /// translate, so the vanilla box union does not turn to face the entity's
 /// direction of travel at all, only the (unported) internal spin moves it.
 /// [`non_living_vehicle_placement`](crate::entity::non_living_vehicle_placement)

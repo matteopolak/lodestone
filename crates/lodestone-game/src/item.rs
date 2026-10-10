@@ -155,7 +155,7 @@ pub const BANNER_PATTERNS_COMPONENT: &str = "minecraft:banner_patterns";
 ///
 /// A shield stack's own dye tint, independent of any
 /// [`BANNER_PATTERNS_COMPONENT`] layer — vanilla's own base-color component
-/// (its own shield-renderer's `baseColor`). Carried as
+/// (as read by its shield renderer). Carried as
 /// [`ComponentValue::BaseColor`].
 pub const BASE_COLOR_COMPONENT: &str = "minecraft:base_color";
 /// Well-known component identifier for `minecraft:custom_model_data`.
@@ -399,7 +399,7 @@ impl ItemComponents {
 ///
 /// A stored stack normally has `count >= 1`; a `count` of zero means *empty* and
 /// is the transient sentinel used mid-algorithm (matching vanilla, whose
-/// `moveItemStackTo` drives a working stack's count to zero). Slots and the
+/// stack-move drives a working stack's count to zero). Slots and the
 /// cursor are `Option<ItemStack>` and normalise an empty stack to `None` at
 /// every write boundary, so a stored `Some(_)` is always genuinely non-empty.
 #[derive(Debug, Clone, PartialEq, Eq)]

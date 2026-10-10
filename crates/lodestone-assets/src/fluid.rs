@@ -373,7 +373,7 @@ pub fn flow_angle(flow: [f64; 2]) -> f32 {
 /// consumer explains the derivation for. `boxes` should come from the
 /// neighbour's **outline** shape — `VersionAdapter::block_outline` /
 /// `lodestone_data::outline_shapes::outline_boxes` — not its collision shape:
-/// vanilla's `getOcclusionShape` is `state.getShape(...)`, the outline getter,
+/// vanilla's occlusion shape is the outline shape, not the collision shape,
 /// and the two disagree for roughly half of all 26.2 block states (see
 /// `lodestone_data::outline_shapes`'s module docs).
 #[must_use]
@@ -407,7 +407,7 @@ pub fn full_footprint_y_range(boxes: &[lodestone_model::BlockAabb]) -> Option<(f
 /// face" — a pure 2-D coverage question with no fluid height in it at all.
 ///
 /// Contrast [`full_footprint_y_range`], which serves the *neighbour*-facing
-/// sibling `isFaceOccludedByNeighbor`: there the probe height is the fluid's own
+/// neighbour-face occlusion test: there the probe height is the fluid's own
 /// corner height, so the answer really does depend on how deep the fluid is, and
 /// the reduction has to carry a `y` range. The self call needs no scoping to a
 /// single box, so this one is exact for any axis-aligned union — stairs and walls
@@ -415,8 +415,8 @@ pub fn full_footprint_y_range(boxes: &[lodestone_model::BlockAabb]) -> Option<(f
 ///
 /// `boxes` must come from the **outline** shape
 /// (`lodestone_data::outline_shapes::outline_boxes`), for the reason
-/// [`full_footprint_y_range`] records: vanilla's `getOcclusionShape` is
-/// `state.getShape(...)`.
+/// [`full_footprint_y_range`] records: vanilla's occlusion shape is the
+/// outline shape.
 ///
 /// # How the coverage test works
 ///

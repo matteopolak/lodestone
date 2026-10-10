@@ -413,7 +413,7 @@ async fn inventory_mutation_round_trips_through_client() {
     //     wrong oracle for our *own* action; the server's own NBT (read over RCON)
     //     is the authority. (A real `ContainerClick` round-trip is exercised by
     //     the separate `container_click_pickup_round_trips_through_client` test;
-    //     `DropSelectedItem` is a `handlePlayerAction`/`DROP_ITEM` packet, which
+    //     `DropSelectedItem` is a player-action drop-item packet, which
     //     *is* load-gated, hence the retry here.)
     //
     // The retry reads server-truth after each single send and stops at 4, so
@@ -690,7 +690,7 @@ async fn container_click_pickup_round_trips_through_client() {
 
     // --- Send the real ContainerClick and confirm via server-truth ---
     //
-    // `handleContainerClick` is not load-gated, so this is usually a no-op retry;
+    // The container-click handler is not load-gated, so this is usually a no-op retry;
     // the loop only absorbs tick/RCON latency and a first-send that raced the
     // server settling our state_id.
     let mut after = seed_truth;

@@ -1061,7 +1061,7 @@ mod tests {
     /// asserted to "increase with height".
     ///
     /// The wrong-argument-order hypothesis is excluded explicitly: reading
-    /// `clampedLerp` as `lerp(start, end, t)` gives a **constant** `0.0` at every
+    /// the clamped lerp as `lerp(start, end, t)` gives a **constant** `0.0` at every
     /// distance, so the d=100 row alone falsifies it.
     #[test]
     fn axis_aligned_linear_pos_ramps_the_chance_along_one_axis() {
@@ -1269,7 +1269,7 @@ mod tests {
     }
 
     /// A stairs block's mossy replacement keeps the source's own `facing`
-    /// (`withPropertiesOf`), rather than drawing a fresh one.
+    /// (copying the source's properties), rather than drawing a fresh one.
     #[test]
     fn block_age_stairs_carries_its_own_facing_into_the_mossy_variant() {
         let processor = Processor::BlockAge { mossiness: 1.0 };

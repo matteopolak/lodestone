@@ -151,10 +151,9 @@ pub const SPECIES: &[&str] = &[
 #[must_use]
 pub fn lookup(species: &str) -> Option<&'static [Registration]> {
     match species {
-        // `Husk` and `ZombieVillager` both extend `Zombie` and declare neither
-        // `registerGoals` nor `addBehaviourGoals`, so they inherit the whole
-        // table verbatim. Checked per class, not inferred from the family —
-        // their sibling `Drowned` does override, one method down.
+        // Husk and zombie villager declare no goal registration of their own, so
+        // they inherit the zombie table verbatim. Checked per class, not
+        // inferred from the family — their sibling drowned does override.
         "zombie" | "husk" | "zombie_villager" => Some(ZOMBIE),
         "drowned" => Some(DROWNED),
         "creeper" => Some(CREEPER),
@@ -211,7 +210,7 @@ pub static CREEPER: &[Registration] = &[
 pub static SPIDER: &[Registration] = &[
     Registration::goal(1, "stay_afloat", float_goal),
     // Vanilla's own spider avoid-armadillo goal, radius `6.0`.
-    // The `isScared` filter is not modelled — see `mobs.rs`'s `avoided_species`,
+    // The is-scared filter is not modelled — see `mobs.rs`'s `avoided_species`,
     // which discloses it can only make a spider flee slightly more often.
     Registration::goal(2, "flee_entity(armadillo)", avoid_entity),
     Registration::goal(3, "pounce", leap_0_4),
@@ -459,7 +458,7 @@ fn stroll_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
 ///
 /// Declared on skeleton but reachable only by [`WITHER_SKELETON`]: the
 /// `else` branch that installs it needs a non-bow main hand, and only the wither
-/// overrides `populateDefaultEquipmentSlots` to have one.
+/// overrides its default equipment to have one.
 /// Walks between village points of interest after dark, ending within four
 /// blocks of each.
 pub fn patrol_village(ctx: &SpeciesContext) -> Box<dyn Goal> {
@@ -575,7 +574,7 @@ mod tests {
         }
     }
 
-    /// Which classes declare `registerGoals`/`addBehaviourGoals` is a claim about
+    /// Which species declare their own goal registration is a claim about
     /// the jar, and it is what decides whether two species share a table. It was
     /// wrong for two of the four branches of this family before this unit, so it
     /// is gated rather than commented.

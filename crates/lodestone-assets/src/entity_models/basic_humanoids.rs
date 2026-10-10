@@ -79,7 +79,7 @@ pub fn creeper_model() -> EntityModelDef {
 }
 
 /// Vanilla's own spider model, sheet 64×32. Head, two body segments, eight 16-long legs posed
-/// by `offsetAndRotation` (the rotations are the vanilla rest pose).
+/// by offset-and-rotation poses (the rotations are the vanilla rest pose).
 pub fn spider_model() -> EntityModelDef {
     let right_leg = || cube([-15.0, -1.0, -1.0], [16.0, 2.0, 2.0], [18.0, 0.0]);
     let left_leg = || cube([-1.0, -1.0, -1.0], [16.0, 2.0, 2.0], [18.0, 0.0]).mirrored();

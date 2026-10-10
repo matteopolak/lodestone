@@ -99,7 +99,7 @@ pub fn riptide_spin_attack_strength(level: u32) -> f32 {
 /// Vanilla's own "can glide" check, together with the player's own override
 /// for it.
 ///
-/// `!flying && !onGround && !isPassenger && !has_effect(LEVITATION)` plus "some
+/// `!flying && !on_ground && !is_passenger && !has_effect(LEVITATION)` plus "some
 /// equipment slot holds a glider". The last conjunct is **not** physics state —
 /// vanilla walks every equipment slot looking for a glider component — so
 /// the caller resolves it and passes the answer in, the same division of

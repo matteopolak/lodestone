@@ -25,9 +25,9 @@
 //!
 //! The numbers come from the jar, not from our tables:
 //!
-//! * `FOLLOW_RANGE` is `16.0` for every mob (Mob's create mob attributes), raised to
-//!   `35.0` by the zombie family (Zombie's create attributes).
-//! * The cut is a full 3-D `distanceToSqr` against `max(range, 2.0)`
+//! * `FOLLOW_RANGE` is `16.0` for every mob, raised to
+//!   `35.0` by the zombie family.
+//! * The cut is a full 3-D squared distance against `max(range, 2.0)`
 //!   (targeting conditions).
 //! * A target that *leaves* follow range is dropped
 //!   (the target goals).

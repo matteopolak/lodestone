@@ -490,7 +490,7 @@ fn elytra_clamps_fall_distance_to_one_before_travel() {
     let pre_clamp = state.fall_distance;
 
     state.fall_flying = true;
-    state.velocity = Vec3d::ZERO; // > -0.5, satisfying checkFallDistanceAccumulation's guard
+    state.velocity = Vec3d::ZERO; // > -0.5, satisfying the fall-distance accumulation guard
     let old_y = state.position.y;
     tick(&mut state, MovementInput::NONE, &world, &profile);
     let ya = state.position.y - old_y;

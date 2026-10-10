@@ -618,7 +618,7 @@ pub(super) fn place_mega_jungle_trunk<R: RandomSource>(
 /// clause never changes the outcome because the subsequent log placement
 /// re-checks the valid-tree-position check regardless). [`place_fancy_trunk`]'s dry-run
 /// limb check is the first place in this module where that argument does
-/// NOT apply — the limb-placement helper's own `doPlace: false` branch uses this free-to-place check directly
+/// NOT apply — the limb-placement helper's own dry-run branch uses this free-to-place check directly
 /// as its own accept/reject verdict, with no follow-up log placement to fall
 /// back on, so the "OR already a log" half is load-bearing here.
 fn is_free(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
@@ -1704,8 +1704,8 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
     /// widened row); everything else delegates to the default wrapper, which
     /// for a double trunk computes `min(|dx|, |dx - 1|)`/`min(|dz|, |dz - 1|)`
     /// (the distance to the nearer of the 2×2 trunk's two columns) before the
-    /// inner predicate: `y == -1 && !doubleTrunk` skips the corners, and
-    /// `y == 1` skips where `minDx + minDz > 2 * r - 2`. All pure geometry —
+    /// inner predicate: `y == -1 && !double_trunk` skips the corners, and
+    /// `y == 1` skips where `min_dx + min_dz > 2 * r - 2`. All pure geometry —
     /// the dark oak foliage placer draws no RNG in its skip logic.
     fn should_skip_location_signed<R: RandomSource>(
         &self,
@@ -1721,7 +1721,7 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
                 // The dark oak foliage placer's own signed skip-location
                 // wrapper's
                 // short-circuit head: delegate to the base kind unless
-                // `y == 0 && doubleTrunk && dx && dz` are all "at the edge".
+                // `y == 0 && double_trunk && dx && dz` are all "at the edge".
                 let delegate = y != 0
                     || !double_trunk
                     || (dx != -current_radius && dx < current_radius)
@@ -1941,10 +1941,10 @@ pub(super)     fn create_foliage<R: RandomSource>(
                 }
             }
             // The fancy foliage placer's own foliage creation — descends from `offset` to
-            // `offset - foliageHeight` inclusive (same direction as
+            // `offset - foliage_height` inclusive (same direction as
             // `Blob`/`Bush` above), widening the radius by 1 for every row
             // EXCEPT the very top (`yo == offset`) and very bottom
-            // (`yo == offset - foliageHeight`) row. No RNG in the radius
+            // (`yo == offset - foliage_height`) row. No RNG in the radius
             // formula itself.
             FoliagePlacerCfg::Fancy { .. } => {
                 for yo in (offset - foliage_height..=offset).rev() {
@@ -1957,9 +1957,9 @@ pub(super)     fn create_foliage<R: RandomSource>(
                 }
             }
             // The cherry foliage placer's own foliage creation — `foliagePos =
-            // foliageAttachment.pos().above(offset)`, `current_radius =
-            // leafRadius + radiusOffset - 1`, two fixed-radius rows at
-            // `foliageHeight - 3`/`foliageHeight - 4`, then a full-radius
+            // the attachment position raised by `offset`, `current_radius =
+            // leaf_radius + radius_offset - 1`, two fixed-radius rows at
+            // `foliage_height - 3`/`foliage_height - 4`, then a full-radius
             // scan down to `y = 0`, then two rows that ALSO try to hang a
             // extra one or two leaves below themselves
             // ([`place_leaves_row_with_hanging_leaves_below`]) at `y = -1`
@@ -2010,7 +2010,7 @@ pub(super) fn place_leaves_row<R: RandomSource>(
     double_trunk: bool,
 ) {
     // The base kind's own leaves-row placement: for a double trunk the loop is widened
-    // by one in the positive direction (`offset = doubleTrunk ? 1 : 0`) to
+    // by one in the positive direction (`offset = double_trunk ? 1 : 0`) to
     // cover the 2×2 trunk footprint, and every cell is gated by the placer's
     // SIGNED skip logic (the non-signed `should_skip_location` is only ever
     // reached through it).
@@ -2134,7 +2134,7 @@ pub(super) fn try_place_leaf<R: RandomSource>(
     foliage_positions: &mut FastSet<(i32, i32, i32)>,
     placed_any: &mut bool,
 ) -> bool {
-    // `!isPersistent && validTreePos`: nothing this engine ever places
+    // Not persistent and a valid tree position: nothing this engine ever places
     // during worldgen carries `persistent=true` (only a player placing a
     // leaf block by hand can set it), so the persistence half of the check
     // is unconditionally true here — not modelled as a separate branch.

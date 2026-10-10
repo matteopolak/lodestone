@@ -32,7 +32,7 @@
 //!
 //! # The fence trick (LOS over the top, unjumpable collision)
 //!
-//! A zombie only paths to a villager it can *see* (`canSee` raytraces eye→eye),
+//! A zombie only paths to a villager it can *see* (an eye-to-eye raytrace),
 //! so the obstacle must not block line of sight — but it must block the *path*.
 //! A 1-block-tall solid wall fails: mobs **jump** 1-block obstacles (jump height
 //! ≈1.25 > 1.0), so the zombie hops straight over it (verified live — it walked

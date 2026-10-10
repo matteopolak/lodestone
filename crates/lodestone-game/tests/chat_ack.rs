@@ -237,7 +237,7 @@ fn ignore_pending_retracts_only_unacknowledged_entries() {
 }
 
 // ---------------------------------------------------------------------------
-// The disconnect-preventing flush schedule (vanilla markMessageAsProcessed):
+// The disconnect-preventing flush schedule (vanilla's mark-as-processed):
 // a standalone ack fires the moment the pending count exceeds ACK_THRESHOLD (64).
 // ---------------------------------------------------------------------------
 
@@ -277,7 +277,7 @@ fn take_acknowledgement_flushes_pending_offset_then_reports_nothing() {
 // ---------------------------------------------------------------------------
 // MessageSignatureCache: pack/unpack and vanilla's exact eviction/reorder.
 // Expected orderings verified against an independent reference of vanilla's
-// ArrayDeque removeLast / addFirst push algorithm.
+// double-ended-queue push algorithm (pop from the back, push to the front).
 // ---------------------------------------------------------------------------
 
 #[test]

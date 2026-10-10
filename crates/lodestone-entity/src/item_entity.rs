@@ -59,7 +59,7 @@ impl Default for ItemLifecycle {
 
 impl ItemLifecycle {
     /// A freshly dropped stack with the default 0.5 s (10-tick) pickup delay a
-    /// natural drop uses (`setDefaultPickUpDelay`).
+    /// natural drop uses.
     #[must_use]
     pub fn newly_dropped(count: u8, max_stack_size: u8) -> Self {
         Self {
@@ -95,7 +95,7 @@ impl ItemLifecycle {
         self.pickup_delay == 0
     }
 
-    /// Whether this stack can participate in a merge (`isMergable`): alive, not
+    /// Whether this stack can participate in a merge: alive, not
     /// never-pickup, not infinite-age, not yet despawned, and not already a full
     /// stack.
     #[must_use]
@@ -125,11 +125,10 @@ pub fn make_infinite(mut lifecycle: ItemLifecycle) -> ItemLifecycle {
 /// `max(to.pickup_delay, from.pickup_delay)` and `to.age` becomes
 /// `min(to.age, from.age)` (vanilla resets the survivor to the younger of the
 /// two ages). `from` keeps its own `age`/`pickup_delay` unchanged — vanilla
-/// never touches `fromItem`'s fields, only its stack count — which matters
+/// never touches the source's fields, only its stack count — which matters
 /// when the merge is partial and `from` survives with leftover count. Returns
 /// `None` when either side is not mergable. When the returned `from` count is
-/// `0`, the source entity should be discarded (`fromStack.isEmpty()` ->
-/// `fromItem.discard()`).
+/// `0`, the source entity should be discarded.
 #[must_use]
 pub fn try_merge(
     to: &ItemLifecycle,

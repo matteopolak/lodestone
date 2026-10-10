@@ -8,7 +8,7 @@
 //! in `[0, 1]`.
 //!
 //! This mirrors vanilla's client behaviour, where an entity renders at
-//! `lerp(prevPos, pos, partialTick)`. We deliberately keep the *policy* (how
+//! `lerp(prev_pos, pos, partial_tick)`. We deliberately keep the *policy* (how
 //! alpha is derived from wall-clock time) out of this crate — that belongs to
 //! the render loop — and provide only the mechanism.
 

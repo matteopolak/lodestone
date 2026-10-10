@@ -61,7 +61,7 @@ pub fn banner_body_model() -> EntityModelDef {
 ///
 /// Drawn **twice** by a real consumer: once opaque through the same
 /// `entity/banner/banner_base` sheet [`banner_body_model`] uses (vanilla's
-/// `submitBanner` passes `Sheets.BANNER_BASE` to both the body and the flag
+/// the banner submit passes the same base sheet to both the body and the flag
 /// model), and then again, translucent, once per pattern layer — see
 /// `lodestone_render::block_entity`'s module doc for the draw-order and
 /// pipeline split.

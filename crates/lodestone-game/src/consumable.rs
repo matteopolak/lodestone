@@ -3,8 +3,8 @@
 //!
 //! # What it is
 //!
-//! Vanilla's `Consumable` record is `(consumeSeconds, animation, sound,
-//! hasConsumeParticles, onConsumeEffects)`. This module carries the first four —
+//! Vanilla's consumable record is `(consume_seconds, animation, sound,
+//! has_consume_particles, on_consume_effects)`. This module carries the first four —
 //! everything a *client* needs to animate a consume and everything a *server*
 //! needs to broadcast its sounds. The effect lists (a golden apple's regeneration,
 //! milk clearing effects, chorus fruit's teleport) are gameplay and live with
@@ -38,7 +38,7 @@
 //!
 //! Adding an item is one row in [`CONSUMABLES`], which is sorted by id and looked
 //! up by binary search — keep it sorted. Only two items in 26.2 override
-//! `consumeSeconds` and only one overrides `sound`, so a new row is almost always
+//! the consume duration and only one overrides `sound`, so a new row is almost always
 //! a default-food or default-drink clone; vanilla's own default-food and
 //! default-drink builders are the two shapes and [`EAT_SOUND`]/[`DRINK_SOUND`] their
 //! sounds.
@@ -67,9 +67,9 @@ pub enum ConsumeAnimation {
 /// animation, the particles and the sound need.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Consumable {
-    /// Vanilla's own consume-ticks getter — `(int)(consumeSeconds * 20.0F)`.
+    /// Consume ticks: `(int)(consume_seconds * 20.0)`.
     ///
-    /// This is also the item's `getUseDuration`, i.e. what
+    /// This is also the item's use duration, i.e. what
     /// vanilla's own use-item-remaining field counts down from, so it is the divisor in
     /// every consume animation expression.
     pub consume_ticks: u32,
@@ -170,7 +170,7 @@ pub fn should_emit_consume_effects(consume_ticks: u32, remaining_ticks: u32) -> 
 /// `get_use_duration() - get_use_item_remaining_ticks()`.
 ///
 /// This client counts **up** (`lodestone_ecs::player::ItemUseTicks`) because
-/// counting up needs no per-item `getUseDuration` for a bow, whose duration is
+/// counting up needs no per-item use duration for a bow, whose duration is
 /// 72000. A consume does have a real duration, so the two directions are
 /// interconvertible here and this is the one place that conversion happens.
 ///
@@ -266,8 +266,8 @@ pub const CONSUMABLES: &[(&str, Consumable)] = &[
     ),
     ("minecraft:mushroom_stew", food(DEFAULT_CONSUME_TICKS)),
     ("minecraft:mutton", food(DEFAULT_CONSUME_TICKS)),
-    // `Consumables.OMINOUS_BOTTLE = default_drink().sound_after_consume(…)`. That
-    // builder call is an `onConsume` effect, **not** a `sound` override — see the
+    // The ominous bottle is a default drink plus a sound-after-consume. That
+    // builder call is an on-consume effect, **not** a `sound` override — see the
     // module docs.
     (
         "minecraft:ominous_bottle",
@@ -310,7 +310,7 @@ mod tests {
         );
     }
 
-    /// Every drink has `hasConsumeParticles = false` and every food has it true,
+    /// Every drink has consume particles off and every food has them on,
     /// because both come from default drink/default food and nothing
     /// overrides the flag. Asserted rather than folded into `animation`, so a
     /// version that *does* override it fails here instead of silently agreeing.
@@ -325,7 +325,7 @@ mod tests {
         }
     }
 
-    /// The `soundAfterConsume` trap: an ominous bottle's `sound` field is the
+    /// The sound-after-consume trap: an ominous bottle's `sound` field is the
     /// plain drink sound, not its disposal noise.
     #[test]
     fn an_ominous_bottle_drinks_with_the_generic_drink_sound() {

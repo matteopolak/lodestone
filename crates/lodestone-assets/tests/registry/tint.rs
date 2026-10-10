@@ -339,7 +339,7 @@ fn particle_tint_diverges_from_the_face_tint_exactly_where_vanilla_does() {
         );
     }
 
-    // Everything else inherits colorAsTerrainParticle from colorInWorld, so the
+    // Everything else takes its terrain-particle colour from its in-world colour, so the
     // two lookups must agree at layer 0. `short_grass` and `redstone_wire` are
     // the greyscale-sprite blocks the white-debris bug was reported against.
     let mut rprops = BTreeMap::new();

@@ -431,7 +431,7 @@ pub struct AirTravelContext {
     /// the player its facing.
     pub yaw: f32,
     /// The jump key is held / the mob is jumping this tick. Feeds the climbable
-    /// "steady climb-up" branch (`(horizontalCollision || jumping) && onClimbable`).
+    /// "steady climb-up" branch (`(horizontal_collision || jumping) && on_climbable`).
     pub jumping: bool,
     /// Levitation amplitude (`Some(amp)` = effect active). Levitation *replaces*
     /// gravity with a pull toward `0.05 * (amp + 1)`.
@@ -538,7 +538,7 @@ pub(crate) fn travel_in_air_among_entities(
         1.0
     };
 
-    // handleRelativeFrictionAndCalculateMovement
+    // Relative friction, then the movement calculation.
     let friction_speed = friction_influenced_speed_value(
         speed,
         block_friction,

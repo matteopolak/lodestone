@@ -94,8 +94,8 @@ impl IntProvider {
                 }
                 entries.last().map_or(0, |(provider, _)| provider.sample(random))
             }
-            // Vanilla's own biased-to-bottom int provider's sample: `minInclusive + nextInt(nextInt(maxInclusive
-            // - minInclusive + 1) + 1)` — two nested, dependent draws, not one.
+            // Vanilla's own biased-to-bottom int provider's sample: `min + next_int(next_int(max
+            // - min + 1) + 1)` — two nested, dependent draws, not one.
             IntProvider::BiasedToBottom { min, max } => {
                 let n = *max - *min + 1;
                 let inner = random.next_int_bounded(n);

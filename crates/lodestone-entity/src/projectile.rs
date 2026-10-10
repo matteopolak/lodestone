@@ -256,11 +256,11 @@ pub fn bow_power_for_time(ticks_held: i32) -> f64 {
     ((pow * pow + pow * 2.0) / 3.0).min(1.0)
 }
 
-/// Vanilla Projectile's shoot from rotation composed with `getMovementToShoot`: the
+/// Vanilla's shoot-from-rotation composed with its movement-to-shoot step: the
 /// initial velocity for a projectile launched by an entity facing
 /// `(yaw, pitch)` in degrees, at `power` blocks per tick.
 ///
-/// `pitch_offset` is vanilla's `yOffset`, applied to the **vertical component
+/// `pitch_offset` is vanilla's y-offset, applied to the **vertical component
 /// only** — `0.0` for everything except a thrown potion's `-20.0`. Applying it to
 /// the horizontal components as well (the obvious mis-read, since it looks like a
 /// rotation) would turn a potion's upward arc into a sideways one.
@@ -280,7 +280,7 @@ pub fn launch_velocity(yaw: f64, pitch: f64, pitch_offset: f64, power: f64) -> V
     let dx = -yaw_rad.sin() * pitch_rad.cos();
     let dy = -offset_pitch_rad.sin();
     let dz = yaw_rad.cos() * pitch_rad.cos();
-    // `getMovementToShoot` normalises before scaling. With `pitch_offset == 0.0`
+    // Vanilla normalises before scaling. With `pitch_offset == 0.0`
     // the triple is already unit-length, but with the potion's `-20.0` it is not,
     // so the normalise is load-bearing rather than defensive.
     let len = (dx * dx + dy * dy + dz * dz).sqrt();
@@ -935,7 +935,7 @@ mod tests {
 
     /// The margin ramp, and specifically that it is **zero** for the first two
     /// ticks. A constant `0.3` is the plausible wrong reading of
-    /// `computeMargin`, and it differs at exactly the ticks that decide whether
+    /// vanilla's margin computation, and it differs at exactly the ticks that decide whether
     /// an arrow hits the archer who fired it.
     #[test]
     fn the_hitbox_margin_starts_at_zero_and_saturates_at_tick_eight() {

@@ -153,7 +153,7 @@ impl LastSeenTracker {
     /// Vanilla's own last-seen-messages max-length constant.
     pub const VANILLA_CAPACITY: usize = 20;
 
-    /// Vanilla's flush threshold: `markMessageAsProcessed` sends a standalone
+    /// Vanilla's flush threshold: marking a message processed sends a standalone
     /// acknowledgement once more than this many messages are pending, which keeps
     /// the server-side pending count far below its 4096 disconnect ceiling.
     pub const ACK_THRESHOLD: i32 = 64;
@@ -261,8 +261,7 @@ impl LastSeenTracker {
         }
     }
 
-    /// Record a shown/processed message and, matching vanilla's
-    /// `markMessageAsProcessed`, return a standalone acknowledgement offset when
+    /// Record a shown/processed message and, matching vanilla, return a standalone acknowledgement offset when
     /// the pending count crosses [`ACK_THRESHOLD`](Self::ACK_THRESHOLD). The
     /// caller sends that offset as this version's `chat_ack` packet. Returns
     /// `None` when nothing needs sending yet (including for a duplicate).
@@ -274,8 +273,8 @@ impl LastSeenTracker {
         }
     }
 
-    /// Flush any pending acknowledgement offset (vanilla's `sendChatAcknowledgement`,
-    /// called on the client's tick cadence): returns the offset to transmit, or
+    /// Flush any pending acknowledgement offset (called on the client's tick
+    /// cadence): returns the offset to transmit, or
     /// `None` when there is nothing outstanding.
     pub fn take_acknowledgement(&mut self) -> Option<i32> {
         let offset = self.get_and_clear_offset();
@@ -345,7 +344,7 @@ impl MessageSignatureCache {
         let mut i = 0;
         while !queue.is_empty() && i < capacity {
             let displaced = self.entries[i].take();
-            // `removeLast` — the most recently queued signature lands first.
+            // Pop from the back — the most recently queued signature lands first.
             self.entries[i] = queue.pop_back();
             if let Some(entry) = displaced
                 && !new_entries.contains(&entry)

@@ -160,7 +160,7 @@ impl AdvancementStore {
         self.nodes.is_empty()
     }
 
-    /// The server's `showAdvancements` flag.
+    /// The server's show-advancements flag.
     #[must_use]
     pub fn show_advancements(&self) -> bool {
         self.show_advancements

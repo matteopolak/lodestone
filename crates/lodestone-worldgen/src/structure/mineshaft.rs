@@ -2150,7 +2150,7 @@ mod tests {
                 "no {kind} in a 101-piece shaft"
             );
         }
-        // `(middleBlockX, 50 + dy, minBlockZ)` — the Z is the chunk *minimum*, which
+        // `(middle_block_x, 50 + dy, min_block_z)` — the Z is the chunk *minimum*, which
         // is the detail a "chunk centre" reading gets wrong by 8.
         assert_eq!(start[0], 8);
         assert_eq!(start[2], 0);

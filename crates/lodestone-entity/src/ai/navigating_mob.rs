@@ -286,7 +286,7 @@ pub struct MobBody {
     /// sibling for [`BrainMob::sniffer_dig_target`]/`MemoryModuleType::SNIFFER_DIG_TARGET`.
     sniffer_dig_target: Option<Vec3>,
     /// The block the current path was computed toward, so `move_to` reuses the
-    /// active path instead of recomputing every tick (vanilla `moveTo` reuse).
+    /// active path instead of recomputing every tick.
     active_target_block: Option<BlockPos>,
     last_look: Option<Vec3>,
     jumping: bool,
@@ -309,7 +309,7 @@ pub struct MobBody {
     /// to recompute within 20 ticks — `MAX_TIME_RECOMPUTE`).
     last_search_tick: Option<u64>,
     /// The actual position delta applied on the last [`advance`], i.e. the mob's
-    /// velocity in **blocks per tick** (vanilla `getDeltaMovement`). Zero when the
+    /// velocity in **blocks per tick**. Zero when the
     /// follower did not move this tick.
     velocity: Vec3,
     /// Last feet position accepted by the server's live terrain sweep. External
@@ -392,7 +392,7 @@ pub struct MobBody {
     /// no eligible partner exists right now. `lodestone-entity` has no
     /// concept of a *population* of mobs, so — exactly as
     /// [`MobController::find_love_partner`]'s doc comment specifies — the
-    /// host performs vanilla's `getFreePartner`/`canMate` search across
+    /// host performs vanilla's free-partner and can-mate search across
     /// siblings and hands back only the answer. Both
     /// [`find_love_partner`](MobController::find_love_partner) and
     /// [`love_partner_position`](MobController::love_partner_position) read
@@ -613,8 +613,8 @@ pub struct MobBody {
     /// Ticks remaining on "took damage recently", the panic window
     /// ([`PANIC_DAMAGE_TICKS`]). Set by [`note_hurt`](Self::note_hurt) for
     /// **every** hit, including one with no identifiable attacker, because
-    /// vanilla's `shouldPanic` reads the damage *source* rather than the
-    /// attacking mob (FleeInPanicGoal's should panic). Read by
+    /// vanilla's panic test reads the damage *source* rather than the
+    /// attacking mob. Read by
     /// [`MobController::is_panicking`].
     damage_ticks: i32,
     /// This mob's `FOLLOW_RANGE` attribute value, in blocks — the range cut
@@ -651,7 +651,7 @@ pub struct MobBody {
     /// Host injection point, refreshed once per tick: whether a player is
     /// currently staring at this mob. Drives
     /// [`MobController::is_being_stared_at`] and therefore the enderman's
-    /// stare-gated goals. The host computes vanilla's `isLookingAtMe` cone +
+    /// stare-gated goals. The host computes vanilla's looking-at-me cone +
     /// line-of-sight from real player view vectors and feeds the boolean —
     /// see that method and [`is_in_view_cone`](super::mob::is_in_view_cone).
     ///
@@ -1862,7 +1862,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Host injection point: whether a player is currently staring at this
-    /// mob. Computed by the host from vanilla's `isLookingAtMe` cone plus line
+    /// mob. Computed by the host from vanilla's looking-at-me cone plus line
     /// of sight — see [`MobController::is_being_stared_at`] and
     /// [`is_in_view_cone`](super::mob::is_in_view_cone).
     pub fn set_stared_at(&mut self, stared_at: bool) -> &mut Self {
@@ -3201,8 +3201,7 @@ impl NavigatingMob<'_> {
             return true;
         }
 
-        // Vanilla `recomputePath` refuses to re-search the *same* destination
-        // within `MAX_TIME_RECOMPUTE` (20) ticks. Only a genuinely new target
+        // Vanilla refuses to re-search the *same* destination within 20 ticks. Only a genuinely new target
         // block bypasses the throttle; a wedged mob whose path finished stands
         // still until the cooldown elapses instead of hammering A\* every tick.
         if same_target
@@ -3341,9 +3340,9 @@ impl MobController for NavigatingMob<'_> {
     ///
     /// **Scope cut, disclosed:** vanilla is
     /// `is_in_water() && get_fluid_height(WATER) > get_fluid_jump_threshold()`
-    /// (`StayAfloatGoal::canUse`), where `isInWater` is a bounding-box
-    /// sweep (Entity's is in water, `wasTouchingWater`) and the threshold is
-    /// `get_eye_height() < 0.4 ? 0.0 : 0.4` (Entity's get fluid jump threshold). This
+    /// (the stay-afloat goal's use test), where in-water is a bounding-box
+    /// sweep and the threshold is
+    /// `get_eye_height() < 0.4 ? 0.0 : 0.4`. This
     /// composition has no fluid-height model at all — `PathWorld` exposes
     /// per-cell classification and collision tops, not fluid levels — so the
     /// feet cell being water stands in for both halves. The practical
@@ -3818,7 +3817,7 @@ impl MobController for NavigatingMob<'_> {
     /// registration: its own nearest-player search,
     /// whose range cut
     /// is its own targeting-conditions test — a full 3-D
-    /// `distanceToSqr` against `max(range * visibility, 2.0)`, with `range` =
+    /// squared distance against `max(range * visibility, 2.0)`, with `range` =
     /// the `FOLLOW_RANGE` attribute.
     ///
     /// **This used to return `self.attack_target` — the field the goal calling
@@ -4236,7 +4235,7 @@ impl BrainMob for NavigatingMob<'_> {
     ///   the result with a walkability test;
     ///   this follower snaps `pos.y` to whatever floor the path resolves to, so a
     ///   random vertical offset would only produce unreachable targets.
-    /// * The position is **not** pre-validated as land. Vanilla's `getPos` retries
+    /// * The position is **not** pre-validated as land. Vanilla's position pick retries
     ///   up to 10 times and returns `null` if none validate. Here an invalid pick
     ///   is caught one step later and cheaply: `MoveToTargetSink` calls `move_to`,
     ///   the real A\* search fails, and the sink erases `WALK_TARGET` so the next
@@ -4729,7 +4728,7 @@ mod tests {
     // These are driver-level: a real `GoalSelector` runs a real `MateGoal`
     // against two real `NavigatingMob`s. The only "host" logic here is the
     // per-tick candidate refresh `MobController::find_love_partner`'s own doc
-    // comment calls for (a population-wide `canMate` search this crate has no
+    // comment calls for (a population-wide can-mate search this crate has no
     // way to do itself) — everything downstream of that one input is the
     // production seam, and `breed()` is never called directly.
 

@@ -601,7 +601,7 @@ pub fn no_entity_collision(test_area: Aabb, nearby: &[NearbyEntity]) -> bool {
 }
 
 /// Vanilla's own "no collision" check —
-/// `noBlockCollision && noEntityCollision && noBorderCollision`.
+/// no block collision, no entity collision and no border collision.
 ///
 /// This is the predicate vanilla's own "can player fit within blocks and
 /// entities" check applies to a `deflate(1.0E-7)`d pose box, and the one

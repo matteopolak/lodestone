@@ -933,9 +933,9 @@ mod tests {
         assert!((patch.pose.z_rot - bottom.pose.z_rot).abs() < 1e-6, "z rotation must match");
 
         // The box itself: bit-identical origin/size/tex_offset to `"bottom"`'s,
-        // per vanilla's boat model's water-patch construction's `texOffs(0, 0).addBox(-14, -9,
-        // -3, 28, 16, 3)` — the same literal `addBox` call `addCommonParts`
-        // makes for `"bottom"`.
+        // per vanilla's boat water-patch construction (tex offset (0, 0), box
+        // (-14, -9, -3) sized 28x16x3) — the same literal box the hull's
+        // `"bottom"` uses.
         assert_eq!(patch.cubes.len(), 1, "the patch is one box, not the whole hull");
         assert_eq!(bottom.cubes.len(), 1);
         assert_eq!(patch.cubes[0].origin, bottom.cubes[0].origin, "box origin must match");

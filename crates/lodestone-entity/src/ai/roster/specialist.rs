@@ -166,12 +166,12 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 ///   `protocol/v26-2/oracle-java/EntityDataIndexOracle.java` — never hand-counted —
 ///   plus a renderer.
 /// * **The 1.0 magic-damage component.** Vanilla hurts the target *twice*:
-///   `indirectMagic` for `magicDamage` (1.0, +2.0 on Hard, +2.0 for an elder) and
-///   then `doHurtTarget` for the ordinary attack-damage hit, both in
+///   an indirect-magic hit of 1.0 (+2.0 on Hard, +2.0 for an elder) and
+///   then the ordinary attack-damage hit, both in
 ///   vanilla's own per-tick update. [`MobController::attack`] is the single melee
-///   verb, so ours is the `doHurtTarget` half only. There is no difficulty
+///   verb, so ours is the ordinary-attack half only. There is no difficulty
 ///   concept here either.
-/// * **Line of sight.** Vanilla drops the target when `!hasLineOfSight`, in
+/// * **Line of sight.** Vanilla drops the target when it loses line of sight, in
 ///   its own per-tick update. This seam has no raycast primitive — the same
 ///   disclosed simplification `FuseGoal`'s own doc comment already makes.
 /// * **Re-arming the stroll on stop**, in vanilla's own stop step,
@@ -182,9 +182,9 @@ pub struct GuardianBeamGoal {
     attack_duration: i32,
     /// Vanilla's own `attackTime` field. Starts negative.
     attack_time: i32,
-    /// Vanilla's own `elder` flag, set in its constructor. An
+    /// Whether this is an elder guardian. An
     /// elder keeps beaming a target that has closed inside 3 blocks; an
-    /// ordinary guardian gives up in `canContinueToUse`.
+    /// ordinary guardian gives up.
     elder: bool,
 }
 

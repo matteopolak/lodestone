@@ -80,7 +80,7 @@ fn tick_air_among_entities(
         state.fall_distance = 0.0;
     }
 
-    // --- travelInAir ----------------------------------------------------------
+    // --- travel in air --------------------------------------------------------
     // The gravity + drag + collision core is the entity-agnostic `travel_in_air`
     // seam (shared with mobs); the player supplies only the transformed input,
     // its own effective speed, and its per-situation flags. Thread the

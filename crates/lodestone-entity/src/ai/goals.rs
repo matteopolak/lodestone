@@ -2260,9 +2260,8 @@ impl Goal for CatPerchGoal {
 /// A tamed cat walks to and lies on the nearest bed.
 ///
 /// Vanilla `CatLieOnBedGoal(cat, speedModifier, searchRange)`, a
-/// Move-to-block goal subclass with `verticalSearchStart = -2` and
-/// `verticalSearchRange = 6` (flags MOVE + JUMP, per its own explicit
-/// `setFlags`). The search itself is host-computed — see
+/// Move-to-block goal with a vertical search start of `-2` and a vertical
+/// search range of `6` (flags MOVE + JUMP). The search itself is host-computed — see
 /// [`MobController::cat_bed_target`]'s own doc, same reasoning as
 /// [`CatPerchGoal`].
 ///
@@ -2828,7 +2827,7 @@ impl Goal for PatrolRouteGoal {
             self.follower_speed
         };
         if !mob.move_to(move_target, speed) {
-            // `moveRandomly`.
+            // Random-move fallback.
             let rx = f64::from(mob.next_i32(Self::RANDOM_MOVE_SPREAD) - 8);
             let rz = f64::from(mob.next_i32(Self::RANDOM_MOVE_SPREAD) - 8);
             mob.move_to(

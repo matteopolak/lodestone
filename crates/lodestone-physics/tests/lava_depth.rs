@@ -138,7 +138,7 @@ fn predicate_boundary_is_inclusive() {
     // Vanilla's own "is in shallow fluid" check: its own fluid-height
     // accessor <= its own fluid-jump-threshold accessor. Standing eye height
     // (1.62) keeps the threshold at 0.4 (vanilla's own jump-threshold formula:
-    // eyeHeight < 0.4 ? 0.0 : 0.4). At exactly 0.4 the branch must still be
+    // eye_height < 0.4 ? 0.0 : 0.4). At exactly 0.4 the branch must still be
     // shallow; a hair above it must be deep.
     let world = EmptyWorld;
     let profile = PhysicsProfile::mc_1_21();

@@ -49,7 +49,7 @@ pub struct BrainGoal {
     brain: Brain,
     /// Activities offered to
     /// [`Brain::set_active_activity_to_first_valid`] each tick, in precedence
-    /// order. This is vanilla's per-species `updateActivity` — e.g.
+    /// order. This is vanilla's per-species activity update — e.g.
     /// Warden brain offers `[EMERGE, DIG, FIGHT, INVESTIGATE,
     /// SNIFF, IDLE]`. For the generic scaffold it is `[IDLE]`.
     candidates: Vec<Activity>,

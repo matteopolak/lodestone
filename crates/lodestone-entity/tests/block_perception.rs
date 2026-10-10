@@ -347,9 +347,9 @@ fn an_edible_block_at_the_mobs_feet_is_eaten_in_place_and_wins_over_the_floor() 
     );
 }
 
-/// The sheep stands still while it eats. Vanilla stops the navigation in
-/// `GrazeGoal.start` and the goal claims MOVE, LOOK and JUMP in its
-/// constructor's `setFlags` call so the water-avoiding stroll at the
+/// The sheep stands still while it eats. Vanilla stops the navigation when
+/// the graze goal starts, and the goal claims MOVE, LOOK and JUMP so the
+/// water-avoiding stroll at the
 /// next priority down cannot preempt it.
 ///
 /// This is the assertion that would fail if the goal were given the wrong flag
@@ -381,9 +381,9 @@ fn a_grazing_sheep_holds_still_for_the_whole_animation() {
 /// halving that Goal's adjusted tick delay applies.
 ///
 /// Vanilla's literals are `1000` and `50`, but neither is the number of ticks
-/// that elapses: `adjustedTickDelay` is positive ceil div for a goal that
-/// does not override `requiresUpdateEveryTick`, and `GrazeGoal` does not
-/// (Goal's reduced tick delay). So the real intervals are **500 and 25**.
+/// that elapses: the adjusted tick delay is a positive ceiling division for a
+/// goal that does not update every tick, and the graze goal does not
+/// update every tick. So the real intervals are **500 and 25**.
 ///
 /// Both hypotheses are computed from outside constants and the measurement must
 /// land on one. A grazing cycle costs `interval + EAT_ANIMATION_TICKS` ticks on

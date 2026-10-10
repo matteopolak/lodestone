@@ -405,7 +405,7 @@ impl Menu {
     ///
     /// Vanilla's own merchant quick-move step is genuinely different from
     /// [`quick_move_generic`](Self::quick_move_generic) — the result slot
-    /// (`slotIndex == 2`) empties into the player inventory the same way, but
+    /// (`slot_index == 2`) empties into the player inventory the same way, but
     /// the two payment slots (`0`, `1`) move to the player inventory
     /// **forwards**, not backwards, and vanilla's own trade-item-move step
     /// (auto-filling the payment slots from the player's own
@@ -1095,7 +1095,7 @@ impl Menu {
     ///
     /// | # | condition | destination |
     /// |---|-----------|-------------|
-    /// | 1 | `slotIndex == 0` (result) | `9..45` **backwards** |
+    /// | 1 | `slot_index == 0` (result) | `9..45` **backwards** |
     /// | 2 | `1..5` (craft grid) | `9..45` forwards |
     /// | 3 | `5..9` (armour) | `9..45` forwards |
     /// | 4 | item is humanoid armour **and** its armour slot is empty | that one slot |

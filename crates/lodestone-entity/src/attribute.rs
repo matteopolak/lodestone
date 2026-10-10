@@ -1582,7 +1582,7 @@ mod tests {
             .unwrap();
 
         // `get`, not `value`: a ghast's `movement_speed` must be **present and
-        // seeded at 0.7** by `createLivingAttributes`, not absent-and-answered
+        // seeded at 0.7** by the living-attribute defaults, not absent-and-answered
         // by `value`'s registry fallback. Those two are indistinguishable
         // through `value` — which is the whole reason a missing `type_spec`
         // arm was invisible — so the distinction has to be made here.

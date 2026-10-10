@@ -69,7 +69,7 @@ fn modify_input_unit_square(
         sx *= sneak_factor;
         sy *= sneak_factor;
     }
-    // modifyInputSpeedForSquareMovement
+    // Square-movement input speed correction.
     let length = (sx * sx + sy * sy).sqrt();
     if length <= 0.0 {
         return (sx, sy);

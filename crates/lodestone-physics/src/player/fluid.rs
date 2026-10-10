@@ -172,7 +172,7 @@ fn tick_water_among_entities(
     // touching a submerged floor).
     accumulate_fall_distance(state, state.position.y - old_y, true);
 
-    // `if (horizontalCollision && on_climbable()) movement = (x, 0.2, z)` — a ladder
+    // `if horizontal_collision && on_climbable() { movement = (x, 0.2, z) }` — a ladder
     // still lifts you while submerged, and it does so *before* the water drag.
     let mut movement = state.velocity;
     if state.horizontal_collision && on_climbable(state, view) {

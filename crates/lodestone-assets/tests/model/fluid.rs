@@ -217,7 +217,7 @@ fn still_fluid_selects_still_texture() {
 
 #[test]
 fn flow_points_from_high_to_low() {
-    // Verified getFlow: distance = ownHeight - neighborHeight, summed over
+    // Vanilla's flow rule: distance = own_height - neighbour_height, summed over
     // dir.step. Only the east neighbour is lower, so flow runs +X (east).
     let low_east = FlowNeighbor {
         own_height: 3.0 / 9.0,
@@ -239,7 +239,7 @@ fn flow_points_from_high_to_low() {
 #[test]
 fn flow_falls_off_ledge_via_below_neighbour() {
     // Neighbour cell is empty (own_height 0) and passable, but the cell below it
-    // holds fluid: verified getFlow reaches down, distance = own - (below-0.888).
+    // holds fluid: vanilla's flow rule reaches down, distance = own - (below-0.888).
     let ledge = FlowNeighbor {
         own_height: 0.0,
         blocks_motion: false,

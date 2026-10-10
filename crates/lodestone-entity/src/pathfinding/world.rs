@@ -106,9 +106,8 @@ impl Aabb {
 /// # Why booleans rather than a block id or a `PathType`-style enum
 ///
 /// Vanilla's own tests are **predicates over tags**, not equality against a
-/// block: `GrazeGoal`'s is `state.is(BlockTags.EDIBLE_FOR_SHEEP)`
-/// (its `IS_EDIBLE` field) beside `state.is(Blocks.GRASS_BLOCK)`
-/// (`GrazeGoal.canUse`). Two independent predicates that can hold together, so an enum would
+/// block: the sheep graze goal tests the `#minecraft:edible_for_sheep` block
+/// tag beside the grass block itself. Two independent predicates that can hold together, so an enum would
 /// have to enumerate the combinations. A block id would drag a registry into
 /// `lodestone-entity`, which the whole `PathWorld` seam exists to avoid, and
 /// would put tag resolution in the goal — the wrong side, exactly as with
@@ -465,15 +464,15 @@ impl NavMode {
 pub struct MobShape {
     /// The evaluator and locomotion this mob uses.
     pub nav_mode: NavMode,
-    /// Bounding-box width (`getBbWidth`).
+    /// Bounding-box width.
     pub width: f32,
-    /// Bounding-box height (`getBbHeight`).
+    /// Bounding-box height.
     pub height: f32,
-    /// Auto-step / jump-up height (`maxUpStep`, the `STEP_HEIGHT` attribute).
+    /// Auto-step / jump-up height (the `STEP_HEIGHT` attribute).
     pub max_up_step: f32,
-    /// Maximum safe fall distance in blocks (`getMaxFallDistance`, default 3).
+    /// Maximum safe fall distance in blocks (default 3).
     pub max_fall_distance: i32,
-    /// Whether the mob swims/floats rather than sinking (`canFloat`).
+    /// Whether the mob swims/floats rather than sinking.
     pub can_float: bool,
     /// Whether the mob can walk over fence tops.
     pub can_walk_over_fences: bool,

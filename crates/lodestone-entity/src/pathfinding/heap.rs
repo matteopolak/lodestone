@@ -1,7 +1,7 @@
 //! The open-set binary heap, a faithful port of vanilla's `BinaryHeap`.
 //!
-//! Vanilla stores `heapIdx` on each `Node` so a node's priority can be changed
-//! in place (`changeCost`) without a linear scan. We keep the nodes in an arena
+//! Vanilla stores a heap index on each node so a node's priority can be changed
+//! in place without a linear scan. We keep the nodes in an arena
 //! (`&mut [Node]`) and store arena indices in the heap; every heap operation
 //! updates the affected nodes' `heap_idx`, exactly as the original mutates the
 //! node objects. Comparisons are on `Node::f`, using the same strict `<` that

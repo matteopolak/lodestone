@@ -1317,8 +1317,7 @@ pub struct RecipeUnlockState {
     /// Recipes the server has explicitly unlocked, once real data arrives.
     /// Empty on every session today — see the type doc.
     known: HashSet<Identifier>,
-    /// Unlocked recipes not yet shown to the player (vanilla's own
-    /// `recipeShown` field) — drives the toast and the tab
+    /// Unlocked recipes not yet shown to the player — drives the toast and the tab
     /// squeeze-highlight animation.
     new: HashSet<Identifier>,
     /// Whether [`unlock`](Self::unlock) or [`remove`](Self::remove) has ever

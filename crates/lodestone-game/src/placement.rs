@@ -145,7 +145,7 @@ pub fn horizontal_from_yaw(yaw: f32) -> BlockFace {
 }
 
 /// The six faces ordered nearest-to-farthest from the player's look vector
-/// (Direction's ordered by nearest). Index `0` is `getNearestLookingDirection`,
+/// (vanilla's nearest-first ordering). Index `0` is the nearest looking direction,
 /// which directional blocks (dispenser, observer, piston) place *opposite* to.
 ///
 /// Re-implemented from the trig in Direction's ordered by nearest: the look vector
@@ -222,7 +222,7 @@ pub trait PlacementWorld {
     fn is_replaceable(&self, pos: BlockPos) -> bool;
 
     /// Whether right-clicking the block at `pos` actuates it
-    /// (`BlockState.useItemOn`/`useWithoutItem` consumes the action): chests,
+    /// (the block's use handler consumes the action): chests,
     /// doors, buttons, furnaces, crafting tables, etc. When `true` and the
     /// player is not sneaking-with-an-item, the click opens/actuates and places
     /// nothing.
@@ -242,7 +242,7 @@ pub struct Target {
     /// The block position the new block occupies.
     pub pos: BlockPos,
     /// Whether the clicked block was itself replaced in place
-    /// (`replacingClickedOnBlock`). `false` means the adjacent cell was used.
+    /// (replacing the clicked block). `false` means the adjacent cell was used.
     pub replaced_clicked: bool,
 }
 
@@ -252,7 +252,7 @@ pub struct Target {
 /// otherwise it goes to the adjacent cell across `face`. This never consults
 /// legality — [`Placement::use_on`] does that — so the result is defined even
 /// for an obstructed or illegal target, matching vanilla's split between
-/// `getClickedPos` and `canPlace`.
+/// the clicked-position and can-place steps.
 #[must_use]
 pub fn resolve_target(
     clicked: BlockPos,
@@ -562,7 +562,7 @@ impl Placement {
         self.take_sequence().as_wire()
     }
 
-    /// Handle a right-click on a block, mirroring `performUseItemOn`'s ordering.
+    /// Handle a right-click on a block, mirroring vanilla's use-item-on ordering.
     ///
     /// 1. If the player is **not** sneaking-with-an-item and the block is
     ///    interactable, the click actuates it and nothing is placed
@@ -614,7 +614,7 @@ impl Placement {
         UseOnDecision::Place { action, prediction }
     }
 
-    /// Clear predictions the server has acknowledged (`endPredictionsUpTo`).
+    /// Clear predictions the server has acknowledged.
     ///
     /// The block-changed-ack carries the highest sequence the server has
     /// processed. Every pending prediction at or below it is *settled*: for an
@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn horizontal_facing_from_yaw() {
-        // fromYRot: 0=south, 90=west, 180=north, 270=east.
+        // 0=south, 90=west, 180=north, 270=east.
         assert_eq!(horizontal_from_yaw(0.0), BlockFace::South);
         assert_eq!(horizontal_from_yaw(90.0), BlockFace::West);
         assert_eq!(horizontal_from_yaw(180.0), BlockFace::North);

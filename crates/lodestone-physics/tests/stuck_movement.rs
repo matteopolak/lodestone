@@ -174,8 +174,8 @@ fn walk_z_advances(world: &World, ticks: usize) -> Vec<f64> {
 #[test]
 fn cobweb_grabs_a_walker_after_a_one_tick_lag() {
     // A walker starting inside a cobweb volume advances *identically* to a free
-    // walker on the first tick (the multiplier is not set until checkInsideBlocks
-    // runs at the end of that tick), then is crawled to a fraction of free speed
+    // walker on the first tick (the multiplier is not set until the inside-block
+    // check runs at the end of that tick), then is crawled to a fraction of free speed
     // from the second tick on.
     let free = World::flat_floor(64, 0);
     let mut web = World::flat_floor(64, 0);

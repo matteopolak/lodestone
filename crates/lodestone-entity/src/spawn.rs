@@ -169,7 +169,7 @@ pub struct DespawnCtx {
     /// Whether the mob requires custom persistence this tick (it is leashed).
     /// Such a mob never despawns and its idle timer is held at zero.
     pub requires_custom_persistence: bool,
-    /// `removeWhenFarAway`: base mobs return `true`; some (tamed, named) return
+    /// Remove-when-far-away: base mobs return `true`; some (tamed, named) return
     /// `false` to opt out of distance despawning even without persistence.
     pub remove_when_far_away: bool,
     /// Squared distance to the nearest player, or `None` if no player exists.
@@ -199,7 +199,7 @@ pub fn check_despawn(ctx: &DespawnCtx) -> DespawnDecision {
         return DespawnDecision::ResetNoActionTime;
     }
     let Some(dist_sqr) = ctx.nearest_player_dist_sqr else {
-        // No player: vanilla's `getNearestPlayer` returns null and the whole
+        // No player: vanilla's nearest-player lookup returns nothing and the whole
         // block is skipped, leaving the idle counter to keep climbing.
         return DespawnDecision::Keep;
     };

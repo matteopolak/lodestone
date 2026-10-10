@@ -99,7 +99,7 @@ const SHOOTER_SHOULDER_Y: f64 = 1.4;
 const AIM_HEIGHT: f64 = 0.6;
 
 /// Vanilla's ballistic arc compensation: the vertical aim component gains
-/// `horizontalDistance * 0.2` (each species' own ranged-attack step). All three
+/// `horizontal_distance * 0.2` (each species' own ranged-attack step). All three
 /// species in this family use the same `0.2F`.
 const ARC_LIFT: f64 = 0.2;
 
@@ -566,12 +566,12 @@ impl Goal for BlazeFireballGoal {
 /// from `-40` toward `0` (vanilla's own per-tick update).
 ///
 /// **Registers no [`Flag`] at all** — its constructor never calls
-/// `setFlags`, unlike every other goal in this file — so it runs alongside
+/// flag registration, unlike every other goal in this file — so it runs alongside
 /// the ghast's random float and face-target goals
 /// rather than contesting MOVE/LOOK with them, and this port's empty
 /// [`FlagSet`] reproduces that exactly rather than approximating it.
 ///
-/// **Not modelled**: the `hasLineOfSight` half of the range gate
+/// **Not modelled**: the line-of-sight half of the range gate
 /// (`target.distance_to_sqr(this.ghast) < 4096.0 && this.ghast.has_line_of_sight(target)`)
 /// — [`MobController`] has no world or raycast access, the same
 /// gap every other goal in this file already lives with — so a ghast charges
@@ -1369,9 +1369,9 @@ mod tests {
 
     #[test]
     fn a_ghast_beyond_range_never_charges_up() {
-        // Vanilla's own per-tick update's outer gate — `distanceToSqr < 4096.0`
+        // Vanilla's own per-tick update's outer gate — squared distance `< 4096.0`
         // (64 blocks). At 100 blocks the charge must never reach 20, and the
-        // `else if chargeTime > 0` branch (which only decrements a *positive*
+        // positive-charge decay branch (which only decrements a *positive*
         // charge) must never let an out-of-range ghast wind up to a shot
         // either.
         let world = Flat;

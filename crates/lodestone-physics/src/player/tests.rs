@@ -179,10 +179,10 @@ mod tests {
         // The sinking-versus-swimming decision (vanilla's own per-tick jump
         // block). Expected magnitudes come from
         // vanilla constants, not from this port:
-        //   * shallow  -> jumpFromGround, JUMP_STRENGTH = 0.42F, then the water
-        //     tick's own `* 0.8F` vertical drag and `- gravity/16` buoyancy step
+        //   * shallow  -> ground jump, JUMP_STRENGTH = 0.42, then the water
+        //     tick's own `* 0.8` vertical drag and `- gravity/16` buoyancy step
         //     => 0.42*0.8 - 0.005 = 0.331
-        //   * deep     -> jumpInLiquid, +0.04F  => 0.04*0.8 - 0.005 = 0.027
+        //   * deep     -> liquid jump, +0.04  => 0.04*0.8 - 0.005 = 0.027
         // A single order of magnitude apart, so the branch cannot be mistaken.
         let p = PhysicsProfile::mc_1_21();
 

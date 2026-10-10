@@ -33,7 +33,7 @@
 //!         pick a random pending index, remove it (Vec::remove, not swap —
 //!         order of what remains matters to nothing here, but the reference
 //!         list-removal operation is what is being ported)
-//!         that piece's addChildren may enqueue more children
+//!         that piece's add-children step may enqueue more children
 //!     move_below_sea_level(sea_level, min_y, random, 10)
 //! until the tree is non-empty AND a PortalRoom got placed
 //! ```

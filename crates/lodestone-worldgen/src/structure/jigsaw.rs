@@ -299,7 +299,7 @@ pub struct JigsawBlockInfo {
     pub front: JigsawDirection,
     /// `top()` of the rotated `orientation`.
     pub top: JigsawDirection,
-    /// `joint`, defaulting by front axis (`getDefaultJointType`).
+    /// `joint`, defaulting by front axis.
     pub joint: JointType,
     /// `name`.
     pub name: JigsawText,
@@ -331,7 +331,7 @@ impl JigsawBlockInfo {
                 (JigsawDirection::parse(f), JigsawDirection::parse(t))
             });
         let nbt = info.nbt.as_ref();
-        // `getDefaultJointType`: a horizontal front defaults to ALIGNED, a
+        // Default joint type: a horizontal front defaults to ALIGNED, a
         // vertical one to ROLLABLE. Every village connection is horizontal, so an
         // implementation that defaulted everything to ROLLABLE would attach
         // upside-down houses and still look like it worked.
@@ -805,7 +805,7 @@ pub struct JigsawConfig {
     /// `start_jigsaw_name` — the named jigsaw the whole structure is anchored on
     /// (`ancient_city`'s `city_anchor`).
     pub start_jigsaw_name: Option<String>,
-    /// `size`, vanilla's `maxDepth`.
+    /// `size`, vanilla's maximum depth.
     pub max_depth: i32,
     /// `start_height`.
     pub start_height: HeightProvider,
@@ -936,7 +936,7 @@ struct PlacedPiece {
 /// per-chunk stream before the biome check, and the whole BFS continues from the
 /// same stream after it. Re-seeding in between (which is what every other
 /// [`StructureKind`](super::StructureKind) does, correctly, because their
-/// `findGenerationPoint` draws nothing) would restart the stream and produce a
+/// generation-point search draws nothing) would restart the stream and produce a
 /// different village.
 #[allow(missing_debug_implementations)]
 pub struct JigsawStub<R> {
@@ -1060,7 +1060,7 @@ pub fn begin<R: RandomSource>(
     })
 }
 
-/// The stub's lazy half: `addPieces`' BFS, then the piece list.
+/// The stub's lazy half: the piece-assembly BFS, then the piece list.
 ///
 /// Run **only after the biome filter passes**, which is what makes a
 /// biome-rejected jigsaw candidate consume exactly the draws vanilla's rejected
@@ -1097,9 +1097,9 @@ pub fn finish<R: RandomSource>(
     placer.into_pieces(config.waterlogging, ctx)
 }
 
-/// The `referencePos` every piece of a start is processed against:
-/// vanilla's structure-start place-in-chunk step's
-/// `new BlockPos(centre.getX(), pieces[0].boundingBox.minY(), centre.getZ())`,
+/// The reference position every piece of a start is processed against:
+/// vanilla's structure-start place-in-chunk step uses
+/// `(centre.x, pieces[0].bounding_box.min_y, centre.z)`,
 /// where `centre` is the **first** piece's box centre.
 ///
 /// A whole-start fact, computed once from the piece list rather than carried by
@@ -1654,7 +1654,7 @@ mod tests {
         assert_eq!(source.front.step(), [0, 0, 0]);
     }
 
-    /// `canAttach`'s three conditions, each falsified independently — including
+    /// The attach test's three conditions, each falsified independently — including
     /// the asymmetric one, which is `source.target == target.name` and **not** the
     /// reverse.
     #[test]
@@ -1887,11 +1887,11 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert!(distinct.len() >= 2, "position does not move the alias map");
 
-        // An empty binding list is `PoolAliasLookup.EMPTY`: identity, no random.
+        // An empty binding list is the empty lookup: identity, no random.
         assert_eq!(PoolAliasLookup::create(&[], pos, seed).lookup("a:melee"), "a:melee");
     }
 
-    /// `allTargets` reaches through a `random_group`, and `all_aliases` names the
+    /// The all-targets listing reaches through a `random_group`, and `all_aliases` names the
     /// ids the bundle deliberately has no document for.
     #[test]
     fn alias_targets_and_names_span_the_whole_binding_tree() {

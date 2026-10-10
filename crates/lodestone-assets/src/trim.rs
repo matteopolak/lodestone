@@ -75,14 +75,14 @@ pub const ARMOR_TRIMS_ATLAS_PATH: &str = "assets/minecraft/atlases/armor_trims.j
 
 /// One `trim_pattern` registry entry (`data/minecraft/trim_pattern/*.json`).
 ///
-/// `id` is both the registry name and the `assetId` path segment — every one
+/// `id` is both the registry name and the `asset_id` path segment — every one
 /// of 26.2's 18 patterns declares `"asset_id": "minecraft:<id>"` with `<id>`
 /// identical to its own file's stem, so there is no separate field to carry
 /// (unlike [`TrimMaterial`], whose *suffix* can differ from its id via the
 /// override table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrimPattern {
-    /// The registry name / `assetId` path segment, e.g. `"sentry"`.
+    /// The registry name / `asset_id` path segment, e.g. `"sentry"`.
     pub id: &'static str,
 }
 

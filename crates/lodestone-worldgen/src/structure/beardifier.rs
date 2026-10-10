@@ -72,7 +72,7 @@ pub struct Junction {
 ///
 /// A piece with `None` here is vanilla's own `else` branch for a non-jigsaw
 /// piece: it
-/// beards as a rigid box with `groundLevelDelta == 0` and contributes no
+/// beards as a rigid box with a ground-level delta of `0` and contributes no
 /// junctions. That is the correct answer for every coded piece, so this stays
 /// `Option` rather than gaining a "not jigsaw" variant.
 #[derive(Debug, Clone, Default)]
@@ -82,8 +82,8 @@ pub struct PieceBeard {
     /// it follows the terrain instead of flattening it — but its junctions still
     /// count.
     pub rigid: bool,
-    /// Vanilla's own ground-level-delta accessor — how far above the piece's `minY` its own floor
-    /// sits, from the template's `groundLevelDelta` marker.
+    /// How far above the piece's min Y its own floor
+    /// sits, from the template's ground-level-delta marker.
     pub ground_level_delta: i32,
     /// Vanilla's own junctions accessor.
     pub junctions: Vec<Junction>,

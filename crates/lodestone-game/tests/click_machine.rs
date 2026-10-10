@@ -140,8 +140,8 @@ fn throw_ctrl_q_drops_whole_slot() {
 
 /// Vanilla's own click-handler THROW step: `THROW` bails out entirely when
 /// `!player.can_drop_items()`, before taking anything from the slot. Vanilla
-/// gates it *inside* the `THROW` arm, unlike the outside-cursor drop (`PICKUP`
-/// with `slotIndex == -999`, `:404-412`), which drops unconditionally — so this
+/// gates it *inside* the throw arm, unlike the outside-cursor drop (pickup
+/// with slot index `-999`), which drops unconditionally — so this
 /// is a control specific to `Throw`, not a general "can't drop" gate.
 #[test]
 fn throw_is_a_noop_when_the_player_cannot_drop_items() {
@@ -192,9 +192,8 @@ fn hotbar_swap_exchanges_two_stacks() {
 
 // --- Off-hand key swap ---
 
-/// Same `Swap` mode, `buttonNum == 40` (vanilla's own click-handler SWAP
-/// step's guard: `buttonNum >= 0 && buttonNum < 9 ||
-/// buttonNum == 40`) — a distinct wire value from the hotbar keys, addressing
+/// Same `Swap` mode, button `40` (vanilla's swap guard accepts buttons
+/// `0..9` or `40`) — a distinct wire value from the hotbar keys, addressing
 /// [`lodestone_game::menu::OFFHAND_NATIVE`] instead of a hotbar index.
 #[test]
 fn offhand_swap_moves_between_slot_and_offhand() {

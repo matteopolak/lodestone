@@ -94,8 +94,8 @@ pub type Result<T> = std::result::Result<T, SkinTextureError>;
 /// Vanilla's `PlayerModelType` — which of the two player rigs a skin declares.
 ///
 /// See the module doc for the two-names-per-variant trap. `Wide` is the
-/// default for every absent or unrecognised declaration, matching
-/// `byLegacyServicesName`.
+/// default for every absent or unrecognised declaration, matching vanilla's
+/// legacy services-name lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlayerModelType {
     /// `WIDE("wide", "default")` — the "Steve" rig, 4px arms.

@@ -102,7 +102,7 @@ pub fn rabbit_model() -> EntityModelDef {
 }
 
 /// vanilla's own adult fox model's body-layer construction: head(+ears+nose), body(+tail), and 4 legs.
-/// `leftLeg`/`rightLeg` are each a single vanilla cube-list builder reused
+/// The left and right legs are each a single vanilla cube-list builder reused
 /// across the hind and front leg *on the same side* (identical box, distinct
 /// per-side texOffs); the sides are not related by `mirror()` at all. Sheet
 /// 48×32.
@@ -238,7 +238,7 @@ pub fn panda_model() -> EntityModelDef {
 /// reset, so `goatee` inherits `mirror=true` too. It's a zero-width box so
 /// this is visually inert, but transcribed faithfully rather than "corrected"
 /// away. Head also carries left_horn/right_horn/nose children (each
-/// independently toggleable via `hasLeftHorn`/`hasRightHorn` at runtime, both
+/// independently toggleable per horn at runtime, both
 /// baked here since this registry has no per-part visibility toggle). Sheet
 /// 64×64.
 pub fn goat_model() -> EntityModelDef {
@@ -399,7 +399,7 @@ pub fn bee_model() -> EntityModelDef {
 }
 
 /// vanilla's own adult turtle model's body-layer construction: head, body(shell+belly), egg_belly
-/// (visibility-toggled at runtime by `hasEgg`, baked unconditionally here) and
+/// (visibility-toggled at runtime when carrying an egg, baked unconditionally here) and
 /// 4 legs. Sheet 128×64.
 pub fn turtle_model() -> EntityModelDef {
     let root = PartDef::new(PartPose::ZERO)

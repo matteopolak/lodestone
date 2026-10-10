@@ -188,8 +188,8 @@ fn the_hotbar_still_has_it_after_the_screen_closes() {
 /// `container_set_slot` arriving **while another window is open** must reach the
 /// one inventory, so the open container's own player rows show it too.
 ///
-/// Vanilla gets this for free — `handleContainerSetSlot` routes container id `0`
-/// to `player.inventoryMenu`, whose slots reference the shared `Inventory`. Here
+/// Vanilla gets this for free — the set-slot handler routes container id `0`
+/// to the player's inventory menu, whose slots reference the shared inventory. Here
 /// it is a forward, so it needs a test.
 #[test]
 fn window_zero_set_slot_while_a_container_is_open_reaches_both_views() {

@@ -203,10 +203,10 @@ fn the_previewed_split_agrees_over_occupied_and_clamped_cells() {
     assert_agrees("occupied + clamped", &cells, cursor);
 }
 
-/// The creative stack-per-slot drag: every painted cell fills to `maxStackSize`,
+/// The creative stack-per-slot drag: every painted cell fills to its max stack size,
 /// and the previewed cursor is a **full stack regardless of what it
-/// distributed** (`recalculateQuickCraftRemaining`, `:251-252`, assigns
-/// `maxStackSize` outright rather than subtracting).
+/// distributed** (vanilla assigns the max stack size outright rather than
+/// subtracting).
 ///
 /// # The one number vanilla does not make agree, and why it is transcribed anyway
 ///

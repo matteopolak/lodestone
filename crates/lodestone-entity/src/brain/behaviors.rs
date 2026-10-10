@@ -753,7 +753,7 @@ impl Behavior for PrepareRam {
             return false;
         };
         // Nearest-first (the sensor's own contract), so the first id present
-        // in the live snapshot is vanilla's `findClosest`.
+        // in the live snapshot is vanilla's closest match.
         let ids = ids.clone();
         let nearby = mob.nearby_entities();
         let Some(target) = ids.iter().find_map(|id| nearby.iter().find(|e| e.id == *id)) else {
@@ -779,7 +779,7 @@ impl Behavior for PrepareRam {
         let live = mob.nearby_entities().into_iter().find(|e| e.id == target_id);
         let Some(live) = live else {
             // The target is no longer in the perceived set — vanilla's
-            // `canStillUse` reads `target.isAlive()`, which this seam cannot
+            // keep-using test reads the target's liveness, which this seam cannot
             // query directly; a target that vanished from perception stands
             // in for it.
             self.candidate = None;

@@ -108,7 +108,7 @@ fn tick_elytra_among_entities(
     nearby: &[crate::push::NearbyEntity],
     moving_slowly: bool,
 ) {
-    // onClimbable: vanilla stops fall-flying and reverts to the walking path.
+    // On a climbable: vanilla stops fall-flying and reverts to the walking path.
     if view.is_climbable(
         mth::floor(state.position.x),
         mth::floor(state.position.y),

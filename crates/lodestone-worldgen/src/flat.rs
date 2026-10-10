@@ -168,9 +168,8 @@ impl FlatLevelGeneratorSettings {
         })
     }
 
-    /// Sum of every layer's height — `FlatLevelGeneratorSettings
-    /// .validateHeight`'s left-hand side, checked there against
-    /// `DimensionType.Y_SIZE`. Exposed so a caller can run the same check
+    /// Sum of every layer's height — the left-hand side of vanilla's flat-settings
+    /// height validation, checked there against the dimension's total Y size. Exposed so a caller can run the same check
     /// against whichever dimension height it is placing into, rather than
     /// this crate assuming one.
     #[must_use]
