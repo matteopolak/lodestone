@@ -51,7 +51,7 @@ fn accepts_only_the_hosted_handshake_protocol() {
 #[test]
 fn join_position_chunk_and_block_update_match_protocol_5_layout() {
     let protocol = V5ServerProtocol;
-    let join = protocol.begin_play(0);
+    let join = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(0));
     let Some(ServerDirective::Send { packet_id, payload }) = join.first() else {
         panic!("join must begin with a packet");
     };

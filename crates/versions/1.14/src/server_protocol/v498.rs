@@ -179,27 +179,27 @@ impl ServerProtocol for V498ServerProtocol {
 
     fn begin_configuration(&self) -> Vec<ServerDirective> { Vec::new() }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         vec![
             send_498(play_498::clientbound::LOGIN, &JoinGameLegacy {
                 entity_id: 1,
-                game_mode: 0,
+                game_mode: join.game_mode_id(),
                 dimension: 0,
                 hashed_seed: 0,
                 max_players: 20,
                 level_type: "default".to_owned(),
-                view_distance: view_radius,
+                view_distance: join.view_distance,
                 reduced_debug_info: false,
                 enable_respawn_screen: true,
             }),
             send_498(play_498::clientbound::POSITION, &ClientboundPositionLook {
-                x: 8.0,
-                y: 100.0,
-                z: 8.0,
+                x: join.spawn.x,
+                y: join.spawn.y,
+                z: join.spawn.z,
                 yaw: 0.0,
                 pitch: 0.0,
                 flags: 0,
-                teleport_id: 0,
+                teleport_id: join.teleport_id,
             }),
         ]
     }

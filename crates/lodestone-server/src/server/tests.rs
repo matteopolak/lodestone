@@ -69,7 +69,7 @@ impl ServerProtocol for NetherPacketAdmissionProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, _join: &crate::protocol::JoinGame) -> Vec<ServerDirective> {
         Vec::new()
     }
 
@@ -104,7 +104,7 @@ impl ServerProtocol for RequestAdmissionProtocol {
     fn begin_configuration(&self) -> Vec<ServerDirective> {
         Vec::new()
     }
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, _join: &crate::protocol::JoinGame) -> Vec<ServerDirective> {
         Vec::new()
     }
     fn begin_chunk_batch(&self) -> ServerDirective {
@@ -434,7 +434,7 @@ impl ServerProtocol for RefusingChunkProtocol {
         unreachable!("these tests only write server directives")
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, _join: &crate::protocol::JoinGame) -> Vec<ServerDirective> {
         unreachable!("these tests only write server directives")
     }
 
@@ -515,8 +515,8 @@ impl ServerProtocol for InitialSeedFailureProtocol {
     fn begin_configuration(&self) -> Vec<ServerDirective> {
         RefusingChunkProtocol.begin_configuration()
     }
-    fn begin_play(&self, radius: i32) -> Vec<ServerDirective> {
-        RefusingChunkProtocol.begin_play(radius)
+    fn begin_play(&self, join: &crate::protocol::JoinGame) -> Vec<ServerDirective> {
+        RefusingChunkProtocol.begin_play(join)
     }
     fn begin_chunk_batch(&self) -> ServerDirective {
         RefusingChunkProtocol.begin_chunk_batch()
@@ -622,7 +622,7 @@ impl ServerProtocol for InitialWorkerProtocol {
         RefusingChunkProtocol.login_success(name, uuid)
     }
     fn begin_configuration(&self) -> Vec<ServerDirective> { Vec::new() }
-    fn begin_play(&self, _: i32) -> Vec<ServerDirective> { Vec::new() }
+    fn begin_play(&self, _join: &crate::protocol::JoinGame) -> Vec<ServerDirective> { Vec::new() }
     fn begin_chunk_batch(&self) -> ServerDirective { ServerDirective::None }
     fn encode_chunk(&self, _: i32, _: i32, _: &ChunkColumn) -> ServerDirective {
         panic!("initial packets must use owned preparation")
@@ -779,7 +779,7 @@ impl ServerProtocol for RetainedLifecycleProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, _join: &crate::protocol::JoinGame) -> Vec<ServerDirective> {
         Vec::new()
     }
 

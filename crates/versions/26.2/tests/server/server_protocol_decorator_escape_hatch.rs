@@ -168,8 +168,8 @@ impl<P: ServerProtocol> ServerProtocol for Decorator<P> {
         self.inner.begin_configuration()
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
-        self.inner.begin_play(view_radius)
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
+        self.inner.begin_play(join)
     }
 
     fn begin_chunk_batch(&self) -> ServerDirective {

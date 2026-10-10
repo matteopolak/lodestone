@@ -73,7 +73,7 @@ use uuid::Uuid;
 mod common;
 use common::unique_username;
 
-/// Full health, from `V770ServerProtocol::begin_play_at`'s fresh-spawn
+/// Full health, from `V770ServerProtocol::begin_play`'s fresh-spawn
 /// `SetHealth` and vanilla's max-health attribute default.
 const MAX_HEALTH: f32 = 20.0;
 

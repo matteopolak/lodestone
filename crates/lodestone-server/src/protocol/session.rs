@@ -7,6 +7,54 @@ use uuid::Uuid;
 
 use super::ResourcePackUrl;
 
+/// Everything a join sequence needs from the server: the values a family
+/// encodes into its login, spawn-position and initial-teleport packets.
+///
+/// [`ServerProtocol::begin_play`] takes this whole record so a family cannot
+/// silently ignore a field the server computed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JoinGame {
+    /// Chunk radius the client is told to render.
+    pub view_distance: i32,
+    /// Chunk radius the server simulates around the player.
+    pub simulation_distance: i32,
+    /// World-space feet position; also the chunk-cache centre.
+    pub spawn: Vec3,
+    /// The player's game mode at join.
+    pub mode: GameMode,
+    /// Acknowledgement id on the initial position packet, for families that
+    /// confirm teleports.
+    pub teleport_id: i32,
+}
+
+impl JoinGame {
+    /// The mode's id in the login packet's game-type field (survival 0 through
+    /// spectator 3).
+    #[must_use]
+    pub fn game_mode_id(&self) -> u8 {
+        match self.mode {
+            GameMode::Survival => 0,
+            GameMode::Creative => 1,
+            GameMode::Adventure => 2,
+            GameMode::Spectator => 3,
+        }
+    }
+
+    /// Join at the spawn-less fallback position `(8, 100, 8)` in survival with
+    /// the simulation distance equal to `view_distance`. For harnesses that
+    /// have no spawn search.
+    #[must_use]
+    pub fn at_default_spawn(view_distance: i32) -> Self {
+        Self {
+            view_distance,
+            simulation_distance: view_distance,
+            spawn: Vec3::new(8.0, 100.0, 8.0),
+            mode: GameMode::Survival,
+            teleport_id: 0,
+        }
+    }
+}
+
 /// The local player's movement abilities — the real per-player abilities
 /// record, as
 /// carried by the player-abilities packet.

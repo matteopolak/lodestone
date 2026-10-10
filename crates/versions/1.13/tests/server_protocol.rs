@@ -44,7 +44,7 @@ fn accepts_only_the_hosted_handshake_protocol() {
 #[test]
 fn join_position_chunk_and_block_update_match_protocol_404_fixtures() {
     let protocol = V404ServerProtocol;
-    let join = protocol.begin_play(8);
+    let join = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     let Some(ServerDirective::Send { packet_id, payload }) = join.first() else {
         panic!("play must begin with a join packet");
     };

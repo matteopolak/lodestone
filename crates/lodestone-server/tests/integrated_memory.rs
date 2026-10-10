@@ -107,7 +107,7 @@ impl ServerProtocol for FakeProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, _join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         Vec::new()
     }
 
@@ -422,7 +422,7 @@ fn entity_encoder_defaults_are_harmless_noops() {
         fn begin_configuration(&self) -> Vec<ServerDirective> {
             unimplemented!()
         }
-        fn begin_play(&self, _r: i32) -> Vec<ServerDirective> {
+        fn begin_play(&self, _join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
             unimplemented!()
         }
         fn begin_chunk_batch(&self) -> ServerDirective {

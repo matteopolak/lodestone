@@ -598,7 +598,7 @@ impl ServerProtocol for V766ServerProtocol {
         }]
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         vec![
             send(
                 play::clientbound::LOGIN,
@@ -607,8 +607,8 @@ impl ServerProtocol for V766ServerProtocol {
                     is_hardcore: false,
                     world_names: vec!["minecraft:overworld".to_owned()],
                     max_players: 20,
-                    view_distance: view_radius.max(1),
-                    simulation_distance: view_radius.max(1),
+                    view_distance: join.view_distance.max(1),
+                    simulation_distance: join.simulation_distance.max(1),
                     reduced_debug_info: false,
                     enable_respawn_screen: true,
                     do_limited_crafting: false,
@@ -616,7 +616,7 @@ impl ServerProtocol for V766ServerProtocol {
                         dimension: registry_index("minecraft:dimension_type", "minecraft:overworld"),
                         world_name: "minecraft:overworld".to_owned(),
                         hashed_seed: 0,
-                        game_mode: 0,
+                        game_mode: join.game_mode_id() as i8,
                         previous_game_mode: 255,
                         is_debug: false,
                         is_flat: true,
@@ -631,13 +631,13 @@ impl ServerProtocol for V766ServerProtocol {
             send(
                 play::clientbound::POSITION,
                 &ClientboundPositionLook {
-                    x: 8.0,
-                    y: 100.0,
-                    z: 8.0,
+                    x: join.spawn.x,
+                    y: join.spawn.y,
+                    z: join.spawn.z,
                     yaw: 0.0,
                     pitch: 0.0,
                     flags: 0,
-                    teleport_id: 0,
+                    teleport_id: join.teleport_id,
                 },
             ),
         ]

@@ -17,7 +17,7 @@ mod session;
 pub use codec::{ChunkEncodeError, ChunkEncoder, DetachedInitialPacketPrepare, DetachedLightCompute, DetachedSourceEncode, ResidentLightBatchCompute, ResidentLightFuture, ServerProtocol, WorldgenScope};
 pub use packets::{ServerBound, ServerDirective};
 pub use session::{
-    Abilities, BossBarSnapshot, EntitySnapshot, HolderVariantKind, MerchantOfferOut, MetadataField, PlayerListing,
+    Abilities, BossBarSnapshot, EntitySnapshot, HolderVariantKind, JoinGame, MerchantOfferOut, MetadataField, PlayerListing,
     ResourcePackPush,
 };
 
@@ -209,27 +209,26 @@ mod tests {
         fn encode_registry_data(&self) -> Vec<ServerDirective> {
             vec![send(4)]
         }
-        fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
-            vec![send(100 + view_radius)]
-        }
-        /// Encodes the **spawn** into the answer, not just the view radius, so
-        /// "the box forwarded `begin_play_at`" and "the box took the default,
-        /// which discards `spawn` and calls `begin_play`" are different values.
-        /// Without this override both sides would answer `send(100 + radius)` and
-        /// the parity assertion would pass with the forward missing. This test
-        /// uses a spawn value distinct from the default for that reason.
-        fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
-            let mode = match mode {
+        /// One directive per field, so a box that dropped or defaulted any
+        /// field answers with a different value than the inner protocol.
+        fn begin_play(&self, join: &JoinGame) -> Vec<ServerDirective> {
+            let mode = match join.mode {
                 GameMode::Survival => 0,
                 GameMode::Creative => 1,
                 GameMode::Adventure => 2,
                 GameMode::Spectator => 3,
             };
-            vec![send(
-                300 + view_radius + spawn.x as i32 + spawn.y as i32 + spawn.z as i32 + mode,
-            )]
+            vec![
+                send(100 + join.view_distance),
+                send(200 + join.simulation_distance),
+                send(join.spawn.x as i32),
+                send(join.spawn.y as i32),
+                send(join.spawn.z as i32),
+                send(300 + mode),
+                send(400 + join.teleport_id),
+            ]
         }
-        // Overridden for the same reason `begin_play_at` is: both have
+        // Overridden because both have
         // emit-nothing defaults, so a missing forward on the box would pass a
         // parity assertion built on the defaults.
         fn encode_game_mode(&self, _mode: GameMode) -> ServerDirective {
@@ -458,16 +457,23 @@ mod tests {
             boxed.encode_registry_data(),
             direct.encode_registry_data()
         );
-        assert_eq!(boxed.begin_play(7), direct.begin_play(7));
-        // This test covers the forwarding contract: `begin_play_at`'s default
-        // discards its `spawn` argument, so
-        // an unforwarded box answers with the family's hardcoded literal instead.
-        // `Numbered` overrides it, so the two sides differ unless the forward
-        // exists.
-        let spawn = Vec3::new(-101.0, 71.0, 202.0);
-        assert_eq!(
-            boxed.begin_play_at(7, spawn, GameMode::Creative),
-            direct.begin_play_at(7, spawn, GameMode::Creative)
+        // Every field differs from any fallback, so a box that drops or
+        // defaults one answers differently from the inner protocol.
+        let join = JoinGame {
+            view_distance: 7,
+            simulation_distance: 5,
+            spawn: Vec3::new(-101.0, 71.0, 202.0),
+            mode: GameMode::Creative,
+            teleport_id: 3,
+        };
+        assert_eq!(boxed.begin_play(&join), direct.begin_play(&join));
+        assert_ne!(
+            boxed.begin_play(&join),
+            boxed.begin_play(&JoinGame {
+                simulation_distance: 6,
+                ..join
+            }),
+            "the double must depend on simulation_distance"
         );
         assert_eq!(
             boxed.encode_game_mode(GameMode::Creative),
@@ -809,7 +815,7 @@ mod tests {
                 unreachable!("this fixture only encodes chunks")
             }
 
-            fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+            fn begin_play(&self, _join: &JoinGame) -> Vec<ServerDirective> {
                 unreachable!("this fixture only encodes chunks")
             }
 

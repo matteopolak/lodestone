@@ -118,7 +118,7 @@ impl ServerProtocol for WatchingProtocol {
     fn begin_configuration(&self) -> Vec<ServerDirective> {
         Vec::new()
     }
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, _join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         self.0.in_play.store(true, Ordering::SeqCst);
         Vec::new()
     }

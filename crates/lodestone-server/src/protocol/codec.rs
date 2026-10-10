@@ -16,7 +16,7 @@ use crate::chunk::{ChunkColumn, ColumnLightSettlement};
 use crate::dimension::Dimension;
 
 use super::{
-    Abilities, EntitySnapshot, MerchantOfferOut, MetadataField, PlayerListing, ResourcePackPush,
+    Abilities, EntitySnapshot, JoinGame, MerchantOfferOut, MetadataField, PlayerListing, ResourcePackPush,
     ServerBound, ServerDirective,
 };
 
@@ -370,47 +370,20 @@ pub trait ServerProtocol: Send + Sync {
     /// Emits the join sequence once the connection has moved into
     /// [`State::Play`] (in reply to [`ServerBound::ConfigurationFinished`]):
     /// the join-game packet, default spawn position, initial teleport, and
-    /// chunk-cache center. Does not send any chunks; the loop calls
-    /// [`begin_chunk_batch`](Self::begin_chunk_batch)/
+    /// chunk-cache center, all derived from `join`. Does not send any chunks;
+    /// the loop calls [`begin_chunk_batch`](Self::begin_chunk_batch)/
     /// [`encode_chunk`](Self::encode_chunk)/
     /// [`end_chunk_batch`](Self::end_chunk_batch) separately so it can drive
     /// the view radius itself.
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective>;
-
-    /// Like [`begin_play`](Self::begin_play), but derives the spawn teleport
-    /// and default-spawn-position coordinates from `spawn` (world-space, feet
-    /// position) rather than from hardcoded version-specific literals.
-    /// Spawn Y is terrain-derived, and the server computes it; the
-    /// protocol only needs to encode it. The chunk-cache center is also
-    /// derived from `spawn` rather than assumed to be `(0, 0)`.
     ///
-    /// The default delegates to [`begin_play`](Self::begin_play), so a family
-    /// that has not adopted terrain-derived spawn yet keeps its existing
-    /// hardcoded join behaviour unchanged.
-    fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
-        let _ = (spawn, mode);
-        self.begin_play(view_radius)
-    }
+    /// A family encodes every [`JoinGame`] field its wire format carries.
+    fn begin_play(&self, join: &JoinGame) -> Vec<ServerDirective>;
 
     /// Whether this family attaches an acknowledgement id to clientbound player
     /// position packets. The server only waits for confirmations when this is
     /// true, so older families retain their existing movement contract.
     fn uses_teleport_acknowledgements(&self) -> bool {
         false
-    }
-
-    /// Like [`begin_play_at`](Self::begin_play_at), but gives an
-    /// acknowledgement-capable family the id its initial position packet must
-    /// carry. The default deliberately retains the legacy join sequence.
-    fn begin_play_at_with_teleport_id(
-        &self,
-        view_radius: i32,
-        spawn: Vec3,
-        mode: GameMode,
-        teleport_id: i32,
-    ) -> Vec<ServerDirective> {
-        let _ = teleport_id;
-        self.begin_play_at(view_radius, spawn, mode)
     }
 
     /// Encodes a game-mode change for the local player (vanilla
@@ -1410,7 +1383,7 @@ pub trait ServerProtocol: Send + Sync {
     ///
     /// # Why this did not already exist
     ///
-    /// The join sequence (`begin_play_at`) and the respawn path
+    /// The join sequence (`begin_play`) and the respawn path
     /// ([`encode_respawn`](Self::encode_respawn)) each build this exact packet
     /// with a free function private to their own implementing module, because
     /// neither needed it exposed through the trait. `dispatch_play_packet` is
@@ -1980,38 +1953,15 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_system_chat_component(message)
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
-        (**self).begin_play(view_radius)
-    }
-
-    // **The forwarding contract requires exactly this three-line
-    // delegation.** `begin_play_at` has a default that discards `spawn` and calls
-    // `begin_play`, so without this the box silently took that default: the
-    // spiral search ran, `server.rs` passed its answer in, and the boxed
-    // protocol threw it away and emitted `V770ServerProtocol::begin_play`'s
-    // hardcoded `(8, 100, 8)`. Singleplayer is the *only* path that boxes the
-    // protocol, so the symptom was "every join lands at y=100 at (8, 8)" with a
-    // fully correct spawn search sitting one call frame away — and no live
-    // oracle covers the boxed path, which is what the parity test below is for.
-    fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
-        (**self).begin_play_at(view_radius, spawn, mode)
+    fn begin_play(&self, join: &JoinGame) -> Vec<ServerDirective> {
+        (**self).begin_play(join)
     }
 
     fn uses_teleport_acknowledgements(&self) -> bool {
         (**self).uses_teleport_acknowledgements()
     }
 
-    fn begin_play_at_with_teleport_id(
-        &self,
-        view_radius: i32,
-        spawn: Vec3,
-        mode: GameMode,
-        teleport_id: i32,
-    ) -> Vec<ServerDirective> {
-        (**self).begin_play_at_with_teleport_id(view_radius, spawn, mode, teleport_id)
-    }
-
-    // Forwarded for the same reason `begin_play_at` is: both have defaults that
+    // Forwarded because both have defaults that
     // emit nothing, so a missing forward here would silently mute the game-mode
     // and abilities packets on the singleplayer (boxed) path alone.
     fn encode_game_mode(&self, mode: GameMode) -> ServerDirective {
@@ -2462,7 +2412,7 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
     // an emit-nothing default and no forward, so a boxed protocol — i.e. every
     // singleplayer session — produced **no sounds, no level events and no
     // particles at all**, silently, while a directly-owned protocol emitted them
-    // normally. Same shape as `begin_play_at` above, and the same reason it went
+    // normally. The same shape as the join forward, and the same reason it went
     // unnoticed: the drain site calls `encode_world_effect` and gets a
     // `ServerDirective::None` that is indistinguishable from "nothing happened".
     fn encode_sound(

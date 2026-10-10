@@ -66,7 +66,7 @@ pub(super) async fn publish_health<T, P>(
     // Every caller passes `LOCAL_PLAYER_ENTITY_ID`, never a `PlayerRegistry`
     // ticket id: every packet built from this reaches `conn` directly, this
     // connection's own socket, and the client only recognises itself under
-    // the constant its own login entity-id field (`begin_play_at`) claimed —
+    // the constant its own login entity-id field (`begin_play`) claimed —
     // see the call sites' own comments. Kept as a plain parameter rather than
     // inlining the constant here so a future caller broadcasting to *other*
     // connections is not tempted to reuse this function for that; it never
@@ -239,7 +239,7 @@ where
             Vec3::new(x, y, z),
             // Always `LOCAL_PLAYER_ENTITY_ID`, never the registry ticket's id:
             // this packet goes straight to `conn`, this player's own socket,
-            // and vanilla's own login entity-id field (`begin_play_at`) always claims that
+            // and vanilla's own login entity-id field (`begin_play`) always claims that
             // constant regardless of whether a `PlayerRegistry` exists — see
             // `LOCAL_PLAYER_ENTITY_ID`'s own doc comment. The ticket's real id
             // is for *other* connections' view of this player, never this one.

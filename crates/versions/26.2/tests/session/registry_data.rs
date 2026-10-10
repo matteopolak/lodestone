@@ -799,7 +799,7 @@ fn the_server_protocol_default_emits_no_registry_data() {
             unreachable!("this control never drives a join")
         }
 
-        fn begin_play(&self, _entity_id: i32) -> Vec<lodestone_server::ServerDirective> {
+        fn begin_play(&self, _join: &lodestone_server::JoinGame) -> Vec<lodestone_server::ServerDirective> {
             unreachable!("this control never drives a join")
         }
 

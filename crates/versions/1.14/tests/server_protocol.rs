@@ -514,7 +514,7 @@ fn protocol_498_accepts_its_handshake_and_emits_legacy_join() {
     assert!(!protocol.has_configuration_phase());
     assert!(protocol.begin_configuration().is_empty());
 
-    let play = protocol.begin_play(8);
+    let play = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     let ServerDirective::Send { packet_id, payload } = &play[0] else {
         panic!("begin_play must send a join packet");
     };
@@ -534,7 +534,7 @@ fn protocol_498_accepts_its_handshake_and_emits_legacy_join() {
 #[test]
 fn protocol_498_emits_the_reference_legacy_join_body() {
     let protocol = V498ServerProtocol;
-    let ServerDirective::Send { packet_id, payload } = &protocol.begin_play(8)[0] else {
+    let ServerDirective::Send { packet_id, payload } = &protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8))[0] else {
         panic!("begin_play must start with a join packet");
     };
 
@@ -678,7 +678,7 @@ fn protocol_578_accepts_its_handshake_and_transitions_directly_to_play() {
         .any(|directive| matches!(directive, ServerDirective::SetCompression(256))));
     assert!(!protocol.has_configuration_phase());
     assert!(protocol.begin_configuration().is_empty());
-    assert_eq!(protocol.begin_play(8).len(), 2);
+    assert_eq!(protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8)).len(), 2);
 }
 
 /// The 1.15.2 join keeps 1.14.4's prefix, then adds a big-endian seed hash
@@ -687,7 +687,7 @@ fn protocol_578_accepts_its_handshake_and_transitions_directly_to_play() {
 #[test]
 fn protocol_578_emits_the_reference_legacy_join_body() {
     let protocol = V578ServerProtocol;
-    let ServerDirective::Send { packet_id, payload } = &protocol.begin_play(8)[0] else {
+    let ServerDirective::Send { packet_id, payload } = &protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8))[0] else {
         panic!("begin_play must start with a join packet");
     };
 
@@ -804,7 +804,7 @@ fn protocol_754_accepts_its_handshake_and_emits_binary_login_success() {
     assert_eq!(success.uuid, uuid);
     assert_eq!(success.username, "player");
 
-    let play = protocol.begin_play(8);
+    let play = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     let ServerDirective::Send { packet_id, payload } = &play[0] else {
         panic!("begin_play must send a join packet");
     };
@@ -823,7 +823,7 @@ fn protocol_754_accepts_its_handshake_and_emits_binary_login_success() {
 #[test]
 fn protocol_754_emits_the_reference_join_body() {
     let protocol = V754ServerProtocol;
-    let ServerDirective::Send { packet_id, payload } = &protocol.begin_play(8)[0] else {
+    let ServerDirective::Send { packet_id, payload } = &protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8))[0] else {
         panic!("begin_play must start with a join packet");
     };
 

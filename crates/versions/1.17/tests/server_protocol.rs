@@ -576,7 +576,7 @@ fn protocol_756_uses_its_capture_ids_and_encodes_a_1_17_chunk() {
     );
     assert!(!protocol.has_configuration_phase());
 
-    let play = protocol.begin_play(8);
+    let play = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     let ServerDirective::Send { packet_id, payload } = &play[0] else {
         panic!("begin_play must start with join");
     };
@@ -654,7 +654,7 @@ fn protocol_758_uses_its_capture_ids_and_encodes_an_inline_light_chunk() {
         ServerBound::Ignored
     );
 
-    let play = protocol.begin_play(8);
+    let play = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     let ServerDirective::Send { packet_id, payload } = &play[0] else {
         panic!("begin_play must start with join");
     };

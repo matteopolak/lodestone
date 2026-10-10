@@ -5,7 +5,7 @@
 //! `crate::server`'s `join_view_rings` yields Chebyshev-ring **offsets**
 //! `(dx, dz)`, and the join loop handed them straight to `encode_chunk` as
 //! absolute chunk coordinates. So the square that went out was always centred on
-//! chunk `(0, 0)`, while `begin_play_at` teleported the player to the real spawn
+//! chunk `(0, 0)`, while `begin_play` teleported the player to the real spawn
 //! and `ViewTracker::new` seeded its "already sent" set around the player's own
 //! column. Three consequences, all reported by the owner as one symptom:
 //!
@@ -46,7 +46,6 @@ use std::sync::Mutex;
 
 use lodestone_core::{Reader, State, Writer};
 use lodestone_data::block_states::StateId;
-use lodestone_model::{GameMode, Vec3};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, ServerBound,
@@ -169,29 +168,20 @@ impl ServerProtocol for CoordProto {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
-        Vec::new()
-    }
-
     /// The announcing arm. `encode_chunk_cache_center` is never called by
     /// `serve_connection` directly — in the real families it is emitted from
-    /// inside `begin_play_at`, which is where the spawn position is in scope, so
+    /// inside `begin_play`, which is where the spawn position is in scope, so
     /// a double that does not override this one records nothing.
     ///
-    /// The `/ 16.0` floor is transcribed from `V770ServerProtocol::begin_play_at`,
+    /// The `/ 16.0` floor is transcribed from the real join,
     /// which is the point: this arm's only input is the `spawn` the server passed
     /// down, and the other arm's only input is the ring walk. Two derivations from
     /// two different places in the join, which is what makes their agreement worth
     /// asserting — it is not a round trip through one expression.
-    fn begin_play_at(
-        &self,
-        _view_radius: i32,
-        spawn: Vec3,
-        _mode: GameMode,
-    ) -> Vec<ServerDirective> {
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         vec![self.encode_chunk_cache_center(
-            (spawn.x / 16.0).floor() as i32,
-            (spawn.z / 16.0).floor() as i32,
+            (join.spawn.x / 16.0).floor() as i32,
+            (join.spawn.z / 16.0).floor() as i32,
         )]
     }
 

@@ -63,7 +63,7 @@ impl ServerProtocol for ProbeProtocol {
 
     fn begin_configuration(&self) -> Vec<ServerDirective> { Vec::new() }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> { Vec::new() }
+    fn begin_play(&self, _join: &lodestone_server::JoinGame) -> Vec<ServerDirective> { Vec::new() }
 
     fn begin_chunk_batch(&self) -> ServerDirective { ServerDirective::None }
 

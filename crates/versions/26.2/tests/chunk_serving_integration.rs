@@ -132,8 +132,8 @@ impl ServerProtocol for TracingProtocol {
         V770ServerProtocol.encode_registry_data()
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
-        V770ServerProtocol.begin_play(view_radius)
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
+        V770ServerProtocol.begin_play(join)
     }
 
     fn begin_chunk_batch(&self) -> ServerDirective {

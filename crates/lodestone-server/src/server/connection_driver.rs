@@ -559,12 +559,13 @@ where
                 let initial_teleport_id = proto
                     .uses_teleport_acknowledgements()
                     .then_some(i32::from(restored_other_dimension));
-                for directive in proto.begin_play_at_with_teleport_id(
-                    view_radius,
-                    join_pos,
-                    game_mode,
-                    0,
-                ) {
+                for directive in proto.begin_play(&crate::protocol::JoinGame {
+                    view_distance: view_radius,
+                    simulation_distance: world.simulation_distance(),
+                    spawn: join_pos,
+                    mode: game_mode,
+                    teleport_id: 0,
+                }) {
                     apply(conn, &mut state, directive).await?;
                 }
                 if restored_other_dimension {

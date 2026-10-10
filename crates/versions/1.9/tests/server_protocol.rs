@@ -69,7 +69,7 @@ fn protocol_110_uses_its_captured_ids_and_rejects_1_11_only_states() {
         ServerBound::Ignored
     );
 
-    let join = protocol.begin_play(8);
+    let join = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     assert!(matches!(
         join.first(),
         Some(ServerDirective::Send { packet_id: 35, .. })
@@ -153,7 +153,7 @@ fn protocol_210_uses_its_captured_ids_and_rejects_1_11_only_states() {
         ServerBound::Ignored
     );
 
-    let join = protocol.begin_play(8);
+    let join = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     assert!(matches!(
         join.first(),
         Some(ServerDirective::Send { packet_id: 35, .. })
@@ -237,7 +237,7 @@ fn protocol_316_uses_its_captured_ids_and_rejects_1_12_only_states() {
         ServerBound::Ignored
     );
 
-    let join = protocol.begin_play(8);
+    let join = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     assert!(matches!(
         join.first(),
         Some(ServerDirective::Send { packet_id: 35, .. })
@@ -662,7 +662,7 @@ fn protocol_340_use_entity_forms_reach_shared_entity_consumers() {
 #[test]
 fn play_join_chunk_and_block_update_have_340_wire_ids() {
     let protocol = V340ServerProtocol;
-    let join = protocol.begin_play(8);
+    let join = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     let Some(ServerDirective::Send { packet_id, payload }) = join.first() else {
         panic!("join must begin with a packet");
     };

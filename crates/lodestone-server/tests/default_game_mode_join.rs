@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 use lodestone_core::{Reader, State, Writer};
 use lodestone_data::block_states::StateId;
-use lodestone_model::{GameMode, Vec3};
+use lodestone_model::GameMode;
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     AccessHandle, AccessLists, Abilities, BlockEntityHandle, ChunkColumn, ChunkSource,
@@ -63,7 +63,7 @@ impl ChunkSource for FlatSource {
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
-/// Emits only what this gate reads: the game mode `begin_play_at` was called
+/// Emits only what this gate reads: the game mode `begin_play` was called
 /// with. A double that overrode nothing else would record nothing, exactly
 /// like `join_view_centre.rs`'s `CoordProto`.
 #[derive(Default)]
@@ -97,11 +97,8 @@ impl ServerProtocol for ModeProto {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
-        Vec::new()
-    }
-
-    fn begin_play_at(&self, _view_radius: i32, _spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
+        let mode = join.mode;
         *self.delivered_mode.lock().expect("mode lock") = Some(mode);
         let mut w = Writer::default();
         w.u8(mode as u8);
@@ -126,7 +123,7 @@ impl ServerProtocol for ModeProto {
 }
 
 /// Drives one real join through `serve_connection_with_access_and_state` and
-/// returns the `GameMode` `begin_play_at` was actually called with.
+/// returns the `GameMode` `begin_play` was actually called with.
 async fn join_and_read_mode(world: &WorldStateHandle) -> GameMode {
     let (client_end, server_end) = memory_pair();
     let source = FlatSource;

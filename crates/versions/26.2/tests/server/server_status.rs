@@ -257,7 +257,7 @@ impl ServerProtocol for UnwiredStatusProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, _join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         Vec::new()
     }
 

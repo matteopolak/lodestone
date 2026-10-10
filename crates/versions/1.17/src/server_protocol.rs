@@ -563,14 +563,14 @@ impl ServerProtocol for V756ServerProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         vec![
             send(
                 play::clientbound::LOGIN,
                 &JoinGame {
                     entity_id: 1,
                     is_hardcore: false,
-                    game_mode: 0,
+                    game_mode: join.game_mode_id(),
                     previous_game_mode: -1,
                     world_names: vec!["minecraft:overworld".to_owned()],
                     dimension_codec: dimension_codec(),
@@ -578,8 +578,8 @@ impl ServerProtocol for V756ServerProtocol {
                     world_name: "minecraft:overworld".to_owned(),
                     hashed_seed: 0,
                     max_players: 20,
-                    view_distance: view_radius,
-                    simulation_distance: view_radius,
+                    view_distance: join.view_distance,
+                    simulation_distance: join.simulation_distance,
                     reduced_debug_info: false,
                     enable_respawn_screen: true,
                     is_debug: false,
@@ -589,13 +589,13 @@ impl ServerProtocol for V756ServerProtocol {
             send(
                 play::clientbound::POSITION,
                 &ClientboundPositionLook {
-                    x: 8.0,
-                    y: 100.0,
-                    z: 8.0,
+                    x: join.spawn.x,
+                    y: join.spawn.y,
+                    z: join.spawn.z,
                     yaw: 0.0,
                     pitch: 0.0,
                     flags: 0,
-                    teleport_id: 0,
+                    teleport_id: join.teleport_id,
                     dismount_vehicle: false,
                 },
             ),
@@ -1116,14 +1116,14 @@ impl ServerProtocol for V758ServerProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         vec![
             send_758(
                 play_758::clientbound::LOGIN,
                 &JoinGame {
                     entity_id: 1,
                     is_hardcore: false,
-                    game_mode: 0,
+                    game_mode: join.game_mode_id(),
                     previous_game_mode: -1,
                     world_names: vec!["minecraft:overworld".to_owned()],
                     dimension_codec: dimension_codec(),
@@ -1131,8 +1131,8 @@ impl ServerProtocol for V758ServerProtocol {
                     world_name: "minecraft:overworld".to_owned(),
                     hashed_seed: 0,
                     max_players: 20,
-                    view_distance: view_radius,
-                    simulation_distance: view_radius,
+                    view_distance: join.view_distance,
+                    simulation_distance: join.simulation_distance,
                     reduced_debug_info: false,
                     enable_respawn_screen: true,
                     is_debug: false,
@@ -1142,13 +1142,13 @@ impl ServerProtocol for V758ServerProtocol {
             send_758(
                 play_758::clientbound::POSITION,
                 &ClientboundPositionLook {
-                    x: 8.0,
-                    y: 100.0,
-                    z: 8.0,
+                    x: join.spawn.x,
+                    y: join.spawn.y,
+                    z: join.spawn.z,
                     yaw: 0.0,
                     pitch: 0.0,
                     flags: 0,
-                    teleport_id: 0,
+                    teleport_id: join.teleport_id,
                     dismount_vehicle: false,
                 },
             ),

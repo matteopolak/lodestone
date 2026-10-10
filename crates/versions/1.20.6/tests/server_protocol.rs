@@ -65,7 +65,7 @@ fn hosted_configuration_matches_the_full_oracle_registry_manifest() {
         ("minecraft:worldgen/biome".to_owned(), 64),
     ]);
     assert_eq!(registries, expected_registry_sizes);
-    let play = protocol.begin_play(7);
+    let play = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(7));
     let ServerDirective::Send { packet_id, payload } = &play[0] else { panic!("join"); };
     assert_eq!(*packet_id, 43);
     let mut reader = Reader::new(payload);

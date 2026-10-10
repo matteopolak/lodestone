@@ -190,18 +190,9 @@ impl ServerProtocol for FakeProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
-        Vec::new()
-    }
-
-    fn begin_play_at(
-        &self,
-        _view_radius: i32,
-        _spawn: Vec3,
-        mode: GameMode,
-    ) -> Vec<ServerDirective> {
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         let mut w = Writer::default();
-        w.u8(mode as u8);
+        w.u8(join.mode as u8);
         vec![ServerDirective::Send {
             packet_id: GAME_MODE_S2C,
             payload: w.as_slice().to_vec(),

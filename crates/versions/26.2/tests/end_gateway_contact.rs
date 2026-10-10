@@ -15,7 +15,7 @@ use lodestone_client::{
 };
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
-use lodestone_model::{GameMode, Rotation, Vec3};
+use lodestone_model::{Rotation, Vec3};
 use lodestone_server::dimension::Dimension;
 use lodestone_server::{
     BlockEntity, BlockEntityHandle, ChunkColumn, ChunkSource, ChunkEncodeError, MobHandle,
@@ -54,27 +54,12 @@ impl ServerProtocol for FixtureProtocol {
         self.0.encode_registry_data()
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
-        self.0.begin_play(view_radius)
-    }
-
-    fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
-        self.0.begin_play_at(view_radius, spawn, mode)
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
+        self.0.begin_play(join)
     }
 
     fn uses_teleport_acknowledgements(&self) -> bool {
         self.0.uses_teleport_acknowledgements()
-    }
-
-    fn begin_play_at_with_teleport_id(
-        &self,
-        view_radius: i32,
-        spawn: Vec3,
-        mode: GameMode,
-        teleport_id: i32,
-    ) -> Vec<ServerDirective> {
-        self.0
-            .begin_play_at_with_teleport_id(view_radius, spawn, mode, teleport_id)
     }
 
     fn encode_teleport_with_id(

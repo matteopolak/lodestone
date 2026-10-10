@@ -366,7 +366,7 @@ impl ServerProtocol for FakeProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, _join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         Vec::new()
     }
 
@@ -648,8 +648,8 @@ impl ServerProtocol for LegacyProtocol {
         FakeProtocol.begin_configuration()
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
-        FakeProtocol.begin_play(view_radius)
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
+        FakeProtocol.begin_play(join)
     }
 
     fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
@@ -718,8 +718,8 @@ impl ServerProtocol for OnlineLegacyProtocol {
         LegacyProtocol.begin_configuration()
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
-        LegacyProtocol.begin_play(view_radius)
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
+        LegacyProtocol.begin_play(join)
     }
 
     fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {

@@ -88,7 +88,7 @@
 //! The hardcoded spawn altitude is a real defect in its own right — on normal
 //! terrain, whose surface is nearer y=64, it puts every joining player in the air
 //! by construction — but it is a separate defect, now fixed: spawn Y
-//! comes from the level's respawn-position finder and `begin_play_at` carries
+//! comes from the level's respawn-position finder and `begin_play` carries
 //! the terrain-derived position through the protocol seam.
 
 use std::time::Duration;

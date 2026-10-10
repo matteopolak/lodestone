@@ -982,13 +982,13 @@ fn login_success(
     ]
 }
 
-fn begin_play(ids: ServerPacketIds, ctx: Ctx, protocol: i32) -> Vec<ServerDirective> {
+fn begin_play(ids: ServerPacketIds, ctx: Ctx, protocol: i32, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
     vec![
         send(
             ids.join,
             &JoinGame {
                 entity_id: 1,
-                game_mode: 0,
+                game_mode: join.game_mode_id(),
                 dimension: 0,
                 difficulty: 2,
                 max_players: 20,
@@ -1001,13 +1001,13 @@ fn begin_play(ids: ServerPacketIds, ctx: Ctx, protocol: i32) -> Vec<ServerDirect
         send(
             ids.position,
             &ClientboundPositionLook {
-                x: 8.0,
-                y: 100.0,
-                z: 8.0,
+                x: join.spawn.x,
+                y: join.spawn.y,
+                z: join.spawn.z,
                 yaw: 0.0,
                 pitch: 0.0,
                 flags: 0,
-                teleport_id: 0,
+                teleport_id: join.teleport_id,
             },
             ctx,
             protocol,
@@ -1140,8 +1140,8 @@ macro_rules! impl_server_protocol {
                 Vec::new()
             }
 
-            fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
-                begin_play($ids, $ctx, $protocol)
+            fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
+                begin_play($ids, $ctx, $protocol, join)
             }
 
             fn uses_teleport_acknowledgements(&self) -> bool {

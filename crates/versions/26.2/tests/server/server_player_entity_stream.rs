@@ -454,14 +454,8 @@ async fn two_connections_see_each_other_as_player_entities() {
     // uninitialised `Vec3::default()`) rather than at the join spawn point
     // cannot pass.
     //
-    // This expected `y = 100.0` and had to change. `100.0` is
-    // `ServerProtocol::begin_play`'s *default* spawn
-    // (`server_protocol.rs`'s `begin_play_at(view_radius, Vec3::new(8.0, 100.0,
-    // 8.0))`), but `serve_connection` does not use that default: it now
-    // calls `begin_play_at` with the result of
-    // `world_spawn::find_initial_spawn`, a real search over the source. Nothing in
-    // the adapter changed — the root cause is entirely on the server side, and the
-    // constant here was a stale copy of a default this path stopped taking.
+    // The expected height is not `100.0`: `serve_connection` joins at the
+    // result of `world_spawn::find_initial_spawn`, a search over the source.
     //
     // For [`AirSource`] that search finds no solid block in any of its 121 spiral
     // candidates, so it returns its documented full-invalid-box fallback of
@@ -489,7 +483,7 @@ async fn two_connections_see_each_other_as_player_entities() {
             GENERATOR_SPAWN_HEIGHT,
             SPAWN_ANCHOR_XZ + 0.5,
         ),
-        "A's entity must stand at the join spawn position `begin_play_at` teleported A to — \
+        "A's entity must stand at the join spawn position `begin_play` teleported A to — \
          `find_initial_spawn`'s fallback for a source with no solid block anywhere"
     );
     assert_ne!(

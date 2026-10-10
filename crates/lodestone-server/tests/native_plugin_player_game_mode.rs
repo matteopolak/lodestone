@@ -62,12 +62,8 @@ impl ServerProtocol for ModeProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
-        Vec::new()
-    }
-
-    fn begin_play_at(&self, _view_radius: i32, _spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
-        vec![mode_directive(mode)]
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
+        vec![mode_directive(join.mode)]
     }
 
     fn encode_game_mode(&self, mode: GameMode) -> ServerDirective {

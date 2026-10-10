@@ -63,7 +63,7 @@ use lodestone_model::{
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, ColumnLightSettlement,
-    EntitySnapshot, HOTBAR_SIZE, RetainedLightStatus,
+    EntitySnapshot, HOTBAR_SIZE, JoinGame, RetainedLightStatus,
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MerchantOfferOut, MetadataField, PlayerListing,
     ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
     WorldBorder, WorldgenScope,
@@ -3529,35 +3529,25 @@ impl ServerProtocol for V770ServerProtocol {
         )]
     }
 
-    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
-        // The hardcoded fallback spawn — see the module doc
-        // comment for why these unitless numbers exist. Delegates to
-        // `begin_play_at` so the body lives in one place.
-        self.begin_play_at(view_radius, Vec3::new(8.0, 100.0, 8.0), GameMode::Survival)
-    }
-
-    fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
-        self.begin_play_at_with_teleport_id(view_radius, spawn, mode, 0)
-    }
-
     fn uses_teleport_acknowledgements(&self) -> bool {
         true
     }
 
-    fn begin_play_at_with_teleport_id(
-        &self,
-        view_radius: i32,
-        spawn: Vec3,
-        mode: GameMode,
-        teleport_id: i32,
-    ) -> Vec<ServerDirective> {
+    fn begin_play(&self, join: &JoinGame) -> Vec<ServerDirective> {
+        let JoinGame {
+            view_distance,
+            simulation_distance,
+            spawn,
+            mode,
+            teleport_id,
+        } = *join;
         let login = GameLogin {
             entity_id: LOCAL_PLAYER_ENTITY_ID,
             hardcore: false,
             levels: vec!["minecraft:overworld".to_string()],
             max_players: 20,
-            view_distance: view_radius.max(1),
-            simulation_distance: view_radius.max(1),
+            view_distance: view_distance.max(1),
+            simulation_distance: simulation_distance.max(1),
             reduced_debug_info: false,
             show_death_screen: true,
             do_limited_crafting: false,
@@ -5292,7 +5282,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// `KEEP_ALL_DATA` only for a dimension change. `0` is what makes the client
     /// rebuild its player state, which is the whole point of the packet.
     ///
-    /// The fields that are not modelled carry `begin_play_at`'s own join values, so
+    /// The fields that are not modelled carry `begin_play`'s own join values, so
     /// a respawn cannot silently change the dimension window a chunk is framed
     /// against: same `dimension_type` holder id `0`, same `minecraft:overworld`,
     /// same `game_type` survival, same `sea_level`. `previous_game_type` is `-1`
@@ -5319,7 +5309,7 @@ impl ServerProtocol for V770ServerProtocol {
             send(play::clientbound::RESPAWN, &respawn),
             // The placement teleport. The player list's respawn moves the rebuilt
             // player entity itself; over the wire that is the same
-            // `player_position` packet `begin_play_at` sends at join, so the two
+            // `player_position` packet `begin_play` sends at join, so the two
             // paths agree by construction rather than by coincidence.
             ServerDirective::Send {
                 packet_id: play::clientbound::PLAYER_POSITION,
@@ -5684,7 +5674,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// For the full-size static default all three are the flat
     /// [`WorldBorder::size`] and the conversion is a no-op (`0 * 50`), exactly
     /// the state a vanilla client shows on join. Called from
-    /// [`begin_play_at`](Self::begin_play_at) between the `login` and
+    /// [`begin_play`](Self::begin_play) between the `login` and
     /// `set_default_spawn_position` packets.
     fn encode_initialize_border(&self, border: &WorldBorder) -> ServerDirective {
         send(

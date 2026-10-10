@@ -585,13 +585,13 @@ impl ServerProtocol for V47ServerProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, join: &lodestone_server::JoinGame) -> Vec<ServerDirective> {
         vec![
             send(
                 play::clientbound::LOGIN,
                 &JoinGame {
                     entity_id: 1,
-                    game_mode: 0,
+                    game_mode: join.game_mode_id(),
                     dimension: 0,
                     difficulty: 2,
                     max_players: 20,
@@ -602,9 +602,9 @@ impl ServerProtocol for V47ServerProtocol {
             send(
                 play::clientbound::POSITION,
                 &ClientboundPositionLook {
-                    x: 8.0,
-                    y: 100.0,
-                    z: 8.0,
+                    x: join.spawn.x,
+                    y: join.spawn.y,
+                    z: join.spawn.z,
                     yaw: 0.0,
                     pitch: 0.0,
                     flags: 0,

@@ -75,7 +75,7 @@ impl ServerProtocol for TagProto {
     fn begin_configuration(&self) -> Vec<ServerDirective> {
         unimplemented!()
     }
-    fn begin_play(&self, _r: i32) -> Vec<ServerDirective> {
+    fn begin_play(&self, _join: &crate::protocol::JoinGame) -> Vec<ServerDirective> {
         unimplemented!()
     }
     fn begin_chunk_batch(&self) -> ServerDirective {

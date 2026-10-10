@@ -64,7 +64,7 @@ fn protocol_762_uses_its_capture_ids_and_encodes_a_registry_shaped_chunk() {
     );
     assert!(!protocol.has_configuration_phase());
 
-    let play_directives = protocol.begin_play(8);
+    let play_directives = protocol.begin_play(&lodestone_server::JoinGame::at_default_spawn(8));
     let ServerDirective::Send { packet_id, payload } = &play_directives[0] else {
         panic!("begin_play must start with join");
     };

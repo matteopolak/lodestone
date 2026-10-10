@@ -182,7 +182,7 @@ impl lodestone_server::ServerProtocol for FakeProtocol {
         Vec::new()
     }
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<lodestone_server::ServerDirective> {
+    fn begin_play(&self, _join: &lodestone_server::JoinGame) -> Vec<lodestone_server::ServerDirective> {
         Vec::new()
     }
 
