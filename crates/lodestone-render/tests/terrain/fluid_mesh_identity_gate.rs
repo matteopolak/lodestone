@@ -148,7 +148,7 @@ struct Palette {
     /// `stone_brick_stairs[facing=north, half=bottom, shape=straight,
     /// waterlogged=true]`. A straight bottom stair covers exactly **one** of its
     /// four sides over the whole square and leaves the other three partially
-    /// covered — the case `isFaceOccludedBySelf` is silent about by
+    /// covered — the case vanilla's self-occlusion check is silent about by
     /// construction. See [`Scene::WaterloggedStairBesideAir`].
     waterlogged_stair: u32,
 }
@@ -211,7 +211,7 @@ enum Scene {
     /// Two properties no other scene here has:
     ///
     /// * The waterlogged block's faces are against **air**, not water, so
-    ///   `same` does not cull them and `isFaceOccludedBySelf` is the rule that
+    ///   `same` does not cull them and the self-occlusion rule is what
     ///   actually decides. `Waterlogged` above cannot reach that code at all.
     /// * Three of the stair's four sides are **partially** covered — one is the
     ///   bottom half only, two are L-shaped, and just one is flush. Vanilla's
@@ -475,8 +475,8 @@ impl FluidSectionView for SceneView<'_> {
     /// species of vacuous test: nothing about the source reads wrong, the flaw is
     /// which implementation the transport resolves to.
     ///
-    /// The `Solid`-layer gate is the `canOcclude` half of vanilla's
-    /// `occlusionShape = canOcclude ? get_occlusion_shape(state) : Shapes.empty()`
+    /// The `Solid`-layer gate is the can-occlude half of vanilla's
+    /// `occlusion_shape = can_occlude ? get_occlusion_shape(state) : empty_shape`
     /// and is not optional: without it every waterlogged leaves block (full-cube
     /// outline, `noOcclusion()`) would cull its own water away entirely.
     fn self_occlusion_at(&self, x: i32, y: i32, z: i32) -> lodestone_assets::fluid::SelfOcclusion {

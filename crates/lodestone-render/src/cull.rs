@@ -51,11 +51,11 @@ pub const CAMERA_CUBE_BLOCKS: f32 = 8.0;
 /// ```text
 /// dx = max(0, abs(chunkX - centerX) - 1)
 /// dz = max(0, abs(chunkZ - centerZ) - 1)
-/// dx * dx + dz * dz < viewDistance * viewDistance
+/// dx * dx + dz * dz < view_distance * view_distance
 /// ```
 ///
 /// A **rounded circle with a one-chunk buffer**, not the streamed square. The
-/// buffer is what makes the strict `<` safe: the ring at exactly `viewDistance`
+/// buffer is what makes the strict `<` safe: the ring at exactly `view_distance`
 /// is still kept (`(rd-1)² < rd²`), so this never removes a column the fog has
 /// not already taken to its end value (`fog.rs`'s render-distance end is
 /// `rd·16`).

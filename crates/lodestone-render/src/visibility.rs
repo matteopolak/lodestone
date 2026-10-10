@@ -397,7 +397,7 @@ pub fn walk_visible(
 ///
 /// The frustum is deliberately *not* passed here in production: reachability is
 /// cached across frames and re-walked only on an 8-block camera-cell crossing or
-/// a graph change (vanilla's `invalidateIfNeeded`), while the frustum is applied
+/// a graph change (vanilla's invalidate-if-needed check), while the frustum is applied
 /// per frame over the cached set. Folding the frustum in would make every mouse
 /// movement a re-walk.
 #[must_use]

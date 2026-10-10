@@ -88,7 +88,7 @@ pub fn spawner_display_scale(bb_width: f32, bb_height: f32) -> f32 {
 /// Plain lerp, not the shortest-arc lerp a wrapping angle usually
 /// wants — vanilla's own choice, and correct here because
 /// vanilla's own base-spawner client-tick function only ever moves `spin` by a handful of degrees a
-/// tick (`1000 / (spawnDelay + 200)`, at most `5`), never enough to cross the
+/// tick (`1000 / (spawn_delay + 200)`, at most `5`), never enough to cross the
 /// `0`/`360` wrap within a single tick's interpolation.
 #[must_use]
 pub fn spawner_spin_degrees(o_spin: f32, spin: f32, partial_tick: f32) -> f32 {

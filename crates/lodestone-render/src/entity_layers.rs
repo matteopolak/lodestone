@@ -746,7 +746,7 @@ pub fn elytra_target_rotations(fall_flying: bool, crouching: bool, motion: Vec3)
 pub const ELYTRA_ROTATION_LERP: f32 = 0.3;
 
 /// The wearer's crouching wing `y` offset in **model texels** — vanilla's
-/// per-frame elytra animation step's `isCrouching ? 3.0F : 0.0F`, which it
+/// per-frame elytra animation step's `crouching ? 3.0 : 0.0`, which it
 /// assigns to *both* wings.
 #[must_use]
 pub const fn elytra_wing_y(crouching: bool) -> f32 {

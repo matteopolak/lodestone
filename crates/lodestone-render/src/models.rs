@@ -710,7 +710,7 @@ pub trait ModelSectionView {
     /// Only the **AO** half of [`quad_corner_sample`] consults this. The
     /// *light* half keeps using [`occludes_at`](Self::occludes_at), because
     /// vanilla's smooth-light substitution is keyed on a third predicate again
-    /// (`translucentN` = `!isViewBlocking || get_light_dampening() == 0`, plus
+    /// (`translucent_n` = `!view_blocking || get_light_dampening() == 0`, plus
     /// vanilla's smooth-light-blend function's packed-light-is-zero test) which
     /// `occludes_at` is much the nearer stand-in for. Swapping both would make
     /// a leaf cell hand its own darkness to its neighbours' *light*, which
@@ -1615,7 +1615,7 @@ pub fn mesh_item_quads(quads: &[BakedQuad], pose: Mat4, gui_light: GuiLight) -> 
 /// culling removes the far faces.
 ///
 /// Shade is **always** the per-face directional constant, with no `GuiLight`
-/// branch: `submitMovingBlock` goes through the block renderer, which has no
+/// branch: the moving-block submit goes through the block renderer, which has no
 /// notion of a model's `gui_light`. Flattening it would make a falling sand block
 /// read as a uniformly-lit cube, which looks like a lighting bug rather than a
 /// pose bug.
@@ -1740,9 +1740,9 @@ pub trait FluidSectionView {
     /// [`lodestone_assets::fluid::full_footprint_y_range`].
     ///
     /// This is the still-open half of vanilla's fluid face-occlusion-by-state function's
-    /// three-way branch (vanilla's shape-occlusion helper's `blockOccludes`/`getFaceShape`):
-    /// [`occludes_at`](Self::occludes_at) already handles the `Shapes.block()`
-    /// fast path (a genuinely full, opaque cube) and `Shapes.empty()` (nothing
+    /// three-way branch (vanilla's shape-occlusion helper):
+    /// [`occludes_at`](Self::occludes_at) already handles the full-block
+    /// fast path (a genuinely full, opaque cube) and the empty shape (nothing
     /// occludes); this covers the `else` branch's *scoped* subset. A shape
     /// with holes, steps or a partial footprint (stairs, fences, walls,
     /// multi-box shapes) is out of scope — see `docs/fluid-rendering.md`'s
@@ -1876,9 +1876,9 @@ fn flow_neighbor_in(
 /// fluid (`y + 1`, matching vanilla's `above.offset(ox, 0, oz)`) carries a
 /// *different* fluid (or none) over a cell that doesn't fully occlude.
 ///
-/// `occludes_at` stands in for vanilla's `isSolidRender` — they agree for a
+/// `occludes_at` stands in for vanilla's solid-render test — they agree for a
 /// plain opaque cube (the dominant case) and this mirrors the same
-/// approximation `mesh_fluids` already makes for `blocks_motion`/`isSolid` in
+/// approximation `mesh_fluids` already makes for `blocks_motion`/solid in
 /// [`flow_neighbor_in`]; see `docs/fluid-rendering.md`.
 #[inline]
 fn should_render_backward_up_face_in(
@@ -1911,7 +1911,7 @@ fn should_render_backward_up_face_in(
 /// [`mesh_models`].
 ///
 /// The **up** face is *not* culled just because the block above occludes: per
-/// `isFaceOccludedByState`'s `direction != UP || height == 1.0` short-circuit,
+/// vanilla's occluded-by-state short-circuit (`direction != UP || height == 1.0`),
 /// a full solid neighbour only culls the top surface when every corner height
 /// is already `1.0` (a same-fluid column stacked one cell short of the ceiling)
 /// — which is why water under a solid block still draws its surface into the
@@ -1975,7 +1975,7 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                 let self_h = neighbor_height_in(&grid, kb, xi, yi, zi);
                 let nh = |dx: i32, dz: i32| neighbor_height_in(&grid, kb, xi + dx, yi, zi + dz);
                 // `[NW, NE, SE, SW]`. This was four bare `corner_height` calls,
-                // which is `calculateAverageHeight` without the branch above it:
+                // which is the corner-height average without the branch above it:
                 // vanilla's fluid-face tesselation function sets every corner to `1.0` when the
                 // fluid's own rendered height already is, and only averages
                 // otherwise. A falling column has the same fluid above every cell,
@@ -2034,10 +2034,10 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                                 min_y <= 1e-4 && max_y + 1e-4 >= face_height
                             })
                 };
-                // `shouldRenderFace`'s *self* half: the block sharing this cell.
+                // The should-render-face check's *self* half: the block sharing this cell.
                 // Note vanilla applies it to `down` and the four sides but **not**
-                // to `up` — `renderUp` is bare `!isNeighborSameFluid`, the one
-                // face that skips `shouldRenderFace` entirely. See
+                // to `up` — the up face is bare "neighbour is not the same fluid", the one
+                // face that skips the should-render-face check entirely. See
                 // `SelfOcclusion`.
                 let self_occ = view.self_occlusion_at(xi, yi, zi);
                 let faces = FaceSet {
@@ -2759,7 +2759,7 @@ mod tests {
         // its `-X` edge neighbour (7,9,8) — the same occluder placement
         // `ao_matches_vanillas_one_occluder_ratio_and_leaves_the_far_corner_bright`
         // uses directly on `quad_corner_sample`. Here `ambient_occlusion_at`
-        // reports `false`, so per vanilla's `tesselateFlat` fallback
+        // reports `false`, so per vanilla's flat-tesselation fallback
         // `mesh_models` must skip corner sampling entirely and emit every
         // vertex at full AO despite the occluder being real.
         struct OccluderAoDisabled;
@@ -3404,7 +3404,7 @@ mod tests {
     /// for a horizontal face). So a pool walled in solid blocks must emit **only**
     /// its top surface, and that surface must be level: vanilla's fluid-height function
     /// returns `-1.0` for a solid non-fluid neighbour, which
-    /// `addWeightedHeight` drops from the average entirely, whereas an *air*
+    /// the weighted-height average drops from the average entirely, whereas an *air*
     /// neighbour contributes `0.0` and drags the corner down.
     ///
     /// Both halves run here. The bank that occludes is the fixed behaviour; the
@@ -3444,7 +3444,7 @@ mod tests {
     // --- Known-gap closures: up-face culling, overlay, back faces ----------
 
     /// Gap: "the up face is not culled by a solid block above" (vanilla draws
-    /// it). `isFaceOccludedByState`'s `direction != UP || height == 1.0F` only
+    /// it). vanilla's occluded-by-state test (`direction != UP || height == 1.0`) only
     /// culls the top face for a *full* solid neighbour when every corner is
     /// already `1.0` — never true for a plain source surrounded by open air on
     /// its sides, whose corners sit at `8/9`. So water directly under a solid

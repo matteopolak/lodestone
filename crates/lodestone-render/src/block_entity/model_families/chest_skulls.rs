@@ -575,7 +575,7 @@ fn banner_placement_matrix(pos: [i32; 3], angle_deg: f32) -> Mat4 {
 /// per-frame render-state extraction:
 ///
 /// ```text
-/// phase = (floorMod(x*7 + y*9 + z*13 + gameTime, 100) + partialTicks) / 100
+/// phase = (((x*7 + y*9 + z*13 + game_time) mod 100) + partial_tick) / 100
 /// ```
 ///
 /// So neighbouring banners do not sway in lockstep, and the phase advances

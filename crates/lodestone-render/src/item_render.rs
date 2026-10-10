@@ -351,7 +351,7 @@ pub const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
 /// the stack's use duration minus the owner's remaining use ticks, i.e.
 /// The ticks spent using the item, which **increases** from 0 as the bow is drawn. Our
 /// `ItemUse::ticks` already *is* that number (it counts up from the rising edge of
-/// the using-item bit precisely so no per-item `getUseDuration` lookup is needed),
+/// the using-item bit precisely so no per-item use-duration lookup is needed),
 /// so [`Self::use_ticks`] is fed in **directly, with no inversion**.
 ///
 /// The use-cycle property in the same package is the remaining use ticks `% period` — the
@@ -453,7 +453,7 @@ impl ItemPropertyContext for ItemStateContext {
             // get ticks using item verbatim; see the type docs for why there is
             // no inversion here.
             "minecraft:use_duration" => self.use_ticks as f32,
-            // `useDuration / getChargeDuration`. Vanilla additionally returns 0
+            // `use_duration / charge_duration`. Vanilla additionally returns 0
             // when the crossbow is already **charged**, which reads the
             // `minecraft:charged_projectiles` component we do not decode — so a
             // charged crossbow keeps whatever wind fraction its last using tick
@@ -1087,7 +1087,7 @@ mod tests {
             assert_eq!(drawing(ticks), "minecraft:item/bow_pulling_1", "at {ticks} ticks");
         }
         // >= 18: 18 * 0.05 = 0.90 exactly. A full draw is 20 ticks and a bow's
-        // `getUseDuration` is 72000, so the top entry has to hold indefinitely.
+        // use duration is 72000, so the top entry has to hold indefinitely.
         for ticks in [18, 19, 20, 72_000] {
             assert_eq!(drawing(ticks), "minecraft:item/bow_pulling_2", "at {ticks} ticks");
         }
@@ -1141,7 +1141,7 @@ mod tests {
     /// evidence rather than a coincidence.
     #[test]
     fn feeding_the_counter_backwards_would_pin_the_bow_at_full_draw() {
-        // A bow's `getUseDuration` is 72000; `duration - ticks` at 6 ticks in is
+        // A bow's use duration is 72000; `duration - ticks` at 6 ticks in is
         // 71994, which sails past every threshold.
         let inverted = ItemStateContext::new(DisplaySlot::FirstPersonRightHand)
             .with_use(true, 72_000 - 6);
@@ -1152,7 +1152,7 @@ mod tests {
         assert_eq!(bow_model_at(correct), "minecraft:item/bow_pulling_0");
     }
 
-    /// `crossbow/pull` is `useDuration / getChargeDuration`, so its own thresholds
+    /// `crossbow/pull` is `use_duration / charge_duration`, so its own thresholds
     /// (0.58 and 1.0, from `items/crossbow.json`) land at ticks 15 and 25.
     #[test]
     fn the_crossbow_pull_fraction_divides_by_the_charge_duration() {

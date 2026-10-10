@@ -399,7 +399,7 @@ impl GuiAtlas {
     ///
     /// [`geometry`](Self::geometry) always maps the *whole* sprite through its
     /// [`GuiScaling`], which is right for every real `gui/sprites/**` entry —
-    /// vanilla blits those through `blitSprite`, which does exactly that. It is
+    /// vanilla's sprite blit does exactly that. It is
     /// wrong for the handful of GUI textures vanilla blits by **raw path** from
     /// a larger sheet, which [`build_with_extras`](Self::build_with_extras)
     /// stitches in whole: the recipe book's panel is

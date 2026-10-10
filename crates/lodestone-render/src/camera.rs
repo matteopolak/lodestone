@@ -36,8 +36,8 @@
 //!   depth choice matches vanilla's is z zero to one device path on Metal, and
 //!   like vanilla the range is **reversed** — near maps to `1`, far to `0`.
 //! * **Eye height / camera offset:** the camera position is the *eye*, which sits
-//!   `entity.y + eyeHeight` above the feet, with standing
-//!   `DEFAULT_EYE_HEIGHT = 1.62` (`Avatar`'s own decompiled source). This offset is load-bearing for
+//!   `entity.y + eye_height` above the feet, with standing
+//!   `DEFAULT_EYE_HEIGHT = 1.62` (the avatar's own default). This offset is load-bearing for
 //!   raycast/block-targeting parity, so it is exposed explicitly as
 //!   [`PLAYER_EYE_HEIGHT`] and [`Camera::with_eye_from_feet`] rather than left
 //!   for the caller to remember.
@@ -420,32 +420,18 @@ pub fn nausea_portal_warp(intensity: f32, angle_degrees: f32) -> Mat4 {
 }
 
 /// The spyglass zoom's field-of-view multiplier — see the module doc pointer
-/// in `crate::screen_effects` for the vignette/letterbox half. Vanilla's own
-/// field-of-view-modifier accessor
-/// (vanilla's decompiled abstract-client-player source, 26.2):
+/// in `crate::screen_effects` for the vignette/letterbox half. In first person
+/// while scoping, vanilla returns `0.1` early, so scoping **overrides** every
+/// other modifier (flying's `1.1`, the walk-speed ratio, the bow-draw ease-in)
+/// rather than composing with them. This models only the scoping case:
+/// `1.0` (no change) when not scoping, `0.1` (a 10x zoom-in) when scoping.
 ///
-/// ```text
-/// } else if (firstPerson && this's is scoping) {
-///     return 0.1F;
-/// }
-/// ```
-///
-/// — an early `return`, so scoping **overrides** every other modifier in that
-/// method (flying's `1.1`, the walk-speed ratio, the bow-draw ease-in), not a
-/// factor composed with them. This function models only the scoping case
-/// (flying/sprint/bow FOV are a different, unstarted issue) — `1.0` (no
-/// change) when not scoping, vanilla's `0.1` (a 10x zoom-in: `getFov`
-/// multiplies `options.fov` by this) when scoping.
-///
-/// Vanilla smooths this behind its own per-frame FOV-modifier field, a
-/// `0.5`-per-frame lerp toward the target (`Camera`'s own decompiled source)
-/// clamped to `0.1..=1.5`
-/// (`Camera`'s own decompiled source) — this function returns the unsmoothed target only;
-/// **not wired to a live `Camera.fov_y_degrees` anywhere in this codebase
-/// yet**, since that value is assigned in `lodestone-shell/src/camera_rig.rs`
-/// (`FOV_Y_DEGREES`/per-frame construction), a file outside this crate's
-/// ownership — see `docs/screen-overlays.md`'s spyglass-FOV
-/// section for the exact composition point.
+/// Vanilla smooths the modifier with a `0.5`-per-frame lerp toward the target,
+/// clamped to `0.1..=1.5`; this returns the unsmoothed target only. It is
+/// **not wired to a live `Camera.fov_y_degrees` yet**, since that value is
+/// assigned in `lodestone-shell/src/camera_rig.rs` (`FOV_Y_DEGREES`/per-frame
+/// construction), outside this crate — see `docs/screen-overlays.md`'s
+/// spyglass-FOV section for the composition point.
 #[must_use]
 pub fn spyglass_fov_modifier(scoping: bool) -> f32 {
     if scoping { 0.1 } else { 1.0 }

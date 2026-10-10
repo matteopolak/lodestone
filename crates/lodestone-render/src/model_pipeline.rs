@@ -209,7 +209,7 @@ impl TextureFiltering {
 /// This renderer's depth is reversed-Z like vanilla's, so nearer is *greater*
 /// and vanilla's `(scale 1.0, constant 10)` polygon offset is transcribed with
 /// **no sign flip**. Read the record definition rather than the call site: the
-/// fields are `(depthTest, writeDepth, depthBiasScaleFactor, depthBiasConstant)`,
+/// fields are `(depth_test, write_depth, bias_scale_factor, bias_constant)`,
 /// so the literal pair `1.0F, 10.0F` is scale 1, constant 10, not the reverse.
 ///
 /// Keep the magnitude in depth-buffer units rather than replacing it with a

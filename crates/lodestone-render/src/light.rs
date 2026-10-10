@@ -27,7 +27,7 @@
 //!
 //! * [`brightness`] is `get_brightness` — and vanilla's own lightmap
 //!   brightness function is the
-//!   same expression with the dimension's `ambientLight` lerped in, which is
+//!   same expression with the dimension's ambient light lerped in, which is
 //!   `0.0` in the overworld.
 //! * **The curve is applied to the raw level, and `SkyFactor` multiplies the
 //!   result.** Applying the curve *after* multiplying by `SkyFactor` instead
@@ -211,7 +211,7 @@ pub fn rgb24_to_channels(packed: u32) -> [f32; 3] {
 /// level (the wire nibble over 15).
 ///
 /// Its lightmap fragment shader's `level / (4.0 - 3.0 * level)`, equal to
-/// vanilla's own lightmap brightness function with the overworld's `ambientLight` of `0.0`. `0.0`
+/// vanilla's own lightmap brightness function with the overworld's ambient light of `0.0`. `0.0`
 /// maps to `0.0` and `1.0` to `1.0`; in between it is strongly concave — half
 /// light is a fifth of the brightness, which is the whole reason a linear ramp
 /// looked so wrong in the middle of the range.

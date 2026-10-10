@@ -69,7 +69,7 @@ pub const SOLID_BEAM_RADIUS: f32 = 0.2;
 /// The beam glow radius.
 pub const BEAM_GLOW_RADIUS: f32 = 0.25;
 /// The end gateway's own hardcoded solid beam radius argument
-/// to the general `submitBeaconBeam` overload — narrower than a beacon's own
+/// to the general beam-submit overload — narrower than a beacon's own
 /// [`SOLID_BEAM_RADIUS`], and (unlike a beacon's) never scaled by distance.
 pub const END_GATEWAY_SOLID_BEAM_RADIUS: f32 = 0.15;
 /// The end gateway's own hardcoded beam glow radius argument.
@@ -106,7 +106,7 @@ pub struct BeaconSpawn {
     /// Resolved beam sections, base-to-top; empty when the beam should not
     /// render at all (no completed base level).
     pub sections: Vec<BeamSection>,
-    /// `floorMod(gameTime, 40) + partialTicks`, as the beam renderer's extract step computes it.
+    /// `(game_time mod 40) + partial_tick`, as the beam renderer's extract step computes it.
     pub animation_time: f32,
     /// [`beam_radius_scale`]'s result for this beacon's distance from the
     /// eye this frame.
@@ -126,13 +126,13 @@ pub struct EndGatewayBeamSpawn {
     /// the spawn/cooldown percent result — `sin(clamp(..) *
     /// PI)` already applied, matching the end-gateway render state's scale.
     pub scale: f32,
-    /// `floorMod(gameTime, 40) + partialTicks` — the same scroll/spin clock
+    /// `(game_time mod 40) + partial_tick` — the same scroll/spin clock
     /// [`BeaconSpawn::animation_time`] carries.
     pub animation_time: f32,
-    /// `Mth.floor(scale * beamDistance)` — the beam's half-height; the drawn
+    /// `floor(scale * beam_distance)` — the beam's half-height; the drawn
     /// beam spans `y ∈ [-height, height]`. `0` (or negative) draws nothing.
     pub height: i32,
-    /// `DyeColor.MAGENTA`/`PURPLE`'s texture diffuse colour, gamma-space
+    /// The magenta/purple dye colours' texture diffuse colour, gamma-space
     /// `0x00RRGGBB` — magenta while spawning, purple while cooling down.
     pub color: u32,
 }
@@ -385,7 +385,7 @@ fn push_beam_part(
     vv2: f32,
     out: &mut Vec<BeamVertex>,
 ) {
-    // `renderPart`'s four `renderQuad` calls, in its own order.
+    // Four quads, in vanilla's own order.
     push_beam_quad(
         base, beam_start, beam_end, color, wnx, wnz, enx, enz, uu1, uu2, vv1, vv2, out,
     );
@@ -416,7 +416,7 @@ fn push_beam_quad(
     vv2: f32,
     out: &mut Vec<BeamVertex>,
 ) {
-    // `renderQuad`/`addVertex`: (beamEnd, a, uu2,vv1), (beamStart, a,
+    // Per quad: (beamEnd, a, uu2,vv1), (beamStart, a,
     // uu2,vv2), (beamStart, b, uu1,vv2), (beamEnd, b, uu1,vv1) — vanilla's
     // `QUADS` winding, triangulated `0,1,2,0,2,3`.
     let v0 = BeamVertex {

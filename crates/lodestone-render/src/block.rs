@@ -61,8 +61,8 @@ pub const DEPTH_CLEAR: f32 = 0.0;
 /// re-derive the direction at each pipeline.
 pub const DEPTH_COMPARE_NEARER: wgpu::CompareFunction = wgpu::CompareFunction::Greater;
 
-/// "Nearer or exactly tied wins" — vanilla's `GREATER_THAN_OR_EQUAL`, which is
-/// its `DepthStencilState.DEFAULT`, and what a forward `[0,1]` buffer spells
+/// "Nearer or exactly tied wins" — vanilla's greater-than-or-equal depth test, which is
+/// its default depth state, and what a forward `[0,1]` buffer spells
 /// `LessEqual`.
 ///
 /// The `Equal` half is load-bearing wherever a model places two elements at

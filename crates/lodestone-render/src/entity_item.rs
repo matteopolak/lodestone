@@ -14,7 +14,7 @@ pub const ITEM_BOB_AMPLITUDE: f32 = 0.1;
 /// Ticks per radian of bob phase (`sin(ageInTicks / 10.0F + bobOffs)`).
 pub const ITEM_BOB_TICKS_PER_RADIAN: f32 = 10.0;
 
-/// Ticks per radian of spin (`getSpin = ageInTicks / 20.0F + bobOffs`).
+/// Ticks per radian of spin (`age_ticks / 20 + bob_offset`).
 pub const ITEM_SPIN_TICKS_PER_RADIAN: f32 = 20.0;
 
 /// `display.ground` of `minecraft:block/block`, which **every** block item model
@@ -292,7 +292,7 @@ pub const VAULT_SPIN_DEGREES_PER_TICK: f32 = 10.0;
 
 /// Vanilla's per-tick vault display-item spin update, evaluated at a
 /// continuous tick: a shortest-path rotation lerp between the previous and
-/// current spin, where `currentSpin = previousSpin + 10°` every tick, which
+/// current spin, where `current_spin = previous_spin + 10°` every tick, which
 /// for a constant per-tick step is exactly the unwrapped linear form below
 /// (the shortest-path wrap only matters when the two ends are more than 180°
 /// apart, and adjacent ticks here are always exactly 10° apart).

@@ -1251,10 +1251,10 @@ fn gui_variant_of(
 const SPRITE_MIN_Z: f32 = 7.5;
 /// Vanilla's item-model-generator's `MAX_Z`: the slab's far face, in model units.
 const SPRITE_MAX_Z: f32 = 8.5;
-/// Vanilla's item-model-generator's `UV_SHRINK`: the per-edge UV inset, in **sprite
-/// texels** (not model units — it is applied before the `xScale`/`yScale`).
+/// Vanilla's item-model-generator UV shrink: the per-edge UV inset, in **sprite
+/// texels** (not model units — it is applied before the x/y scale).
 const SPRITE_UV_SHRINK: f32 = 0.1;
-/// Vanilla's item-model-generator's `SOUTH_FACE_UVS`.
+/// Vanilla's item-model-generator south-face UVs.
 const SPRITE_SOUTH_UVS: [f32; 4] = [0.0, 0.0, 16.0, 16.0];
 /// Vanilla's item-model-generator's `NORTH_FACE_UVS` — note the reversed `u`.
 const SPRITE_NORTH_UVS: [f32; 4] = [16.0, 0.0, 0.0, 16.0];
@@ -1267,7 +1267,7 @@ const SPRITE_TEXTURE_VAR: &str = "layer";
 /// The `Direction` mapping is **deliberately counter-intuitive and is vanilla's**:
 /// `LEFT` maps to `EAST` and `RIGHT` to `WEST`. Do not "fix" it — the enum's
 /// `direction` is used for two different things (the neighbour step in
-/// `checkTransition`, and the facing handed to the face bakery), and the bakery
+/// the edge-transition check, and the facing handed to the face bakery), and the bakery
 /// recomputes the true facing from the vertices anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SideDirection {
@@ -1290,7 +1290,7 @@ impl SideDirection {
         }
     }
 
-    /// Vanilla's side-direction enum's `isHorizontal` accessor — which controls whether the edge
+    /// Vanilla's side-direction enum's horizontal accessor — which controls whether the edge
     /// quad's `v` range runs up or down, not whether the quad itself is
     /// horizontal.
     fn is_horizontal(self) -> bool {
@@ -1298,7 +1298,7 @@ impl SideDirection {
     }
 
     /// The `(step_x, step_y)` of [`Self::direction`] in *image* space, which
-    /// `checkTransition` **subtracts** to find the neighbour texel.
+    /// the edge-transition check **subtracts** to find the neighbour texel.
     fn step(self) -> (i32, i32) {
         match self {
             // Direction::Up  = (0, 1, 0) -> neighbour is (x, y - 1), the texel above.
@@ -1372,7 +1372,7 @@ fn sprite_face(uv: [f32; 4]) -> Face {
         uv: Some(uv),
         texture: format!("#{SPRITE_TEXTURE_VAR}"),
         // An item slab has no neighbours to be culled by. Vanilla uses
-        // `addUnculledFace` for every one of these.
+        // unculled faces for every one of these.
         cullface: None,
         rotation: 0,
         tintindex: None,
@@ -1403,7 +1403,7 @@ fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
     let mut elements = Vec::new();
 
     // The front and back of the slab. One element with two faces rather than
-    // vanilla's two `bakeQuad` calls; `bake_model` emits one quad per face,
+    // vanilla's two quad bakes; `bake_model` emits one quad per face,
     // so the output is the same pair.
     let mut faces = HashMap::new();
     faces.insert(Direction::South, sprite_face(SPRITE_SOUTH_UVS));
@@ -1504,8 +1504,8 @@ fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
 /// leave that layer untinted — parallel to `layers`, and produced by
 /// [`item_layer_tint_slots`] from the item definition's own `tints` list.
 ///
-/// Vanilla stamps `tintIndex = layerIndex` on these quads and resolves the
-/// colour from the item's `TintSource` list at draw time
+/// Vanilla stamps the layer index as the tint index on these quads and resolves the
+/// colour from the item's tint-source list at draw time
 /// (vanilla's cuboid-item-model wrapper). We cannot write the layer index into
 /// `BakedQuad::tint_index`, because that field indexes
 /// `BlockModels::tint_palette` and layer `0` would collide with whatever
@@ -2221,7 +2221,7 @@ impl BlockModels {
     /// sprite, nothing else), and `map` picks the wider `item_frame_map`
     /// variant, whose border is a full block across and whose back plate sits
     /// where the map picture will — the same `map=` switch vanilla's
-    /// `updateForItemFrame` makes from `state.mapId != null`.
+    /// item-frame update makes when a map id is present.
     ///
     /// Empty when the pack ships no such blockstate, which callers must treat
     /// as "draw nothing" exactly as they do an empty

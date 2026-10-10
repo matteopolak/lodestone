@@ -854,7 +854,7 @@ fn warm(p: [u8; 3]) -> bool {
 /// rect and asserted the warm pixels landed inside it. That rect came out as
 /// (0, 0, 255, 128) — the entire upper frame — and the reason is worth
 /// recording, because it is a fact about vanilla's geometry that is easy to get
-/// wrong from the source: `buildSunriseFan`'s perimeter vertices are **not**
+/// wrong from the source: the sunrise fan's perimeter vertices are **not**
 /// offsets from the bright centre vertex. The centre is `(0, 100, 0)` and the
 /// perimeter is `(sin·120, cos·120, -cos·40)`, so after
 /// `sunrise_fan_transform` the perimeter is a ring of radius 120 centred on the

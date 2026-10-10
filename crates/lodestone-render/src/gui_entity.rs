@@ -163,7 +163,7 @@ impl GuiEntityLook {
 /// The look angles for a cursor at `mouse_px` over the rect `rect_px`
 /// (`[x, y, w, h]`, top-left origin, **logical GUI pixels**).
 ///
-/// `fall_flying` is `renderState.pose == Pose.FALL_FLYING`, which zeroes the
+/// `fall_flying` is the fall-flying pose, which zeroes the
 /// head pitch and nothing else.
 #[must_use]
 pub fn gui_entity_look(rect_px: [f32; 4], mouse_px: [f32; 2], fall_flying: bool) -> GuiEntityLook {

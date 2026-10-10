@@ -56,7 +56,7 @@
 //!
 //! # Underwater: a tint, not a second fog
 //!
-//! `submitWater` multiplies the `underwater.png` texel by a **grayscale**
+//! The water overlay submit multiplies the `underwater.png` texel by a **grayscale**
 //! colour (ARGB's color from float,
 //! vanilla's own screen-effect renderer) at alpha `0.1` — not blue; whatever blue
 //! cast the overlay has comes entirely from the texture's own pixels. This is
@@ -110,7 +110,7 @@ fn vertex(position: [f32; 2], uv: [f32; 2], color: [f32; 4]) -> ScreenOverlayVer
 pub const UNDERWATER_TINT_ALPHA: f32 = 0.1;
 
 /// How many times the underwater texture tiles across the quad — vanilla's
-/// constant `4.0F` (`uvSize` in `submitWater`).
+/// constant `4.0` (the water overlay's UV size).
 pub const UNDERWATER_TILE_COUNT: f32 = 4.0;
 
 /// The lightmap value the underwater overlay is tinted by — vanilla's own
@@ -288,7 +288,7 @@ fn fire_quad(offset_x: f32, tilt: f32, v0: f32, v1: f32) -> [ScreenOverlayVertex
 /// `frame_index` (wrapped by `frame_count`, from
 /// [`lodestone_assets::fire_frame_count`]) — see the module doc and
 /// [`fire_quad`] for the transform this reproduces. Exactly two quads, one
-/// per `submitFire` call, never a repeated/tiled copy.
+/// per fire-overlay submit, never a repeated/tiled copy.
 #[must_use]
 pub fn fire_overlay_triangles(frame_index: u32, frame_count: u32) -> [ScreenOverlayVertex; 12] {
     let frame_count = frame_count.max(1);
@@ -315,7 +315,7 @@ pub const PUMPKIN_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// Builds the pumpkin overlay's one static, full-screen NDC quad. Unlike the
 /// underwater overlay this does not scroll with look direction and does not
 /// tile — vanilla's HUD texture-overlay extraction function blits the texture once at
-/// `(0, 0, guiWidth, guiHeight)` with UV `(0,0)-(1,1)`, no animation, no
+/// `(0, 0, gui_width, gui_height)` with UV `(0,0)-(1,1)`, no animation, no
 /// per-frame recompute. Built once and never re-uploaded past construction.
 #[must_use]
 pub fn pumpkin_overlay_triangles() -> [ScreenOverlayVertex; 6] {
@@ -417,10 +417,10 @@ pub const SPYGLASS_SCALE: f32 = 1.125;
 
 /// The spyglass lens's half-extent in NDC on each axis, for a given screen
 /// `aspect` (width/height). Derived algebraically from
-/// vanilla's HUD spyglass-overlay extraction function's `srcWidth = srcHeight =
-/// min(guiWidth, guiHeight)` and
-/// `ratio = min(guiWidth/srcWidth, guiHeight/srcHeight) * scale`: one of the
-/// two `Math.min` arms is always exactly `1.0` (whichever dimension *is* the
+/// vanilla's HUD spyglass-overlay extraction function's `src_width = src_height =
+/// min(gui_width, gui_height)` and
+/// `ratio = min(gui_width/src_width, gui_height/src_height) * scale`: one of the
+/// two `min` arms is always exactly `1.0` (whichever dimension *is* the
 /// smaller one divides itself), so `ratio` reduces to `scale` and the smaller
 /// screen dimension gets half-extent exactly `scale`, the larger one either
 /// `scale / aspect` (landscape) or `scale * aspect` (portrait).
@@ -581,7 +581,7 @@ pub fn portal_overlay_alpha(intensity: f32) -> f32 {
 /// `nether_portal.png` strip — see that texture's own loader doc for why the
 /// exact same frame-count function applies). Unlike the fire strip's four
 /// tiled quads, this is one full-screen quad, matching
-/// `extractPortalOverlay`'s single `blitSprite` call — no tile mirroring is
+/// vanilla's single portal-overlay sprite blit — no tile mirroring is
 /// needed since there is only one quad to begin with.
 #[must_use]
 pub fn portal_overlay_triangles(frame_index: u32, frame_count: u32, intensity: f32) -> [ScreenOverlayVertex; 6] {

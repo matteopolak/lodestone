@@ -9,8 +9,8 @@
 //! (its display renderer's submit function, 26.2):
 //!
 //! ```text
-//! pose = T(anchor) * orientation(billboard, entityYaw, entityPitch, cameraYaw, cameraPitch)
-//!            * Transformation(translation, leftRotation, scale, rightRotation)
+//! pose = T(anchor) * orientation(billboard, entity_yaw, entity_pitch, camera_yaw, camera_pitch)
+//!            * Transformation(translation, left_rotation, scale, right_rotation)
 //! ```
 //!
 //! [`display_orientation`] is the first factor, [`DisplayTransformation::to_matrix`]
@@ -159,11 +159,10 @@ impl Default for DisplayTransformation {
 
 impl DisplayTransformation {
     /// Vanilla's transformation-record compose function (`26.2`):
-    /// `T(translation) * R(leftRotation) * S(scale) * R(rightRotation)`, in
+    /// `T(translation) * R(left_rotation) * S(scale) * R(right_rotation)`, in
     /// that order — translate, then the left rotation, then scale, then the
     /// right rotation, composed left-to-right exactly as vanilla's own
-    /// `Matrix4f` calls chain (`result.translation(...); result.rotate(left);
-    /// result.scale(...); result.rotate(right);`).
+    /// matrix calls chain.
     #[must_use]
     pub fn to_matrix(&self) -> Mat4 {
         Mat4::from_translation(self.translation)
@@ -200,9 +199,8 @@ pub fn display_placement_matrix(anchor: Vec3, orientation: Quat, transform: &Dis
 /// ```
 ///
 /// A local glyph or background-panel corner is then fed to `pose` **directly
-/// unoffset** (buffer's add vertex,
-/// text collector's submit text — `submitText`'s own
-/// internal push is equivalent to translating by `(offset, y, 0)` before
+/// unoffset** (the text collector's submit
+/// push is equivalent to translating by `(offset, y, 0)` before
 /// drawing each glyph at its own local pixel rect), so every caller of this
 /// function's result multiplies a **raw, un-offset** local point (a glyph's
 /// font-pixel rect, or the background panel's `(-1,-1)`/`(width,height)`
@@ -225,7 +223,7 @@ pub fn text_glyph_transform(base: Mat4, total_width: f32, total_height: f32) -> 
         * Mat4::from_translation(Vec3::new(1.0 - total_width / 2.0, -total_height, 0.0))
 }
 
-/// A `text_display`'s glyph colour: vanilla's `textOpacity << 24 | 0xFFFFFF`
+/// A `text_display`'s glyph colour: vanilla's `text_opacity << 24 | 0xFFFFFF`
 /// (its text-display renderer's inner-submit function) — the RGB channels are hardcoded
 /// white regardless of the text's own component colour (a real
 /// simplification vanilla itself makes for this render type, not one this

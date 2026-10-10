@@ -44,7 +44,7 @@
 //!
 //! Rain and snow are two textures, so they are two **draws** over one buffer —
 //! instances sorted rain-first by [`crate::weather::extract_columns`], exactly as
-//! vanilla issues two `drawIndexed` calls over one mesh (`:157-158`). Nothing in
+//! vanilla issues two indexed draw calls over one mesh. Nothing in
 //! the shader branches on the kind.
 
 use bytemuck::{Pod, Zeroable};

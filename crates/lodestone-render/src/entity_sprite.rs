@@ -364,12 +364,12 @@ pub fn fishing_swing_shaping(attack_anim: f32) -> f32 {
 /// player and for our own body whenever the camera is detached.
 ///
 /// ```text
-/// rightOffset   = invert · 0.35 · scale
-/// forwardOffset = 0.8 · scale
-/// yOffset       = crouching ? -0.1875 : 0
-/// hand = eye + (−cos·rightOffset − sin·forwardOffset,
-///               yOffset − 0.45·scale,
-///               −sin·rightOffset + cos·forwardOffset)
+/// right_offset   = invert · 0.35 · scale
+/// forward_offset = 0.8 · scale
+/// y_offset       = crouching ? -0.1875 : 0
+/// hand = eye + (−cos·right_offset − sin·forward_offset,
+///               y_offset − 0.45·scale,
+///               −sin·right_offset + cos·forward_offset)
 /// ```
 ///
 /// `sin`/`cos` are of the owner's **body** yaw in radians, through

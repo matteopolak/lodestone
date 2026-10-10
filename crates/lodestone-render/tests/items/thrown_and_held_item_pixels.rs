@@ -60,7 +60,7 @@
 //! 3. **A handedness-flipped pose does not reproduce the frame** — the executed
 //!    control for assertion 2.
 //! 4. **`attack_anim = 0` is exactly the rest pose**, because
-//!    `applyItemArmAttackTransform`'s leading `Ry(i·45°)` is cancelled by its
+//!    the item arm attack transform's leading `Ry(i·45°)` is cancelled by its
 //!    trailing `Ry(i·-45°)` only when both shaping terms vanish. Dropping either
 //!    rotation leaves a permanent 45° twist that no swing test would notice.
 //!
@@ -606,7 +606,7 @@ fn a_thrown_snowball_draws_a_silhouette_and_the_edge_on_control_does_not() {
 // The item in the first-person hand
 // ---------------------------------------------------------------------------
 
-/// `applyItemArmAttackTransform` must be exactly the identity at rest, so the
+/// The item arm attack transform must be exactly the identity at rest, so the
 /// resting pose is independent of the swing. Hermetic.
 #[test]
 fn the_first_person_item_chain_is_a_plain_translation_at_rest() {

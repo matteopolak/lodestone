@@ -141,7 +141,7 @@ pub enum HandPoseOverride {
 }
 
 /// Vanilla's shared raised-arms routine's resting arm elevation,
-/// `-PI / (isAggressive ? 1.5 : 2.25)` radians about X. Negative raises the arm
+/// `-PI / (aggressive ? 1.5 : 2.25)` radians about X. Negative raises the arm
 /// forward in the Y-down model frame, which is the "arms out in front" pose.
 #[must_use]
 fn zombie_arm_x_rest(aggressive: bool) -> f32 {
@@ -767,8 +767,8 @@ pub enum ArmPose {
     /// further as the charge advances.
     CrossbowCharge {
         /// Charge fraction in `0..=1`, vanilla's
-        /// `clamp(ticksUsingItem, 0, maxCrossbowChargeDuration) /
-        /// maxCrossbowChargeDuration`.
+        /// `clamp(ticks_using_item, 0, max_charge_duration) /
+        /// max_charge_duration`.
         ///
         /// The **fraction** rather than `(ticks, duration)` on purpose: the
         /// duration is vanilla's crossbow charge-duration function, which is
@@ -1567,20 +1567,20 @@ impl Skeleton {
     /// Transcribed from the decompiled 26.2 client:
     ///
     /// ```text
-    ///   f  = sin(attackTime * PI)
-    ///   f1 = sin((1 - (1 - attackTime)^2) * PI)
-    ///   rightArm.zRot = 0;            leftArm.zRot = 0
-    ///   rightArm.yRot = -(0.1 - f*0.6); leftArm.yRot = 0.1 - f*0.6
-    ///   f2 = -PI / (isAggressive ? 1.5 : 2.25)
-    ///   rightArm.xRot = f2;           leftArm.xRot = f2
-    ///   rightArm.xRot += f*1.2 - f1*0.4; leftArm.xRot += f*1.2 - f1*0.4
+    ///   f  = sin(attack_time * PI)
+    ///   f1 = sin((1 - (1 - attack_time)^2) * PI)
+    ///   right_arm.z_rot = 0;            left_arm.z_rot = 0
+    ///   right_arm.y_rot = -(0.1 - f*0.6); left_arm.y_rot = 0.1 - f*0.6
+    ///   f2 = -PI / (aggressive ? 1.5 : 2.25)
+    ///   right_arm.x_rot = f2;           left_arm.x_rot = f2
+    ///   right_arm.x_rot += f*1.2 - f1*0.4; left_arm.x_rot += f*1.2 - f1*0.4
     ///   bob arms
     /// ```
     ///
     /// Three details that are easy to get wrong and are load bearing here:
     ///
     /// * It **assigns** all three rotations, so it overrides both the walk swing
-    ///   and `setupAttackAnimation`'s arm rotations. A zombie's arms do not
+    ///   and the attack animation's arm rotations. A zombie's arms do not
     ///   swing as it walks — that is the whole visual signature.
     /// * It does **not** touch the arms' `x`/`z` *translation*, so
     ///   [`Self::attack_anim`]'s orbit of the twisting torso survives.
@@ -2746,7 +2746,7 @@ mod tests {
              thrust is missing"
         );
 
-        // isAggressive swaps -PI/2.25 for -PI/1.5, past horizontal, so the arm
+        // Aggressive swaps -PI/2.25 for -PI/1.5, past horizontal, so the arm
         // reaches *less* far forward while sitting higher.
         let angry = arm_reach(
             &skel,
@@ -2843,7 +2843,7 @@ mod tests {
     /// checked against.
     ///
     /// Two swim positions, chosen to discriminate the window logic rather
-    /// than only exercise a boundary: `swim_pos == 0.0` (`quadraticArmUpdate`
+    /// than only exercise a boundary: `swim_pos == 0.0` (the quadratic arm-update term
     /// zero, so the first window's z-lean term is zero) and `swim_pos ==
     /// 18.0` (the *second* window, `t == 0.5`, where a build that only
     /// implemented the first window would predict the wrong angle). `amt:
@@ -2931,7 +2931,7 @@ mod tests {
     }
 
     /// Vanilla's humanoid pose setup swim leg-kick clause is unconditional —
-    /// not gated by `isUsingItem`, and (unlike the arm block) not gated by
+    /// not gated by using-item state, and (unlike the arm block) not gated by
     /// [`HumanoidArms`] either, since a swimming zombie's raised-arm override
     /// never touches its legs. `zombie` is used here specifically to prove
     /// that: the arm block above only ever runs for `Swinging`, so exercising
@@ -2946,9 +2946,9 @@ mod tests {
         assert_eq!(skel.arms, HumanoidArms::Zombie, "zombie must be the non-swinging rig");
         let right_leg = skel.index_of("right_leg").unwrap();
 
-        // swim_pos == 0.0: rightLeg.xRot = lerp(1.0, _, 0.3*cos(0)) == 0.3.
+        // swim_pos == 0.0: right_leg.x_rot = lerp(1.0, _, 0.3*cos(0)) == 0.3.
         // y_rot/z_rot: vanilla's unconditional 0.005 rad anti-z-fight nudge
-        // (`this.right_leg.yRot = 0.005F; this.right_leg.zRot = 0.005F;`),
+        // (both set to 0.005),
         // which the swim block's x_rot-only assignment does not touch.
         let posed = skel.pose(&AnimInput {
             swim_amount: 1.0,
@@ -3086,7 +3086,7 @@ mod tests {
         let body = skel.index_of("body").expect("body");
         let arm = skel.index_of("right_arm").expect("right arm");
 
-        // After `setupAttackAnimation`: that twists `body.y_rot`, this assigns
+        // After the attack animation: that twists `body.y_rot`, this assigns
         // `body.x_rot`. Two axes, so a mid-swing crouch keeps both.
         let swinging = AnimInput {
             attack_anim: 0.5,
@@ -3107,7 +3107,7 @@ mod tests {
         );
         assert!((both[body].x_rot - 0.5).abs() < 1e-6, "and must still pitch the body");
 
-        // Before `bobModelPart`: the age-driven bob is still layered on top, so a
+        // Before the arm bob: the age-driven bob is still layered on top, so a
         // crouching idle arm is not frozen. `age_ticks` alone must still move it.
         let crouched_early = skel.posed(&AnimInput {
             crouching: true,
@@ -3340,7 +3340,7 @@ mod tests {
         assert!((ly_over - ly1).abs() < 1e-6, "progress > 1 must clamp");
     }
 
-    /// `animateCrossbowHold` is a *different* pose from the charge — the holding
+    /// The crossbow-hold pose is a *different* pose from the charge — the holding
     /// arm tracks the head here and does not in the charge. Asserting they differ
     /// is what stops one being wired where the other belongs, which a still
     /// screenshot of a crossbow cannot distinguish.
@@ -3845,7 +3845,7 @@ mod tests {
         let poses = skel.posed(&input);
         let mut wrong = Vec::new();
         let expected = [
-            // `ArmorStand.DEFAULT_*_POSE`, in degrees.
+            // The armor stand's default poses, in degrees.
             ("left_arm", skel.slots.left_arm, (-10.0, 0.0, -10.0)),
             ("right_arm", skel.slots.right_arm, (-15.0, 0.0, 10.0)),
             ("left_leg", skel.slots.left_leg, (-1.0, 0.0, -1.0)),
@@ -3869,7 +3869,7 @@ mod tests {
     ///
     /// This is what makes "compute the walk cycle and overwrite it" different
     /// from "skip the walk cycle for this rig", which would be cheaper and would
-    /// look equivalent: `setupAttackAnimation` moves the arms' `x`/`z` pivots as
+    /// look equivalent: the attack animation moves the arms' `x`/`z` pivots as
     /// the torso twists, and nothing assigns those back. A type gate on the
     /// family would silently delete this motion.
     #[test]

@@ -369,9 +369,9 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // band seen from below must read `0.4`.
     let n = -normalize(cross(dpdx(in.local), dpdy(in.local)));
     // Vanilla's **two** diffuse lights, not one. Read from the 26.2 client jar:
-    // `com.mojang.blaze3d.platform.Lighting.DIFFUSE_LIGHT_0/1` are
-    // `(0.2, 1.0, -0.7)` and `(-0.2, 1.0, 0.7)` normalised, and `updateLevel`
-    // installs exactly those for the world — the entry the first-person hand also
+    // the two diffuse light directions are
+    // `(0.2, 1.0, -0.7)` and `(-0.2, 1.0, 0.7)` normalised, and the level
+    // setup installs exactly those for the world — the entry the first-person hand also
     // renders under, since the in-hand item render runs inside the level render and the
     // only 3D-items setup in the game renderer is afterwards, for the GUI.
     let light_0 = normalize(vec3<f32>(0.2, 1.0, -0.7));
@@ -521,8 +521,8 @@ fn fs_main_flame(in: FlameVsOut) -> @location(0) vec4<f32> {
     // Vanilla forces the flame's light coords to full block-light
     // (the entity's light coords with block light forced to 15, as vanilla's
     // own flame feature does) and submits a flat white vertex colour
-    // (`fireVertex`'s set color, `:71`) with no per-face lighting define
-    // on `ENTITY_CUTOUT_CULL` — fire reads as self-lit, not shaded by the
+    // with no per-face lighting define
+    // on the cutout-cull entity pipeline — fire reads as self-lit, not shaded by the
     // scene the way a mob's body is. This entry point therefore skips
     // `shade_entity`'s two-light diffuse and world-light dimming entirely
     // (there is no per-instance light byte to look one up from — see

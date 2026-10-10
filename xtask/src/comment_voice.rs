@@ -893,7 +893,6 @@ const BARE_MEMBER_PENDING: &[&str] = &[
     "crates/lodestone-entity/",
     "crates/lodestone-game/",
     "crates/lodestone-physics/",
-    "crates/lodestone-render/",
     "crates/lodestone-server/",
     "crates/lodestone-shell/",
     "crates/lodestone-worldgen/",

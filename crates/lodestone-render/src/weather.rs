@@ -369,7 +369,7 @@ pub fn lightning_flash_linear(linear: [f32; 3], flashing: bool) -> [f32; 3] {
 ///
 /// The layering is subtler than "blend twice", and the subtlety is load-bearing:
 /// the real client splits the two weights so they do **not** double-count,
-/// taking `thunder = thunderLevel` and `rain = rainLevel - thunderLevel`. At
+/// taking `thunder = thunder_level` and `rain = rain_level - thunder_level`. At
 /// full thunder the rain weight is therefore `0`, and only the thunder layer
 /// applies — otherwise a full storm would be darkened twice and undershoot the
 /// floor.
@@ -677,7 +677,7 @@ pub fn snow_column(
 ///
 /// Returns columns **sorted rain-first**, so the pass can issue two instanced
 /// draws with two textures and no per-fragment branch, exactly as vanilla issues
-/// two `drawIndexed` calls (`:157-158`).
+/// two indexed draw calls.
 ///
 /// `radius` is clamped to `HALF_RAIN_TABLE_SIZE` because a wider radius would
 /// index outside [`column_offset_table`]; vanilla's option maxes out below the

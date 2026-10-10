@@ -176,8 +176,8 @@ fn mesh_aabb(name: &str) -> (Vec3, Vec3) {
 /// that makes this a magnitude assertion rather than a direction check.
 const TOL: f32 = 1e-4;
 
-/// The base head box, vanilla's skull model's head-model-creation function's
-/// `addBox(-4, -8, -4, 8, 8, 8)` at `PartPose.ZERO`, in blocks.
+/// The base head box, vanilla's skull model's head box, a `(-4, -8, -4, 8, 8, 8)`
+/// cuboid at zero pose, in blocks.
 const SKULL_HEAD_LO: Vec3 = Vec3::new(-0.25, -0.5, -0.25);
 /// The other corner of [`SKULL_HEAD_LO`]'s box.
 const SKULL_HEAD_HI: Vec3 = Vec3::new(0.25, 0.0, 0.25);
@@ -200,7 +200,7 @@ fn hat_hi() -> Vec3 {
 
 #[test]
 fn the_skull_rig_is_authored_y_down_exactly_as_vanilla_authors_it() {
-    // vanilla's skull model's head-model-creation function: `addBox(-4, -8, -4, 8, 8, 8)`, `PartPose.ZERO`,
+    // vanilla's skull model's head box: a `(-4, -8, -4, 8, 8, 8)` cuboid at zero pose,
     // `/16` at compile time. Every number below depends on this, and a rig baked
     // block-space-up instead would make the node transformation's 180°-about-X
     // flip push the head *down* rather than up — the same half-block error, from
@@ -270,8 +270,8 @@ fn a_held_player_head_lands_where_the_jar_says_and_nowhere_near_the_alternatives
     // is the humanoid head layer, whose `"hat"` child is inflated `0.25`,
     // and the held-item path bakes that same layer
     // (vanilla's skull block-renderer's create-model function, shared with the block-entity path)
-    // while vanilla's skull special-renderer's extents function measures the whole root through
-    // `getExtentsForGui`. The bare-head numbers this gate carried before are
+    // while vanilla's skull special-renderer's extents function measures the whole root.
+    // The bare-head numbers are
     // the *un-hatted* hypothesis, and they are computed below so the
     // assertion says which one it landed on.
     let fold = Vec3::new(0.56, -1.02, -0.72);

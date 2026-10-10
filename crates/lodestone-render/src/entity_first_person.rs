@@ -64,7 +64,7 @@ impl Arm {
 ///
 /// Read from 26.2's decompiled source, where the three
 /// values are `1.0F`, `2.0F` and `-10.0F` and the translate is
-/// `((isLeftHand ? -1 : 1) * offsetX / 16, offsetY / 16, offsetZ / 16)`.
+/// `((left_hand ? -1 : 1) * offset_x / 16, offset_y / 16, offset_z / 16)`.
 pub const HELD_ITEM_OFFSET_TEXELS: [f32; 3] = [1.0, 2.0, -10.0];
 
 /// The same offsets for a **baby** (vanilla's own baby-offset flag): `0.0`, `1.0`, `-4.5`.
@@ -125,7 +125,7 @@ pub fn hand_transform(
 /// * Vanilla's held-item hand-layer submit function has two further pose steps this does not model, both
 ///   gated on state the shell does not track: its third-person attacking-item
 ///   spear animation
-///   (a stab swing mid-attack) and its using-item arm-pose animation (`ticksUsingItem != 0`,
+///   (a stab swing mid-attack) and its using-item arm-pose animation (`ticks_using_item != 0`,
 ///   i.e. drawing a bow, eating, blocking with a shield). Both are the identity in
 ///   the resting case this renders.
 ///
@@ -596,8 +596,8 @@ pub fn first_person_item_attack_chain(arm: Arm, attack_anim: f32) -> Mat4 {
 /// vanilla's held-item hand-layer submit function's generic (melee/"whack") branch:
 ///
 /// ```text
-/// T(i·0.56, -0.52 + h·-0.6, -0.72)          -- applyItemArmTransform
-///   · T(i·xs, ys, zs) · apply item arm attack transform   -- swingArm
+/// T(i·0.56, -0.52 + h·-0.6, -0.72)          -- item arm transform
+///   · T(i·xs, ys, zs) · apply item arm attack transform   -- swing
 /// ```
 ///
 /// `inverse_arm_height` is vanilla's own equip-height term — the equip/swap dip,
@@ -832,7 +832,7 @@ pub fn first_person_bow_power(held_ticks: f32) -> f32 {
 /// own `firstperson_?hand` display transform.
 ///
 /// ```text
-/// T(i·0.56, -0.52 + h·-0.6, -0.72)          -- applyItemArmTransform
+/// T(i·0.56, -0.52 + h·-0.6, -0.72)          -- item arm transform
 ///   · T(i·-0.2785682, 0.18344387, 0.15731531)
 ///   · Rx(-13.935) · Ry(i·35.3) · Rz(i·-9.785)
 ///   · T(0, shake, 0) · T(0, 0, power·0.04)

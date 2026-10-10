@@ -20,7 +20,7 @@
 //!
 //! # Refill model (26.2, read from source rather than remembered)
 //!
-//! `getCurrentAirSupplyBubble` computes `ceil((air + offset) * 10 / max_air)`
+//! Vanilla's bubble-count function computes `ceil((air + offset) * 10 / max_air)`
 //! for the "full" count (`offset = -2`) and the "about to pop" position
 //! (`offset = 0`). Because that is a continuous ceiling of a ratio rather than
 //! an integer bubble-per-`max_air/10`-ticks snap, the full-bubble count climbs
@@ -177,7 +177,7 @@ pub fn bubble_row(
 /// right-to-left from the row's right anchor, each stepping
 /// [`BUBBLE_SEPARATION`] px left of the previous. `x_right`/`y` are that
 /// anchor and the row's y-line — screen-layout concerns the HUD owns (vanilla
-/// derives `yLineAir` from vehicle-heart row count via `getAirBubbleYLine`).
+/// derives the air row's y-line from the vehicle-heart row count).
 #[must_use]
 pub fn bubble_position(index: usize, x_right: f32, y: f32) -> (f32, f32) {
     let bubble = index as f32 + 1.0;

@@ -37,7 +37,7 @@
 //!    0.375, 0) · scale(1, 0.375, 1)` — flattens the portal's cube into a
 //!    thin slab spanning `y ∈ [0.375, 0.75]`, matching the real portal
 //!    frame's height. Vanilla's end-gateway renderer's submit function applies **no**
-//!    transform at all before `submitCube`, so a gateway's swirl fills the
+//!    transform at all before submitting the cube, so a gateway's swirl fills the
 //!    *whole* block (`y ∈ [0, 1]`) — the one geometric difference between the
 //!    two types, both driven through the same [`push_face`].
 //!

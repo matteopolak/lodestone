@@ -208,10 +208,10 @@ impl CrackPipeline {
                 stencil: wgpu::StencilState::default(),
                 // Polygon offset: pull the crack toward the camera so it wins the
                 // depth test against the coplanar block face instead of z-fighting.
-                // Ported from vanilla's `pipeline/crumbling`, whose
-                // `DepthStencilState(GREATER_THAN_OR_EQUAL, false, 1.0F, 10.0F)`
-                // is `(depthTest, writeDepth, depthBiasScaleFactor,
-                // depthBiasConstant)` — scale factor *then* constant, verified
+                // Ported from vanilla's crumbling pipeline, whose depth state
+                // `(GREATER_THAN_OR_EQUAL, false, 1.0, 10.0)` is
+                // `(depth_test, write_depth, bias_scale_factor,
+                // bias_constant)` — scale factor *then* constant, verified
                 // against the Vulkan pipeline's own source, where
                 // the constant factor reads the bias constant and
                 // the slope factor reads the bias scale factor. So

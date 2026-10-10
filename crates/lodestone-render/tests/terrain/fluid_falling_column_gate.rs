@@ -11,11 +11,11 @@
 //! short-circuits:
 //!
 //! ```text
-//! float heightSelf = this's get height;
-//! if (heightSelf >= 1.0F) {
-//!    heightNorthEast = heightNorthWest = heightSouthEast = heightSouthWest = 1.0F;
+//! let height_self = own rendered height;
+//! if height_self >= 1.0 {
+//!    all four corner heights = 1.0;
 //! } else {
-//!    ... calculateAverageHeight per corner ...
+//!    ... average the neighbouring heights per corner ...
 //! }
 //! ```
 //!
@@ -42,7 +42,7 @@
 //! # Why nothing caught it
 //!
 //! `crates/lodestone-assets/tests/fluid.rs` unit-tests `render_height` (the
-//! `hasSameAbove` short-circuit) and `corner_height` (the average) and both were
+//! same-fluid-above short-circuit) and `corner_height` (the average) and both were
 //! correct. The rule that composes them was unrepresented, so there was no symbol
 //! to point a test at — which is why the fix introduces
 //! `lodestone_assets::fluid::corner_heights` rather than inlining a conditional.
@@ -105,7 +105,7 @@ impl FluidSectionView for TwoColumns {
             kind: FluidKind::Water,
             // Vanilla's falling water is get flowing: amount 8, falling.
             // The amount is deliberately not 9 — nothing in the game has 9, which
-            // is why `heightSelf` can only reach 1.0 through `hasSameAbove`.
+            // is why the own height can only reach 1.0 through the same-fluid-above flag.
             state: FluidState::new(8, true),
         })
     }

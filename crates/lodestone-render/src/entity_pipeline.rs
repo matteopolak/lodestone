@@ -1392,7 +1392,7 @@ fn build_entity_pipeline(
             front_face: wgpu::FrontFace::Ccw,
             // Double-sided for now: robust visibility while per-model winding
             // parity is pixel-verified. See the module docs. Vanilla's armour
-            // render type is `armorCutoutNoCull`, i.e. also double-sided.
+            // render type is also double-sided.
             cull_mode: None,
             ..Default::default()
         },
@@ -1484,8 +1484,8 @@ impl EntityPipeline {
             "lodestone-entity",
             // Vanilla's own value, translated. Every 26.2 entity
             // render type shares one depth-stencil declaration, which pins
-            // `(GREATER_THAN_OR_EQUAL, writeDepth = true)`
-            // (vanilla's depth-stencil-state declaration) — `DEPTH_COMPARE_NEARER_OR_EQUAL` here,
+            // greater-than-or-equal with depth writes on
+            // — `DEPTH_COMPARE_NEARER_OR_EQUAL` here,
             // transcribed unflipped because this engine is reversed-Z too.
             // Every entity render variant (solid, cutout, cutout-cull,
             // translucent) inherits it; none overrides it.
@@ -1525,8 +1525,7 @@ impl EntityPipeline {
     /// # Why the tie-admitting comparison, and why it is no longer only here
     ///
     /// Vanilla's own entity depth state is
-    /// `(GREATER_THAN_OR_EQUAL, writeDepth = true)`
-    /// (vanilla's depth-stencil-state declaration), which is
+    /// greater-than-or-equal with depth writes on, which is
     /// [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
     /// here — this engine is reversed-Z too, so nothing flips.
     ///
@@ -1777,8 +1776,8 @@ impl EntityPipeline {
     /// far ones paint over the near ones. Vanilla's own translucent entity render
     /// type overrides the blend
     /// function and nothing about depth, so the default depth-stencil state's
-    /// `writeDepth = true` carries through — the same `LessEqual` translation of
-    /// `GREATER_THAN_OR_EQUAL` this file applies everywhere else, per `CLAUDE.md`'s
+    /// depth writes stay on — the same `LessEqual` translation of
+    /// greater-than-or-equal this file applies everywhere else, per `CLAUDE.md`'s
     /// `[0,1]`-depth note.
     ///
     /// `vs_main` and [`EntityInstanceRaw`], not a narrower flame-style format: an orb
@@ -1817,7 +1816,7 @@ impl EntityPipeline {
     /// (26.2's decompiled render-pipeline registration
     /// table): the default depth-stencil state (this engine's
     /// `LessEqual`, same translation every sibling here applies) with
-    /// `ColorTargetState(…, writeMask = 0)` — a normal depth-tested,
+    /// a colour write mask of 0 — a normal depth-tested,
     /// depth-writing draw whose fragment output never reaches the
     /// framebuffer. `blend` is therefore irrelevant (there is nothing to
     /// blend) and left `None` to match the base mob pipeline's state, the
@@ -1881,17 +1880,17 @@ impl EntityPipeline {
     ///
     /// 26.2's decompiled render-pipeline registration table:
     /// a translucent-blend colour target,
-    /// depth state `(GREATER_THAN_OR_EQUAL, writeDepth = false)`. This
-    /// engine is reversed-Z like vanilla, so `GREATER_THAN_OR_EQUAL` is
+    /// depth state greater-than-or-equal with depth writes off. This
+    /// engine is reversed-Z like vanilla, so that test is
     /// [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
     /// with no flip — the same transcription every other pipeline in this file
-    /// makes. `writeDepth = false` carries straight through: a shadow is a flat decal painted onto
+    /// makes. Depth writes off carry straight through: a shadow is a flat decal painted onto
     /// the ground that already wrote its own depth, so writing again would only
     /// invite it to z-fight whatever draws after it at the same depth.
     ///
     /// Vanilla's shadow render type also inherits `MATRICES_FOG_SNIPPET`
     /// (distance fog). This port's `entity_shadow.wgsl` does not apply it — a
-    /// disclosed simplification: `shadowRadius` is capped at 32 blocks and every
+    /// disclosed simplification: the shadow radius is capped at 32 blocks and every
     /// piece this renderer builds sits within a few blocks of its casting
     /// entity, almost always well inside the near fog band, so the visible cost
     /// is a shadow that stays a hair too dark at the extreme edge of render
@@ -1903,9 +1902,9 @@ impl EntityPipeline {
     /// ground."* Vanilla's `ENTITY_SHADOW` uses the two-argument
     /// `DepthStencilState`, so it has **no** depth bias at all — and a shadow
     /// piece is placed *exactly* coplanar with the ground it sits on, by
-    /// construction: vanilla's shadow-feature renderer's prepare function emits its quad at
-    /// `piece.relative_y() + shape_below().bounds().minY`, and the only blocks
-    /// that reach it are the ones `isCollisionShapeFullBlock` accepted, whose
+    /// construction: vanilla's shadow-feature renderer emits its quad at
+    /// `piece.relative_y() + shape_below().bounds().min_y`, and the only blocks
+    /// that reach it are the ones with a full-block collision shape, whose
     /// bounds are the unit cube. **Zero separation**, which is the part no
     /// amount of depth precision helps with: a polygon offset is the only
     /// mechanism that can order two exactly coincident surfaces without moving
