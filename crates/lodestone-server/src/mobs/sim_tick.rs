@@ -419,8 +419,10 @@ impl<'w> MobSim<'w> {
                 self.reconcile_player_riders(&connected);
             }
         }
-        let sky_darkening = sunlight::darkening(self.day_time);
-        let sun_bright = sunlight::bright_outside(self.day_time);
+        let sky = self.sky;
+        let sea_level = sky.dimension.sea_level();
+        let sky_darkening = sky.darkening(self.day_time);
+        let sun_bright = sky.bright_outside(self.day_time);
         let sun_chance = sunlight::ignite_chance(sky_darkening);
         for m in &mut self.mobs {
             let before_live_collision = m.mob.live_collision_origin();
@@ -438,12 +440,21 @@ impl<'w> MobSim<'w> {
             };
             if m.rider.is_none() && column_loaded {
                 let helmeted = m.equipment.head.is_some();
+                m.mob.set_sea_level(sea_level);
+                m.rained_on = sky.raining() && {
+                    let at = m.position();
+                    let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
+                    let head = at.y + f64::from(m.mob.shape().height);
+                    lodestone_entity::pathfinding::PathWorld::sees_sky(&path_world, x, at.y.floor() as i32, z)
+                        || lodestone_entity::pathfinding::PathWorld::sees_sky(&path_world, x, head.floor() as i32, z)
+                };
                 m.mob.set_sun_state(sun_bright, m.burn.is_on_fire(), helmeted);
                 if sun_bright
                     && !helmeted
                     && m.health > 0.0
                     && sunlight::burns_in_sunlight(&m.entity_type)
                     && !m.in_water()
+                    && !m.rained_on
                     && lodestone_entity::ai::MobController::next_f32(&mut m.mob) < sun_chance
                 {
                     let at = m.position();
@@ -1186,7 +1197,7 @@ impl<'w> MobSim<'w> {
                 serial,
                 id: m.id,
                 burn: m.burn,
-                in_water: m.in_water(),
+                in_water: m.in_water() || m.rained_on,
                 fire_immune: species::is_fire_immune(&m.entity_type),
                 fire_resistance: m.effects.get("minecraft:fire_resistance").is_some(),
             };

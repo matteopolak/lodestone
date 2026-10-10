@@ -184,6 +184,9 @@ pub trait MobController {
         None
     }
 
+    /// The sea level of the mob's dimension, in blocks.
+    fn sea_level(&self) -> i32;
+
     /// Tells a drowned whether it is heading for land, which makes it rise and
     /// swim toward its waypoint even with no target in water.
     fn set_searching_for_land(&mut self, searching: bool) {

@@ -365,6 +365,8 @@ pub enum SwimRule {
     Smooth {
         /// Factor on the requested speed while in water.
         in_water: f64,
+        /// Factor on the requested speed while walking.
+        on_land: f64,
         /// Whether the body rises slightly each tick.
         buoyant: bool,
     },
@@ -437,7 +439,7 @@ impl MobShape {
             can_pass_doors: true,
             can_open_doors: false,
             malus_overrides: HashMap::new(),
-            swim_rule: SwimRule::Smooth { in_water: 0.1, buoyant: false },
+            swim_rule: SwimRule::Smooth { in_water: 0.1, on_land: 0.5, buoyant: false },
         }
     }
 

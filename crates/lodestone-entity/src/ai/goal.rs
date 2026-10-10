@@ -487,6 +487,9 @@ mod tests {
     #[derive(Default)]
     struct DummyMob;
     impl MobController for DummyMob {
+        fn sea_level(&self) -> i32 {
+            63
+        }
         fn next_f32(&mut self) -> f32 {
             0.0
         }

@@ -142,4 +142,10 @@ In water the body runs the species' `SwimRule` on a 3D velocity with 0.9 drag; o
 
 Goals are in `roster/amphibious.rs` (turtle: panic, tempt on seagrass, walk to water two blocks under its feet within 24, travel through water in legs, wander ashore only) plus the drowned's go-to-water, swim-up and in-water-target rules in `roster/hostile_melee.rs` (`MeleeAttackGoal::with_valid_target`, `NearestAttackableTargetGoal::with_filter`). The axolotl's idle swim speed is 0.5 (`brain::roster::stroll_speed`).
 
-Not modelled: turtle eggs, breeding and home block, the turtle's panic preferring water, the drowned beach goal, the axolotl and frog speed factors on land (0.5 and 0.1 of the swim factor, 0.15 axolotl land stroll), the frog's 0.75 swim stroll, and sea level other than 63.
+Walking speed out of water is scaled by the rule's `on_land` factor (axolotl 0.5, frog 0.1); the brain strolls are 0.5 swimming and 0.15 ashore for the axolotl, 0.75 swimming and 1.0 ashore for the frog (`RandomStroll::with_water_speed`). Goals read the dimension's sea level through `MobController::sea_level`, which `MobSim::set_environment` sets per tick from `Dimension::sea_level`.
+
+Not modelled: turtle eggs, breeding and home block, the turtle's panic preferring water, the drowned beach goal, and the gradual turn that scales a walking axolotl's speed.
+
+### Weather and sun
+
+`MobSim::set_environment(dimension, rain, thunder)` feeds the sky: brightness (`sunlight::Sky`) now includes rain and thunder, so a thunderstorm at noon is not bright outside while plain rain is. A mob under open sky (feet or head cell) while the rain level exceeds 0.2 is rained on: the sun cannot ignite it and any fire is put out each tick. The biome's precipitation type is not consulted.

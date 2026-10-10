@@ -12,15 +12,18 @@
 //! ([`crate::natural_spawn::sky_darkening_for`]). The brightness curve is
 //! `v / (4 - 3v)` with `v = light / 15`; the sun only bites when that exceeds
 //! 0.5 (light 13 or more), and then on a tick whose uniform roll times 30 is
-//! below `2 * (brightness - 0.4)`. Rain and block light are not modelled.
+//! below `2 * (brightness - 0.4)`. Rain darkens the sky, and a mob under open
+//! sky in rain is wet, which puts out and prevents the fire. Block light and
+//! the biome's precipitation type are not modelled.
 //!
 //! # How to change it
 //!
-//! Add a species to [`burns_in_sunlight`]; wire weather by passing real rain
-//! and thunder levels to the darkening function.
+//! Add a species to [`burns_in_sunlight`]; the host feeds the dimension and
+//! weather through `MobSim::set_environment`.
 
 use lodestone_model::ResourceKey;
 
+use crate::dimension::Dimension;
 use crate::natural_spawn::sky_darkening_for;
 
 /// Species that catch fire in daylight.
@@ -31,14 +34,34 @@ pub(super) fn burns_in_sunlight(entity_type: &ResourceKey) -> bool {
     )
 }
 
-/// The sky darkening at `day_time` under clear weather in the overworld.
-pub(super) fn darkening(day_time: i32) -> u8 {
-    sky_darkening_for(crate::dimension::Dimension::Overworld, i64::from(day_time), 0.0, 0.0)
+/// The dimension and weather the sky is read in.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Sky {
+    pub(super) dimension: Dimension,
+    pub(super) rain_level: f32,
+    pub(super) thunder_level: f32,
 }
 
-/// Whether it is bright outside: the sky is dimmed by less than 4.
-pub(super) fn bright_outside(day_time: i32) -> bool {
-    darkening(day_time) < 4
+impl Sky {
+    /// Clear overworld weather, until the host says otherwise.
+    pub(super) const fn clear() -> Self {
+        Self { dimension: Dimension::Overworld, rain_level: 0.0, thunder_level: 0.0 }
+    }
+
+    /// The sky darkening at `day_time`.
+    pub(super) fn darkening(self, day_time: i32) -> u8 {
+        sky_darkening_for(self.dimension, i64::from(day_time), self.rain_level, self.thunder_level)
+    }
+
+    /// Whether it is bright outside: the sky is dimmed by less than 4.
+    pub(super) fn bright_outside(self, day_time: i32) -> bool {
+        self.darkening(day_time) < 4
+    }
+
+    /// Whether rain is falling hard enough to wet a mob under open sky.
+    pub(super) fn raining(self) -> bool {
+        self.rain_level > 0.2
+    }
 }
 
 /// The per-tick chance of catching fire under open sky at this sky darkening.
@@ -68,9 +91,23 @@ mod tests {
 
     #[test]
     fn noon_is_bright_and_midnight_is_not() {
-        assert!(bright_outside(6000));
-        assert!(!bright_outside(18000));
+        let sky = Sky::clear();
+        assert!(sky.bright_outside(6000));
+        assert!(!sky.bright_outside(18000));
         // Darkening is 5 at tick 12800, past the bright limit of 3.
-        assert!(!bright_outside(12800));
+        assert!(!sky.bright_outside(12800));
+    }
+
+    /// At noon the light is 15. Full rain alone pulls it by `0.3125 * (4 - 15)`
+    /// to 11.5625, a darkening of 3 (still bright); a full thunderstorm then
+    /// pulls it by `0.52734375 * (4 - 15)` to 9.2, a darkening of 5.
+    #[test]
+    fn rain_alone_keeps_noon_bright_and_a_thunderstorm_does_not() {
+        let rain = Sky { rain_level: 1.0, ..Sky::clear() };
+        assert_eq!(rain.darkening(6000), 3);
+        assert!(rain.bright_outside(6000));
+        let storm = Sky { rain_level: 1.0, thunder_level: 1.0, ..Sky::clear() };
+        assert_eq!(storm.darkening(6000), 5);
+        assert!(!storm.bright_outside(6000));
     }
 }

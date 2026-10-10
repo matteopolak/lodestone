@@ -103,6 +103,18 @@ pub enum Dimension {
 }
 
 impl Dimension {
+    /// The sea level of the dimension's default terrain settings.
+    #[must_use]
+    pub const fn sea_level(self) -> i32 {
+        match self {
+            Self::Overworld => 63,
+            Self::Nether => 32,
+            Self::End => 0,
+        }
+    }
+}
+
+impl Dimension {
     /// Every dimension, in holder order.
     pub const ALL: [Dimension; 3] = [Dimension::Overworld, Dimension::Nether, Dimension::End];
 

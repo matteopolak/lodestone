@@ -94,6 +94,7 @@ impl<'w> MobSim<'w> {
             #[cfg(not(target_arch = "wasm32"))]
             bell_claims: villager::BellClaims::new(),
             day_time: 0,
+            sky: sunlight::Sky::clear(),
             posted_vibrations: Vec::new(),
             dragons: HashMap::new(),
             withers: HashMap::new(),
@@ -172,6 +173,14 @@ impl<'w> MobSim<'w> {
     /// tick, ahead of `tick_with_terrain`.
     pub fn set_day_time(&mut self, day_time: i32) -> &mut Self {
         self.day_time = day_time;
+        self
+    }
+
+    /// Supplies the dimension and the current rain and thunder levels, which
+    /// decide the sky's brightness, whether mobs are rained on, and the sea
+    /// level mobs read.
+    pub fn set_environment(&mut self, dimension: crate::dimension::Dimension, rain_level: f32, thunder_level: f32) -> &mut Self {
+        self.sky = sunlight::Sky { dimension, rain_level, thunder_level };
         self
     }
 
@@ -492,6 +501,7 @@ impl<'w> MobSim<'w> {
             max_health,
             defenses,
             burn: crate::burning::BurnState::new(),
+            rained_on: false,
             anger: None,
             stung_at: None,
             piglin_alert_ticks: -1,

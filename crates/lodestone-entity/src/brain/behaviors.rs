@@ -31,6 +31,7 @@ fn horizontal_distance(a: Vec3, b: Vec3) -> f64 {
 #[derive(Debug)]
 pub struct RandomStroll {
     speed: f32,
+    water_speed: Option<f32>,
     max_xz: i32,
     max_y: i32,
     may_stroll_from_water: bool,
@@ -43,11 +44,33 @@ impl RandomStroll {
     pub fn new(speed: f32) -> Self {
         Self {
             speed,
+            water_speed: None,
             max_xz: 10,
             max_y: 7,
             may_stroll_from_water: true,
             entry: [(MemoryModuleType::WALK_TARGET, MemoryStatus::ValueAbsent)],
         }
+    }
+}
+
+impl RandomStroll {
+    /// Strolls at `speed` while in water instead of the land speed.
+    #[must_use]
+    pub fn with_water_speed(mut self, speed: f32) -> Self {
+        self.water_speed = Some(speed);
+        self
+    }
+}
+
+impl RandomStroll {
+    fn speed(&self, in_water: bool) -> f32 {
+        if in_water { self.water_speed.unwrap_or(self.speed) } else { self.speed }
+    }
+}
+
+impl From<f32> for RandomStroll {
+    fn from(speed: f32) -> Self {
+        Self::new(speed)
     }
 }
 
@@ -62,7 +85,7 @@ impl Behavior for RandomStroll {
         }
         let target = mob
             .random_land_pos(self.max_xz, self.max_y)
-            .map(|pos| MemoryValue::WalkTarget(WalkTarget::new(pos, self.speed, 0)));
+            .map(|pos| MemoryValue::WalkTarget(WalkTarget::new(pos, self.speed(mob.in_water()), 0)));
         mem.set_or_erase(MemoryModuleType::WALK_TARGET, target);
         true
     }

@@ -23,8 +23,7 @@
 //! # How to change it
 //!
 //! Not modelled: eggs, laying, breeding and the home block of the turtle; the
-//! turtle's panic preferring water within 7 blocks; the drowned's beach goal;
-//! sea level other than 63.
+//! turtle's panic preferring water within 7 blocks; the drowned's beach goal.
 
 use lodestone_model::Vec3;
 
@@ -76,9 +75,6 @@ fn land_stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(LandStrollGoal(RandomStrollGoal::new(ctx.speed).with_interval(100)))
 }
 
-/// The level the drowned swims up toward.
-const SEA_LEVEL: i32 = 63;
-
 fn cell(at: Vec3) -> (i32, i32, i32) {
     (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32)
 }
@@ -88,8 +84,8 @@ fn bottom_center(x: i32, y: i32, z: i32) -> Vec3 {
 }
 
 /// A random point up to `h` blocks sideways and `v` blocks vertically from the
-/// mob, aimed within `spread` radians of `toward`, that is not open air
-/// above nothing. Tries ten times.
+/// mob, aimed within `spread` radians of `toward`, that is not inside a solid
+/// or open air above nothing. Tries ten times.
 fn point_towards(mob: &mut dyn MobController, h: f64, v: i32, toward: Vec3, spread: f64) -> Option<Vec3> {
     let here = mob.position();
     let base = (toward.z - here.z).atan2(toward.x - here.x) - std::f64::consts::FRAC_PI_2;
@@ -101,7 +97,8 @@ fn point_towards(mob: &mut dyn MobController, h: f64, v: i32, toward: Vec3, spre
         let x = bx + (-distance * angle.sin()).floor() as i32;
         let z = bz + (distance * angle.cos()).floor() as i32;
         let candidate = bottom_center(x, by + dy, z);
-        if !mob.air_at(Vec3::new(candidate.x, candidate.y - 1.0, candidate.z)) {
+        let open = mob.water_at(candidate) || mob.air_at(candidate);
+        if open && !mob.air_at(Vec3::new(candidate.x, candidate.y - 1.0, candidate.z)) {
             return Some(candidate);
         }
     }
@@ -239,7 +236,7 @@ impl Goal for TravelGoal {
         let dx = f64::from(mob.next_i32(1025) - 512);
         let mut dy = f64::from(mob.next_i32(9) - 4);
         let dz = f64::from(mob.next_i32(1025) - 512);
-        if dy + here.y > f64::from(SEA_LEVEL - 1) {
+        if dy + here.y > f64::from(mob.sea_level() - 1) {
             dy = 0.0;
         }
         self.destination = Some(Vec3::new(here.x + dx, here.y + dy, here.z + dz));
@@ -351,7 +348,7 @@ struct DrownedSwimUpGoal {
 
 impl DrownedSwimUpGoal {
     fn eligible(mob: &dyn MobController) -> bool {
-        !mob.bright_outside() && mob.in_water() && mob.position().y < f64::from(SEA_LEVEL - 2)
+        !mob.bright_outside() && mob.in_water() && mob.position().y < f64::from(mob.sea_level() - 2)
     }
 }
 
@@ -379,10 +376,11 @@ impl Goal for DrownedSwimUpGoal {
 
     fn tick(&mut self, mob: &mut dyn MobController) {
         let here = mob.position();
-        if here.y >= f64::from(SEA_LEVEL - 1) || !mob.navigation_done() {
+        let sea_level = mob.sea_level();
+        if here.y >= f64::from(sea_level - 1) || !mob.navigation_done() {
             return;
         }
-        let surface = Vec3::new(here.x, f64::from(SEA_LEVEL - 1), here.z);
+        let surface = Vec3::new(here.x, f64::from(sea_level - 1), here.z);
         match point_towards(mob, 4.0, 8, surface, std::f64::consts::FRAC_PI_2) {
             Some(next) => {
                 mob.move_to(next, self.speed);

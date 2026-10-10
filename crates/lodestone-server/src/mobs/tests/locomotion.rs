@@ -452,6 +452,10 @@ fn a_spider_climbs_a_wall_to_reach_a_player() {
 
 /// How many of 400 zombies are on fire after one tick on a stone floor.
 fn zombies_alight(day_time: i32, roof: bool) -> usize {
+    zombies_alight_in(day_time, roof, 0.0)
+}
+
+fn zombies_alight_in(day_time: i32, roof: bool, rain_level: f32) -> usize {
     let mut world = ChunkWorld::new(-64, 384);
     for z in 0..32 {
         for x in 0..32 {
@@ -463,6 +467,7 @@ fn zombies_alight(day_time: i32, roof: bool) -> usize {
     }
     let mut sim = MobSim::new(&world);
     sim.set_day_time(day_time);
+    sim.set_environment(crate::dimension::Dimension::Overworld, rain_level, 0.0);
     let ids: Vec<i32> = (0..400)
         .map(|i| {
             let at = Vec3::new(f64::from(i % 20) * 1.5 + 1.5, 1.0, f64::from(i / 20) * 1.5 + 1.5);
@@ -482,6 +487,35 @@ fn zombies_catch_fire_only_in_open_daylight() {
     assert!((6..=28).contains(&open), "{open} of 400 alight at noon");
     assert_eq!(zombies_alight(18000, false), 0, "none should burn at night");
     assert_eq!(zombies_alight(6000, true), 0, "none should burn under a roof");
+}
+
+/// Rain wets a mob under open sky: of 400 zombies at noon none catches fire in
+/// a downpour (the same 400 average 16 in clear weather), and one already alight
+/// is put out within a tick.
+#[test]
+fn rain_stops_the_sun_igniting_zombies_and_puts_out_a_burning_one() {
+    assert_eq!(zombies_alight_in(6000, false, 1.0), 0);
+    assert!(zombies_alight_in(6000, false, 0.0) >= 6);
+
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..32 {
+        for x in 0..32 {
+            world.set_block(x, 0, z, "minecraft:stone");
+        }
+    }
+    let alight_after_two_ticks = |rain_level: f32| {
+        let mut sim = MobSim::new(&world);
+        sim.set_day_time(18000);
+        sim.set_environment(crate::dimension::Dimension::Overworld, rain_level, 0.0);
+        let id = sim.spawn_species("minecraft:skeleton".parse().expect("valid key"), Vec3::new(8.5, 1.0, 8.5)).id();
+        sim.get_mut(id).expect("alive").ignite_for_seconds(8.0);
+        for _ in 0..2 {
+            sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        }
+        sim.get(id).expect("alive").is_on_fire()
+    };
+    assert!(alight_after_two_ticks(0.0));
+    assert!(!alight_after_two_ticks(1.0));
 }
 
 /// A burning skeleton in daylight with no target heads for the first spot the
@@ -790,15 +824,20 @@ fn an_axolotl_swims_and_wanders_in_a_pond() {
 
 /// A frog is buoyant: each tick in water adds 0.005 upward, which 0.9 drag
 /// settles at `0.005 / (1 - 0.9)` = 0.05 blocks a tick, so a frog released at
-/// mid-depth rises to the surface within a few seconds and stays there.
+/// the bottom of a pond (surface at y 5) spends its time near the top while
+/// it wanders; a body without the push averages mid-depth.
 #[test]
-fn a_frog_in_a_pond_rises_to_the_surface() {
+fn a_frog_in_a_pond_floats_near_the_surface() {
     let world = pond_world();
     let mut sim = MobSim::new(&world);
     let id = sim.spawn_species("minecraft:frog".parse().expect("valid key"), Vec3::new(32.5, 1.5, 32.5)).id();
-    for _ in 0..150 {
+    let mut sum = 0.0;
+    for i in 0..500 {
         sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        if i >= 200 {
+            sum += sim.get(id).expect("alive").position().y;
+        }
     }
-    let y = sim.get(id).expect("alive").position().y;
-    assert!(y >= 4.0, "still at y {y}");
+    let mean = sum / 300.0;
+    assert!(mean >= 4.4, "mean height {mean}");
 }

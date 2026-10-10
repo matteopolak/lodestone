@@ -58,6 +58,9 @@ impl SpeedProbe {
 }
 
 impl MobController for SpeedProbe {
+    fn sea_level(&self) -> i32 {
+        63
+    }
     // `next_f32` returns 0.0 so every probability gate (`LookAtPlayerGoal`'s
     // 0.02, `FloatGoal`'s 0.8) passes: they all test `next_f32() < p`.
     fn next_f32(&mut self) -> f32 {

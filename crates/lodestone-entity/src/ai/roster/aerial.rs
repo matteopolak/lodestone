@@ -21,8 +21,7 @@
 //!
 //! # How to change it
 //!
-//! Not modelled: cats frightening a swooping phantom away, the sea-level clamp
-//! using any level but 63, picking the highest of several players (the nearest
+//! Not modelled: cats frightening a swooping phantom away, picking the highest of several players (the nearest
 //! is taken), and the horizontal 16-block limit of the target scan.
 
 use lodestone_model::Vec3;
@@ -71,9 +70,6 @@ fn attack_player_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 
 /// How far away the target scan sees a player.
 const SCAN_RANGE: f64 = 64.0;
-
-/// The level the anchor is kept above while attacking.
-const SEA_LEVEL: i32 = 63;
 
 /// Scans for a player on a timer: after 20 ticks, then every 60.
 #[derive(Debug)]
@@ -125,7 +121,7 @@ fn anchor_above_target(mob: &mut dyn MobController) {
     let Some(target) = mob.attack_target() else { return };
     let lift = mob.next_i32(20);
     let (x, z) = (target.x.floor() as i32, target.z.floor() as i32);
-    let y = (target.y.floor() as i32 + 20 + lift).max(SEA_LEVEL + 1);
+    let y = (target.y.floor() as i32 + 20 + lift).max(mob.sea_level() + 1);
     if let Some(swoop) = mob.swoop() {
         swoop.anchor = (x, y, z);
     }

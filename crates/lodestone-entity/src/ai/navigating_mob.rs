@@ -120,6 +120,9 @@ pub const PANIC_DAMAGE_TICKS: i32 = 40;
 /// real per-species value with [`set_follow_range`](NavigatingMob::set_follow_range).
 pub const DEFAULT_FOLLOW_RANGE: f64 = 16.0;
 
+/// The sea level a mob starts with, until its host sets its dimension's.
+const OVERWORLD_SEA_LEVEL: i32 = 63;
+
 /// The floor vanilla puts under the target-acquisition range, in blocks:
 /// its own targeting-conditions test takes the larger of the follow range
 /// times a modifier and `2.0`, where `2.0` is vanilla's own
@@ -365,6 +368,8 @@ pub struct MobBody {
     climb_goal: Option<(Vec3, f64)>,
     /// Host-fed daylight state: bright outside, on fire, wearing a helmet.
     sun: (bool, bool, bool),
+    /// The dimension's sea level, set by the host each tick.
+    sea_level: i32,
     against_wall: bool,
     /// Whether the last step was a wall climb, which gravity does not touch.
     climbed: bool,
@@ -816,6 +821,7 @@ impl<'w> NavigatingMob<'w> {
             swoop_anchored: false,
             climb_goal: None,
             sun: (false, false, false),
+            sea_level: OVERWORLD_SEA_LEVEL,
             against_wall: false,
             climbed: false,
             on_ground: false,
@@ -1958,7 +1964,7 @@ impl<'w> NavigatingMob<'w> {
             to_waypoint = (w.x - self.pos.x, w.z - self.pos.z);
             let distance = to_waypoint.0.hypot(to_waypoint.1);
             if distance > 0.0 {
-                let push = locomotion::thrust(self.navigator.speed(), medium) / distance;
+                let push = locomotion::thrust(self.navigator.speed() * self.land_speed_factor(), medium) / distance;
                 thrust = (to_waypoint.0 * push, to_waypoint.1 * push);
             }
         }
@@ -2003,6 +2009,11 @@ impl<'w> NavigatingMob<'w> {
         if moved_x * moved_x + moved_z * moved_z > 1e-12 {
             self.body_yaw = movement_yaw(moved_x, moved_z);
         }
+    }
+
+    /// Sets the sea level of the dimension the mob is in.
+    pub fn set_sea_level(&mut self, sea_level: i32) {
+        self.sea_level = sea_level;
     }
 
     /// Feeds the daylight state the sun goals read: whether it is bright
@@ -2188,6 +2199,14 @@ impl<'w> NavigatingMob<'w> {
         self.fly_velocity = Vec3::new(v.x * 0.91, v.y * 0.91, v.z * 0.91);
     }
 
+    /// The factor a walking amphibian applies to its requested speed.
+    fn land_speed_factor(&self) -> f64 {
+        match (self.shape.nav_mode, self.shape.swim_rule) {
+            (NavMode::Amphibious, SwimRule::Smooth { on_land, .. }) => on_land,
+            _ => 1.0,
+        }
+    }
+
     /// Whether an amphibian in water uses its swimming locomotion. A drowned
     /// swims only toward a target that is in water, or while looking for land;
     /// otherwise it moves like any walker.
@@ -2211,7 +2230,7 @@ impl<'w> NavigatingMob<'w> {
         let mut accel = Vec3::new(0.0, 0.0, 0.0);
         let mut push_y = 0.0;
         match self.shape.swim_rule {
-            SwimRule::Smooth { in_water, buoyant } => {
+            SwimRule::Smooth { in_water, buoyant, .. } => {
                 if buoyant {
                     push_y += 0.005;
                 }
@@ -2748,6 +2767,10 @@ impl NavigatingMob<'_> {
 }
 
 impl MobController for NavigatingMob<'_> {
+    fn sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
     fn set_searching_for_land(&mut self, searching: bool) {
         self.searching_for_land = searching;
     }
@@ -5566,7 +5589,7 @@ mod tests {
     }
 
     fn axolotl<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
-        let shape = MobShape::amphibian(SwimRule::Smooth { in_water: 0.1, buoyant: false }, 0.75, 0.42);
+        let shape = MobShape::amphibian(SwimRule::Smooth { in_water: 0.1, on_land: 0.5, buoyant: false }, 0.75, 0.42);
         NavigatingMob::new(world, shape, at, 1.0, 4000, 0)
     }
 
@@ -5701,5 +5724,41 @@ mod tests {
         };
         assert!((rise(true) - 0.004_875).abs() < 1e-9, "{}", rise(true));
         assert!((rise(false) - 0.002_875).abs() < 1e-9, "{}", rise(false));
+    }
+
+    #[test]
+    fn the_swim_up_goal_reads_the_hosts_sea_level() {
+        let heads_for_land = |sea_level: i32| {
+            let mut mob = drowned(&Shore, Vec3::new(1.5, -4.0, 0.5));
+            mob.set_sea_level(sea_level);
+            let mut ai = selector_for("drowned", 0.23);
+            let mut flagged = false;
+            for _ in 0..10 {
+                mob.tick(&mut ai);
+                flagged |= mob.searching_for_land;
+            }
+            flagged
+        };
+        // The goal runs below two blocks under sea level: -4 is under 61 and
+        // under -2 would need a sea level above -2.
+        assert!(heads_for_land(63));
+        assert!(!heads_for_land(-2));
+    }
+
+    #[test]
+    fn a_walking_amphibian_applies_its_land_factor_to_the_move_speed() {
+        // Ground thrust is the speed times the input of the same size, so a
+        // land factor of 0.5 quarters the first step.
+        let first_step = |on_land: f64| {
+            let shape = MobShape::amphibian(SwimRule::Smooth { in_water: 0.1, on_land, buoyant: false }, 0.75, 0.42);
+            let mut mob = NavigatingMob::new(&Shore, shape, Vec3::new(12.5, 0.0, 0.5), 1.0, 4000, 0);
+            mob.tick(&mut GoalSelector::new());
+            MobController::move_to(&mut mob, Vec3::new(20.5, 0.0, 0.5), 0.2);
+            let before = mob.position().x;
+            mob.tick(&mut GoalSelector::new());
+            mob.position().x - before
+        };
+        let ratio = first_step(0.5) / first_step(1.0);
+        assert!((ratio - 0.25).abs() < 1e-9, "{ratio}");
     }
 }

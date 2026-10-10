@@ -80,12 +80,12 @@ use super::Brain;
 /// Stated so nobody later "fixes" a speed bug by editing this constant.
 pub const SCAFFOLD_STROLL_SPEED: f32 = 1.0;
 
-/// The stroll speed modifier of `species`: the scaffold's, except for the
-/// axolotl, which swims idly at `0.5`. Its `0.15` on land is not modelled.
-fn stroll_speed(species: &str) -> f32 {
+/// The stroll of `species`: the scaffold's, except for the axolotl (0.15 on
+/// land, 0.5 swimming).
+fn stroll_for(species: &str) -> RandomStroll {
     match species {
-        "axolotl" => 0.5,
-        _ => SCAFFOLD_STROLL_SPEED,
+        "axolotl" => RandomStroll::new(0.15).with_water_speed(0.5),
+        _ => RandomStroll::new(SCAFFOLD_STROLL_SPEED),
     }
 }
 
@@ -145,7 +145,7 @@ fn leaf<B: Behavior + 'static>(b: B) -> Box<dyn BehaviorControl> {
 /// memory. `CORE` holds the sinks because they must keep running across an
 /// activity switch; `IDLE` holds the deciders.
 #[must_use]
-pub fn scaffold(stroll_speed: f32, look_distance: f32) -> Brain {
+pub fn scaffold(stroll: impl Into<RandomStroll>, look_distance: f32) -> Brain {
     let mut brain = Brain::new();
     brain.add_sensor(Box::new(NearestPlayerSensor));
     brain.add_activity(
@@ -165,7 +165,7 @@ pub fn scaffold(stroll_speed: f32, look_distance: f32) -> Brain {
                 "idle_gate",
                 vec![
                     leaf(SetPlayerLookTarget::new(look_distance)),
-                    leaf(RandomStroll::new(stroll_speed)),
+                    leaf(stroll.into()),
                 ],
             )),
         )],
@@ -192,8 +192,8 @@ pub fn scaffold(stroll_speed: f32, look_distance: f32) -> Brain {
 /// toward last tick's fleeing point one tick late, every tick, for the whole
 /// panic.
 #[must_use]
-pub fn scaffold_with_panic(stroll_speed: f32, look_distance: f32, panic_speed_multiplier: f32) -> Brain {
-    let mut brain = scaffold(stroll_speed, look_distance);
+pub fn scaffold_with_panic(stroll: impl Into<RandomStroll>, look_distance: f32, panic_speed_multiplier: f32) -> Brain {
+    let mut brain = scaffold(stroll, look_distance);
     brain.add_sensor(Box::new(HurtBySensor));
     brain.add_activity(
         Activity::CORE,
@@ -415,7 +415,11 @@ pub fn goat_brain() -> Brain {
 /// way [`goat_brain`]'s `RAM_COOLDOWN_TICKS` check is.
 #[must_use]
 pub fn frog_brain() -> Brain {
-    let mut brain = scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, 2.0);
+    let mut brain = scaffold_with_panic(
+        RandomStroll::new(1.0).with_water_speed(0.75),
+        SCAFFOLD_LOOK_DISTANCE,
+        2.0,
+    );
     brain.add_sensor(Box::new(NearestAttackableFoodSensor));
     brain.add_activity(
         Activity::TONGUE,
@@ -777,7 +781,7 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
     if species == "sniffer" {
         return Some(BrainGoal::new(sniffer_brain(), vec![Activity::SNIFF, Activity::IDLE]));
     }
-    let stroll = stroll_speed(species);
+    let stroll = stroll_for(species);
     let brain = match PANIC_SPEED_MULTIPLIER.iter().find(|&&(s, _)| s == species) {
         Some(&(_, speed)) => scaffold_with_panic(stroll, SCAFFOLD_LOOK_DISTANCE, speed),
         None => scaffold(stroll, SCAFFOLD_LOOK_DISTANCE),

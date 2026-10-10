@@ -760,8 +760,8 @@ fn species_drifts(entity_type: &ResourceKey) -> bool {
 /// How an amphibious species swims, if it paths through both water and land.
 fn species_amphibious(entity_type: &ResourceKey) -> Option<SwimRule> {
     match entity_type.path() {
-        "axolotl" => Some(SwimRule::Smooth { in_water: 0.1, buoyant: false }),
-        "frog" => Some(SwimRule::Smooth { in_water: 0.02, buoyant: true }),
+        "axolotl" => Some(SwimRule::Smooth { in_water: 0.1, on_land: 0.5, buoyant: false }),
+        "frog" => Some(SwimRule::Smooth { in_water: 0.02, on_land: 0.1, buoyant: true }),
         "turtle" => Some(SwimRule::Turtle),
         "drowned" => Some(SwimRule::Drowned),
         _ => None,
@@ -1648,6 +1648,8 @@ pub struct SimMob<'w> {
     /// [`MobSim::tick_burning`]; standing in a fire/lava block does not yet
     /// ignite a mob because this path has no block-state fire source.
     burn: crate::burning::BurnState,
+    /// Whether rain is falling on the mob this tick, which puts out its fire.
+    rained_on: bool,
     /// Persistent-anger state, host-side (the anger deadline):
     /// the **absolute game tick** the grudge ends at, plus where the entity it
     /// is held against was when it was set.
@@ -2728,6 +2730,9 @@ pub struct MobSim<'w> {
     /// which is a harmless default rather than a silent lie, since `0` is a
     /// real, reachable time of day.
     day_time: i32,
+    /// The dimension and weather the sky is read in, host-fed each tick by
+    /// [`set_environment`](Self::set_environment).
+    sky: sunlight::Sky,
     /// Vibrations real producers posted this tick (the vibration substrate) —
     /// resolved into each listener's [`SimMob::nearest_vibration`] by
     /// [`resolve_vibrations`](Self::resolve_vibrations), which also drains
