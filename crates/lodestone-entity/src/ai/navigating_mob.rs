@@ -150,6 +150,8 @@ const SWIM_VERTICAL_REACH: f64 = 0.5;
 /// A path search reaches at least this far however short the mob's follow range.
 const MIN_PATH_LENGTH: f64 = 16.0;
 const DRIFT_FLOOR: f64 = 0.003;
+/// How fast a climber rises while pressed against a wall, blocks per tick.
+const CLIMB_SPEED: f64 = 0.2;
 
 /// How far below the feet the block that sets slipperiness is sampled.
 const SUPPORT_PROBE: f64 = 0.500_001;
@@ -334,6 +336,18 @@ pub struct MobBody {
     /// velocity (the horizontal part is [`drift`](Self::drift)).
     swim_speed: f64,
     swim_vy: f64,
+    /// A drifter's pulse state: the velocity its goals chose, the velocity it
+    /// currently carries, and the phase and rate of its pulse cycle.
+    drift_vector: Vec3,
+    drift_velocity: Vec3,
+    pulse: f64,
+    pulse_rate: f64,
+    /// A climber's destination, kept after its ground path ends so it keeps
+    /// heading straight at it, and whether it pressed against a wall last tick.
+    climb_goal: Option<(Vec3, f64)>,
+    against_wall: bool,
+    /// Whether the last step was a wall climb, which gravity does not touch.
+    climbed: bool,
     /// Whether the last terrain sweep blocked downward motion. The navigation
     /// snapshot answers path topology, while the server owns the live collision
     /// sweep that refreshes this after each tick.
@@ -738,6 +752,13 @@ impl<'w> NavigatingMob<'w> {
             fall_speed: 0.0,
             swim_speed: 0.0,
             swim_vy: 0.0,
+            drift_vector: Vec3::new(0.0, 0.0, 0.0),
+            drift_velocity: Vec3::new(0.0, 0.0, 0.0),
+            pulse: 0.0,
+            pulse_rate: 0.0,
+            climb_goal: None,
+            against_wall: false,
+            climbed: false,
             on_ground: false,
             body_yaw: 0.0,
             love_ticks: 0,
@@ -1019,6 +1040,9 @@ impl<'w> NavigatingMob<'w> {
         vertical_collision: bool,
     ) {
         let movement_attempted = self.pos != before;
+        if movement_attempted {
+            self.against_wall = (resolved.x - self.pos.x).abs() > 1e-9 || (resolved.z - self.pos.z).abs() > 1e-9;
+        }
         // A blocked axis kills the velocity carried along it.
         if (resolved.x - self.pos.x).abs() > 1e-9 {
             self.drift.0 = 0.0;
@@ -1054,7 +1078,7 @@ impl<'w> NavigatingMob<'w> {
     /// the same gravity and drag sequence instead of inventing a server-side
     /// teleport-down correction.
     pub fn begin_live_fall_from_unsupported_surface(&mut self) {
-        if self.fall_speed < 0.0 || self.shape.nav_mode == NavMode::Swim {
+        if self.fall_speed < 0.0 || self.climbed || self.shape.nav_mode == NavMode::Swim {
             return;
         }
         let displacement = self.fall_speed + FALL_GRAVITY_PER_TICK;
@@ -1793,7 +1817,20 @@ impl<'w> NavigatingMob<'w> {
         }
         let old = self.pos;
         let pos = self.pos;
-        let waypoint = self.navigator.tick(pos);
+        let mut waypoint = self.navigator.tick(pos);
+        let mut heading_only = false;
+        if self.shape.can_climb && waypoint.is_none() {
+            waypoint = self.climb_waypoint();
+            heading_only = waypoint.is_some();
+        }
+        if self.shape.nav_mode == NavMode::Drift {
+            self.drift_step();
+            self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
+            if self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z > 1e-12 {
+                self.body_yaw = movement_yaw(self.velocity.x, self.velocity.z);
+            }
+            return;
+        }
         if self.shape.nav_mode == NavMode::Swim {
             self.swim_step(waypoint);
             self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
@@ -1827,8 +1864,14 @@ impl<'w> NavigatingMob<'w> {
         let retained = f64::from(self.footing_speed_factor()) * locomotion::drag(medium);
         self.drift = (step.0 * retained, step.1 * retained);
 
+        let climbing = self.shape.can_climb && self.against_wall;
+        self.climbed = climbing;
         match waypoint {
-            Some(w) => {
+            _ if climbing => {
+                self.pos.y += CLIMB_SPEED;
+                self.fall_speed = 0.0;
+            }
+            Some(w) if !heading_only => {
                 if self.reached_vertical_transition(w, to_waypoint, step) || self.fall_speed != 0.0 {
                     self.pos.y = Self::step_vertical(
                         self.pos.y,
@@ -1838,7 +1881,7 @@ impl<'w> NavigatingMob<'w> {
                     );
                 }
             }
-            None => {
+            _ => {
                 // Most of a mob's life is between paths; gravity still applies.
                 let ground_y = self.ground_below(self.pos);
                 self.pos.y = Self::step_vertical(
@@ -1849,12 +1892,66 @@ impl<'w> NavigatingMob<'w> {
                 );
             }
         }
+        self.against_wall = false;
         let moved_x = self.pos.x - old.x;
         let moved_z = self.pos.z - old.z;
         self.velocity = Vec3::new(moved_x, self.pos.y - old.y, moved_z);
         if moved_x * moved_x + moved_z * moved_z > 1e-12 {
             self.body_yaw = movement_yaw(moved_x, moved_z);
         }
+    }
+
+    /// Where a climber heads once its ground path has ended: straight at its
+    /// destination until the body is within its own width of it, or above it and
+    /// within that width horizontally.
+    fn climb_waypoint(&mut self) -> Option<Vec3> {
+        let (goal, speed) = self.climb_goal?;
+        let width = f64::from(self.shape.width);
+        let flat = (goal.x - self.pos.x).hypot(goal.z - self.pos.z);
+        let near = flat.hypot(goal.y - self.pos.y) < width;
+        if near || (self.pos.y > goal.y && flat < width) {
+            self.climb_goal = None;
+            return None;
+        }
+        self.navigator.set_speed(speed);
+        
+        Some(goal)
+    }
+
+    /// One tick of pulsed drifting. A pulse cycle runs a phase from 0 to a full
+    /// turn at its own rate; in water the chosen velocity is applied during the
+    /// stretch of the first half-turn past three quarters of it, the body
+    /// glides at 0.9 of its velocity per tick through the rest, and out of water
+    /// it only falls.
+    fn drift_step(&mut self) {
+        const TURN: f64 = std::f64::consts::TAU;
+        const GLIDE: f64 = 0.9;
+        const AIR_DRAG: f64 = 0.98;
+        if self.pulse_rate == 0.0 {
+            self.pulse_rate = 1.0 / (f64::from(MobController::next_f32(self)) + 1.0) * 0.2;
+        }
+        self.pulse += self.pulse_rate;
+        if self.pulse > TURN {
+            self.pulse -= TURN;
+            if MobController::next_i32(self, 10) == 0 {
+                self.pulse_rate = 1.0 / (f64::from(MobController::next_f32(self)) + 1.0) * 0.2;
+            }
+        }
+        if self.in_water {
+            if self.pulse < TURN / 2.0 {
+                if self.pulse / (TURN / 2.0) > 0.75 {
+                    self.drift_velocity = self.drift_vector;
+                }
+            } else {
+                let v = self.drift_velocity;
+                self.drift_velocity = Vec3::new(v.x * GLIDE, v.y * GLIDE, v.z * GLIDE);
+            }
+        } else {
+            self.drift_velocity = Vec3::new(0.0, (self.drift_velocity.y - FALL_GRAVITY_PER_TICK) * AIR_DRAG, 0.0);
+        }
+        self.pos.x += self.drift_velocity.x;
+        self.pos.y += self.drift_velocity.y;
+        self.pos.z += self.drift_velocity.z;
     }
 
     /// One tick of swimming: the speed eases toward the path's, thrust is a
@@ -2082,6 +2179,9 @@ impl NavigatingMob<'_> {
     /// Paths to `target` and starts following, stopping within `reach` blocks
     /// (Manhattan) of it.
     pub(crate) fn move_to_within(&mut self, target: Vec3, speed: f64, reach: i32) -> bool {
+        if self.shape.can_climb {
+            self.climb_goal = Some((target, self.goal_speed(speed)));
+        }
         let block = self.surface_block(BlockPos::new(
             target.x.floor() as i32,
             target.y.floor() as i32,
@@ -2139,6 +2239,23 @@ impl NavigatingMob<'_> {
 }
 
 impl MobController for NavigatingMob<'_> {
+    fn drift_vector(&self) -> Vec3 {
+        self.drift_vector
+    }
+
+    fn set_drift_vector(&mut self, vector: Vec3) {
+        self.drift_vector = vector;
+    }
+
+    fn water_at(&self, at: Vec3) -> bool {
+        self.world.is_water(at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32)
+    }
+
+    fn air_at(&self, at: Vec3) -> bool {
+        let (x, y, z) = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+        self.world.base_path_type(x, y, z) == PathType::Open && !self.world.is_water(x, y, z)
+    }
+
     fn next_f32(&mut self) -> f32 {
         self.rng.next_unit() as f32
     }
@@ -2236,6 +2353,7 @@ impl MobController for NavigatingMob<'_> {
     fn stop_navigation(&mut self) {
         self.navigator.stop();
         self.active_target_block = None;
+        self.climb_goal = None;
     }
 
     fn set_jumping(&mut self, jumping: bool) {
@@ -4647,5 +4765,85 @@ mod tests {
              1.95-tall mob cannot stand there, and vanilla's noCollision check must \
              catch it even though the ground beneath the candidate is solid and dry"
         );
+    }
+
+    /// Open sea from y 0 to 40: every cell water, nothing solid.
+    struct Sea;
+
+    impl PathWorld for Sea {
+        fn min_y(&self) -> i32 {
+            -8
+        }
+        fn base_path_type(&self, _x: i32, y: i32, _z: i32) -> PathType {
+            if (0..=40).contains(&y) { PathType::Water } else { PathType::Open }
+        }
+        fn collision_top(&self, _x: i32, _y: i32, _z: i32) -> f64 {
+            0.0
+        }
+        fn collides(&self, _aabb: Aabb) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_drifter_pulses_its_vector_for_exactly_the_hand_derived_ticks() {
+        // Pulse rate 0.2 per tick, so after k ticks the phase is 0.2k. The
+        // vector is applied while phase/pi is above 0.75 and phase is below
+        // pi: k = 12 (2.4 / 3.1416 = 0.76) through k = 15 (3.0). Before that
+        // the body is at rest; from k = 16 (3.2 > pi) it keeps 0.9 per tick.
+        let world = Sea;
+        let mut mob =
+            NavigatingMob::new(&world, MobShape::drifter(0.8, 0.8), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0);
+        mob.pulse_rate = 0.2;
+        mob.drift_vector = Vec3::new(0.2, 0.0, 0.0);
+        let mut ai = GoalSelector::new();
+        let mut speeds = Vec::new();
+        for _ in 0..18 {
+            mob.tick(&mut ai);
+            speeds.push(mob.velocity().x);
+        }
+        let expected = [
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.2, 0.2, 0.18, 0.162, 0.1458,
+        ];
+        for (k, (got, want)) in speeds.iter().zip(expected).enumerate() {
+            assert!((got - want).abs() < 1e-9, "tick {}: {got} vs {want}", k + 1);
+        }
+    }
+
+    #[test]
+    fn a_drifter_out_of_water_only_falls() {
+        // Out of water the horizontal velocity is zeroed and the vertical one
+        // follows (v - 0.08) * 0.98: -0.0784, then (-0.0784 - 0.08) * 0.98.
+        let world = FluidArena::dry();
+        let mut mob =
+            NavigatingMob::new(&world, MobShape::drifter(0.8, 0.8), Vec3::new(0.5, 10.0, 0.5), 0.0, 100, 0);
+        mob.drift_vector = Vec3::new(0.2, 0.1, 0.0);
+        let mut ai = GoalSelector::new();
+        mob.tick(&mut ai);
+        assert!((mob.velocity().y + 0.0784).abs() < 1e-9 && mob.velocity().x == 0.0);
+        mob.tick(&mut ai);
+        assert!((mob.velocity().y + 0.155_232).abs() < 1e-9, "{}", mob.velocity().y);
+    }
+
+    fn flee_vector(attacker_x: f64) -> Vec3 {
+        use crate::ai::goals::DriftFleeGoal;
+        let world = Sea;
+        let mut mob =
+            NavigatingMob::new(&world, MobShape::drifter(0.8, 0.8), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0);
+        mob.note_hurt(Some(Vec3::new(attacker_x, 20.0, 0.5)));
+        let mut ai = GoalSelector::new();
+        ai.add(1, Box::new(DriftFleeGoal::new()));
+        mob.tick(&mut ai);
+        mob.drift_vector()
+    }
+
+    #[test]
+    fn a_hurt_drifter_flees_scaled_by_distance() {
+        // Attacker 2 blocks behind: away vector 2, boost 3, divided by 20 = 0.3.
+        assert!((flee_vector(-1.5).x - 0.3).abs() < 1e-9);
+        // 8 blocks behind: boost 3 - (8 - 5) / 5 = 2.4, so 8 * 2.4 / 20 = 0.96.
+        assert!((flee_vector(-7.5).x - 0.96).abs() < 1e-9);
+        // 10 or more blocks away it does not flee at all.
+        assert_eq!(flee_vector(-9.5).x, 0.0);
     }
 }

@@ -97,6 +97,28 @@ pub trait MobController {
         self.random_stroll_target()
     }
 
+    /// The velocity a drifting mob pushes in its next pulse.
+    fn drift_vector(&self) -> Vec3 {
+        Vec3::new(0.0, 0.0, 0.0)
+    }
+
+    /// Chooses the velocity a drifting mob pushes in its next pulse.
+    fn set_drift_vector(&mut self, vector: Vec3) {
+        let _ = vector;
+    }
+
+    /// Whether the cell containing `at` holds water.
+    fn water_at(&self, at: Vec3) -> bool {
+        let _ = at;
+        false
+    }
+
+    /// Whether the cell containing `at` is open, non-fluid space.
+    fn air_at(&self, at: Vec3) -> bool {
+        let _ = at;
+        false
+    }
+
     /// The current attack target's position, if the mob has one.
     fn attack_target(&self) -> Option<Vec3> {
         None

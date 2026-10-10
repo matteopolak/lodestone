@@ -325,6 +325,8 @@ pub enum NavMode {
     Ground,
     /// Swims through water cells in all six directions and never leaves it.
     Swim,
+    /// Moves by pushing a velocity chosen by its goals in pulses, with no path.
+    Drift,
 }
 
 /// Per-mob parameters that make traversability mob-specific.
@@ -344,6 +346,8 @@ pub struct MobShape {
     pub can_float: bool,
     /// Whether the mob can walk over fence tops.
     pub can_walk_over_fences: bool,
+    /// Whether the mob climbs walls it presses against.
+    pub can_climb: bool,
     /// Whether the mob may pass through doorways.
     pub can_pass_doors: bool,
     /// Whether the mob can open wooden doors.
@@ -365,6 +369,7 @@ impl MobShape {
             max_fall_distance: 3,
             can_float: false,
             can_walk_over_fences: false,
+            can_climb: false,
             can_pass_doors: true,
             can_open_doors: false,
             malus_overrides: HashMap::new(),
@@ -379,6 +384,14 @@ impl MobShape {
         shape.nav_mode = NavMode::Swim;
         shape.can_float = true;
         shape.malus_overrides.insert(PathType::Water, 0.0);
+        shape
+    }
+
+    /// A body that drifts in water on pulsed velocities instead of following paths.
+    #[must_use]
+    pub fn drifter(width: f32, height: f32) -> Self {
+        let mut shape = Self::swimmer(width, height);
+        shape.nav_mode = NavMode::Drift;
         shape
     }
 

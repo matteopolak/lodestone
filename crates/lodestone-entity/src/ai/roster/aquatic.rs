@@ -1,4 +1,5 @@
-//! Goal sets for the bony fish: cod, salmon, tropical fish and pufferfish.
+//! Goal sets for water animals: the bony fish (cod, salmon, tropical fish,
+//! pufferfish) and the squids.
 //!
 //! # What it is
 //!
@@ -13,7 +14,7 @@
 //! the puff needs a contact-damage hook.
 
 use crate::ai::goal::Goal;
-use crate::ai::goals::{AvoidEntityGoal, PanicGoal, RandomStrollGoal};
+use crate::ai::goals::{AvoidEntityGoal, DriftFleeGoal, DriftGoal, PanicGoal, RandomStrollGoal};
 
 use super::{Registration, Selector, SpeciesContext};
 
@@ -23,6 +24,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
     match species {
         "cod" | "salmon" | "tropical_fish" => Some(SCHOOLING_FISH),
         "pufferfish" => Some(PUFFERFISH),
+        "squid" | "glow_squid" => Some(SQUID),
         _ => None,
     }
 }
@@ -43,6 +45,20 @@ pub static PUFFERFISH: &[Registration] = &[
     Registration::missing(Selector::Goal, 1, "puff"),
 ];
 
+/// Squid and glow squid: pulsed drifting, and an escape from whoever hurt them.
+pub static SQUID: &[Registration] = &[
+    Registration::goal(0, "drift", drift),
+    Registration::goal(1, "drift flee", drift_flee),
+];
+
+fn drift(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(DriftGoal::new())
+}
+
+fn drift_flee(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(DriftFleeGoal::new())
+}
+
 fn panic(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(PanicGoal::new(ctx.speed * 1.25))
 }
@@ -59,7 +75,6 @@ fn swim_stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::ai::roster::registrations_for;
 
     #[test]
@@ -71,7 +86,8 @@ mod tests {
     }
 
     #[test]
-    fn a_squid_is_not_claimed() {
-        assert!(lookup("squid").is_none());
+    fn a_squid_has_no_path_goals() {
+        assert_eq!(registrations_for("squid").len(), 2);
+        assert!(std::ptr::eq(registrations_for("squid"), registrations_for("glow_squid")));
     }
 }

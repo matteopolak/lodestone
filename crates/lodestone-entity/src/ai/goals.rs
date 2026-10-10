@@ -427,6 +427,98 @@ impl Goal for SwellGoal {
     }
 }
 
+/// A drifting mob's random heading: when idle, out of water or by a one in 25
+/// goal-tick chance it picks a new velocity pulse of 0.2 along a random
+/// horizontal direction with a vertical part in -0.1..0.1; after 100 idle ticks
+/// it stops.
+#[derive(Debug, Default)]
+pub struct DriftGoal;
+
+impl DriftGoal {
+    /// Creates the goal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Goal for DriftGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[])
+    }
+
+    fn can_use(&mut self, _mob: &mut dyn MobController) -> bool {
+        true
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        if mob.no_action_time() > 100 {
+            mob.set_drift_vector(Vec3::new(0.0, 0.0, 0.0));
+        } else if mob.next_i32(reduced_tick_delay(50)) == 0
+            || !mob.in_water()
+            || mob.drift_vector().length().powi(2) <= 1.0e-5
+        {
+            let angle = f64::from(mob.next_f32()) * std::f64::consts::TAU;
+            let rise = -0.1 + f64::from(mob.next_f32()) * 0.2;
+            mob.set_drift_vector(Vec3::new(angle.cos() * 0.2, rise, angle.sin() * 0.2));
+        }
+    }
+}
+
+/// A drifting mob that was hurt recently swims directly away from the attacker
+/// while it is within 10 blocks, scaled up to three times as hard when close.
+#[derive(Debug, Default)]
+pub struct DriftFleeGoal;
+
+impl DriftFleeGoal {
+    /// Creates the goal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Goal for DriftFleeGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[])
+    }
+
+    fn requires_update_every_tick(&self) -> bool {
+        true
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        mob.in_water() && mob.last_hurt_by().is_some_and(|h| distance_sqr(h, mob.position()) < 100.0)
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        let Some(hurter) = mob.last_hurt_by() else {
+            return;
+        };
+        let here = mob.position();
+        let mut away = Vec3::new(here.x - hurter.x, here.y - hurter.y, here.z - hurter.z);
+        let landing = Vec3::new(here.x + away.x, here.y + away.y, here.z + away.z);
+        let air = mob.air_at(landing);
+        if !(mob.water_at(landing) || air) {
+            return;
+        }
+        let length = away.length();
+        if length > 0.0 {
+            let mut boost = 3.0;
+            if length > 5.0 {
+                boost -= (length - 5.0) / 5.0;
+            }
+            if boost > 0.0 {
+                away = Vec3::new(away.x * boost, away.y * boost, away.z * boost);
+            }
+        }
+        if air {
+            away.y = 0.0;
+        }
+        mob.set_drift_vector(Vec3::new(away.x / 20.0, away.y / 20.0, away.z / 20.0));
+    }
+}
+
 /// Flees from a nearby avoided entity.
 ///
 /// Vanilla's own avoid-entity goal (flag MOVE), simplified to: when a threat is close,

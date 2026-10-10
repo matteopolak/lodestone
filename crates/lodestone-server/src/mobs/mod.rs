@@ -718,7 +718,9 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
     } else {
         base.map_or((0.6, 1.95), |d| (d.width, d.height))
     };
-    let mut shape = if species_swims(entity_type) {
+    let mut shape = if species_drifts(entity_type) {
+        MobShape::drifter(width * scale, height * scale)
+    } else if species_swims(entity_type) {
         MobShape::swimmer(width * scale, height * scale)
     } else {
         MobShape::land(width * scale, height * scale)
@@ -727,10 +729,16 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
     shape.can_open_doors = species_can_open_doors(entity_type);
     shape.can_float = species_can_float(entity_type);
     shape.can_walk_over_fences = species_can_walk_over_fences(entity_type);
+    shape.can_climb = matches!(entity_type.path(), "spider" | "cave_spider");
     for &(kind, malus) in lodestone_entity::pathfinding::species_malus_overrides(entity_type.path()) {
         shape.malus_overrides.insert(kind, malus);
     }
     shape
+}
+
+/// Species that move by pulsed drifting instead of paths.
+fn species_drifts(entity_type: &ResourceKey) -> bool {
+    matches!(entity_type.path(), "squid" | "glow_squid")
 }
 
 /// Species whose navigation moves only through water.

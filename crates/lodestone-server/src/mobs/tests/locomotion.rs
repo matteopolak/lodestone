@@ -368,3 +368,82 @@ fn a_cod_flees_a_nearby_player() {
     let away = (p.x - player.x).hypot(p.z - player.z);
     assert!(away > 4.5, "the cod is {away} blocks from the player");
 }
+
+/// A squid in a tank pulses along a random heading. Each pulse pushes the full
+/// 0.2 horizontal vector, so the fastest tick is exactly 0.2 blocks and none
+/// is faster; across the run it travels well beyond its start.
+#[test]
+fn a_squid_pulses_through_its_tank_at_the_vector_speed() {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..32 {
+        for x in 0..32 {
+            world.set_block(x, 0, z, "minecraft:stone");
+            for y in 1..=10 {
+                world.set_block(x, y, z, "minecraft:water");
+            }
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    let start = Vec3::new(16.5, 5.0, 16.5);
+    let id = sim.spawn_species("minecraft:squid".parse().expect("valid key"), start).id();
+    sim.set_players(vec![PerceivedPlayer {
+        identity: None,
+        perception: PlayerPerception {
+            position: Vec3::new(16.5, 5.0, 40.5),
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, -1.0),
+        },
+    }]);
+    let (mut fastest, mut farthest) = (0.0_f64, 0.0_f64);
+    let mut last = start;
+    for _ in 0..600 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        let p = sim.get(id).expect("alive").position();
+        fastest = fastest.max((p.x - last.x).hypot(p.z - last.z));
+        farthest = farthest.max((p.x - start.x).hypot(p.z - start.z));
+        last = p;
+    }
+    assert!((fastest - 0.2).abs() < 1e-6, "fastest horizontal step {fastest}");
+    assert!(farthest >= 3.0, "only {farthest} blocks from its start");
+}
+
+/// A spider chasing a player standing on a 4-high plateau climbs the face. A
+/// climb rises 0.2 blocks per tick, so the fastest vertical step is exactly
+/// 0.2, and it gets within biting reach of the player (feet above y 4) before
+/// the attack goal stops the climb.
+#[test]
+fn a_spider_climbs_a_wall_to_reach_a_player() {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..16 {
+        for x in 0..32 {
+            world.set_block(x, 0, z, "minecraft:stone");
+            if x >= 10 {
+                for y in 1..=4 {
+                    world.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
+    let id = sim.spawn_species("minecraft:spider".parse().expect("valid key"), Vec3::new(5.5, 1.0, 8.5)).id();
+    sim.set_players(vec![PerceivedPlayer {
+        identity: None,
+        perception: PlayerPerception {
+            position: Vec3::new(10.5, 5.0, 8.5),
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, -1.0),
+        },
+    }]);
+    let (mut fastest_rise, mut highest) = (0.0_f64, 0.0_f64);
+    let mut last_y = 1.0;
+    for _ in 0..400 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        let y = sim.get(id).expect("alive").position().y;
+        fastest_rise = fastest_rise.max(y - last_y);
+        highest = highest.max(y);
+        last_y = y;
+    }
+    assert!((fastest_rise - 0.2).abs() < 1e-6, "fastest rise {fastest_rise}");
+    assert!(highest >= 4.0, "the spider only reached y {highest}");
+}
