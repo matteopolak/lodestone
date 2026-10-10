@@ -211,6 +211,15 @@ pub(super) fn is_fire_immune(entity_type: &ResourceKey) -> bool {
 /// Matched on the resource-key *path*, so a namespace other than `minecraft:`
 /// would also match. Harmless today (nothing loads datapacks) and the generated
 /// table will carry full keys.
+/// Mobs a pufferfish ignores.
+pub(super) fn not_scary_for_pufferfish(species: &str) -> bool {
+    matches!(
+        species,
+        "turtle" | "guardian" | "elder_guardian" | "cod" | "pufferfish" | "salmon" | "tropical_fish" | "dolphin" | "squid"
+            | "glow_squid" | "tadpole" | "nautilus" | "zombie_nautilus" | "sulfur_cube"
+    )
+}
+
 pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
     match species {
         // `AbstractCow` covers both, and they share `cow_food`.

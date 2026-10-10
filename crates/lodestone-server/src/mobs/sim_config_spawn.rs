@@ -507,6 +507,8 @@ impl<'w> MobSim<'w> {
             piglin_alert_ticks: -1,
             armadillo_danger_ticks: 0,
             axolotl_play_dead_ticks: 0,
+            puff: puffer::PuffState::default(),
+            flock: flock::FlockLink::default(),
             camel_sitting: false,
             camel_pose_tick: 0,
             camel_dash_cooldown: 0,
@@ -744,6 +746,9 @@ impl<'w> MobSim<'w> {
             attack_damage_from_attributes(&attrs)
         };
         mob.knockback_resistance = knockback_resistance_from_attributes(&attrs);
+        if mob.entity_type().path() == "turtle" {
+            mob.mob.set_nest(Some(Vec3::new(pos.x.floor() + 0.5, pos.y.floor(), pos.z.floor() + 0.5)));
+        }
         mob
     }
 

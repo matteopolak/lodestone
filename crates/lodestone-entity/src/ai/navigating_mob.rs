@@ -473,6 +473,20 @@ pub struct MobBody {
     players_by_height: Vec<Vec3>,
     /// Host-fed, phantoms only: a cat within 16 blocks of the body.
     cat_near: bool,
+    /// Host-fed, pufferfish only: a scary entity within 2 blocks.
+    scary_near: bool,
+    /// Host-fed, turtles only: the nesting beach.
+    nest: Option<Vec3>,
+    /// Whether the mob is walking back to its nest.
+    going_home: bool,
+    /// Host-fed, schooling fish only: the leader's position when following.
+    flock_leader: Option<Vec3>,
+    /// Host-fed: whether other fish follow this one.
+    flock_followers: bool,
+    /// Set when the fish gave up following; the host drains it.
+    flock_left: bool,
+    /// Whether the puff goal is running.
+    inflating: bool,
     /// Host injection point, refreshed once per tick: the position of a nearby
     /// entity currently tempting this mob, or `None`. Drives
     /// [`MobController::temptation`] and therefore
@@ -853,6 +867,13 @@ impl<'w> NavigatingMob<'w> {
             nearest_player: None,
             players_by_height: Vec::new(),
             cat_near: false,
+            scary_near: false,
+            nest: None,
+            going_home: false,
+            flock_leader: None,
+            flock_followers: false,
+            flock_left: false,
+            inflating: false,
             temptation: None,
             avoid_threat: None,
             no_action_time: 0,
@@ -1369,6 +1390,36 @@ impl<'w> NavigatingMob<'w> {
     pub fn set_nearest_player(&mut self, player: Option<Vec3>) -> &mut Self {
         self.nearest_player = player;
         self
+    }
+
+    /// Host injection point: whether a pufferfish has something scary near.
+    pub fn set_scary_near(&mut self, scary: bool) -> &mut Self {
+        self.scary_near = scary;
+        self
+    }
+
+    /// Host injection point: the school state of a schooling fish.
+    pub fn set_flock(&mut self, leader: Option<Vec3>, has_followers: bool) -> &mut Self {
+        self.flock_leader = leader;
+        self.flock_followers = has_followers;
+        self
+    }
+
+    /// Drains the "gave up following" flag.
+    pub fn take_flock_left(&mut self) -> bool {
+        std::mem::take(&mut self.flock_left)
+    }
+
+    /// Host injection point: the turtle's nesting beach.
+    pub fn set_nest(&mut self, nest: Option<Vec3>) -> &mut Self {
+        self.nest = nest;
+        self
+    }
+
+    /// Whether the puff goal is running.
+    #[must_use]
+    pub fn is_inflating(&self) -> bool {
+        self.inflating
     }
 
     /// Host injection point: the players a phantom may target, highest first,
@@ -2937,6 +2988,39 @@ impl MobController for NavigatingMob<'_> {
 
     fn cat_near(&self) -> bool {
         self.cat_near
+    }
+
+    fn flock_leader(&self) -> Option<Vec3> {
+        self.flock_leader
+    }
+
+    fn has_flock_followers(&self) -> bool {
+        self.flock_followers
+    }
+
+    fn leave_flock(&mut self) {
+        self.flock_left = true;
+        self.flock_leader = None;
+    }
+
+    fn nest_position(&self) -> Option<Vec3> {
+        self.nest
+    }
+
+    fn going_home(&self) -> bool {
+        self.going_home
+    }
+
+    fn set_going_home(&mut self, going_home: bool) {
+        self.going_home = going_home;
+    }
+
+    fn scary_near(&self) -> bool {
+        self.scary_near
+    }
+
+    fn set_inflating(&mut self, inflating: bool) {
+        self.inflating = inflating;
     }
 
     fn last_hurt_by(&self) -> Option<Vec3> {

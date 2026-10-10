@@ -617,8 +617,10 @@ impl<'w> MobSim<'w> {
     /// The only species table it consults is [`avoided_species`], which answers
     /// "is that a threat to me", a perception question.
     pub(super) fn feed_perception(&mut self) {
+        self.update_flocks();
         let n = self.mobs.len();
         let mut nearest_player = vec![None; n];
+        let mut scary_near = vec![false; n];
         let mut sky_hunt: Vec<(Vec<Vec3>, bool)> = vec![(Vec::new(), false); n];
         let mut temptation = vec![None; n];
         let mut threat = vec![None; n];
@@ -742,6 +744,26 @@ impl<'w> MobSim<'w> {
                         && (o.position().z - pos.z).abs() <= 16.0
                 });
                 sky_hunt[i] = (high, cat_near);
+            }
+
+            // --- pufferfish scare ------------------------------------------
+            // Any player, or any mob outside the not-scary list, within 2
+            // blocks of the fish's box.
+            if species == "pufferfish" {
+                let shape = me.mob.shape();
+                let (hw, h) = (f64::from(shape.width) / 2.0 + 2.0, f64::from(shape.height));
+                let near = |p: Vec3, depth: f64, height: f64| {
+                    (p.x - pos.x).abs() < hw + depth
+                        && (p.z - pos.z).abs() < hw + depth
+                        && p.y < pos.y + h + 2.0
+                        && p.y + height > pos.y - 2.0
+                };
+                scary_near[i] = self.players.iter().any(|p| near(p.perception.position, 0.3, 1.8))
+                    || self.mobs.iter().any(|o| {
+                        o.id != me.id
+                            && !species::not_scary_for_pufferfish(o.entity_type().path())
+                            && near(o.position(), f64::from(o.mob.shape().width) / 2.0, f64::from(o.mob.shape().height))
+                    });
             }
 
             // --- temptation -----------------------------------------------
@@ -1032,7 +1054,7 @@ impl<'w> MobSim<'w> {
             let home = m.bed.map(block_center);
             let meeting_point = m.meeting_point.map(block_center);
             let (high, cat_near) = std::mem::take(&mut sky_hunt[i]);
-            m.mob.set_sky_hunt_inputs(high, cat_near);
+            m.mob.set_sky_hunt_inputs(high, cat_near).set_scary_near(scary_near[i]);
             m.mob
                 .set_nearest_player(nearest_player[i])
                 .set_temptation(temptation[i])

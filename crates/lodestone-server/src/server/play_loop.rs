@@ -1897,6 +1897,24 @@ where
                                 )
                                 .is_some()
                             {
+                                if hit.poison_ticks > 0 {
+                                    effects.apply("minecraft:poison", hit.poison_ticks, 0);
+                                    apply(
+                                        conn,
+                                        &mut state,
+                                        proto.encode_update_mob_effect(
+                                            LOCAL_PLAYER_ENTITY_ID,
+                                            "minecraft:poison",
+                                            0,
+                                            hit.poison_ticks,
+                                            false,
+                                            true,
+                                            true,
+                                            false,
+                                        ),
+                                    )
+                                    .await?;
+                                }
                                 let direction = crate::vitals::HurtDirection::from_source(
                                     hit.attacker_pos,
                                     Vec3::new(x, y, z),

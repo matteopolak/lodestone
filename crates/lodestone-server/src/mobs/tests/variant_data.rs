@@ -217,3 +217,27 @@ fn dye_mixing_matches_the_two_ingredient_recipes() {
         }
     }
 }
+
+/// The pufferfish's ignore list is the jar's tag, entry for entry.
+#[test]
+fn the_pufferfish_ignore_list_matches_the_jars_tag() {
+    let Some(root) = data_root() else { return };
+    let tag = json(&root, "tags/entity_type/not_scary_for_pufferfish.json");
+    let names: Vec<String> = tag["values"]
+        .as_array()
+        .expect("values")
+        .iter()
+        .map(|v| v.as_str().expect("string").trim_start_matches("minecraft:").to_owned())
+        .collect();
+    assert!(names.len() >= 10, "tag read wrongly: {names:?}");
+    for name in &names {
+        assert!(super::species::not_scary_for_pufferfish(name), "{name} should be ignored");
+    }
+    for control in ["zombie", "cow", "villager", "axolotl"] {
+        assert!(!names.iter().any(|n| n == control) && !super::species::not_scary_for_pufferfish(control));
+    }
+    // Every ignored name in our list is in the tag (the match arm count equals the tag size).
+    let ours = ["turtle", "guardian", "elder_guardian", "cod", "pufferfish", "salmon", "tropical_fish", "dolphin", "squid",
+        "glow_squid", "tadpole", "nautilus", "zombie_nautilus", "sulfur_cube"];
+    assert_eq!(ours.len(), names.len());
+}

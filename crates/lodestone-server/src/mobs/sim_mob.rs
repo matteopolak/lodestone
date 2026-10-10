@@ -1224,6 +1224,9 @@ impl<'w> SimMob<'w> {
                 _ => {}
             }
         }
+        if self.entity_type.path() == "pufferfish" {
+            metadata.push(MetadataField::PuffState(i32::from(self.puff.state)));
+        }
         if self.entity_type.path() == "bat" {
             metadata.push(MetadataField::BatResting(self.is_resting()));
         }
@@ -1337,5 +1340,18 @@ impl<'w> SimMob<'w> {
             // `SimMob` alone has no player list to resolve against.
             leash_link: None,
         }
+    }
+}
+
+#[cfg(test)]
+impl SimMob<'_> {
+    /// The entity id of the school leader this fish follows.
+    pub fn school_leader(&self) -> Option<i32> {
+        self.flock.leader
+    }
+
+    /// This fish plus its followers.
+    pub fn school_size(&self) -> i32 {
+        self.flock.size
     }
 }

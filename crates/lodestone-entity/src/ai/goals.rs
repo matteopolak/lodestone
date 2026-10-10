@@ -726,6 +726,7 @@ impl Goal for AvoidEntityGoal {
 pub struct PanicGoal {
     speed: f64,
     target: Option<Vec3>,
+    water_radius: Option<i32>,
 }
 
 impl PanicGoal {
@@ -735,8 +736,40 @@ impl PanicGoal {
         Self {
             speed,
             target: None,
+            water_radius: None,
         }
     }
+
+    /// Makes the goal flee to the nearest water within `radius` blocks when
+    /// there is any, rather than to a random spot.
+    #[must_use]
+    pub fn seeking_water(mut self, radius: i32) -> Self {
+        self.water_radius = Some(radius);
+        self
+    }
+}
+
+/// The nearest water cell within `radius` blocks horizontally and one
+/// vertically, by Manhattan distance.
+fn nearest_water(mob: &dyn MobController, radius: i32) -> Option<Vec3> {
+    let here = mob.position();
+    let (bx, by, bz) = (here.x.floor() as i32, here.y.floor() as i32, here.z.floor() as i32);
+    let mut best: Option<(i32, Vec3)> = None;
+    for dx in -radius..=radius {
+        for dy in -1_i32..=1 {
+            for dz in -radius..=radius {
+                let cost = dx.abs() + dy.abs() + dz.abs();
+                if best.is_some_and(|(c, _)| c <= cost) {
+                    continue;
+                }
+                let at = Vec3::new(f64::from(bx + dx) + 0.5, f64::from(by + dy), f64::from(bz + dz) + 0.5);
+                if mob.water_at(at) {
+                    best = Some((cost, at));
+                }
+            }
+        }
+    }
+    best.map(|(_, at)| at)
 }
 
 impl Goal for PanicGoal {
@@ -747,6 +780,12 @@ impl Goal for PanicGoal {
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
         if !mob.is_panicking() {
             return false;
+        }
+        if let Some(radius) = self.water_radius
+            && let Some(water) = nearest_water(mob, radius)
+        {
+            self.target = Some(water);
+            return true;
         }
         self.target = mob.random_stroll_target();
         self.target.is_some()
@@ -2500,6 +2539,8 @@ mod tests {
         gift_requested: u32,
         shoulder_dismount_ticks: i32,
         shoulder_ride_requested: u32,
+        water_cells: Vec<(i32, i32, i32)>,
+        moved_to: Option<Vec3>,
     }
     impl MobController for ScriptMob {
         fn sea_level(&self) -> i32 {
@@ -2523,9 +2564,13 @@ mod tests {
         fn is_panicking(&self) -> bool {
             self.panicking
         }
-        fn move_to(&mut self, _t: Vec3, _s: f64) -> bool {
+        fn move_to(&mut self, t: Vec3, _s: f64) -> bool {
             self.move_calls += 1;
+            self.moved_to = Some(t);
             true
+        }
+        fn water_at(&self, at: Vec3) -> bool {
+            self.water_cells.contains(&(at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32))
         }
         fn navigation_done(&self) -> bool {
             self.nav_done
@@ -3072,6 +3117,39 @@ mod tests {
              target-anchored (and un-jittered) formula's {wrong_hypothesis:?} \
              — this must be the enderman-anchored formula, not the one it replaced"
         );
+    }
+
+    /// A panicking mob that seeks water heads for the nearest water cell by
+    /// Manhattan distance (here (3, 0, 0) at distance 3 over (-2, 1, 5) at 8,
+    /// the farther one listed first), one with no water in reach strolls, and
+    /// a plain panic ignores the water altogether.
+    #[test]
+    fn panic_seeking_water_takes_the_nearest_water_cell() {
+        let mob = |cells: Vec<(i32, i32, i32)>| ScriptMob {
+            pos: Vec3::new(0.5, 64.0, 0.5),
+            panicking: true,
+            stroll: Some(Vec3::new(9.0, 64.0, 9.0)),
+            water_cells: cells,
+            ..Default::default()
+        };
+        let near_and_far = vec![(-2, 65, 5), (3, 64, 0)];
+        let mut goal = PanicGoal::new(1.2).seeking_water(7);
+        let mut m = mob(near_and_far.clone());
+        assert!(goal.can_use(&mut m));
+        goal.start(&mut m);
+        assert_eq!(m.moved_to, Some(Vec3::new(3.5, 64.0, 0.5)));
+
+        let mut m = mob(vec![(20, 64, 0)]);
+        let mut goal = PanicGoal::new(1.2).seeking_water(7);
+        assert!(goal.can_use(&mut m));
+        goal.start(&mut m);
+        assert_eq!(m.moved_to, Some(Vec3::new(9.0, 64.0, 9.0)), "water beyond 7 blocks is ignored");
+
+        let mut m = mob(near_and_far);
+        let mut goal = PanicGoal::new(1.2);
+        assert!(goal.can_use(&mut m));
+        goal.start(&mut m);
+        assert_eq!(m.moved_to, Some(Vec3::new(9.0, 64.0, 9.0)), "a plain panic never looks for water");
     }
 
     #[test]

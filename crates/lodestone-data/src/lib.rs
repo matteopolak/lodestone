@@ -49,6 +49,8 @@ pub(crate) mod generated_entity_type_enum;
 pub(crate) mod generated_entity_types;
 #[path = "generated/face_occlusion.rs"]
 pub(crate) mod generated_face_occlusion;
+#[path = "generated/redstone_conductor.rs"]
+pub(crate) mod generated_redstone_conductor;
 #[path = "generated/hardness.rs"]
 pub(crate) mod generated_hardness;
 #[path = "generated/item_enum.rs"]
@@ -111,6 +113,7 @@ pub mod entity_dimensions;
 pub mod entity_type;
 pub mod entity_types;
 pub mod face_occlusion;
+pub mod redstone_conductor;
 pub mod hardness;
 pub mod item;
 pub mod item_rarity;

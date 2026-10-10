@@ -402,6 +402,8 @@ pub enum MetadataField {
     /// Index 16 is shared with other species' fields under other serializers, so
     /// only a bat's snapshot may carry this.
     BatResting(bool),
+    /// A pufferfish's puff state (0 small, 1 mid, 2 full), the integer at index 17.
+    PuffState(i32),
     /// The real villager's own villager-data field — index **19**, serializer
     /// `VILLAGER_DATA` (`18`): a villager type plus a villager profession
     /// plus a plain level int, which is the *whole* of what a client's

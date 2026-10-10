@@ -302,10 +302,7 @@ pub static DROWNED: &[Registration] = &[
     // never has this goal's `can_use` return true.
     Registration::goal(2, "Drowned.DrownedTridentAttackGoal", super::ranged::trident_attack),
     Registration::goal(2, "Drowned.DrownedAttackGoal", drowned_melee),
-    // Vanilla's own go-to-beach goal extends `MoveToBlockGoal` —
-    // leaves the water at night to hunt. No sun/time query on the AI seam and
-    // no water to leave.
-    Registration::missing(Selector::Goal, 5, "Drowned.DrownedGoToBeachGoal"),
+    Registration::goal(5, "Drowned.DrownedGoToBeachGoal", super::amphibious::drowned_go_to_beach),
     Registration::goal(6, "Drowned.DrownedSwimUpGoal", super::amphibious::drowned_swim_up),
     // Vanilla's own plain stroll goal at speed `1.0` — the plain stroll, **not** the
     // water-avoiding subclass every other species in this family registers

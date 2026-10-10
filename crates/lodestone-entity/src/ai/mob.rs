@@ -175,6 +175,42 @@ pub trait MobController {
         false
     }
 
+    /// The position of the school leader this fish follows, if it follows one
+    /// (host-fed for schooling fish only).
+    fn flock_leader(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Whether other fish follow this one.
+    fn has_flock_followers(&self) -> bool {
+        false
+    }
+
+    /// Stops following the leader; the host drops the school link.
+    fn leave_flock(&mut self) {}
+
+    /// The turtle's nesting beach, where it was born (host-fed).
+    fn nest_position(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Whether the mob is walking back to its nest.
+    fn going_home(&self) -> bool {
+        false
+    }
+
+    /// Sets whether the mob is walking back to its nest.
+    fn set_going_home(&mut self, _going_home: bool) {}
+
+    /// Whether something a pufferfish fears is within 2 blocks (host-fed for
+    /// pufferfish only).
+    fn scary_near(&self) -> bool {
+        false
+    }
+
+    /// Starts or stops inflating (read back by the host's puff state machine).
+    fn set_inflating(&mut self, _inflating: bool) {}
+
     /// Whether the mob is on fire.
     fn is_burning(&self) -> bool {
         false

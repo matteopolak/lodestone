@@ -424,6 +424,8 @@ pub mod villager;
 // Species helpers stay private to this module tree; `pub(super)` exposes them
 // to descendant simulation modules without adding an external API path.
 mod species;
+mod puffer;
+mod flock;
 mod sunlight;
 mod sim_mob;
 mod handle;
@@ -1737,6 +1739,10 @@ pub struct SimMob<'w> {
     /// for every live axolotl. `0` for every non-axolotl species, where
     /// nothing reads it.
     axolotl_play_dead_ticks: i32,
+    /// A pufferfish's puff; idle for every other species.
+    puff: puffer::PuffState,
+    /// A schooling fish's place in its school.
+    flock: flock::FlockLink,
     /// The camel's own "is sitting" state — real, client-visible
     /// sitting pose (see [`CAMEL_POSE_SITTING`]). Toggled by
     /// [`camel_random_sitting`]'s own per-tick approximation of
@@ -3076,6 +3082,8 @@ pub struct PlayerHit {
     /// The attacking mob's position, for the driver's hurt-direction/knockback
     /// calculation (`crate::vitals::HurtDirection::from_source`).
     pub attacker_pos: Vec3,
+    /// Ticks of poison the hit also applies (0 for none).
+    pub poison_ticks: i32,
 }
 
 /// One vanilla zombie hurt-handler reinforcement roll that passed — the *decision*

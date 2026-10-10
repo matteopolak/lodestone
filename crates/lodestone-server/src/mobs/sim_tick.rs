@@ -521,6 +521,31 @@ impl<'w> MobSim<'w> {
             if m.health > 0.0 && m.axolotl_play_dead_ticks > 0 {
                 m.axolotl_play_dead_ticks -= 1;
             }
+            // A pufferfish's puff follows its goal, and a puffed one stings any
+            // player touching its box (0.3 blocks of reach).
+            if m.health > 0.0 && m.entity_type.path() == "pufferfish" {
+                m.puff.tick(m.mob.is_inflating());
+                if m.puff.state > 0 {
+                    let (here, shape) = (m.position(), m.mob.shape());
+                    // A player's box is 0.6 wide, 1.8 tall.
+                    let (half_w, h) = (f64::from(shape.width) / 2.0 + 0.3, f64::from(shape.height));
+                    for p in &self.players {
+                        let at = p.perception.position;
+                        let touching = (at.x - here.x).abs() < half_w
+                            && (at.z - here.z).abs() < half_w
+                            && at.y < here.y + h
+                            && at.y + 1.8 > here.y;
+                        if let (true, Some(identity)) = (touching, p.identity) {
+                            self.pending_player_hits.push(PlayerHit {
+                                identity,
+                                raw_damage: m.puff.sting_damage(),
+                                attacker_pos: here,
+                                poison_ticks: m.puff.sting_poison_ticks(),
+                            });
+                        }
+                    }
+                }
+            }
             // `allay_liked_noteblock`'s cooldown countdown, and
             // `allay_duplication_cooldown`'s — see both fields' own docs.
             // Cleared outright at zero rather than left as `Some((pos, 0))`,
@@ -783,6 +808,7 @@ impl<'w> MobSim<'w> {
                     identity,
                     raw_damage,
                     attacker_pos,
+                    poison_ticks: 0,
                 });
                 // A tamed pet retaliates against the source that hurt its
                 // owner. The event carries the attacker's position rather than

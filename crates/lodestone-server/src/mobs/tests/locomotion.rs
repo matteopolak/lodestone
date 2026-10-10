@@ -607,12 +607,16 @@ fn a_bee_flies_and_wanders() {
 
 /// A bat world: a stone floor at y=0, and optionally a stone ceiling at y=11.
 fn bat_world(ceiling: bool) -> ChunkWorld {
+    bat_world_with(ceiling.then_some("minecraft:stone"))
+}
+
+fn bat_world_with(ceiling: Option<&str>) -> ChunkWorld {
     let mut world = ChunkWorld::new(-64, 384);
     for z in 0..64 {
         for x in 0..64 {
             world.set_block(x, 0, z, "minecraft:stone");
-            if ceiling {
-                world.set_block(x, 11, z, "minecraft:stone");
+            if let Some(block) = ceiling {
+                world.set_block(x, 11, z, block);
             }
         }
     }
@@ -715,15 +719,21 @@ fn a_phantom_swoops_down_on_a_player_again_and_again() {
 /// plateau of height 3 from x=29 on, with water filling every column below it
 /// up to y=3 (so the shore is x<=28, land standing at y=4).
 fn beach_world() -> ChunkWorld {
+    beach_world_at(0)
+}
+
+/// The beach with its floor at `base`, so its water surface sits at
+/// `base + 3`.
+fn beach_world_at(base: i32) -> ChunkWorld {
     let mut world = ChunkWorld::new(-64, 384);
     for z in 0..64 {
         for x in 0..64 {
-            let top = (x - 26).clamp(0, 3);
-            for y in 0..=top {
+            let top = base + (x - 26).clamp(0, 3);
+            for y in base..=top {
                 world.set_block(x, y, z, "minecraft:stone");
             }
             if x <= 28 {
-                for y in (top + 1)..=3 {
+                for y in (top + 1)..=(base + 3) {
                     world.set_block(x, y, z, "minecraft:water");
                 }
             }
@@ -1000,4 +1010,170 @@ fn a_skeleton_in_daylight_wanders_only_under_cover() {
     };
     assert_eq!(leavers(6000), 0, "skeletons walked out into the sun");
     assert!(leavers(18000) >= 3, "only {} of 8 left the roof at night", leavers(18000));
+}
+
+/// A 3x3 tank of water two blocks deep on a stone floor, walled in.
+fn tank_world() -> ChunkWorld {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..64 {
+        for x in 0..64 {
+            world.set_block(x, 0, z, "minecraft:stone");
+            let inside = (31..=33).contains(&x) && (31..=33).contains(&z);
+            let wall = (30..=34).contains(&x) && (30..=34).contains(&z) && !inside;
+            for y in 1..=3 {
+                if inside {
+                    world.set_block(x, y, z, "minecraft:water");
+                } else if wall {
+                    world.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+    }
+    world
+}
+
+fn puff_after(ticks: usize, scare: Option<&str>) -> (i32, Vec<MetadataField>) {
+    let world = tank_world();
+    let mut sim = MobSim::new(&world);
+    let id = sim.spawn_species("minecraft:pufferfish".parse().expect("valid key"), Vec3::new(32.5, 1.5, 32.5)).id();
+    if let Some(species) = scare {
+        sim.spawn_species(format!("minecraft:{species}").parse().expect("valid key"), Vec3::new(32.5, 2.2, 32.5));
+    }
+    for _ in 0..ticks {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+    }
+    let metadata = sim.get(id).expect("alive").snapshot().metadata;
+    let state = metadata.iter().find_map(|m| if let MetadataField::PuffState(s) = m { Some(*s) } else { None });
+    (state.expect("a pufferfish always reports its puff"), metadata)
+}
+
+/// A pufferfish puffs up when a mob it fears is within 2 blocks, and stays
+/// small beside a mob on the jar's ignore list or alone. A zombie in the tank
+/// is 0.7 blocks away; a cod is equally close.
+#[test]
+fn a_pufferfish_puffs_for_a_scary_mob_but_not_for_a_cod() {
+    assert_eq!(puff_after(100, Some("cod")).0, 0, "a cod does not scare it");
+    assert_eq!(puff_after(100, None).0, 0, "alone it stays small");
+    let (state, metadata) = puff_after(100, Some("zombie"));
+    assert_eq!(state, 2, "41 inflating ticks reach full");
+    assert!(metadata.contains(&MetadataField::PuffState(2)));
+}
+
+/// A puffed fish stings a player touching it for `1 + state` damage and
+/// `60 * state` ticks of poison; a small one does not sting.
+#[test]
+fn a_puffed_pufferfish_stings_a_player_touching_it() {
+    let world = tank_world();
+    let mut sim = MobSim::new(&world);
+    sim.spawn_species("minecraft:pufferfish".parse().expect("valid key"), Vec3::new(32.5, 1.5, 32.5));
+    sim.set_players(vec![viewed(32.5, 1.0, 32.5, 77)]);
+    let mut hits = Vec::new();
+    for _ in 0..3 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        hits.extend(sim.take_player_hits());
+    }
+    let first = hits.first().expect("a sting");
+    assert_eq!((first.raw_damage, first.poison_ticks), (2.0, 60), "mid puff");
+}
+
+/// Six cod released in one corner of a pond organise into a school within the
+/// first minutes: some follow a leader, every school stays within the cap of 8
+/// and a leader's size equals itself plus the fish naming it. Six pufferfish in
+/// the same spot (which do not school) form no links.
+#[test]
+fn cod_in_a_pond_form_a_school_and_pufferfish_do_not() {
+    let census = |species: &str| {
+        let world = pond_world();
+        let mut sim = MobSim::new(&world);
+        let ids: Vec<i32> = (0..6)
+            .map(|i| {
+                let at = Vec3::new(30.5 + f64::from(i % 3) * 1.5, 2.5, 30.5 + f64::from(i / 3) * 1.5);
+                sim.spawn_species(format!("minecraft:{species}").parse().expect("valid key"), at).id()
+            })
+            .collect();
+        sim.set_players(vec![viewed(32.5, 1.0, 36.5, 5)]);
+        for _ in 0..1500 {
+            sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        }
+        let followers: Vec<(i32, i32)> =
+            ids.iter().filter_map(|&id| sim.get(id).and_then(|m| m.school_leader()).map(|l| (id, l))).collect();
+        for &(_, leader) in &followers {
+            let named = followers.iter().filter(|&&(_, l)| l == leader).count() as i32;
+            let size = sim.get(leader).expect("leader alive").school_size();
+            assert_eq!(size, named + 1, "leader {leader}'s size counts itself and its followers");
+            assert!(size <= 8);
+        }
+        for &(id, leader) in &followers {
+            let (a, b) = (sim.get(id).expect("alive").position(), sim.get(leader).expect("alive").position());
+            let d = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt();
+            assert!(d < 13.0, "follower {id} is {d} blocks from its leader");
+        }
+        followers.len()
+    };
+    assert!(census("cod") >= 3, "only {} cod follow a leader", census("cod"));
+    assert_eq!(census("pufferfish"), 0);
+}
+
+/// A drowned floating at the surface of a sea (y 63) comes ashore at night to a
+/// standable block with two empty cells above it; in daylight it stays in the
+/// water. Ashore means standing on the plateau (x >= 29) at feet y 64.
+#[test]
+fn a_drowned_at_the_surface_comes_ashore_at_night_but_not_by_day() {
+    let world = beach_world_at(60);
+    let ashore = |time: i32| {
+        let mut sim = MobSim::new(&world);
+        sim.set_day_time(time);
+        let id = sim.spawn_species("minecraft:drowned".parse().expect("valid key"), Vec3::new(26.5, 62.0, 32.5)).id();
+        let mut landed = false;
+        for _ in 0..900 {
+            sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+            let p = sim.get(id).expect("alive").position();
+            landed |= p.x >= 29.0 && p.y >= 63.9;
+        }
+        landed
+    };
+    assert!(ashore(18000));
+    assert!(!ashore(6000));
+}
+
+/// A turtle carried 80 blocks from the beach it was born on walks back until
+/// within 7 blocks of it (the 1/700 draw per goal tick fires within a few
+/// hundred ticks); the test requires it to get within 20 blocks.
+#[test]
+fn a_turtle_far_from_its_nest_walks_home() {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..40 {
+        for x in 0..200 {
+            world.set_block(x, 0, z, "minecraft:stone");
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    sim.set_day_time(6000);
+    let id = sim.spawn_species("minecraft:turtle".parse().expect("valid key"), Vec3::new(20.5, 1.0, 20.5)).id();
+    sim.get_mut(id).expect("alive").teleport_to(Vec3::new(100.5, 1.0, 20.5));
+    sim.set_players(vec![viewed(100.5, 1.0, 40.5, 3)]);
+    let mut closest = f64::MAX;
+    for _ in 0..8000 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        closest = closest.min(sim.get(id).expect("alive").position().x - 20.5);
+    }
+    assert!(closest < 20.0, "closest approach to the nest {closest}");
+}
+
+/// A bat hangs from a ceiling that conducts redstone and not from one that is
+/// a full cube yet does not (glass), nor one that is not a full cube (a slab).
+#[test]
+fn a_bat_roosts_only_under_a_block_that_conducts_redstone() {
+    let rests = |ceiling: &str| {
+        let world = bat_world_with(Some(ceiling));
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_species("minecraft:bat".parse().expect("valid key"), Vec3::new(32.5, 10.0, 32.5)).id();
+        for _ in 0..200 {
+            sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        }
+        sim.get(id).expect("alive").is_resting()
+    };
+    assert!(rests("minecraft:stone"));
+    assert!(!rests("minecraft:glass"), "glass is a full cube that does not conduct");
+    assert!(!rests("minecraft:oak_slab[type=bottom,waterlogged=false]"));
 }

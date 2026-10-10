@@ -253,6 +253,13 @@ pub(super) fn is_full_cube(state: StateId) -> bool {
     matches!(collision_shapes::collision_boxes(state), [b] if b.min == [0.0; 3] && b.max == [1.0; 3])
 }
 
+/// Whether the state conducts redstone power, which is what a bat roosts
+/// under. A state added after 26.2 has no captured answer, so it counts when
+/// it is a full cube.
+fn conducts_redstone(state: StateId) -> bool {
+    lodestone_data::redstone_conductor::conducts(state).unwrap_or_else(|| is_full_cube(state))
+}
+
 pub(super) fn collision_top_of(state: StateId) -> f64 {
     if state.block().name() == "minecraft:moving_piston" {
         return 1.0;
@@ -297,7 +304,7 @@ impl PathWorld for ChunkWorld {
     }
 
     fn is_roost(&self, x: i32, y: i32, z: i32) -> bool {
-        is_full_cube(self.block_state_id(x, y, z))
+        conducts_redstone(self.block_state_id(x, y, z))
     }
 
     fn collides(&self, aabb: Aabb) -> bool {
@@ -379,7 +386,7 @@ impl PathWorld for LivePathWorld<'_> {
     }
 
     fn is_roost(&self, x: i32, y: i32, z: i32) -> bool {
-        (self.terrain)(x, y, z).is_some_and(is_full_cube)
+        (self.terrain)(x, y, z).is_some_and(conducts_redstone)
     }
 
     fn collides(&self, aabb: Aabb) -> bool {

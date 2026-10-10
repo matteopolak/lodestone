@@ -272,6 +272,27 @@ oracle-face-occlusion:
         java -cp "/work:$CP" FaceOcclusionOracle
       ' > crates/lodestone-data/tests/support/face_occlusion_jvm.txt
 
+# Re-dump whether each 26.2 block state conducts redstone power (the bat's
+# roost test). Needs Apple `container`. Follow with `just regen-redstone-conductor`.
+oracle-redstone-conductor:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CACHE="$(cd .cache/mc/{{pinned_mc}} && pwd)"
+    HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
+    container system start >/dev/null 2>&1 || true
+    container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
+      eclipse-temurin:25-jdk bash -c '
+        set -e
+        CP="/mc/versions/{{pinned_mc}}/server-{{pinned_mc}}.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        mkdir -p /work && cp /oracle/RedstoneConductorOracle.java /work/
+        javac -cp "$CP" -d /work /work/RedstoneConductorOracle.java
+        java -cp "/work:$CP" RedstoneConductorOracle
+      ' > crates/lodestone-data/tests/support/redstone_conductor_jvm.txt
+
+# Regenerate crates/lodestone-data's redstone-conductor table from the committed dump.
+regen-redstone-conductor:
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test redstone_conductor committed_table_matches_dump -- --ignored --nocapture
+
 # Regenerate crates/lodestone-data's effective face-occlusion table from the
 # committed JVM dump. Test: crates/lodestone-data/tests/face_occlusion.rs ::
 # committed_table_matches_dump (#[ignore]d).
