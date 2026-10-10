@@ -154,7 +154,7 @@
 use crate::ai::goal::Goal;
 use crate::ai::goals::{
     EndermanFreezeWhenLookedAt, EndermanLookForPlayerGoal, FollowOwnerGoal, FollowParentGoal,
-    MeleeAttackGoal, NearestAttackableTargetGoal, PanicGoal, TemptGoal,
+    MeleeAttackGoal, NearestAttackableTargetGoal, PanicGoal, RandomStrollGoal, TemptGoal,
 };
 
 use super::{
@@ -401,10 +401,7 @@ pub static BEE: &[Registration] = &[
     Registration::missing(Selector::Goal, 5, "Bee.BeeGoToHiveGoal"),
     Registration::missing(Selector::Goal, 6, "Bee.BeeGoToKnownFlowerGoal"),
     Registration::missing(Selector::Goal, 7, "Bee.BeeGrowCropGoal"),
-    // Vanilla's own bee-wander goal picks a destination in flight and hands it to a flying
-    // navigation. Our `RandomStrollGoal` drives the ground A*, so it is not an
-    // equivalent — a bee is not a mob that walks somewhere slowly.
-    Registration::missing(Selector::Goal, 8, "Bee.BeeWanderGoal"),
+    Registration::goal(8, "Bee.BeeWanderGoal", bee_wander),
     Registration::goal(9, "FloatGoal", float_goal),
     // Vanilla's own bee retaliation goal extends
     // the shared hurt-by-target goal; it overrides only the continue check, adding
@@ -586,6 +583,12 @@ fn tempt_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// row to keep deferring.
 fn anger_gated_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(NearestAttackableTargetGoal::anger_gated())
+}
+
+/// Picks a destination in flight about once in ten goal ticks and flies there at
+/// the species speed.
+fn bee_wander(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(RandomStrollGoal::new(ctx.speed).with_interval(10))
 }
 
 /// The bee's melee speed multiplier, from vanilla's own bee goal-registration method.

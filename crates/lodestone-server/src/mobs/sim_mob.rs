@@ -337,6 +337,12 @@ impl<'w> SimMob<'w> {
         self
     }
 
+    /// Whether a bat is hanging from a ceiling.
+    #[must_use]
+    pub fn is_resting(&self) -> bool {
+        self.mob.is_resting()
+    }
+
     /// Whether this mob is currently in the sitting **pose** —
     /// `SitWhenOrderedToGoal`'s observable output, which is what the `0x01`
     /// bit of vanilla's shared entity-flags metadata field carries. Read this to answer "did the goal run",
@@ -1217,6 +1223,9 @@ impl<'w> SimMob<'w> {
                 }
                 _ => {}
             }
+        }
+        if self.entity_type.path() == "bat" {
+            metadata.push(MetadataField::BatResting(self.is_resting()));
         }
         // Index 16's boolean, shared by the ageable-mob, zombie and zoglin
         // "is baby" metadata fields

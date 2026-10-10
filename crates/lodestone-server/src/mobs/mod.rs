@@ -77,7 +77,7 @@ use lodestone_entity::vibration::{
     is_vibration_listener, nearest_listenable, nearest_note_block_play,
 };
 use lodestone_entity::item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion};
-use lodestone_entity::pathfinding::MobShape;
+use lodestone_entity::pathfinding::{MobShape, NavMode};
 use lodestone_entity::projectile::{Projectile, ProjectileRegistry};
 use lodestone_entity::spawn_equipment::{self, EquipRandom};
 use lodestone_entity::{
@@ -719,8 +719,8 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
     } else {
         base.map_or((0.6, 1.95), |d| (d.width, d.height))
     };
-    let mut shape = if entity_type.path() == "ghast" {
-        MobShape::flier(width * scale, height * scale)
+    let mut shape = if let Some(mode) = species_flight(entity_type) {
+        MobShape::flier(mode, width * scale, height * scale)
     } else if species_drifts(entity_type) {
         MobShape::drifter(width * scale, height * scale)
     } else if species_swims(entity_type) {
@@ -737,6 +737,17 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
         shape.malus_overrides.insert(kind, malus);
     }
     shape
+}
+
+/// How an airborne species moves, if it flies.
+fn species_flight(entity_type: &ResourceKey) -> Option<NavMode> {
+    match entity_type.path() {
+        "ghast" => Some(NavMode::Fly),
+        "bee" => Some(NavMode::Air),
+        "bat" => Some(NavMode::Flutter),
+        "phantom" => Some(NavMode::Swoop),
+        _ => None,
+    }
 }
 
 /// Species that move by pulsed drifting instead of paths.

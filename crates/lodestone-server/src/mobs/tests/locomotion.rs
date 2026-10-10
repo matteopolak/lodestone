@@ -539,3 +539,140 @@ fn a_ghast_floats_and_wanders() {
     assert!(farthest >= 4.0, "only {farthest} blocks from its start");
     assert!(fastest > 0.0 && fastest < 0.5, "fastest step {fastest}");
 }
+
+/// A bee flies paths through open air under no gravity: with a floor 30 blocks
+/// below it never settles, it wanders away from where it started, and thrust of
+/// 0.02 scaled by the 0.6 flying speed limits a level flight to
+/// `0.012 / (1 - 0.91)` blocks per tick.
+#[test]
+fn a_bee_flies_and_wanders() {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..64 {
+        for x in 0..64 {
+            world.set_block(x, 0, z, "minecraft:stone");
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    sim.set_day_time(6000);
+    let start = Vec3::new(32.5, 30.0, 32.5);
+    let id = sim.spawn_species("minecraft:bee".parse().expect("valid key"), start).id();
+    let (mut lowest, mut farthest, mut fastest) = (f64::MAX, 0.0_f64, 0.0_f64);
+    let mut last = start;
+    for _ in 0..800 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        let p = sim.get(id).expect("alive").position();
+        lowest = lowest.min(p.y);
+        farthest = farthest.max(((p.x - start.x).powi(2) + (p.z - start.z).powi(2)).sqrt());
+        fastest = fastest.max(((p.x - last.x).powi(2) + (p.y - last.y).powi(2) + (p.z - last.z).powi(2)).sqrt());
+        last = p;
+    }
+    assert!(lowest > 10.0, "the bee sank to y {lowest}");
+    assert!(farthest >= 4.0, "only {farthest} blocks from its start");
+    assert!(fastest > 0.05 && fastest < 0.2, "fastest step {fastest}");
+}
+
+/// A bat world: a stone floor at y=0, and optionally a stone ceiling at y=11.
+fn bat_world(ceiling: bool) -> ChunkWorld {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..64 {
+        for x in 0..64 {
+            world.set_block(x, 0, z, "minecraft:stone");
+            if ceiling {
+                world.set_block(x, 11, z, "minecraft:stone");
+            }
+        }
+    }
+    world
+}
+
+/// A bat under a full-cube ceiling hangs motionless with its head against the
+/// block: `floor(10.0) + 1 - 0.9` is 10.1.
+#[test]
+fn a_bat_hangs_from_a_ceiling_until_a_player_comes_within_four_blocks() {
+    let world = bat_world(true);
+    let mut sim = MobSim::new(&world);
+    let start = Vec3::new(32.5, 10.0, 32.5);
+    let id = sim.spawn_species("minecraft:bat".parse().expect("valid key"), start).id();
+    for _ in 0..200 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+    }
+    let hung = sim.get(id).expect("alive").position();
+    assert!((hung.y - 10.1).abs() < 1e-6 && (hung.x - start.x).abs() < 1e-9, "{hung:?}");
+    assert!(sim.get(id).expect("alive").is_resting());
+    assert!(sim.get(id).expect("alive").snapshot().metadata.contains(&MetadataField::BatResting(true)));
+
+    sim.set_players(vec![PerceivedPlayer {
+        identity: None,
+        perception: PlayerPerception {
+            position: Vec3::new(35.5, 10.0, 32.5),
+            held_item: None,
+            view_direction: Vec3::new(-1.0, 0.0, 0.0),
+        },
+    }]);
+    let mut woke = false;
+    for _ in 0..10 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        woke |= !sim.get(id).expect("alive").is_resting();
+    }
+    assert!(woke, "a player three blocks away wakes it");
+}
+
+/// Away from any ceiling a bat flutters: it wakes at once, never touches the
+/// floor, and wanders. Its velocity eases toward half a block per tick, so no
+/// step is longer than that plus the 0.01 forward thrust.
+#[test]
+fn a_bat_in_the_open_flutters_and_wanders() {
+    let world = bat_world(false);
+    let mut sim = MobSim::new(&world);
+    let start = Vec3::new(32.5, 20.0, 32.5);
+    let id = sim.spawn_species("minecraft:bat".parse().expect("valid key"), start).id();
+    let (mut lowest, mut farthest, mut fastest) = (f64::MAX, 0.0_f64, 0.0_f64);
+    let mut last = start;
+    for _ in 0..600 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        let p = sim.get(id).expect("alive").position();
+        lowest = lowest.min(p.y);
+        farthest = farthest.max(((p.x - start.x).powi(2) + (p.z - start.z).powi(2)).sqrt());
+        fastest = fastest.max(((p.x - last.x).powi(2) + (p.y - last.y).powi(2) + (p.z - last.z).powi(2)).sqrt());
+        last = p;
+    }
+    assert!(!sim.get(id).expect("alive").is_resting());
+    assert!(lowest > 1.0, "the bat sank to y {lowest}");
+    assert!(farthest >= 3.0, "only {farthest} blocks from its start");
+    assert!(fastest > 0.05 && fastest < 0.9, "fastest step {fastest}");
+}
+
+/// A phantom with a player below dives and reaches the player's body, climbs
+/// away to circle, and dives again: each dive ends on contact, which drops the
+/// target, and the scan finds the player again within a few seconds.
+#[test]
+fn a_phantom_swoops_down_on_a_player_again_and_again() {
+    let world = bat_world(false);
+    let mut sim = MobSim::new(&world);
+    sim.set_day_time(18000);
+    let id = sim.spawn_species("minecraft:phantom".parse().expect("valid key"), Vec3::new(32.5, 26.0, 32.5)).id();
+    sim.set_players(vec![PerceivedPlayer {
+        identity: Some(PlayerIdentity { uuid: uuid::Uuid::from_u128(7), entity_id: 42 }),
+        perception: PlayerPerception {
+            position: Vec3::new(32.5, 1.0, 32.5),
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, -1.0),
+        },
+    }]);
+    let (mut dives, mut near, mut hits) = (0, false, Vec::new());
+    for _ in 0..2400 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        hits.extend(sim.take_player_hits());
+        let p = sim.get(id).expect("alive").position();
+        let distance = ((p.x - 32.5).powi(2) + (p.y - 1.9).powi(2) + (p.z - 32.5).powi(2)).sqrt();
+        if distance < 2.0 && !near {
+            dives += 1;
+            near = true;
+        } else if distance > 10.0 {
+            near = false;
+        }
+    }
+    assert!(dives >= 2, "only {dives} dives");
+    assert!(hits.len() >= 2, "{} hits", hits.len());
+    assert!(hits.iter().all(|h| (h.raw_damage - 6.0).abs() < 1e-4), "{:?}", hits.iter().map(|h| h.raw_damage).collect::<Vec<_>>());
+}

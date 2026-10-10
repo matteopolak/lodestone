@@ -248,6 +248,11 @@ pub(super) fn path_type_of(state: StateId) -> PathType {
 /// A moving piston has no census shape (it delegates to a block entity this
 /// crate's discrete shove does not model) and is treated as a full cube so a
 /// mob standing on a block mid-push does not fall through it.
+/// Whether the state's collision shape is one full cube.
+pub(super) fn is_full_cube(state: StateId) -> bool {
+    matches!(collision_shapes::collision_boxes(state), [b] if b.min == [0.0; 3] && b.max == [1.0; 3])
+}
+
 pub(super) fn collision_top_of(state: StateId) -> f64 {
     if state.block().name() == "minecraft:moving_piston" {
         return 1.0;
@@ -289,6 +294,10 @@ impl PathWorld for ChunkWorld {
 
     fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
         collision_top_of(self.block_state_id(x, y, z))
+    }
+
+    fn is_roost(&self, x: i32, y: i32, z: i32) -> bool {
+        is_full_cube(self.block_state_id(x, y, z))
     }
 
     fn collides(&self, aabb: Aabb) -> bool {
@@ -367,6 +376,10 @@ impl PathWorld for LivePathWorld<'_> {
 
     fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
         (self.terrain)(x, y, z).map_or(1.0, collision_top_of)
+    }
+
+    fn is_roost(&self, x: i32, y: i32, z: i32) -> bool {
+        (self.terrain)(x, y, z).is_some_and(is_full_cube)
     }
 
     fn collides(&self, aabb: Aabb) -> bool {

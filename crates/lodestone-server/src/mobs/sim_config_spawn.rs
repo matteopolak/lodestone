@@ -727,7 +727,12 @@ impl<'w> MobSim<'w> {
         mob.mob.set_main_hand_item(equipped.main_hand.clone());
         mob.equipment = equipped;
         mob.defenses = defenses_from_attributes(&attrs);
-        mob.attack_damage = attack_damage_from_attributes(&attrs);
+        mob.attack_damage = if mob.entity_type().path() == "phantom" {
+            // A phantom's damage is 6 plus its size, and every spawn has size 0.
+            6.0
+        } else {
+            attack_damage_from_attributes(&attrs)
+        };
         mob.knockback_resistance = knockback_resistance_from_attributes(&attrs);
         mob
     }

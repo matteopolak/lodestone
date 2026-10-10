@@ -30,7 +30,7 @@ use lodestone_model::{BlockPos, Vec3};
 
 use super::goal::GoalSelector;
 use super::locomotion;
-use super::mob::{EatenBlock, MobController, ProjectileLaunch, distance_sqr};
+use super::mob::{EatenBlock, MobController, ProjectileLaunch, SwoopState, distance_sqr};
 use crate::brain::BrainMob;
 use crate::pathfinding::{
     Aabb, BlockCues, MobShape, NavMode, PathFinder, PathNavigator, PathParams, PathStart, PathType,
@@ -348,6 +348,15 @@ pub struct MobBody {
     float_duration: i32,
     fly_velocity: Vec3,
     flying_speed: f64,
+    /// Whether a path-following flier has started moving, after which gravity no longer applies.
+    air_ready: bool,
+    /// A bat's roost state: hanging from a ceiling, its wander target block, and
+    /// the forward input it last flew with.
+    bat: BatState,
+    /// A phantom's circling anchor, move target and phase, and its move control's speed.
+    swoop: SwoopState,
+    swoop_speed: f64,
+    swoop_anchored: bool,
     /// A climber's destination, kept after its ground path ends so it keeps
     /// heading straight at it, and whether it pressed against a wall last tick.
     climb_goal: Option<(Vec3, f64)>,
@@ -663,6 +672,26 @@ pub struct MobBody {
 /// Minecraft body yaw (degrees) for a horizontal movement delta: 0 = +Z (south),
 /// −90 = +X (east), 90 = −X (west), 180 = −Z (north). Mirrors vanilla's
 /// `atan2(dz, dx) * 180/PI - 90` idiom used when a mob faces its motion.
+/// Wraps an angle in degrees into (-180, 180].
+/// What a fluttering bat remembers between ticks.
+#[derive(Debug, Clone)]
+struct BatState {
+    resting: bool,
+    target: Option<(i32, i32, i32)>,
+    forward: f64,
+}
+
+impl Default for BatState {
+    fn default() -> Self {
+        Self { resting: true, target: None, forward: 0.0 }
+    }
+}
+
+fn wrap_degrees(angle: f32) -> f32 {
+    let wrapped = angle.rem_euclid(360.0);
+    if wrapped > 180.0 { wrapped - 360.0 } else { wrapped }
+}
+
 fn movement_yaw(dx: f64, dz: f64) -> f32 {
     (dz.atan2(dx).to_degrees() - 90.0) as f32
 }
@@ -768,6 +797,18 @@ impl<'w> NavigatingMob<'w> {
             float_duration: 0,
             fly_velocity: Vec3::new(0.0, 0.0, 0.0),
             flying_speed: 0.0,
+            air_ready: false,
+            bat: BatState::default(),
+            swoop: SwoopState {
+                move_target: Vec3::new(0.0, 0.0, 0.0),
+                anchor: (0, 0, 0),
+                swooping: false,
+                blocked: false,
+                half_width: 0.0,
+                height: 0.0,
+            },
+            swoop_speed: 0.1,
+            swoop_anchored: false,
             climb_goal: None,
             sun: (false, false, false),
             against_wall: false,
@@ -1100,7 +1141,7 @@ impl<'w> NavigatingMob<'w> {
     /// the same gravity and drag sequence instead of inventing a server-side
     /// teleport-down correction.
     pub fn begin_live_fall_from_unsupported_surface(&mut self) {
-        if self.fall_speed < 0.0 || self.climbed || matches!(self.shape.nav_mode, NavMode::Swim | NavMode::Fly) {
+        if self.fall_speed < 0.0 || self.climbed || self.shape.nav_mode == NavMode::Swim || self.shape.nav_mode.is_airborne() {
             return;
         }
         let displacement = self.fall_speed + FALL_GRAVITY_PER_TICK;
@@ -1845,6 +1886,21 @@ impl<'w> NavigatingMob<'w> {
             waypoint = self.climb_waypoint();
             heading_only = waypoint.is_some();
         }
+        if self.shape.nav_mode == NavMode::Swoop {
+            self.swoop_step();
+            self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
+            return;
+        }
+        if self.shape.nav_mode == NavMode::Flutter {
+            self.flutter_step();
+            self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
+            return;
+        }
+        if self.shape.nav_mode == NavMode::Air {
+            self.air_step(waypoint);
+            self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
+            return;
+        }
         if self.shape.nav_mode == NavMode::Fly {
             self.fly_step();
             self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
@@ -1952,6 +2008,254 @@ impl<'w> NavigatingMob<'w> {
         self.navigator.set_speed(speed);
         
         Some(goal)
+    }
+
+    /// One tick of path-following flight. Toward the waypoint the body turns at
+    /// most 90 degrees a tick, then accelerates by 0.02 along its heading scaled
+    /// by the requested speed (the flying-speed attribute times the goal's
+    /// modifier), with a vertical share of the same size whenever the waypoint
+    /// is not level; air keeps 0.91 of the velocity. Before its first move the
+    /// body still falls.
+    fn air_step(&mut self, waypoint: Option<Vec3>) {
+        const THRUST: f64 = 0.02;
+        const AIR_DRAG: f64 = 0.91;
+        const MAX_TURN: f32 = 90.0;
+        let mut input = (0.0, 0.0);
+        if let Some(w) = waypoint {
+            self.air_ready = true;
+            let (xd, yd, zd) = (w.x - self.pos.x, w.y - self.pos.y, w.z - self.pos.z);
+            if xd * xd + yd * yd + zd * zd >= 2.500_000_3e-7 {
+                let target = movement_yaw(xd, zd);
+                let turn = wrap_degrees(target - self.body_yaw).clamp(-MAX_TURN, MAX_TURN);
+                self.body_yaw = wrap_degrees(self.body_yaw + turn);
+                let modifier = if self.movement_speed > 0.0 { self.navigator.speed() / self.movement_speed } else { 0.0 };
+                let speed = modifier * self.flying_speed;
+                let flat = xd.hypot(zd);
+                let vertical = if yd.abs() > 1e-5 || flat > 1e-5 { if yd > 0.0 { speed } else { -speed } } else { 0.0 };
+                input = (vertical, speed);
+            }
+        }
+        let (vertical, forward) = input;
+        let length = vertical.hypot(forward);
+        let scale = if length > 1.0 { THRUST / length } else { THRUST };
+        let yaw = f64::from(self.body_yaw).to_radians();
+        let v = self.fly_velocity;
+        let mut vy = v.y + vertical * scale;
+        if !self.air_ready {
+            vy -= FALL_GRAVITY_PER_TICK;
+        }
+        let (vx, vz) = (v.x - forward * scale * yaw.sin(), v.z + forward * scale * yaw.cos());
+        self.pos.x += vx;
+        self.pos.y += vy;
+        self.pos.z += vz;
+        self.fly_velocity = Vec3::new(vx * AIR_DRAG, vy * AIR_DRAG, vz * AIR_DRAG);
+    }
+
+    /// A wander destination for a path-following flier: up to eight blocks out
+    /// within a quarter turn either side of its heading and seven vertically,
+    /// lifted one to three blocks above any solid it lands in, and rejected on
+    /// water or a pathing penalty; if ten tries fail, up to eight out and four
+    /// vertically, two below its level, lifted clear of solid only.
+    fn air_wander_target(&mut self) -> Option<Vec3> {
+        const TRIES: u32 = 10;
+        let heading = f64::from(self.body_yaw).to_radians();
+        let (dir_x, dir_z) = (-heading.sin(), heading.cos());
+        let solid = |w: &dyn PathWorld, x: i32, y: i32, z: i32| w.collision_top(x, y, z) > 0.0;
+        for (vertical, flying_height, hover) in [(7, 0, true), (4, -2, false)] {
+            for _ in 0..TRIES {
+                let Some((xt, yt, zt)) = self.random_direction(8.0, vertical, flying_height, dir_x, dir_z) else {
+                    continue;
+                };
+                let x = (f64::from(xt.floor() as i32) + self.pos.x).floor() as i32;
+                let mut y = (f64::from(yt) + self.pos.y).floor() as i32;
+                let z = (f64::from(zt.floor() as i32) + self.pos.z).floor() as i32;
+                if y < self.world.min_y() {
+                    continue;
+                }
+                let lift = if hover { MobController::next_i32(self, 3) + 1 } else { 0 };
+                if solid(self.world, x, y, z) {
+                    y += 1;
+                    while y < self.world.min_y() + 4096 && solid(self.world, x, y, z) {
+                        y += 1;
+                    }
+                    let first_open = y;
+                    while y - first_open < lift && !solid(self.world, x, y + 1, z) {
+                        y += 1;
+                    }
+                }
+                let kind = self.world.base_path_type(x, y, z);
+                if kind == PathType::Water || self.shape.malus(kind) != 0.0 {
+                    continue;
+                }
+                return Some(Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5));
+            }
+        }
+        None
+    }
+
+    /// A random offset up to `reach` blocks horizontally within a quarter turn
+    /// either side of the direction (`dir_x`, `dir_z`), and `vertical` blocks
+    /// up or down shifted by `flying_height`.
+    fn random_direction(&mut self, reach: f64, vertical: i32, flying_height: i32, dir_x: f64, dir_z: f64) -> Option<(f64, i32, f64)> {
+        let centre = dir_z.atan2(dir_x) - std::f64::consts::FRAC_PI_2;
+        let angle = centre + (2.0 * f64::from(MobController::next_f32(self)) - 1.0) * std::f64::consts::FRAC_PI_2;
+        let dist = MobController::next_f64(self).sqrt() * reach * std::f64::consts::SQRT_2;
+        let (xt, zt) = (-dist * angle.sin(), dist * angle.cos());
+        if xt.abs() > reach || zt.abs() > reach {
+            return None;
+        }
+        let yt = MobController::next_i32(self, 2 * vertical + 1) - vertical + flying_height;
+        Some((xt, yt, zt))
+    }
+
+    /// Sets the circling anchor five blocks above where the mob first acts.
+    fn anchor_at_spawn(&mut self) {
+        if !self.swoop_anchored {
+            self.swoop.anchor = (self.pos.x.floor() as i32, self.pos.y.floor() as i32 + 5, self.pos.z.floor() as i32);
+            self.swoop_anchored = true;
+        }
+    }
+
+    /// One tick of the circle-and-swoop move control. A wall turns the body
+    /// around and resets its speed. Toward the move target the heading turns at
+    /// most 4 degrees a tick, and the speed climbs toward 1.8 while the heading
+    /// holds within 3 degrees of last tick's and falls toward 0.2 while it
+    /// turns; the velocity then eases a fifth of the way to the speed spread
+    /// over the three axes by the target's direction. Air keeps 0.91 of it.
+    fn swoop_step(&mut self) {
+        const MAX_TURN: f32 = 4.0;
+        self.anchor_at_spawn();
+        self.swoop.half_width = f64::from(self.shape.width) / 2.0;
+        self.swoop.height = f64::from(self.shape.height);
+        self.swoop.blocked = self.against_wall;
+        if self.swoop.blocked {
+            self.body_yaw += 180.0;
+            self.swoop_speed = 0.1;
+        }
+        let mut tdx = self.swoop.move_target.x - self.pos.x;
+        let tdy = self.swoop.move_target.y - self.pos.y;
+        let mut tdz = self.swoop.move_target.z - self.pos.z;
+        let mut flat = tdx.hypot(tdz);
+        if flat.abs() > 1e-5 {
+            let scale = 1.0 - (tdy * f64::from(0.7_f32)).abs() / flat;
+            tdx *= scale;
+            tdz *= scale;
+            flat = tdx.hypot(tdz);
+            let reach = (tdx * tdx + tdz * tdz + tdy * tdy).sqrt();
+            let previous = self.body_yaw;
+            let heading = wrap_degrees(tdz.atan2(tdx).to_degrees() as f32);
+            let current = wrap_degrees(self.body_yaw + 90.0);
+            let turn = wrap_degrees(heading - current).clamp(-MAX_TURN, MAX_TURN);
+            self.body_yaw = current + turn - 90.0;
+            let (speed, steady) = (self.swoop_speed, wrap_degrees(self.body_yaw - previous).abs() < 3.0);
+            self.swoop_speed = if steady {
+                (speed + 0.005 * (1.8 / speed)).min(1.8)
+            } else {
+                (speed - 0.025).max(0.2)
+            };
+            let pitch = -(-tdy).atan2(flat);
+            let travel = f64::from(self.body_yaw + 90.0).to_radians();
+            let want = Vec3::new(
+                self.swoop_speed * travel.cos() * (tdx / reach).abs(),
+                self.swoop_speed * pitch.sin() * (tdy / reach).abs(),
+                self.swoop_speed * travel.sin() * (tdz / reach).abs(),
+            );
+            let v = self.fly_velocity;
+            self.fly_velocity = Vec3::new(v.x + (want.x - v.x) * 0.2, v.y + (want.y - v.y) * 0.2, v.z + (want.z - v.z) * 0.2);
+        }
+        let v = self.fly_velocity;
+        self.pos.x += v.x;
+        self.pos.y += v.y;
+        self.pos.z += v.z;
+        self.fly_velocity = Vec3::new(v.x * 0.91, v.y * 0.91, v.z * 0.91);
+    }
+
+    /// Whether a bat is hanging from a ceiling.
+    #[must_use]
+    pub fn is_resting(&self) -> bool {
+        self.bat.resting
+    }
+
+    /// One tick of bat flight. A hanging bat wakes when the block above stops
+    /// being a full cube or a player is within four blocks. A flying bat heads
+    /// for a random block within six horizontally and between two below and
+    /// three above, easing its velocity toward half a block per tick sideways
+    /// and 0.7 vertically by a tenth of the difference, and now and then hangs
+    /// from a full cube overhead. The move then applies 0.01 of forward thrust,
+    /// gravity, and drags of 0.91 sideways and 0.98 vertically; vertical speed
+    /// is cut to 0.6 each tick while flying, and a hanging bat is held still,
+    /// flush with the top of its block.
+    fn flutter_step(&mut self) {
+        const THRUST: f64 = 0.02;
+        const GRAVITY: f64 = 0.08;
+        let (cx, cy, cz) = (self.pos.x.floor() as i32, self.pos.y.floor() as i32, self.pos.z.floor() as i32);
+        let hangs = self.world.is_roost(cx, cy + 1, cz);
+        if self.bat.resting {
+            let near = self.nearest_player.is_some_and(|p| {
+                (p.x - self.pos.x).powi(2) + (p.y - self.pos.y).powi(2) + (p.z - self.pos.z).powi(2) <= 16.0
+            });
+            if !hangs || near {
+                self.bat.resting = false;
+            }
+        } else {
+            self.flutter_steer();
+            if MobController::next_i32(self, 100) == 0 && hangs {
+                self.bat.resting = true;
+            }
+        }
+        let yaw = f64::from(self.body_yaw).to_radians();
+        let thrust = self.bat.forward * THRUST;
+        let v = self.fly_velocity;
+        let (vx, vz) = (v.x - thrust * yaw.sin(), v.z + thrust * yaw.cos());
+        self.pos.x += vx;
+        self.pos.y += v.y;
+        self.pos.z += vz;
+        self.fly_velocity = Vec3::new(vx * 0.91, (v.y - GRAVITY) * 0.98, vz * 0.91);
+        if self.bat.resting {
+            self.fly_velocity = Vec3::new(0.0, 0.0, 0.0);
+            self.pos.y = self.pos.y.floor() + 1.0 - f64::from(self.shape.height);
+        } else {
+            self.fly_velocity.y *= 0.6;
+        }
+        self.bat.forward *= 0.98;
+    }
+
+    /// Picks and chases the bat's wander block.
+    fn flutter_steer(&mut self) {
+        let empty = |w: &dyn PathWorld, (x, y, z): (i32, i32, i32)| {
+            w.collision_top(x, y, z) == 0.0 && w.base_path_type(x, y, z) == PathType::Open
+        };
+        if let Some(t) = self.bat.target
+            && (!empty(self.world, t) || t.1 <= self.world.min_y())
+        {
+            self.bat.target = None;
+        }
+        let close = |t: (i32, i32, i32), p: Vec3| {
+            (f64::from(t.0) + 0.5 - p.x).powi(2) + (f64::from(t.1) + 0.5 - p.y).powi(2) + (f64::from(t.2) + 0.5 - p.z).powi(2) < 4.0
+        };
+        let pos = self.pos;
+        if self.bat.target.is_none_or(|t| MobController::next_i32(self, 30) == 0 || close(t, pos)) {
+            let dx = MobController::next_i32(self, 7) - MobController::next_i32(self, 7);
+            let dy = MobController::next_i32(self, 6) - 2;
+            let dz = MobController::next_i32(self, 7) - MobController::next_i32(self, 7);
+            self.bat.target = Some((
+                (pos.x + f64::from(dx)).floor() as i32,
+                (pos.y + f64::from(dy)).floor() as i32,
+                (pos.z + f64::from(dz)).floor() as i32,
+            ));
+        }
+        let Some((tx, ty, tz)) = self.bat.target else { return };
+        let (dx, dy, dz) = (f64::from(tx) + 0.5 - pos.x, f64::from(ty) + 0.1 - pos.y, f64::from(tz) + 0.5 - pos.z);
+        let sign = |d: f64| if d == 0.0 { 0.0 } else { d.signum() };
+        let v = self.fly_velocity;
+        let v = Vec3::new(
+            v.x + (sign(dx) * 0.5 - v.x) * 0.1,
+            v.y + (sign(dy) * 0.7 - v.y) * 0.1,
+            v.z + (sign(dz) * 0.5 - v.z) * 0.1,
+        );
+        self.fly_velocity = v;
+        self.body_yaw = movement_yaw(v.x, v.z);
+        self.bat.forward = 0.5;
     }
 
     /// Sets the speed a floater accelerates at (the `flying_speed` attribute).
@@ -2233,7 +2537,7 @@ impl NavigatingMob<'_> {
     }
 
     fn surface_block(&self, block: BlockPos) -> BlockPos {
-        if self.shape.nav_mode == NavMode::Swim {
+        if self.shape.nav_mode.is_volume() {
             return block;
         }
         const SEARCH_UP: i32 = 64;
@@ -2324,6 +2628,20 @@ impl NavigatingMob<'_> {
 }
 
 impl MobController for NavigatingMob<'_> {
+    fn swoop(&mut self) -> Option<&mut SwoopState> {
+        self.anchor_at_spawn();
+        (self.shape.nav_mode == NavMode::Swoop).then_some(&mut self.swoop)
+    }
+
+    fn motion_blocking_height(&self, x: i32, from_y: i32, z: i32) -> i32 {
+        let blocks = |y: i32| self.world.collision_top(x, y, z) > 0.0 || self.world.is_water(x, y, z);
+        let mut y = from_y;
+        while y > self.world.min_y() && !blocks(y) {
+            y -= 1;
+        }
+        y + 1
+    }
+
     fn float_to(&mut self, target: Vec3) {
         self.float_wanted = Some(target);
     }
@@ -2721,6 +3039,9 @@ impl MobController for NavigatingMob<'_> {
     fn random_stroll_target(&mut self) -> Option<Vec3> {
         if self.shape.nav_mode == NavMode::Swim {
             return self.swim_target();
+        }
+        if self.shape.nav_mode == NavMode::Air {
+            return self.air_wander_target();
         }
         self.stroll_search(None)
     }
@@ -4957,7 +5278,7 @@ mod tests {
     }
 
     fn floater<'w>(world: &'w dyn PathWorld) -> NavigatingMob<'w> {
-        let mut mob = NavigatingMob::new(world, MobShape::flier(4.0, 4.0), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0);
+        let mut mob = NavigatingMob::new(world, MobShape::flier(NavMode::Fly, 4.0, 4.0), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0);
         mob.set_flying_speed(0.06);
         mob
     }
@@ -4986,5 +5307,104 @@ mod tests {
         mob.tick(&mut ai);
         assert_eq!(mob.float_wanted(), None);
         assert_eq!(mob.velocity().x, 0.0);
+    }
+
+    fn bee<'w>(world: &'w dyn PathWorld, mode: NavMode) -> NavigatingMob<'w> {
+        let mut mob = NavigatingMob::new(world, MobShape::flier(mode, 0.7, 0.6), Vec3::new(0.5, 5.0, 0.5), 0.3, 4000, 0);
+        mob.set_flying_speed(0.6);
+        mob
+    }
+
+    #[test]
+    fn a_bee_on_a_level_path_cruises_at_its_thrust_limit() {
+        // Thrust 0.02 along a heading scaled by the requested speed 0.6 gives
+        // 0.012 a tick added before the move; air then keeps 0.91, so the
+        // per-tick displacement settles at 0.012 / (1 - 0.91).
+        let world = Arena { walls: HashSet::new() };
+        let mut mob = bee(&world, NavMode::Air);
+        assert!(MobController::move_to(&mut mob, Vec3::new(40.5, 5.0, 0.5), 0.3));
+        let mut ai = GoalSelector::new();
+        for _ in 0..70 {
+            mob.tick(&mut ai);
+        }
+        let cruise = mob.velocity().x;
+        assert!((cruise - 0.012 / 0.09).abs() < 0.002, "{cruise}");
+        assert!((mob.position().y - 5.0).abs() < 0.1, "a level path stays level, at {}", mob.position().y);
+    }
+
+    #[test]
+    fn a_bee_flies_over_a_wall_a_walker_could_not_cross() {
+        let walls: HashSet<_> = (0..=5).flat_map(|y| (-20..=20).map(move |z| (6, y, z))).collect();
+        let world = Arena { walls };
+        let mut mob = bee(&world, NavMode::Air);
+        assert!(MobController::move_to(&mut mob, Vec3::new(12.5, 5.0, 0.5), 0.3));
+        let mut ai = GoalSelector::new();
+        let mut highest = 0.0_f64;
+        for _ in 0..400 {
+            mob.tick(&mut ai);
+            highest = highest.max(mob.position().y);
+        }
+        assert!(mob.position().x > 10.5, "{:?}", mob.position());
+        assert!(highest > 5.9, "it went over, peaking at {highest}");
+    }
+
+    fn bat<'w>(world: &'w dyn PathWorld) -> NavigatingMob<'w> {
+        NavigatingMob::new(world, MobShape::flier(NavMode::Flutter, 0.5, 0.9), Vec3::new(0.5, 10.0, 0.5), 0.0, 100, 0)
+    }
+
+    #[test]
+    fn a_bat_in_the_open_eases_toward_its_target_block() {
+        // From rest toward a block up and to +x: the velocity eases a tenth of
+        // the way to (0.5, 0.7, 0) = (0.05, 0.07, 0); facing +x, forward input
+        // 0.5 adds 0.5 * 0.02 along x for a displacement of (0.06, 0.07, 0).
+        // Drag then leaves (0.06 * 0.91, (0.07 - 0.08) * 0.98 * 0.6, 0).
+        let world = Arena { walls: HashSet::new() };
+        let mut mob = bat(&world);
+        mob.bat.resting = false;
+        mob.bat.target = Some((5, 12, 0));
+        let mut ai = GoalSelector::new();
+        let start = mob.position();
+        mob.tick(&mut ai);
+        let p = mob.position();
+        assert!((p.x - start.x - 0.06).abs() < 1e-9 && (p.y - start.y - 0.07).abs() < 1e-9, "{p:?}");
+        assert!(mob.fly_velocity.z.abs() < 1e-9);
+        assert!((mob.fly_velocity.x - 0.0546).abs() < 1e-9, "{}", mob.fly_velocity.x);
+        assert!((mob.fly_velocity.y - (-0.01 * 0.98 * 0.6)).abs() < 1e-9, "{}", mob.fly_velocity.y);
+    }
+
+    fn phantom<'w>(world: &'w dyn PathWorld) -> NavigatingMob<'w> {
+        NavigatingMob::new(world, MobShape::flier(NavMode::Swoop, 0.9, 0.5), Vec3::new(0.5, 20.0, 0.5), 0.0, 100, 0)
+    }
+
+    #[test]
+    fn a_phantom_facing_its_target_gains_speed_and_eases_its_velocity() {
+        // Facing +x (yaw -90) at a target straight ahead, the heading is steady,
+        // so the speed climbs from 0.1 by 0.005 * (1.8 / 0.1) = 0.09 to 0.19. The
+        // velocity then eases a fifth of the way to (0.19, 0, 0).
+        let world = Arena { walls: HashSet::new() };
+        let mut mob = phantom(&world);
+        mob.set_body_yaw(-90.0);
+        mob.swoop.move_target = Vec3::new(20.5, 20.0, 0.5);
+        let mut ai = GoalSelector::new();
+        mob.tick(&mut ai);
+        assert!((mob.swoop_speed - 0.19).abs() < 1e-6, "{}", mob.swoop_speed);
+        assert!((mob.position().x - 0.5 - 0.038).abs() < 1e-6, "{:?}", mob.position());
+        assert!(mob.position().y == 20.0 && (mob.position().z - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_phantom_turns_four_degrees_a_tick_and_slows_while_turning() {
+        // From yaw 0 (facing +z) toward +x the first tick turns 4 degrees to -4,
+        // too sharp for the steady rule, so the speed drops to its 0.2 floor. The
+        // velocity eases a fifth of the way to 0.2 * cos(86 degrees) along x.
+        let world = Arena { walls: HashSet::new() };
+        let mut mob = phantom(&world);
+        mob.swoop.move_target = Vec3::new(20.5, 20.0, 0.5);
+        let mut ai = GoalSelector::new();
+        mob.tick(&mut ai);
+        assert!((mob.body_yaw() + 4.0).abs() < 1e-4, "{}", mob.body_yaw());
+        assert!((mob.swoop_speed - 0.2).abs() < 1e-9);
+        let expected = 0.2 * 86.0_f64.to_radians().cos() * 0.2;
+        assert!((mob.position().x - 0.5 - expected).abs() < 1e-6, "{:?}", mob.position());
     }
 }

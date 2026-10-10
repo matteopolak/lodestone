@@ -19,6 +19,39 @@ use crate::pathfinding::BlockCues;
 /// All methods take `&mut self` because goals both observe and command the mob;
 /// a host implementation typically holds the entity state, a
 /// [`PathNavigator`](crate::pathfinding::PathNavigator) and an RNG.
+/// The flight state of a mob that circles an anchor and swoops at a target.
+#[derive(Debug, Clone)]
+pub struct SwoopState {
+    /// The point the move control steers toward.
+    pub move_target: Vec3,
+    /// The block the mob circles, as (x, y, z).
+    pub anchor: (i32, i32, i32),
+    /// Whether the mob is diving at its target rather than circling.
+    pub swooping: bool,
+    /// Whether the last move was stopped by a wall.
+    pub blocked: bool,
+    /// Half the body width and the body height, for the contact test.
+    pub half_width: f64,
+    /// See `half_width`.
+    pub height: f64,
+}
+
+impl SwoopState {
+    /// Whether the body, grown by 0.2 on every side, overlaps a player's
+    /// 0.6 by 1.8 box standing at `feet`.
+    #[must_use]
+    pub fn touches(&self, at: Vec3, feet: Vec3) -> bool {
+        const GROW: f64 = 0.2;
+        const PLAYER_HALF: f64 = 0.3;
+        const PLAYER_HEIGHT: f64 = 1.8;
+        let reach = self.half_width + GROW + PLAYER_HALF;
+        (at.x - feet.x).abs() < reach
+            && (at.z - feet.z).abs() < reach
+            && at.y - GROW < feet.y + PLAYER_HEIGHT
+            && at.y + self.height + GROW > feet.y
+    }
+}
+
 pub trait MobController {
     /// A uniform random `f32` in `[0, 1)` (vanilla's `random.nextFloat`).
     fn next_f32(&mut self) -> f32;
@@ -149,6 +182,19 @@ pub trait MobController {
     /// The position a floating mob is still drifting toward, if any.
     fn float_wanted(&self) -> Option<Vec3> {
         None
+    }
+
+    /// The circle-and-swoop flight state, for a mob that flies that way.
+    fn swoop(&mut self) -> Option<&mut SwoopState> {
+        None
+    }
+
+    /// The Y of the first cell above the highest block at or below `from_y` in
+    /// the column (`x`, `z`) that stops motion or holds a fluid; `from_y` for a
+    /// host without terrain.
+    fn motion_blocking_height(&self, x: i32, from_y: i32, z: i32) -> i32 {
+        let _ = (x, z);
+        from_y
     }
 
     /// The current attack target's position, if the mob has one.

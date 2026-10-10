@@ -454,7 +454,7 @@ impl<'a> Search<'a> {
         self.mob_x = start.x;
         self.mob_y = start.y;
         self.mob_z = start.z;
-        if self.mob.nav_mode == NavMode::Swim {
+        if self.mob.nav_mode.is_volume() {
             let half = f64::from(self.mob.width) / 2.0;
             let (x, y, z) = (
                 (start.x - half).floor() as i32,
@@ -463,8 +463,9 @@ impl<'a> Search<'a> {
             );
             self.mob_block = BlockPos::new(x, y, z);
             let idx = self.get_node(x, y, z);
-            self.arena[idx].kind = PathType::Water;
-            self.arena[idx].cost_malus = self.mob.malus(PathType::Water);
+            let kind = if self.mob.nav_mode == NavMode::Swim { PathType::Water } else { self.volume_type(x, y, z) };
+            self.arena[idx].kind = kind;
+            self.arena[idx].cost_malus = self.mob.malus(kind);
             return Some(idx);
         }
         let block_x = start.x.floor() as i32;
@@ -717,17 +718,28 @@ impl<'a> Search<'a> {
         if all_water { PathType::Water } else { PathType::Blocked }
     }
 
+    /// The classification of the cell block at (`x`,`y`,`z`) for a body that
+    /// moves through a volume: water for a swimmer, any passable type for a flier.
+    fn volume_type(&mut self, x: i32, y: i32, z: i32) -> PathType {
+        if self.mob.nav_mode == NavMode::Swim {
+            return self.swim_type(x, y, z);
+        }
+        let kind = self.cached_path_type(x, y, z);
+        if self.mob.malus(kind) >= 0.0 { kind } else { PathType::Blocked }
+    }
+
     fn swim_node(&mut self, x: i32, y: i32, z: i32) -> Option<usize> {
         let key = pack(x, y, z);
         let kind = match self.type_cache.get(&key) {
             Some(&kind) => kind,
             None => {
-                let kind = self.swim_type(x, y, z);
+                let kind = self.volume_type(x, y, z);
                 self.type_cache.insert(key, kind);
                 kind
             }
         };
-        if kind != PathType::Water {
+        let wanted = if self.mob.nav_mode == NavMode::Swim { kind == PathType::Water } else { kind != PathType::Blocked };
+        if !wanted {
             return None;
         }
         let cost = self.mob.malus(kind);
@@ -769,7 +781,7 @@ impl<'a> Search<'a> {
 
     /// Returns up to 8 neighbour arena indices for `pos`.
     fn get_neighbors(&mut self, pos: usize) -> Vec<usize> {
-        if self.mob.nav_mode == NavMode::Swim {
+        if self.mob.nav_mode.is_volume() {
             return self.swim_neighbors(pos);
         }
         let (px, py, pz) = self.coords(pos);

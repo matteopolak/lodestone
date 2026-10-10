@@ -221,6 +221,12 @@ pub trait PathWorld: Send + Sync {
         false
     }
 
+    /// Whether the block is a full cube a bat can hang from.
+    fn is_roost(&self, x: i32, y: i32, z: i32) -> bool {
+        let _ = (x, y, z);
+        false
+    }
+
     /// The block-identity [`BlockCues`] at this position — the goal-facing
     /// counterpart to [`base_path_type`](PathWorld::base_path_type), which
     /// cannot tell `grass_block` from `stone`.
@@ -336,6 +342,30 @@ pub enum NavMode {
     Drift,
     /// Floats through open air toward a wanted position, with no path or gravity.
     Fly,
+    /// Flies along a path through open air cells, thrusting toward each waypoint
+    /// under no gravity.
+    Air,
+    /// Flutters toward a random nearby block with its own velocity easing, and
+    /// hangs from a ceiling to rest.
+    Flutter,
+    /// Circles an anchor point and swoops at its target by easing its velocity
+    /// toward a move-target point.
+    Swoop,
+}
+
+impl NavMode {
+    /// Whether the body moves under no gravity through open air.
+    #[must_use]
+    pub fn is_airborne(self) -> bool {
+        matches!(self, Self::Fly | Self::Air | Self::Flutter | Self::Swoop)
+    }
+
+    /// Whether the path search moves through a volume of cells in all six
+    /// directions instead of walking on a floor.
+    #[must_use]
+    pub fn is_volume(self) -> bool {
+        matches!(self, Self::Swim | Self::Air)
+    }
 }
 
 /// Per-mob parameters that make traversability mob-specific.
@@ -404,11 +434,11 @@ impl MobShape {
         shape
     }
 
-    /// A body that floats toward wanted positions under no gravity.
+    /// A body that moves through air under no gravity in the given airborne mode.
     #[must_use]
-    pub fn flier(width: f32, height: f32) -> Self {
+    pub fn flier(mode: NavMode, width: f32, height: f32) -> Self {
         let mut shape = Self::land(width, height);
-        shape.nav_mode = NavMode::Fly;
+        shape.nav_mode = mode;
         shape
     }
 

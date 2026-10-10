@@ -323,6 +323,9 @@ const METADATA_IDX_HORSE_FLAGS: u8 = 18;
 /// side's `IDX_BABY` in `crates/versions/26.2/src/packets/metadata.rs`.
 const METADATA_IDX_BABY: u8 = 16;
 
+/// The bat's flags byte, index 16 — a `BYTE` whose `0x01` bit is resting.
+const METADATA_IDX_BAT_FLAGS: u8 = 16;
+
 // Cosmetic-state indices and serializers, each read off
 // `tests/support/entity_data_index_jvm.txt` (and checked against it by
 // `cosmetic_metadata_constants_match_the_jar_dump`), never hand-counted.
@@ -4458,6 +4461,11 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_BABY);
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*b);
+                }
+                MetadataField::BatResting(resting) => {
+                    w.u8(METADATA_IDX_BAT_FLAGS);
+                    w.var_i32(METADATA_SER_BYTE);
+                    w.i8(i8::from(*resting));
                 }
                 MetadataField::VillagerData {
                     kind,

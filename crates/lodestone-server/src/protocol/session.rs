@@ -398,6 +398,10 @@ pub enum MetadataField {
     /// (`crate::mobs::species_shape`); this variant is what lets the
     /// *client* apply the same shrink to what it draws.
     Baby(bool),
+    /// The bat's flags byte at index 16, whose `0x01` bit is hanging from a ceiling.
+    /// Index 16 is shared with other species' fields under other serializers, so
+    /// only a bat's snapshot may carry this.
+    BatResting(bool),
     /// The real villager's own villager-data field — index **19**, serializer
     /// `VILLAGER_DATA` (`18`): a villager type plus a villager profession
     /// plus a plain level int, which is the *whole* of what a client's
