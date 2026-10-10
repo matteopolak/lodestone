@@ -77,7 +77,7 @@ use lodestone_entity::vibration::{
     is_vibration_listener, nearest_listenable, nearest_note_block_play,
 };
 use lodestone_entity::item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion};
-use lodestone_entity::pathfinding::{MobShape, NavMode};
+use lodestone_entity::pathfinding::{MobShape, NavMode, SwimRule};
 use lodestone_entity::projectile::{Projectile, ProjectileRegistry};
 use lodestone_entity::spawn_equipment::{self, EquipRandom};
 use lodestone_entity::{
@@ -725,6 +725,8 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
         MobShape::drifter(width * scale, height * scale)
     } else if species_swims(entity_type) {
         MobShape::swimmer(width * scale, height * scale)
+    } else if let Some(rule) = species_amphibious(entity_type) {
+        MobShape::amphibian(rule, width * scale, height * scale)
     } else {
         MobShape::land(width * scale, height * scale)
     };
@@ -753,6 +755,17 @@ fn species_flight(entity_type: &ResourceKey) -> Option<NavMode> {
 /// Species that move by pulsed drifting instead of paths.
 fn species_drifts(entity_type: &ResourceKey) -> bool {
     matches!(entity_type.path(), "squid" | "glow_squid")
+}
+
+/// How an amphibious species swims, if it paths through both water and land.
+fn species_amphibious(entity_type: &ResourceKey) -> Option<SwimRule> {
+    match entity_type.path() {
+        "axolotl" => Some(SwimRule::Smooth { in_water: 0.1, buoyant: false }),
+        "frog" => Some(SwimRule::Smooth { in_water: 0.02, buoyant: true }),
+        "turtle" => Some(SwimRule::Turtle),
+        "drowned" => Some(SwimRule::Drowned),
+        _ => None,
+    }
 }
 
 /// Species whose navigation moves only through water.

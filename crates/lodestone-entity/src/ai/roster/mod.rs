@@ -94,6 +94,7 @@ use super::goals::{
 };
 
 pub mod aerial;
+pub mod amphibious;
 pub mod aquatic;
 pub mod equine;
 pub mod hostile_melee;
@@ -443,7 +444,7 @@ pub type FamilyLookup = fn(&str) -> Option<&'static [Registration]>;
 /// most one family — the first match wins, and
 /// `no_species_is_claimed_by_two_families` fails if two claim the same one, which
 /// is the failure mode of five people adding arms in parallel.
-pub const FAMILIES: [FamilyLookup; 8] = [
+pub const FAMILIES: [FamilyLookup; 9] = [
     hostile_melee::lookup,
     ranged::lookup,
     passive::lookup,
@@ -452,6 +453,7 @@ pub const FAMILIES: [FamilyLookup; 8] = [
     equine::lookup,
     aquatic::lookup,
     aerial::lookup,
+    amphibious::lookup,
 ];
 
 /// The full registration table for `species`, or [`FALLBACK`] if no family

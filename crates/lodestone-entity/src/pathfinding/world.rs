@@ -351,6 +351,29 @@ pub enum NavMode {
     /// Circles an anchor point and swoops at its target by easing its velocity
     /// toward a move-target point.
     Swoop,
+    /// Walks on land and swims through water, along one path that crosses the
+    /// shoreline; the water locomotion follows the shape's [`SwimRule`].
+    Amphibious,
+}
+
+/// How an amphibious body moves while it is in water.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SwimRule {
+    /// Smooth swimming: the speed is scaled by `in_water`, the heading pitches
+    /// toward the waypoint 5 degrees a tick, and the thrust follows the pitch.
+    /// `buoyant` adds a small upward push each tick.
+    Smooth {
+        /// Factor on the requested speed while in water.
+        in_water: f64,
+        /// Whether the body rises slightly each tick.
+        buoyant: bool,
+    },
+    /// A turtle: a vertical push toward the waypoint, thrust of a tenth of the
+    /// speed along the heading, and a slow sink unless it has somewhere to be.
+    Turtle,
+    /// A drowned hunting a target in water: pushes proportional to the raw
+    /// distance to the waypoint.
+    Drowned,
 }
 
 impl NavMode {
@@ -394,6 +417,8 @@ pub struct MobShape {
     /// Per-type malus overrides (`Mob.getPathfindingMalus`); absent types use
     /// the [`PathType::malus`] default.
     pub malus_overrides: HashMap<PathType, f32>,
+    /// The water locomotion of an [`NavMode::Amphibious`] body.
+    pub swim_rule: SwimRule,
 }
 
 impl MobShape {
@@ -412,6 +437,7 @@ impl MobShape {
             can_pass_doors: true,
             can_open_doors: false,
             malus_overrides: HashMap::new(),
+            swim_rule: SwimRule::Smooth { in_water: 0.1, buoyant: false },
         }
     }
 
@@ -439,6 +465,15 @@ impl MobShape {
     pub fn flier(mode: NavMode, width: f32, height: f32) -> Self {
         let mut shape = Self::land(width, height);
         shape.nav_mode = mode;
+        shape
+    }
+
+    /// A body that walks and swims in the given way.
+    #[must_use]
+    pub fn amphibian(rule: SwimRule, width: f32, height: f32) -> Self {
+        let mut shape = Self::land(width, height);
+        shape.nav_mode = NavMode::Amphibious;
+        shape.swim_rule = rule;
         shape
     }
 

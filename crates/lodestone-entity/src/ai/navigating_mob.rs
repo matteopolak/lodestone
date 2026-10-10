@@ -33,7 +33,7 @@ use super::locomotion;
 use super::mob::{EatenBlock, MobController, ProjectileLaunch, SwoopState, distance_sqr};
 use crate::brain::BrainMob;
 use crate::pathfinding::{
-    Aabb, BlockCues, MobShape, NavMode, PathFinder, PathNavigator, PathParams, PathStart, PathType,
+    Aabb, BlockCues, MobShape, NavMode, SwimRule, PathFinder, PathNavigator, PathParams, PathStart, PathType,
     PathWorld,
 };
 
@@ -350,6 +350,9 @@ pub struct MobBody {
     flying_speed: f64,
     /// Whether a path-following flier has started moving, after which gravity no longer applies.
     air_ready: bool,
+    /// An amphibian's swimming pitch in degrees, and whether it is looking for land to leave the water.
+    swim_pitch: f32,
+    searching_for_land: bool,
     /// A bat's roost state: hanging from a ceiling, its wander target block, and
     /// the forward input it last flew with.
     bat: BatState,
@@ -798,6 +801,8 @@ impl<'w> NavigatingMob<'w> {
             fly_velocity: Vec3::new(0.0, 0.0, 0.0),
             flying_speed: 0.0,
             air_ready: false,
+            swim_pitch: 0.0,
+            searching_for_land: false,
             bat: BatState::default(),
             swoop: SwoopState {
                 move_target: Vec3::new(0.0, 0.0, 0.0),
@@ -1141,7 +1146,9 @@ impl<'w> NavigatingMob<'w> {
     /// the same gravity and drag sequence instead of inventing a server-side
     /// teleport-down correction.
     pub fn begin_live_fall_from_unsupported_surface(&mut self) {
-        if self.fall_speed < 0.0 || self.climbed || self.shape.nav_mode == NavMode::Swim || self.shape.nav_mode.is_airborne() {
+        if self.fall_speed < 0.0 || self.climbed || self.shape.nav_mode == NavMode::Swim
+            || self.shape.nav_mode.is_airborne()
+            || (self.shape.nav_mode == NavMode::Amphibious && self.in_water) {
             return;
         }
         let displacement = self.fall_speed + FALL_GRAVITY_PER_TICK;
@@ -1886,6 +1893,17 @@ impl<'w> NavigatingMob<'w> {
             waypoint = self.climb_waypoint();
             heading_only = waypoint.is_some();
         }
+        if self.shape.nav_mode == NavMode::Amphibious {
+            if self.in_water && self.swims_now() {
+                self.amphibious_swim_step(waypoint);
+                self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
+                if self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z > 1e-12 {
+                    self.body_yaw = movement_yaw(self.velocity.x, self.velocity.z);
+                }
+                return;
+            }
+            self.fly_velocity = Vec3::new(0.0, 0.0, 0.0);
+        }
         if self.shape.nav_mode == NavMode::Swoop {
             self.swoop_step();
             self.velocity = Vec3::new(self.pos.x - old.x, self.pos.y - old.y, self.pos.z - old.z);
@@ -2168,6 +2186,106 @@ impl<'w> NavigatingMob<'w> {
         self.pos.y += v.y;
         self.pos.z += v.z;
         self.fly_velocity = Vec3::new(v.x * 0.91, v.y * 0.91, v.z * 0.91);
+    }
+
+    /// Whether an amphibian in water uses its swimming locomotion. A drowned
+    /// swims only toward a target that is in water, or while looking for land;
+    /// otherwise it moves like any walker.
+    fn swims_now(&self) -> bool {
+        match self.shape.swim_rule {
+            SwimRule::Drowned => self.searching_for_land || self.attack_target.is_some_and(|t| self.target_in_water(t)),
+            _ => true,
+        }
+    }
+
+    fn target_in_water(&self, target: Vec3) -> bool {
+        self.world.is_water(target.x.floor() as i32, target.y.floor() as i32, target.z.floor() as i32)
+    }
+
+    /// One tick of an amphibian's swimming. The velocity gains thrust by the
+    /// species' [`SwimRule`], moves the body, and keeps 0.9 of itself.
+    fn amphibious_swim_step(&mut self, waypoint: Option<Vec3>) {
+        const DRAG: f64 = 0.9;
+        let speed = self.navigator.speed();
+        let yaw_to = |from: Vec3, w: Vec3| movement_yaw(w.x - from.x, w.z - from.z);
+        let mut accel = Vec3::new(0.0, 0.0, 0.0);
+        let mut push_y = 0.0;
+        match self.shape.swim_rule {
+            SwimRule::Smooth { in_water, buoyant } => {
+                if buoyant {
+                    push_y += 0.005;
+                }
+                if let Some(w) = waypoint {
+                    let (xd, yd, zd) = (w.x - self.pos.x, w.y - self.pos.y, w.z - self.pos.z);
+                    if xd * xd + yd * yd + zd * zd >= 2.500_000_3e-7 {
+                        let turn = wrap_degrees(yaw_to(self.pos, w) - self.body_yaw).clamp(-10.0, 10.0);
+                        self.body_yaw = wrap_degrees(self.body_yaw + turn);
+                        let flat = xd.hypot(zd);
+                        if yd.abs() > 1e-5 || flat > 1e-5 {
+                            let wanted = wrap_degrees((-yd.atan2(flat).to_degrees()) as f32).clamp(-85.0, 85.0);
+                            self.swim_pitch += (wanted - self.swim_pitch).clamp(-5.0, 5.0);
+                        }
+                        let pitch = f64::from(self.swim_pitch).to_radians();
+                        let (up, forward) = (-pitch.sin() * speed, pitch.cos() * speed);
+                        let length = up.hypot(forward);
+                        let scale = speed * in_water / length.max(1.0);
+                        let yaw = f64::from(self.body_yaw).to_radians();
+                        accel = Vec3::new(-forward * scale * yaw.sin(), up * scale, forward * scale * yaw.cos());
+                    }
+                }
+            }
+            SwimRule::Turtle => {
+                if let Some(w) = waypoint {
+                    let (xd, yd, zd) = (w.x - self.pos.x, w.y - self.pos.y, w.z - self.pos.z);
+                    let reach = (xd * xd + yd * yd + zd * zd).sqrt();
+                    if reach >= 1e-5 {
+                        let turn = wrap_degrees(yaw_to(self.pos, w) - self.body_yaw).clamp(-90.0, 90.0);
+                        self.body_yaw = wrap_degrees(self.body_yaw + turn);
+                        self.swim_speed += (speed - self.swim_speed) * 0.125;
+                        push_y += self.swim_speed * (yd / reach) * 0.1;
+                    }
+                } else {
+                    self.swim_speed = 0.0;
+                }
+                push_y += 0.005;
+                let yaw = f64::from(self.body_yaw).to_radians();
+                let thrust = 0.1 * self.swim_speed;
+                accel = Vec3::new(-thrust * yaw.sin(), 0.0, thrust * yaw.cos());
+                if self.attack_target.is_none() {
+                    push_y -= 0.005;
+                }
+            }
+            SwimRule::Drowned => {
+                if self.searching_for_land || self.attack_target.is_some_and(|t| t.y > self.pos.y) {
+                    push_y += 0.002;
+                }
+                if let Some(w) = waypoint {
+                    let (xd, yd, zd) = (w.x - self.pos.x, w.y - self.pos.y, w.z - self.pos.z);
+                    let reach = (xd * xd + yd * yd + zd * zd).sqrt();
+                    if reach > 0.0 {
+                        let turn = wrap_degrees(yaw_to(self.pos, w) - self.body_yaw).clamp(-90.0, 90.0);
+                        self.body_yaw = wrap_degrees(self.body_yaw + turn);
+                        self.swim_speed += (speed - self.swim_speed) * 0.125;
+                        let yaw = f64::from(self.body_yaw).to_radians();
+                        let forward = 0.01 * self.swim_speed;
+                        accel = Vec3::new(
+                            self.swim_speed * xd * 0.005 - forward * yaw.sin(),
+                            0.0,
+                            self.swim_speed * zd * 0.005 + forward * yaw.cos(),
+                        );
+                        push_y += self.swim_speed * (yd / reach) * 0.1;
+                    }
+                } else {
+                    self.swim_speed = 0.0;
+                }
+            }
+        }
+        let v = self.fly_velocity;
+        let v = Vec3::new(v.x + accel.x, v.y + accel.y + push_y, v.z + accel.z);
+        self.pos.x += v.x;
+        self.pos.y += v.y;
+        self.pos.z += v.z;
+        self.fly_velocity = Vec3::new(v.x * DRAG, v.y * DRAG, v.z * DRAG);
     }
 
     /// Whether a bat is hanging from a ceiling.
@@ -2516,7 +2634,7 @@ impl NavigatingMob<'_> {
             return None;
         }
         let solid = |w: &dyn PathWorld, x: i32, y: i32, z: i32| w.collision_top(x, y, z) > 0.0;
-        if self.shape.nav_mode == NavMode::Swim {
+        if self.shape.nav_mode == NavMode::Swim || (self.shape.nav_mode == NavMode::Amphibious && self.in_water) {
             if solid(self.world, x, y, z) || self.shape.malus(self.world.base_path_type(x, y, z)) != 0.0 {
                 return None;
             }
@@ -2537,7 +2655,9 @@ impl NavigatingMob<'_> {
     }
 
     fn surface_block(&self, block: BlockPos) -> BlockPos {
-        if self.shape.nav_mode.is_volume() {
+        if self.shape.nav_mode.is_volume()
+            || (self.shape.nav_mode == NavMode::Amphibious && self.world.is_water(block.x, block.y, block.z))
+        {
             return block;
         }
         const SEARCH_UP: i32 = 64;
@@ -2628,6 +2748,10 @@ impl NavigatingMob<'_> {
 }
 
 impl MobController for NavigatingMob<'_> {
+    fn set_searching_for_land(&mut self, searching: bool) {
+        self.searching_for_land = searching;
+    }
+
     fn swoop(&mut self) -> Option<&mut SwoopState> {
         self.anchor_at_spawn();
         (self.shape.nav_mode == NavMode::Swoop).then_some(&mut self.swoop)
@@ -3037,7 +3161,7 @@ impl MobController for NavigatingMob<'_> {
     /// pathing-penalty cell; the first valid one wins (every candidate weighs
     /// the same), snapped to its cell's bottom centre.
     fn random_stroll_target(&mut self) -> Option<Vec3> {
-        if self.shape.nav_mode == NavMode::Swim {
+        if self.shape.nav_mode == NavMode::Swim || (self.shape.nav_mode == NavMode::Amphibious && self.in_water) {
             return self.swim_target();
         }
         if self.shape.nav_mode == NavMode::Air {
@@ -5406,5 +5530,176 @@ mod tests {
         assert!((mob.swoop_speed - 0.2).abs() < 1e-9);
         let expected = 0.2 * 86.0_f64.to_radians().cos() * 0.2;
         assert!((mob.position().x - 0.5 - expected).abs() < 1e-6, "{:?}", mob.position());
+    }
+
+    /// Water for x < 10 from the floor at y -6 up to the surface cell y -1, dry
+    /// land for x >= 10 standing at y 0, nothing above.
+    struct Shore;
+
+    impl Shore {
+        fn solid(x: i32, y: i32) -> bool {
+            y <= -6 || (x >= 10 && y <= -1)
+        }
+    }
+
+    impl PathWorld for Shore {
+        fn min_y(&self) -> i32 {
+            -8
+        }
+        fn base_path_type(&self, x: i32, y: i32, _z: i32) -> PathType {
+            if Self::solid(x, y) {
+                PathType::Blocked
+            } else if x < 10 && (-5..=-1).contains(&y) {
+                PathType::Water
+            } else {
+                PathType::Open
+            }
+        }
+        fn collision_top(&self, x: i32, y: i32, _z: i32) -> f64 {
+            if Self::solid(x, y) { 1.0 } else { 0.0 }
+        }
+        fn collides(&self, aabb: Aabb) -> bool {
+            let (x0, x1) = (aabb.min_x.floor() as i32, (aabb.max_x - 1e-7).floor() as i32);
+            let (y0, y1) = (aabb.min_y.floor() as i32, (aabb.max_y - 1e-7).floor() as i32);
+            (x0..=x1).any(|x| (y0..=y1).any(|y| Self::solid(x, y)))
+        }
+    }
+
+    fn axolotl<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
+        let shape = MobShape::amphibian(SwimRule::Smooth { in_water: 0.1, buoyant: false }, 0.75, 0.42);
+        NavigatingMob::new(world, shape, at, 1.0, 4000, 0)
+    }
+
+    #[test]
+    fn a_smooth_swimmer_cruises_at_its_hand_derived_thrust_limit() {
+        // A goal speed of 0.5 against an attribute of 1.0: the in-water factor
+        // 0.1 makes the move speed 0.05, the input of length 0.5 adds 0.025 a
+        // tick along the heading, and 0.9 drag settles the displacement at
+        // 0.025 / (1 - 0.9).
+        let mut mob = axolotl(&Shore, Vec3::new(1.5, -4.0, 0.5));
+        assert!(MobController::move_to(&mut mob, Vec3::new(8.5, -4.0, 0.5), 0.5));
+        let mut ai = GoalSelector::new();
+        let mut best = 0.0_f64;
+        for _ in 0..60 {
+            mob.tick(&mut ai);
+            best = best.max(mob.velocity().x);
+        }
+        assert!((best - 0.25).abs() < 0.02, "{best}");
+    }
+
+    #[test]
+    fn an_amphibian_swims_out_and_walks_up_the_shore() {
+        let mut mob = axolotl(&Shore, Vec3::new(1.5, -4.0, 0.5));
+        mob.body_yaw = -90.0;
+        mob.set_follow_range(32.0);
+        assert!(MobController::move_to(&mut mob, Vec3::new(14.5, 0.0, 0.5), 0.3));
+        let mut ai = GoalSelector::new();
+        for _ in 0..600 {
+            mob.tick(&mut ai);
+        }
+        let p = mob.position();
+        assert!(p.x > 12.0 && p.y > -0.5, "{p:?}");
+    }
+
+    #[test]
+    fn a_water_only_swimmer_stays_behind_the_shore() {
+        let shape = MobShape::flier(NavMode::Swim, 0.75, 0.42);
+        let mut mob = NavigatingMob::new(&Shore, shape, Vec3::new(1.5, -4.0, 0.5), 1.0, 4000, 0);
+        mob.body_yaw = -90.0;
+        mob.set_follow_range(32.0);
+        MobController::move_to(&mut mob, Vec3::new(14.5, 0.0, 0.5), 0.3);
+        let mut ai = GoalSelector::new();
+        for _ in 0..600 {
+            mob.tick(&mut ai);
+        }
+        assert!(mob.position().x < 10.0, "{:?}", mob.position());
+    }
+
+    fn drowned<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
+        let mut shape = MobShape::amphibian(SwimRule::Drowned, 0.6, 1.95);
+        shape.max_up_step = 1.0;
+        let mut mob = NavigatingMob::new(world, shape, at, 1.0, 4000, 0);
+        mob.set_follow_range(32.0);
+        mob
+    }
+
+    /// A turtle narrowed to one cell, so the sheer shore of [`Shore`] does not
+    /// leave a two-cell body hanging over the drop.
+    fn turtle<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
+        let mut shape = MobShape::amphibian(SwimRule::Turtle, 0.9, 0.4);
+        shape.max_up_step = 1.0;
+        let mut mob = NavigatingMob::new(world, shape, at, 1.0, 4000, 0);
+        mob.set_follow_range(48.0);
+        mob
+    }
+
+    fn selector_for(species: &str, speed: f64) -> GoalSelector {
+        let mut ai = GoalSelector::new();
+        for (priority, goal) in crate::ai::roster::goals_for(species, &crate::ai::roster::SpeciesContext::new(speed)) {
+            ai.add(priority, goal);
+        }
+        ai
+    }
+
+    fn run_species(mob: &mut NavigatingMob<'_>, species: &str, speed: f64, ticks: usize) {
+        let mut ai = selector_for(species, speed);
+        for _ in 0..ticks {
+            mob.tick(&mut ai);
+        }
+    }
+
+    #[test]
+    fn a_turtle_ashore_walks_into_water_found_two_blocks_below_its_feet() {
+        let mut mob = turtle(&Shore, Vec3::new(11.5, 0.0, 0.5));
+        let mut ai = selector_for("turtle", 0.25);
+        let mut entered = false;
+        for _ in 0..120 {
+            mob.tick(&mut ai);
+            entered |= mob.in_water;
+        }
+        assert!(entered, "{:?}", mob.position());
+    }
+
+    #[test]
+    fn a_turtle_with_no_water_in_reach_stays_on_land() {
+        let mut mob = turtle(&Shore, Vec3::new(70.5, 0.0, 0.5));
+        run_species(&mut mob, "turtle", 0.25, 150);
+        assert!(!mob.in_water && mob.position().x > 40.0, "{:?}", mob.position());
+    }
+
+    #[test]
+    fn a_drowned_in_daylight_leaves_the_land_for_water_and_at_night_does_not() {
+        let mut day = drowned(&Shore, Vec3::new(11.5, 0.0, 0.5));
+        day.set_sun_state(true, false, false);
+        run_species(&mut day, "drowned", 0.23, 300);
+        assert!(day.in_water, "{:?}", day.position());
+
+        let mut night = drowned(&Shore, Vec3::new(11.5, 0.0, 0.5));
+        run_species(&mut night, "drowned", 0.23, 300);
+        assert!(!night.in_water, "{:?}", night.position());
+    }
+
+    #[test]
+    fn a_drowned_heading_for_land_adds_its_buoyancy_to_the_swim_push() {
+        // From rest the move speed eases to 0.23 * 0.125 = 0.02875; straight
+        // up, the push is 0.1 of that, and heading for land adds 0.002. A
+        // drowned also swims toward a target in water; one level with it adds no
+        // buoyancy.
+        let rise = |searching: bool| {
+            let mut mob = drowned(&Shore, Vec3::new(1.5, -5.0, 0.5));
+            let mut ai = GoalSelector::new();
+            mob.tick(&mut ai);
+            if searching {
+                MobController::set_searching_for_land(&mut mob, true);
+            } else {
+                MobController::set_attack_target(&mut mob, Some(Vec3::new(1.5, -5.0, 0.5)));
+            }
+            assert!(MobController::move_to(&mut mob, Vec3::new(1.5, -2.0, 0.5), 0.23));
+            let before = mob.position().y;
+            mob.tick(&mut ai);
+            mob.position().y - before
+        };
+        assert!((rise(true) - 0.004_875).abs() < 1e-9, "{}", rise(true));
+        assert!((rise(false) - 0.002_875).abs() < 1e-9, "{}", rise(false));
     }
 }

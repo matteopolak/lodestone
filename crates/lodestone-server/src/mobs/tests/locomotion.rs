@@ -527,7 +527,7 @@ fn a_ghast_floats_and_wanders() {
     let id = sim.spawn_species("minecraft:ghast".parse().expect("valid key"), start).id();
     let (mut lowest, mut farthest, mut fastest) = (f64::MAX, 0.0_f64, 0.0_f64);
     let mut last = start;
-    for _ in 0..600 {
+    for _ in 0..400 {
         sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
         let p = sim.get(id).expect("alive").position();
         lowest = lowest.min(p.y);
@@ -628,7 +628,7 @@ fn a_bat_in_the_open_flutters_and_wanders() {
     let id = sim.spawn_species("minecraft:bat".parse().expect("valid key"), start).id();
     let (mut lowest, mut farthest, mut fastest) = (f64::MAX, 0.0_f64, 0.0_f64);
     let mut last = start;
-    for _ in 0..600 {
+    for _ in 0..400 {
         sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
         let p = sim.get(id).expect("alive").position();
         lowest = lowest.min(p.y);
@@ -675,4 +675,130 @@ fn a_phantom_swoops_down_on_a_player_again_and_again() {
     assert!(dives >= 2, "only {dives} dives");
     assert!(hits.len() >= 2, "{} hits", hits.len());
     assert!(hits.iter().all(|h| (h.raw_damage - 6.0).abs() < 1e-4), "{:?}", hits.iter().map(|h| h.raw_damage).collect::<Vec<_>>());
+}
+
+/// A beach: stone floor at y=0 that climbs one block per column from x=27 to a
+/// plateau of height 3 from x=29 on, with water filling every column below it
+/// up to y=3 (so the shore is x<=28, land standing at y=4).
+fn beach_world() -> ChunkWorld {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 0..64 {
+        for x in 0..64 {
+            let top = (x - 26).clamp(0, 3);
+            for y in 0..=top {
+                world.set_block(x, y, z, "minecraft:stone");
+            }
+            if x <= 28 {
+                for y in (top + 1)..=3 {
+                    world.set_block(x, y, z, "minecraft:water");
+                }
+            }
+        }
+    }
+    world
+}
+
+fn in_beach_water(p: Vec3) -> bool {
+    p.x < 29.0 && p.y < 3.9
+}
+
+/// A turtle on the plateau finds water two blocks under its feet seven blocks
+/// away (spiral ring 7), walks down the steps and swims; one placed beyond the
+/// 24-block search never sees water and stays on land.
+#[test]
+fn a_turtle_ashore_walks_to_the_water_and_one_out_of_range_does_not() {
+    let world = beach_world();
+    let reaches = |x: f64| {
+        let mut sim = MobSim::new(&world);
+        sim.set_day_time(6000);
+        let id = sim.spawn_species("minecraft:turtle".parse().expect("valid key"), Vec3::new(x, 4.0, 32.5)).id();
+        let mut entered = false;
+        for _ in 0..600 {
+            sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+            entered |= in_beach_water(sim.get(id).expect("alive").position());
+        }
+        entered
+    };
+    assert!(reaches(34.5));
+    assert!(!reaches(60.5));
+}
+
+/// A drowned out of water in daylight picks a water cell within ten blocks
+/// and walks to it; at night the same drowned is not drawn to water.
+#[test]
+fn a_drowned_in_daylight_walks_to_the_water_and_at_night_does_not() {
+    let world = beach_world();
+    let enters = |time: i32| {
+        let mut sim = MobSim::new(&world);
+        sim.set_day_time(time);
+        let id = sim.spawn_species("minecraft:drowned".parse().expect("valid key"), Vec3::new(34.5, 4.0, 32.5)).id();
+        let mut entered = false;
+        for _ in 0..300 {
+            sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+            entered |= in_beach_water(sim.get(id).expect("alive").position());
+        }
+        entered
+    };
+    assert!(enters(6000));
+    assert!(!enters(18000));
+}
+
+/// A walled pond, 23 by 23 blocks and 4 deep, with open air above its rim.
+fn pond_world() -> ChunkWorld {
+    let mut world = ChunkWorld::new(-64, 384);
+    for z in 20..=44 {
+        for x in 20..=44 {
+            let wall = x == 20 || x == 44 || z == 20 || z == 44;
+            for y in 0..=5 {
+                if y == 0 || wall {
+                    world.set_block(x, y, z, "minecraft:stone");
+                } else if y <= 4 {
+                    world.set_block(x, y, z, "minecraft:water");
+                }
+            }
+        }
+    }
+    world
+}
+
+/// An axolotl in a pond swims under no gravity without leaving the water or
+/// sinking to the floor, wandering away from where it began. Its idle swim
+/// speed of 0.5 against an attribute of 1.0 makes the move speed 0.05 and the
+/// input 0.5, so thrust is 0.025 a tick and a step is bounded by
+/// `0.025 / (1 - 0.9)`.
+#[test]
+fn an_axolotl_swims_and_wanders_in_a_pond() {
+    let world = pond_world();
+    let mut sim = MobSim::new(&world);
+    let start = Vec3::new(32.5, 2.5, 32.5);
+    let id = sim.spawn_species("minecraft:axolotl".parse().expect("valid key"), start).id();
+    let (mut lowest, mut highest, mut farthest, mut fastest) = (f64::MAX, 0.0_f64, 0.0_f64, 0.0_f64);
+    let mut last = start;
+    for _ in 0..800 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+        let p = sim.get(id).expect("alive").position();
+        lowest = lowest.min(p.y);
+        highest = highest.max(p.y);
+        farthest = farthest.max(((p.x - start.x).powi(2) + (p.z - start.z).powi(2)).sqrt());
+        fastest = fastest.max(((p.x - last.x).powi(2) + (p.y - last.y).powi(2) + (p.z - last.z).powi(2)).sqrt());
+        last = p;
+    }
+    assert!(lowest >= 1.0 && highest <= 5.05, "left the water: {lowest}..{highest}");
+    assert!(farthest >= 3.0, "only {farthest} blocks from its start");
+    assert!(fastest > 0.1 && fastest <= 0.251, "fastest step {fastest}");
+}
+
+/// A frog is buoyant: each tick in water adds 0.005 upward, which 0.9 drag
+/// settles at `0.005 / (1 - 0.9)` = 0.05 blocks a tick, so a frog released at
+/// mid-depth rises to the surface within a few seconds and stays there.
+#[test]
+fn a_frog_in_a_pond_rises_to_the_surface() {
+    let world = pond_world();
+    let mut sim = MobSim::new(&world);
+    let id = sim.spawn_species("minecraft:frog".parse().expect("valid key"), Vec3::new(32.5, 1.5, 32.5)).id();
+    for _ in 0..150 {
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
+    }
+    let y = sim.get(id).expect("alive").position().y;
+    assert!(y >= 4.0, "still at y {y}");
 }

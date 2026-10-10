@@ -454,7 +454,7 @@ impl<'a> Search<'a> {
         self.mob_x = start.x;
         self.mob_y = start.y;
         self.mob_z = start.z;
-        if self.mob.nav_mode.is_volume() {
+        if self.mob.nav_mode.is_volume() || self.mob.nav_mode == NavMode::Amphibious {
             let half = f64::from(self.mob.width) / 2.0;
             let (x, y, z) = (
                 (start.x - half).floor() as i32,
@@ -724,18 +724,91 @@ impl<'a> Search<'a> {
         if self.mob.nav_mode == NavMode::Swim {
             return self.swim_type(x, y, z);
         }
+        if self.mob.nav_mode == NavMode::Amphibious {
+            return self.amphibious_type(x, y, z);
+        }
         let kind = self.cached_path_type(x, y, z);
         if self.mob.malus(kind) >= 0.0 { kind } else { PathType::Blocked }
     }
 
+    /// The amphibian's classification of the cell block at (`x`,`y`,`z`): the
+    /// mob's own path type there if the body fits and either its feet are in
+    /// water or it would stand on something, else blocked.
+    fn amphibious_type(&mut self, x: i32, y: i32, z: i32) -> PathType {
+        let kind = self.cached_path_type(x, y, z);
+        if self.mob.malus(kind) < 0.0 {
+            return PathType::Blocked;
+        }
+        let supported = self.world.collision_top(x, y - 1, z) > 0.0;
+        if self.world.is_water(x, y, z) || supported { kind } else { PathType::Blocked }
+    }
+
+    /// Whether the body could occupy the cell block at (`x`,`y`,`z`) without
+    /// touching a solid, standing or not.
+    fn body_fits(&self, x: i32, y: i32, z: i32) -> bool {
+        let (w, h) = (f64::from(self.mob.width), f64::from(self.mob.height));
+        let (cx, cz) = (f64::from(x) + f64::from(self.mob.cell_width()) / 2.0, f64::from(z) + f64::from(self.mob.cell_width()) / 2.0);
+        !self.world.collides(Aabb::new(cx - w / 2.0, f64::from(y), cz - w / 2.0, cx + w / 2.0, f64::from(y) + h, cz + w / 2.0))
+    }
+
+    /// The faces and horizontal diagonals of a swimmer, plus a one-block step
+    /// up out of a blocked face and a drop of up to three blocks off an open
+    /// edge, so one path can cross a shoreline.
+    fn amphibious_neighbors(&mut self, pos: usize) -> Vec<usize> {
+        const HORIZONTAL: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+        const MAX_DROP: i32 = 3;
+        let mut result = self.swim_neighbors(pos);
+        let (px, py, pz) = self.coords(pos);
+        let cells = self.mob.cell_width();
+        for &(dx, dz) in &HORIZONTAL {
+            let (x, z) = (px + dx, pz + dz);
+            if !self.body_fits(x, py, z) {
+                if self.body_fits(px, py + 1, pz)
+                    && let Some(n) = self.swim_node(x, py + 1, z)
+                    && !self.arena[n].closed
+                {
+                    result.push(n);
+                }
+                continue;
+            }
+            // A body `cells` wide clears a ledge only by moving that many cells
+            // out, so the drop is tried at each hop while the body still fits.
+            'hops: for hop in 1..=cells {
+                let (x, z) = (px + dx * hop, pz + dz * hop);
+                if !self.body_fits(x, py, z) || self.mob.malus(self.cached_path_type(x, py, z)) < 0.0 {
+                    break;
+                }
+                if self.swim_node(x, py, z).is_some() {
+                    break;
+                }
+                for drop in 1..=MAX_DROP {
+                    if let Some(n) = self.swim_node(x, py - drop, z) {
+                        if !self.arena[n].closed {
+                            result.push(n);
+                        }
+                        break 'hops;
+                    }
+                    if self.world.collision_top(x, py - drop, z) > 0.0 {
+                        break;
+                    }
+                }
+            }
+        }
+        result
+    }
+
     fn swim_node(&mut self, x: i32, y: i32, z: i32) -> Option<usize> {
-        let key = pack(x, y, z);
-        let kind = match self.type_cache.get(&key) {
-            Some(&kind) => kind,
-            None => {
-                let kind = self.volume_type(x, y, z);
-                self.type_cache.insert(key, kind);
-                kind
+        let kind = if self.mob.nav_mode == NavMode::Amphibious {
+            self.volume_type(x, y, z)
+        } else {
+            let key = pack(x, y, z);
+            match self.type_cache.get(&key) {
+                Some(&kind) => kind,
+                None => {
+                    let kind = self.volume_type(x, y, z);
+                    self.type_cache.insert(key, kind);
+                    kind
+                }
             }
         };
         let wanted = if self.mob.nav_mode == NavMode::Swim { kind == PathType::Water } else { kind != PathType::Blocked };
@@ -781,6 +854,9 @@ impl<'a> Search<'a> {
 
     /// Returns up to 8 neighbour arena indices for `pos`.
     fn get_neighbors(&mut self, pos: usize) -> Vec<usize> {
+        if self.mob.nav_mode == NavMode::Amphibious {
+            return self.amphibious_neighbors(pos);
+        }
         if self.mob.nav_mode.is_volume() {
             return self.swim_neighbors(pos);
         }

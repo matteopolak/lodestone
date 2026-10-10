@@ -232,6 +232,7 @@ pub(super) fn tempt_food(species: &str) -> &'static [&'static str] {
         // (`Cat.CatTemptGoal(CAT_FOOD)`); without this arm the row was
         // installed on a real mob but never reached by real perception.
         "cat" => &["cod", "salmon"],
+        "turtle" => &["seagrass"],
         // Not a mistake: most species have no food tag, and an empty slice
         // keeps `TemptGoal` correctly inert for them rather than tempting them
         // with anything.

@@ -48,7 +48,7 @@ Five primitives back this on `MobController`: anger deadline and target, gaze te
 
 A goal never spawns an entity: it computes the aiming maths and calls `MobController::launch_projectile`; `NavigatingMob` accumulates launches and the host drains them once per tick into `ProjectileRegistry` via `MobSim::spawn_projectile`. Shapes: a 20-tick-draw bow attack, a no-draw interval ranged attack, and the blaze burst (three fireballs 6 ticks apart, 60-tick wind-up, 100-tick pause, melee under 2 blocks). Arrows, tridents, snowballs and potions launch at power 1.6 plus arc lift; small fireballs at 0.1 with no lift and accelerate in flight.
 
-Skeleton-family species register through `hostile_melee`'s shared table because weapon choice is by equipment; a bow is handed out unconditionally, so the melee fallback is reachable only for the wither skeleton. The drowned trident row is `Missing` (no inventory model to key off).
+Skeleton-family species register through `hostile_melee`'s shared table because weapon choice is by equipment; a bow is handed out unconditionally, so the melee fallback is reachable only for the wither skeleton.
 
 ### Vertical motion
 
@@ -81,7 +81,7 @@ A mob's goals start, stop and tick only on its "full" parity ticks (every second
 
 `MobShape::swimmer` selects `NavMode::Swim`: the search expands the six faces plus horizontal diagonals over cells whose whole body extent is water, and `swim_step` moves with an eased speed, a vertical push proportional to the vertical share of the heading, a 0.9 drag and gravity once out of the water. A swimmer's stroll destination comes from the same ten-offset search, kept only if the cell is open water.
 
-Cod, salmon, tropical fish and pufferfish are swimmers (`species_swims` in `mobs/mod.rs`) with the `roster/aquatic.rs` goals: panic, flee players within 8 blocks (the perception feed is `flees_players`), swim stroll. Flock following and the pufferfish puff are `Missing` rows. Amphibious navigation is not implemented.
+Cod, salmon, tropical fish and pufferfish are swimmers (`species_swims` in `mobs/mod.rs`) with the `roster/aquatic.rs` goals: panic, flee players within 8 blocks (the perception feed is `flees_players`), swim stroll. Flock following and the pufferfish puff are `Missing` rows.
 
 ### Drifting and climbing
 
@@ -133,3 +133,13 @@ Mobs tick against the live terrain (`tick_in`): an absent column is blocked for 
 - The version crate's entity encoders and entity-type registry.
 - The pinned `.cache/mc` decompile for every priority, multiplier, range and timing.
 - Related: [autonomous navigation](autonomous-navigation.md), [combat](combat.md), [mob spawning](mob-spawning.md), [villagers](villagers.md).
+
+### Amphibious mobs
+
+Turtle, drowned, axolotl and frog use `NavMode::Amphibious` (`species_amphibious` in `mobs/mod.rs`). The path search is the swimmer's six-face-plus-diagonal volume search over cells the species' malus allows, where a cell must hold water or have solid support. It adds a one-block step up out of a blocked face and drops of up to three blocks off an open edge, tried out to `cell_width` hops so a body wider than one cell can clear a ledge.
+
+In water the body runs the species' `SwimRule` on a 3D velocity with 0.9 drag; out of water it uses the ground follower. Axolotl and frog are `Smooth` (10 degrees of turn and 5 of pitch per tick, thrust `speed * in_water * speed`; the frog is buoyant by 0.005 a tick), the turtle's push is vertical toward the waypoint plus a tenth of the speed along the heading with a slow sink when idle, and the drowned swims only toward a target in water or while `searching_for_land`, pushing proportionally to the raw distance to the waypoint.
+
+Goals are in `roster/amphibious.rs` (turtle: panic, tempt on seagrass, walk to water two blocks under its feet within 24, travel through water in legs, wander ashore only) plus the drowned's go-to-water, swim-up and in-water-target rules in `roster/hostile_melee.rs` (`MeleeAttackGoal::with_valid_target`, `NearestAttackableTargetGoal::with_filter`). The axolotl's idle swim speed is 0.5 (`brain::roster::stroll_speed`).
+
+Not modelled: turtle eggs, breeding and home block, the turtle's panic preferring water, the drowned beach goal, the axolotl and frog speed factors on land (0.5 and 0.1 of the swim factor, 0.15 axolotl land stroll), the frog's 0.75 swim stroll, and sea level other than 63.

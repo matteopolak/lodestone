@@ -80,6 +80,15 @@ use super::Brain;
 /// Stated so nobody later "fixes" a speed bug by editing this constant.
 pub const SCAFFOLD_STROLL_SPEED: f32 = 1.0;
 
+/// The stroll speed modifier of `species`: the scaffold's, except for the
+/// axolotl, which swims idly at `0.5`. Its `0.15` on land is not modelled.
+fn stroll_speed(species: &str) -> f32 {
+    match species {
+        "axolotl" => 0.5,
+        _ => SCAFFOLD_STROLL_SPEED,
+    }
+}
+
 /// How far the scaffold's look behaviour will track a player, in blocks. Vanilla's
 /// brain mobs use `8.0F` for the generic look-target behaviour's player row, the
 /// same figure the goal system's own look-at-player goal uses.
@@ -768,9 +777,10 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
     if species == "sniffer" {
         return Some(BrainGoal::new(sniffer_brain(), vec![Activity::SNIFF, Activity::IDLE]));
     }
+    let stroll = stroll_speed(species);
     let brain = match PANIC_SPEED_MULTIPLIER.iter().find(|&&(s, _)| s == species) {
-        Some(&(_, speed)) => scaffold_with_panic(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE, speed),
-        None => scaffold(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE),
+        Some(&(_, speed)) => scaffold_with_panic(stroll, SCAFFOLD_LOOK_DISTANCE, speed),
+        None => scaffold(stroll, SCAFFOLD_LOOK_DISTANCE),
     };
     Some(BrainGoal::idle(brain))
 }

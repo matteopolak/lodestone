@@ -184,6 +184,12 @@ pub trait MobController {
         None
     }
 
+    /// Tells a drowned whether it is heading for land, which makes it rise and
+    /// swim toward its waypoint even with no target in water.
+    fn set_searching_for_land(&mut self, searching: bool) {
+        let _ = searching;
+    }
+
     /// The circle-and-swoop flight state, for a mob that flies that way.
     fn swoop(&mut self) -> Option<&mut SwoopState> {
         None

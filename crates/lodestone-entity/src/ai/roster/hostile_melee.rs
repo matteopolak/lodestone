@@ -77,19 +77,15 @@
 //!   vanilla's own behaviour-goals helper does, and the goal's own `can_use` gates on
 //!   [`crate::ai::MobController::main_hand_item`] rather than on
 //!   registration.
-//! * **Nothing in the sim is a villager, iron golem, turtle, armadillo, axolotl or
-//!   piglin**, so every target registration naming one is [`Coverage::Missing`]
+//! * **Nothing in the sim is a villager, iron golem, armadillo or piglin**, so every target registration naming one is [`Coverage::Missing`]
 //!   rather than a goal that would search for an entity class that cannot be
 //!   spawned.
 //! * **Vanilla's own same-owner alert-others flag is not modelled** — our
 //!   `HurtByTargetGoal` retaliates but never propagates anger to nearby mobs.
 //!   That needs a sim-side census of nearby same-species mobs this repo does
 //!   not have yet.
-//! * **No water-aware navigation exists**, so all five of the drowned's
-//!   amphibious goals (vanilla's own go-to-water, go-to-beach and swim-up
-//!   goals, and the two that gate on a valid target) are `Missing`. A
-//!   drowned on land behaves like a slow zombie, which is what vanilla's own
-//!   land branch does anyway.
+//! * **The drowned's go-to-beach goal is `Missing`.** Its go-to-water, swim-up
+//!   and in-water target rules are modelled in [`super::amphibious`].
 //!
 //! # What these tables cannot fix, and where the behaviour actually stops
 //!
@@ -121,8 +117,11 @@
 //! structurally cannot answer, so it is unimplemented. That errs *permissive* —
 //! a mob can acquire through a wall.
 
+use lodestone_model::Vec3;
+
 use crate::ai::goal::Goal;
-use crate::ai::goals::{FleeSunGoal, MeleeAttackGoal, RandomStrollGoal};
+use crate::ai::mob::MobController;
+use crate::ai::goals::{FleeSunGoal, MeleeAttackGoal, NearestAttackableTargetGoal, RandomStrollGoal};
 
 use super::{
     Registration, Selector, SpeciesContext, avoid_entity, float_goal, hurt_by_target,
@@ -283,23 +282,15 @@ pub static ZOMBIE: &[Registration] = &[
 /// `ZombieAttackGoal`, `MoveThroughVillageGoal` and a water-avoiding stroll that
 /// vanilla never registers on it, and lose all six goals that make it amphibious.
 ///
-/// Of the fifteen rows seven are now modelled, with the trident row the
-/// newest addition: it joins the melee row as real now that
-/// [`crate::spawn_equipment`] can say which drowned are holding one. Four of
-/// the eight still-`Missing` rows are the amphibious navigation, which this
-/// repo has no water-aware pathing for at all.
+/// The go-to-water, swim-up, melee and player-target rows are modelled; the
+/// beach goal and the target rows naming other species stay `Missing`.
 pub static DROWNED: &[Registration] = &[
     // -- inherited from vanilla's own zombie registration ---------------------
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
     // -- the drowned's own behaviour-goals helper -----------------------------
-    // Vanilla's own go-to-water goal — seeks a water column to
-    // submerge in. Needs the water-aware navigation the drowned's own
-    // navigation type
-    // provides and this repo's `PathWorld` does
-    // not.
-    Registration::missing(Selector::Goal, 1, "Drowned.DrownedGoToWaterGoal"),
+    Registration::goal(1, "Drowned.DrownedGoToWaterGoal", super::amphibious::drowned_go_to_water),
     // Vanilla's own drowned trident-attack goal extends
     // `RangedAttackGoal` — its builder lives in the ranged-attack roster
     // (`super::ranged::trident_attack`), registered from here since the
@@ -310,20 +301,12 @@ pub static DROWNED: &[Registration] = &[
     // rolled a trident (`crate::spawn_equipment`, ~93.75% of spawns) simply
     // never has this goal's `can_use` return true.
     Registration::goal(2, "Drowned.DrownedTridentAttackGoal", super::ranged::trident_attack),
-    // Vanilla's own drowned attack goal extends `ZombieAttackGoal`,
-    // adding only a valid-target check — vanilla's rule that a drowned in water
-    // will chase anything but on land only chases a target that is itself in
-    // water. Not modelled: our melee goal chases whatever
-    // target it is given, which on land makes a drowned slightly more
-    // aggressive than vanilla's.
-    Registration::goal(2, "Drowned.DrownedAttackGoal", melee_attack),
+    Registration::goal(2, "Drowned.DrownedAttackGoal", drowned_melee),
     // Vanilla's own go-to-beach goal extends `MoveToBlockGoal` —
     // leaves the water at night to hunt. No sun/time query on the AI seam and
     // no water to leave.
     Registration::missing(Selector::Goal, 5, "Drowned.DrownedGoToBeachGoal"),
-    // Vanilla's own swim-up goal — rises toward the
-    // surface. Needs a sea-level query and vertical swimming.
-    Registration::missing(Selector::Goal, 6, "Drowned.DrownedSwimUpGoal"),
+    Registration::goal(6, "Drowned.DrownedSwimUpGoal", super::amphibious::drowned_swim_up),
     // Vanilla's own plain stroll goal at speed `1.0` — the plain stroll, **not** the
     // water-avoiding subclass every other species in this family registers
     // (contrast the zombie's own behaviour-goals helper). So this is the one stroll row in
@@ -336,15 +319,25 @@ pub static DROWNED: &[Registration] = &[
     // retaliate against other drowned. Not modelled; ours has no class filter,
     // and nothing yet makes one drowned hurt another.
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
-    // Vanilla's own targeting-goal registration adds the same valid-target
-    // water rule as the melee goal, unmodelled the same way.
-    Registration::target(2, "NearestAttackableTargetGoal(Player)", nearest_attackable_target),
+    Registration::target(2, "NearestAttackableTargetGoal(Player)", drowned_player_target),
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(AbstractVillager)"),
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(IronGolem)"),
-    // Vanilla's drowned hunt axolotls; nothing in this sim is one.
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(Axolotl)"),
     Registration::missing(Selector::Target, 5, "NearestAttackableTargetGoal(Turtle)"),
 ];
+
+/// A drowned goes for a target only in water, or at night wherever it is.
+fn drowned_target_ok(mob: &dyn MobController, target: Vec3) -> bool {
+    !mob.bright_outside() || mob.water_at(target)
+}
+
+fn drowned_melee(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(MeleeAttackGoal::new(ctx.speed, ctx.attack_reach).with_valid_target(drowned_target_ok))
+}
+
+fn drowned_player_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(NearestAttackableTargetGoal::new().with_filter(drowned_target_ok))
+}
 
 /// The flee-sun registration's speed multiplier, `1.0`.
 fn flee_sun(ctx: &SpeciesContext) -> Box<dyn Goal> {

@@ -241,6 +241,7 @@ impl Goal for RandomLookAroundGoal {
 /// path or on a 5% roll.
 #[derive(Debug)]
 pub struct MeleeAttackGoal {
+    valid_target: Option<TargetFilter>,
     speed: f64,
     reach_sqr: f64,
     cooldown: i32,
@@ -265,6 +266,7 @@ impl MeleeAttackGoal {
     #[must_use]
     pub fn new(speed: f64, reach: f64) -> Self {
         Self {
+            valid_target: None,
             speed,
             reach_sqr: reach * reach,
             cooldown: 0,
@@ -272,6 +274,23 @@ impl MeleeAttackGoal {
             recalc: 0,
             pathed_target: None,
             last_checked: None,
+        }
+    }
+}
+
+impl MeleeAttackGoal {
+    /// Restricts the goal to targets `filter` accepts, checked on start and on
+    /// every continue test.
+    #[must_use]
+    pub fn with_valid_target(mut self, filter: TargetFilter) -> Self {
+        self.valid_target = Some(filter);
+        self
+    }
+
+    fn accepts(&self, mob: &dyn MobController, target: Option<Vec3>) -> bool {
+        match (self.valid_target, target) {
+            (Some(filter), Some(t)) => filter(mob, t),
+            _ => true,
         }
     }
 }
@@ -292,11 +311,12 @@ impl Goal for MeleeAttackGoal {
         }
         self.last_checked = Some(now);
         self.target = mob.attack_target();
-        self.target.is_some()
+        self.target.is_some() && self.accepts(mob, self.target)
     }
 
     fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
-        mob.attack_target().is_some()
+        let target = mob.attack_target();
+        target.is_some() && self.accepts(mob, target)
     }
 
     fn start(&mut self, mob: &mut dyn MobController) {
@@ -1024,6 +1044,9 @@ impl Goal for EndermanLookForPlayerGoal {
     }
 }
 
+/// A test of whether a mob may take a position as its target.
+pub type TargetFilter = fn(&dyn MobController, Vec3) -> bool;
+
 /// Acquires the nearest attackable entity as the mob's target.
 ///
 /// Vanilla's own nearest-attackable-target goal (flag TARGET). Runs in the mob's
@@ -1039,6 +1062,8 @@ pub struct NearestAttackableTargetGoal {
     anger_gated: bool,
     /// Consecutive ticks the held target has been out of sight.
     unseen_ticks: i32,
+    /// Candidates this rejects are not acquired.
+    filter: Option<TargetFilter>,
 }
 
 /// Ticks a held target may stay out of sight before the goal drops it.
@@ -1059,7 +1084,15 @@ impl NearestAttackableTargetGoal {
             target: None,
             anger_gated: false,
             unseen_ticks: 0,
+            filter: None,
         }
+    }
+
+    /// Acquires only a candidate `filter` accepts.
+    #[must_use]
+    pub fn with_filter(mut self, filter: TargetFilter) -> Self {
+        self.filter = Some(filter);
+        self
     }
 
     /// The **neutral** mob's form of this registration: vanilla passes an
@@ -1115,6 +1148,11 @@ impl Goal for NearestAttackableTargetGoal {
         } else {
             mob.find_nearest_target()
         };
+        if let (Some(filter), Some(t)) = (self.filter, self.target)
+            && !filter(mob, t)
+        {
+            self.target = None;
+        }
         self.target.is_some()
     }
 
