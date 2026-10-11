@@ -173,6 +173,22 @@ impl<'w> MobSim<'w> {
         self.get(id).map(SimMob::position)
     }
 
+    /// Whether a mob that keeps a player from resting stands within
+    /// `horizontal` blocks of `centre` on x and z and `vertical` on y: any
+    /// monster, except the zombified piglin, which only counts while angry at
+    /// the player (anger is not queried here, so it never counts).
+    #[must_use]
+    pub fn monster_prevents_rest(&self, centre: Vec3, horizontal: f64, vertical: f64) -> bool {
+        self.mobs.iter().any(|m| {
+            let at = m.position();
+            m.category == MobCategory::Monster
+                && m.entity_type.path() != "zombified_piglin"
+                && (at.x - centre.x).abs() <= horizontal
+                && (at.z - centre.z).abs() <= horizontal
+                && (at.y - centre.y).abs() <= vertical
+        })
+    }
+
     /// Iterates the live mobs.
     pub fn iter(&self) -> impl Iterator<Item = &SimMob<'w>> {
         self.mobs.iter()

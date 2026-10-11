@@ -352,6 +352,13 @@ pub trait ServerProtocol: Send + Sync {
         self.encode_system_chat(&message.to_plain_string())
     }
 
+    /// Encodes one line of transient feedback for the action bar above the
+    /// hotbar (the same packet as [`Self::encode_system_chat`] with the overlay
+    /// flag set). A family with no action bar falls back to the chat line.
+    fn encode_action_bar(&self, message: &str) -> ServerDirective {
+        self.encode_system_chat(message)
+    }
+
     /// Encodes a server→client plugin-message payload (vanilla
     /// Custom-payload packet, wire id `custom_payload`).
     /// `channel` is the namespaced channel identifier; `data` is the
@@ -1981,6 +1988,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_system_chat_component(&self, message: &Text) -> ServerDirective {
         (**self).encode_system_chat_component(message)
+    }
+
+    fn encode_action_bar(&self, message: &str) -> ServerDirective {
+        (**self).encode_action_bar(message)
     }
 
     fn begin_play(&self, join: &JoinGame) -> Vec<ServerDirective> {

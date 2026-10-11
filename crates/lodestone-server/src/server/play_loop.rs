@@ -435,6 +435,9 @@ where
     // doc comment.
     let player_entity_id =
         player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
+    // Leaving the connection by any path gets the player out of bed, which
+    // clears their vote entry and destroys a straw bed they lay in.
+    let _sleep_seat = crate::sleep::SleepSeat::new(sleep_vote, player_entity_id);
     if let (Some(registry), Some(rotation)) = (entities.players(), player_rot) {
         registry.set_rotation(player_entity_id, rotation);
     }
@@ -3460,6 +3463,9 @@ where
     // can register and wake voters; timer-fed vote counts remain native-only.
     let player_entity_id =
         player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
+    // Leaving the connection by any path gets the player out of bed, which
+    // clears their vote entry and destroys a straw bed they lay in.
+    let _sleep_seat = crate::sleep::SleepSeat::new(sleep_vote, player_entity_id);
     // The initial join dump is unacknowledged, so this gate begins `true`.
     let mut awaiting_chunk_batch_ack = true;
     let mut pending_chunk_batches: VecDeque<PendingChunkBatch> = VecDeque::new();

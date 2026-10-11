@@ -59,6 +59,10 @@ impl ServerProtocol for RespawnOnlyProto {
         self.log(format!("chat {message}"));
         ServerDirective::None
     }
+    fn encode_action_bar(&self, message: &str) -> ServerDirective {
+        self.log(format!("bar {message}"));
+        ServerDirective::None
+    }
     fn supports_dimension_change(&self) -> bool {
         true
     }
@@ -739,4 +743,179 @@ async fn a_death_at_home_does_not_ask_for_a_dimension_reset() {
         reset, None,
         "a same-dimension death must not signal a reset"
     );
+}
+
+/// What a driven bed click left behind.
+struct BedRun {
+    log: Vec<String>,
+    respawn: Option<RespawnPoint>,
+    mobs: MobHandle,
+}
+
+/// Right-clicks the cell `at` of `world` with empty hands through the real
+/// `apply_use_item_on`, as the player `1` of `vote`, standing at `player`.
+async fn click_bed(
+    world: &BlockWorld,
+    at: BlockPos,
+    player: Option<Vec3>,
+    vote: &SleepVote,
+    game_mode: GameMode,
+    mobs: Option<MobHandle>,
+) -> BedRun {
+    let (client_end, server_end) = lodestone_net::memory_pair();
+    let mut conn = Connection::new(server_end);
+    let mut state = State::Play;
+    let proto = RespawnOnlyProto::default();
+    let mut inventory = PlayerInventory::new();
+    let mut respawn = None;
+    let feed = BlockTickFeed::default();
+    let mobs = mobs.unwrap_or_else(|| MobHandle::new(crate::ChunkWorld::new(0, 256)));
+    let mut next_window_id = 1;
+    let mut open_container = None;
+    let mut container_sync = ContainerSync::default();
+    let mut bone_meal_rng = SpawnRng::new(1);
+    apply_use_item_on(
+        &mut conn,
+        &proto,
+        world,
+        &mut state,
+        None,
+        at,
+        BlockFace::Up,
+        Vec3f::new(0.5, 1.0, 0.5),
+        player,
+        &mut respawn,
+        None,
+        None,
+        false,
+        Uuid::nil(),
+        &mut inventory,
+        &BlockEntityHandle::default(),
+        &mut next_window_id,
+        &mut open_container,
+        &mut container_sync,
+        &mobs,
+        0.5,
+        &feed,
+        vote,
+        1,
+        &mut bone_meal_rng,
+        lodestone_model::Difficulty::Normal,
+        game_mode,
+        0,
+        0,
+        &crate::plugin_crafting::CraftingStationHooks::default(),
+    )
+    .await
+    .expect("the fixture protocol never errors");
+    drop(client_end);
+    let log = proto.0.lock().unwrap().clone();
+    BedRun { log, respawn, mobs }
+}
+
+fn bar(text: &str) -> String {
+    format!("bar {text}")
+}
+
+const NO_SLEEP: &str = "You can sleep only at night or during thunderstorms";
+
+/// A bed whose foot is at (0, 64, 0) and head at (0, 64, -1), under open air.
+fn bed_world(dimension: crate::dimension::Dimension) -> BlockWorld {
+    let world = BlockWorld::flat(dimension);
+    for (z, part) in [(0, "foot"), (-1, "head")] {
+        world.set_block(
+            0,
+            64,
+            z,
+            StateId::from_state_str(&format!("minecraft:red_bed[facing=north,part={part}]")).unwrap(),
+        );
+    }
+    world
+}
+
+const NEAR: Vec3 = Vec3 { x: 1.5, y: 64.0, z: 1.5 };
+
+/// A regular bed used in the Nether removes both halves and queues a power-5
+/// blast with fire at the head's centre; the Overworld control below does
+/// neither.
+#[tokio::test]
+async fn a_bed_used_in_the_nether_explodes() {
+    let world = bed_world(Dim::Nether);
+    let vote = SleepVote::default();
+    let run = click_bed(&world, BlockPos::new(0, 64, 0), Some(NEAR), &vote, GameMode::Survival, None).await;
+    for z in [0, -1] {
+        assert_eq!(world.block_state_id(0, 64, z), crate::chunk::air_state(), "bed half at z={z} removed");
+    }
+    let blasts = run.mobs.with(|sim| sim.take_detonations());
+    assert_eq!(blasts.len(), 1);
+    assert_eq!(blasts[0].centre, Vec3::new(0.5, 64.5, -0.5), "centre of the head cell");
+    assert!((blasts[0].radius - 5.0).abs() < f32::EPSILON);
+    assert!(blasts[0].fire && blasts[0].destroys_blocks);
+    assert!(!vote.is_sleeping(1));
+    assert_eq!(run.respawn, None);
+    assert_eq!(run.log, vec!["block 0 64 -1 charges=0".to_owned(), "block 0 64 0 charges=0".to_owned()]);
+}
+
+/// The End refuses sleep the same way (control for the Nether test: the rule
+/// is per dimension, not per Nether).
+#[tokio::test]
+async fn a_bed_used_in_the_end_explodes_but_in_the_overworld_it_stays() {
+    let end = bed_world(Dim::End);
+    let run = click_bed(&end, BlockPos::new(0, 64, -1), Some(NEAR), &SleepVote::default(), GameMode::Survival, None).await;
+    assert_eq!(run.mobs.with(|sim| sim.take_detonations()).len(), 1, "clicking the head works too");
+    let overworld = bed_world(Dim::Overworld);
+    let run = click_bed(&overworld, BlockPos::new(0, 64, 0), Some(NEAR), &SleepVote::default(), GameMode::Survival, None).await;
+    assert!(run.mobs.with(|sim| sim.take_detonations()).is_empty());
+    assert_ne!(overworld.block_state_id(0, 64, 0), crate::chunk::air_state());
+}
+
+/// By day a bed click sets the spawn but refuses to sleep, with the reference
+/// action-bar text; by night (or a storm) the same click sleeps.
+#[tokio::test]
+async fn a_bed_refuses_sleep_by_day_and_accepts_it_when_dark() {
+    let world = bed_world(Dim::Overworld);
+    let vote = SleepVote::default();
+    let day = click_bed(&world, BlockPos::new(0, 64, 0), Some(NEAR), &vote, GameMode::Survival, None).await;
+    assert_eq!(day.log, vec!["chat Respawn point set".to_owned(), bar(NO_SLEEP)]);
+    assert!(!vote.is_sleeping(1), "a daytime click must not join the vote");
+    vote.set_dark_outside(true);
+    let night = click_bed(&world, BlockPos::new(0, 64, 0), Some(NEAR), &vote, GameMode::Survival, None).await;
+    assert!(night.log.iter().all(|line| !line.starts_with("bar ")), "{:?}", night.log);
+    assert!(vote.is_sleeping(1));
+}
+
+/// Reach, obstruction and monsters each refuse with their own text, at night.
+#[tokio::test]
+async fn a_bed_refuses_when_far_obstructed_or_watched() {
+    let vote = SleepVote::default();
+    vote.set_dark_outside(true);
+    let bed = BlockPos::new(0, 64, 0);
+
+    let world = bed_world(Dim::Overworld);
+    let far = click_bed(&world, bed, Some(Vec3::new(9.5, 64.0, 0.5)), &vote, GameMode::Survival, None).await;
+    assert_eq!(far.log, vec![bar("You may not rest now; the bed is too far away")]);
+    // Within reach of the foot alone is enough: the head is 4 blocks off in x.
+    let foot_only = click_bed(&world, bed, Some(Vec3::new(3.0, 64.0, 0.5)), &vote, GameMode::Survival, None).await;
+    assert!(foot_only.log.iter().all(|line| !line.starts_with("bar ")), "{:?}", foot_only.log);
+    vote.get_up(1);
+
+    let blocked = bed_world(Dim::Overworld);
+    blocked.set_block(0, 65, -1, StateId::from_state_str("minecraft:stone").unwrap());
+    let run = click_bed(&blocked, bed, Some(NEAR), &vote, GameMode::Survival, None).await;
+    assert_eq!(run.log, vec![bar("This bed is obstructed")]);
+
+    let watched = MobHandle::new(crate::ChunkWorld::new(0, 256));
+    watched.with(|sim| {
+        sim.spawn_species("minecraft:zombie".parse().expect("valid key"), Vec3::new(6.0, 64.0, 0.5));
+    });
+    let run = click_bed(&world, bed, Some(NEAR), &vote, GameMode::Survival, Some(watched.clone())).await;
+    // The spawn is set before the monster check, so only the sleep is refused.
+    assert_eq!(
+        run.log,
+        vec!["chat Respawn point set".to_owned(), bar("You may not rest now; there are monsters nearby")]
+    );
+    assert!(!vote.is_sleeping(1));
+    let creative = click_bed(&world, bed, Some(NEAR), &vote, GameMode::Creative, Some(watched)).await;
+    assert!(creative.log.iter().all(|line| !line.starts_with("bar ")), "creative ignores monsters");
+    assert!(vote.is_sleeping(1));
 }

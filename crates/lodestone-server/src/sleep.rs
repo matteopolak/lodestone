@@ -61,14 +61,12 @@
 //!   of `100` until the tick loop reads that setting from the shared world-rule
 //!   store. Time advancement already reads
 //!   [`crate::world_state::WorldStateHandle::advance_time`].
-//! * **Bed-entry gates** are unmodelled. A bed that is not legally
-//!   enterable (blocked, out of reach, monsters within ±8/±5, daytime, the
-//!   player flying/creative) with per-reason messages. The monster check is
-//!   already a documented remainder in `crate::world_spawn`'s
-//!   [`is_legal_bed_respawn`] (it needs a shape-B mob AABB); the daytime check
-//!   needs the day clock the *loop* owns, not the connection — so this landing
-//!   registers a bed click unconditionally and relies on the 100-tick
-//!   deep-sleep threshold to avoid counting accidental daytime clicks.
+//! * **Bed-entry gates** live in the `UseItemOn` bed arm (see [`BedRefusal`]):
+//!   reach, an obstructed cell above either half, a bright sky, and a hostile
+//!   mob nearby (skipped in creative). The sky check reads the darkness flag the
+//!   tick loop publishes on [`SleepVote`] each tick. An angry zombified piglin
+//!   does not count as a monster here, as per-mob anger is not queryable, and a
+//!   bed another player occupies is not refused.
 //! * **Spectator exclusion** is unmodelled: this crate has no spectator
 //!   concept, so every connected player counts toward the vote
 //!   so every connected player counts toward the vote.
@@ -140,6 +138,9 @@ struct SleepVoteInner {
     /// The number of players who can vote. This crate has no spectator
     /// concept, so every connected player counts.
     active: u32,
+    /// Whether the Overworld sky is dark enough to sleep under, as the tick
+    /// loop last computed it from the clock and the weather.
+    dark_outside: bool,
 }
 
 impl SleepVote {
@@ -166,6 +167,23 @@ impl SleepVote {
         if !inner.straw_beds.iter().any(|(id, _)| *id == entity_id) {
             inner.straw_beds.push((entity_id, head));
         }
+    }
+
+    /// Whether the player is currently in a bed.
+    pub fn is_sleeping(&self, entity_id: i32) -> bool {
+        self.0.lock().expect("sleep vote lock poisoned").sleepers.contains(&entity_id)
+    }
+
+    /// Publishes whether the Overworld sky is dark (night or a thunderstorm);
+    /// the tick loop owns the clock and the weather, so it feeds this each tick
+    /// and a connection's bed click reads it.
+    pub fn set_dark_outside(&self, dark: bool) {
+        self.0.lock().expect("sleep vote lock poisoned").dark_outside = dark;
+    }
+
+    /// Whether the Overworld sky was dark at the last tick.
+    pub fn dark_outside(&self) -> bool {
+        self.0.lock().expect("sleep vote lock poisoned").dark_outside
     }
 
     /// Drains the straw bed heads whose sleepers have left.
@@ -211,6 +229,67 @@ impl SleepVote {
         inner.vacated_straw_beds.extend(woken.into_iter().map(|(_, head)| head));
     }
 }
+
+/// Gets a connection's player out of bed when the connection ends, whatever
+/// the exit path: the roster entry clears and a straw bed they lay in is
+/// queued for destruction, as for any other leaving.
+#[derive(Debug)]
+pub struct SleepSeat {
+    vote: SleepVote,
+    entity_id: i32,
+}
+
+impl SleepSeat {
+    /// A seat for `entity_id` on `vote`.
+    pub fn new(vote: &SleepVote, entity_id: i32) -> Self {
+        Self { vote: vote.clone(), entity_id }
+    }
+}
+
+impl Drop for SleepSeat {
+    fn drop(&mut self) {
+        self.vote.get_up(self.entity_id);
+    }
+}
+
+/// Why a bed click does not put the player to sleep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BedRefusal {
+    /// Neither bed cell is within reach.
+    TooFarAway,
+    /// A suffocating block sits above the head or the foot.
+    Obstructed,
+    /// The sky is bright.
+    NotDark,
+    /// A hostile mob is within 8 blocks horizontally and 5 vertically.
+    NotSafe,
+}
+
+impl BedRefusal {
+    /// The action-bar text the player sees.
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::TooFarAway => "You may not rest now; the bed is too far away",
+            Self::Obstructed => "This bed is obstructed",
+            Self::NotDark => "You can sleep only at night or during thunderstorms",
+            Self::NotSafe => "You may not rest now; there are monsters nearby",
+        }
+    }
+}
+
+/// Whether the bed cell at `cell` is within a player's sleeping reach: 3
+/// blocks horizontally and 2 vertically of the cell's bottom centre.
+pub(crate) fn bed_cell_in_reach(player: lodestone_model::Vec3, cell: lodestone_model::BlockPos) -> bool {
+    (player.x - (f64::from(cell.x) + 0.5)).abs() <= 3.0
+        && (player.y - f64::from(cell.y)).abs() <= 2.0
+        && (player.z - (f64::from(cell.z) + 0.5)).abs() <= 3.0
+}
+
+/// Power of the blast a regular bed makes when used where sleeping is forbidden.
+pub const BED_BLAST_POWER: f32 = 5.0;
+
+/// The sky darkening (0 bright to 11 dark) at which the sky counts as dark.
+pub const DARK_SKY_DARKENING: u8 = 4;
 
 /// One sleeping player, with the game tick their deep-sleep clock started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,6 +413,35 @@ impl SleepFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connection that ends while its player lies in a straw bed clears the
+    /// vote entry and queues the bed's head for destruction; a seat still alive
+    /// (the control) does neither.
+    #[test]
+    fn dropping_a_seat_gets_the_sleeper_up_and_vacates_their_straw_bed() {
+        let vote = SleepVote::new();
+        let head = lodestone_model::BlockPos::new(4, 70, -2);
+        vote.lay_down_straw(7, head);
+        vote.lay_down(8);
+        let seat = SleepSeat::new(&vote, 7);
+        assert!(vote.is_sleeping(7));
+        assert!(vote.take_vacated_straw_beds().is_empty(), "still seated: nothing vacated");
+        drop(seat);
+        assert!(!vote.is_sleeping(7));
+        assert!(vote.is_sleeping(8), "another player's entry stays");
+        assert_eq!(vote.take_vacated_straw_beds(), vec![head]);
+    }
+
+    /// Reach is 3 blocks in x and z and 2 in y from the cell's bottom centre.
+    #[test]
+    fn bed_reach_is_three_by_two_by_three_from_the_cell_bottom_centre() {
+        use lodestone_model::{BlockPos, Vec3};
+        let cell = BlockPos::new(10, 64, 10);
+        assert!(bed_cell_in_reach(Vec3::new(13.5, 66.0, 7.5), cell));
+        assert!(!bed_cell_in_reach(Vec3::new(13.51, 64.0, 10.5), cell));
+        assert!(!bed_cell_in_reach(Vec3::new(10.5, 66.01, 10.5), cell));
+        assert!(!bed_cell_in_reach(Vec3::new(10.5, 61.99, 10.5), cell));
+    }
 
     /// Pins the vote arithmetic to `max(1, ceil(active * pct / 100))`. The
     /// four rows are the ones that

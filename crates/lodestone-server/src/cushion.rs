@@ -209,7 +209,7 @@ fn covered_by(region: &Aabb, covering: &[Aabb]) -> bool {
 }
 
 /// Whether the state suffocates: in the suffocation tag with a full-cube collider.
-fn is_suffocating(state: StateId) -> bool {
+pub(crate) fn is_suffocating(state: StateId) -> bool {
     tool::block_tag_contains(SUFFOCATION_TAG, state.block())
         && collision_shapes::collision_boxes(state).iter().any(|b| {
             (0..3).all(|a| b.min[a] <= 1.0e-4 && b.max[a] >= 1.0 - 1.0e-4)

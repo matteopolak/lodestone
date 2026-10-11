@@ -3043,6 +3043,14 @@ async fn run_tick_loop_with_weather_impl<W>(
         // clock (`encode_set_time` on the connection side); and every sleeper
         // wakes (`wakeUpAllPlayers` → sleep status's remove all sleepers) and the
         // roster is cleared so a day-sleeping click cannot vote again tonight.
+        sleep_vote.set_dark_outside(
+            crate::natural_spawn::sky_darkening_for(
+                crate::dimension::Dimension::Overworld,
+                day_time,
+                weather.rain_level,
+                weather.rain_level * weather.thunder_level,
+            ) >= crate::sleep::DARK_SKY_DARKENING,
+        );
         let (active, sleeper_ids) = sleep_vote.snapshot();
         sleep_state.reconcile(&sleeper_ids, game_tick);
         if clock_role == WorldClockRole::Owner
@@ -6629,6 +6637,47 @@ mod tests {
             "the passed vote's roster must be cleared by the skip"
         );
     }
+    /// The loop publishes whether the Overworld sky is dark for bed clicks to
+    /// read: day time 14000 is night and 6000 is noon, both clear.
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_publishes_whether_the_sky_is_dark_for_beds() {
+        for (day_time, dark) in [(14_000, true), (6_000, false)] {
+            let (mobs, out, block_entities) = handles();
+            let (world, block_tick_out, tick_area) = world_tick_args();
+            let vote = SleepVote::new();
+            let world_state = crate::world_state::WorldStateHandle::default();
+            world_state.set_day_time(day_time);
+            let loop_vote = vote.clone();
+            tokio::spawn(async move {
+                run_tick_loop_with_weather(
+                    mobs,
+                    out,
+                    block_entities,
+                    Arc::new(TickClock::new()),
+                    world,
+                    block_tick_out,
+                    tick_area,
+                    ExplosionFeed::default(),
+                    WeatherFeed::default(),
+                    WeatherState::default(),
+                    &loop_vote,
+                    &SleepFeed::default(),
+                    crate::region_source::ScheduledTickHandle::default(),
+                    world_state,
+                    crate::tick_area::TickFollow::default(),
+                    BorderFeed::default(),
+                )
+                .await;
+            });
+            tokio::task::yield_now().await;
+            for _ in 0..3 {
+                tokio::time::advance(TICK_PERIOD).await;
+            }
+            tokio::task::yield_now().await;
+            assert_eq!(vote.dark_outside(), dark, "day time {day_time}");
+        }
+    }
+
     // ---------------------------------------------------------------------
     // The fire arm of the block-tick drain. `crate::fire`'s own tests gate
     // `run_scheduled_tick`'s behaviour against a reference generator; these two

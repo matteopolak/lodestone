@@ -558,13 +558,19 @@ pub(crate) fn straw_bed_rule(dimension: crate::dimension::Dimension) -> StrawBed
 /// The head cell of the bed half at `pos`: `pos` itself for a head, one step
 /// along `facing` for a foot. Only the head is ever destroyed by the straw
 /// bed rule, leaving the foot standing.
-pub(crate) fn straw_bed_head(pos: lodestone_model::BlockPos, state: BlockStateId) -> Option<lodestone_model::BlockPos> {
+pub(crate) fn bed_head(pos: lodestone_model::BlockPos, state: BlockStateId) -> Option<lodestone_model::BlockPos> {
     let part = state.properties().iter().find_map(|(k, v)| (*k == "part").then_some(*v))?;
     if part == "head" {
         return Some(pos);
     }
     let (dx, dz) = bed_facing_steps(state)?;
     Some(lodestone_model::BlockPos::new(pos.x + dx, pos.y, pos.z + dz))
+}
+
+/// The foot cell of the bed whose head is at `head`: one step against `facing`.
+pub(crate) fn bed_foot(head: lodestone_model::BlockPos, head_state: BlockStateId) -> Option<lodestone_model::BlockPos> {
+    let (dx, dz) = bed_facing_steps(head_state)?;
+    Some(lodestone_model::BlockPos::new(head.x - dx, head.y, head.z - dz))
 }
 
 /// Whether right-clicking the bed at `bed` should set the player's respawn
@@ -1318,8 +1324,8 @@ mod tests {
         let at = lodestone_model::BlockPos::new(4, 70, 4);
         let foot = state("minecraft:straw_bed[part=foot,facing=east]");
         let head = state("minecraft:straw_bed[part=head,facing=east]");
-        assert_eq!(straw_bed_head(at, foot), Some(lodestone_model::BlockPos::new(5, 70, 4)));
-        assert_eq!(straw_bed_head(at, head), Some(at));
+        assert_eq!(bed_head(at, foot), Some(lodestone_model::BlockPos::new(5, 70, 4)));
+        assert_eq!(bed_head(at, head), Some(at));
     }
 
     #[test]

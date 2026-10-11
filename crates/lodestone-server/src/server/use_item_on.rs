@@ -586,50 +586,95 @@ where
         }
     }
 
-    // Right-clicking a bed records a per-player respawn point and registers
-    // the player for the sleep vote. A bed click is an interaction, not a
-    // placement, so it returns before the inventory-placement logic. The
-    // legality gate applies the three checks in [`is_legal_bed_respawn`].
-    // Notify the client only when the stored point changes; a repeat click on
-    // the same bed is silent. This crate has no localization table or action-bar
-    // encoder, so the notification uses a plain system-chat line.
+    // Right-clicking a bed. A dimension whose rule forbids sleeping destroys
+    // the bed (a regular bed explodes, a straw bed just breaks). Otherwise the
+    // click runs the entry checks in order (reach, obstruction), sets the
+    // respawn point of a regular bed, then refuses for a bright sky or a
+    // nearby monster; only a click that passes them all puts the player in
+    // the night-skip vote. Refusals reach the action bar.
     let clicked_bed = source.block_state_id(pos.x, pos.y, pos.z);
     if is_bed_block(clicked_bed) || crate::world_spawn::is_straw_bed(clicked_bed) {
-        // Register the player in the night-skip vote. Bed-entry gates for
-        // day/night, nearby monsters, and already-sleeping state are outside
-        // this interaction; the 100-tick deep-sleep threshold prevents a
-        // single daytime click from advancing the vote. Registration is
-        // idempotent, so a repeat click does not double-count.
         let bed_dimension = source.dimension().unwrap_or(crate::dimension::Dimension::Overworld);
-        if crate::world_spawn::is_straw_bed(clicked_bed) {
-            let Some(head) = crate::world_spawn::straw_bed_head(pos, clicked_bed) else {
-                return Ok(());
-            };
-            match crate::world_spawn::straw_bed_rule(bed_dimension) {
-                crate::world_spawn::StrawBedRule::DestroyOnUse => {
-                    let head_state = source.block_state_id(head.x, head.y, head.z);
-                    if crate::world_spawn::is_straw_bed(head_state) {
-                        let air = crate::chunk::air_state();
-                        source.set_block(head.x, head.y, head.z, air);
-                        apply(conn, state, proto.encode_block_update(head.x, head.y, head.z, air)).await?;
-                        block_ticks.publish_change(head.x, head.y, head.z, head_state, air);
-                        if let Some(effect) = crate::effects::straw_bed_destroyed(head) {
-                            block_ticks.publish_effect(effect);
-                        }
+        let Some(head) = crate::world_spawn::bed_head(pos, clicked_bed) else {
+            return Ok(());
+        };
+        let is_straw = crate::world_spawn::is_straw_bed(clicked_bed);
+        let head_state = source.block_state_id(head.x, head.y, head.z);
+        let destroyed_on_use = if is_straw {
+            crate::world_spawn::straw_bed_rule(bed_dimension) == crate::world_spawn::StrawBedRule::DestroyOnUse
+        } else {
+            !crate::respawn::bed_works_in(bed_dimension)
+        };
+        let foot = crate::world_spawn::bed_foot(head, head_state);
+        if destroyed_on_use {
+            if is_straw {
+                if crate::world_spawn::is_straw_bed(head_state) {
+                    let air = crate::chunk::air_state();
+                    source.set_block(head.x, head.y, head.z, air);
+                    apply(conn, state, proto.encode_block_update(head.x, head.y, head.z, air)).await?;
+                    block_ticks.publish_change(head.x, head.y, head.z, head_state, air);
+                    if let Some(effect) = crate::effects::straw_bed_destroyed(head) {
+                        block_ticks.publish_effect(effect);
                     }
                 }
-                crate::world_spawn::StrawBedRule::DestroyOnLeave => sleep_vote.lay_down_straw(player_entity_id, head),
+            } else if is_bed_block(head_state) {
+                // Both halves go before the blast, so it does not shield itself.
+                let air = crate::chunk::air_state();
+                for cell in std::iter::once(head).chain(foot) {
+                    let old = source.block_state_id(cell.x, cell.y, cell.z);
+                    if !is_bed_block(old) {
+                        continue;
+                    }
+                    source.set_block(cell.x, cell.y, cell.z, air);
+                    apply(conn, state, proto.encode_block_update(cell.x, cell.y, cell.z, air)).await?;
+                    block_ticks.publish_change(cell.x, cell.y, cell.z, old, air);
+                }
+                let centre = Vec3::new(f64::from(head.x) + 0.5, f64::from(head.y) + 0.5, f64::from(head.z) + 0.5);
+                mobs.with(|sim| sim.queue_blast(centre, crate::sleep::BED_BLAST_POWER, true, true));
             }
             return Ok(());
         }
-        sleep_vote.lay_down(player_entity_id);
-        if is_bed_block(clicked_bed)
-            && crate::respawn::bed_works_in(bed_dimension)
-            && is_legal_bed_respawn(source, pos, player_pos)
-            && !respawn.is_some_and(|existing| existing.same_block(pos, bed_dimension))
+        // Already in a bed: nothing happens.
+        if sleep_vote.is_sleeping(player_entity_id) {
+            return Ok(());
+        }
+        let reach_refused = player_pos.is_some_and(|player| {
+            !std::iter::once(head)
+                .chain(foot)
+                .any(|cell| crate::sleep::bed_cell_in_reach(player, cell))
+        });
+        let mut refused = None;
+        if reach_refused {
+            refused = Some(crate::sleep::BedRefusal::TooFarAway);
+        } else if std::iter::once(head)
+            .chain(foot)
+            .any(|cell| crate::cushion::is_suffocating(source.block_state_id(cell.x, cell.y + 1, cell.z)))
         {
-            *respawn = Some(RespawnPoint::block(pos, bed_dimension, player_yaw.unwrap_or(0.0)));
-            apply(conn, state, proto.encode_system_chat("Respawn point set")).await?;
+            refused = Some(crate::sleep::BedRefusal::Obstructed);
+        }
+        if refused.is_none() {
+            if !is_straw
+                && is_legal_bed_respawn(source, pos, player_pos)
+                && !respawn.is_some_and(|existing| existing.same_block(pos, bed_dimension))
+            {
+                *respawn = Some(RespawnPoint::block(pos, bed_dimension, player_yaw.unwrap_or(0.0)));
+                apply(conn, state, proto.encode_system_chat("Respawn point set")).await?;
+            }
+            if !sleep_vote.dark_outside() {
+                refused = Some(crate::sleep::BedRefusal::NotDark);
+            } else if game_mode != GameMode::Creative {
+                let centre = Vec3::new(f64::from(head.x) + 0.5, f64::from(head.y), f64::from(head.z) + 0.5);
+                if mobs.with(|sim| sim.monster_prevents_rest(centre, 8.0, 5.0)) {
+                    refused = Some(crate::sleep::BedRefusal::NotSafe);
+                }
+            }
+        }
+        if let Some(reason) = refused {
+            apply(conn, state, proto.encode_action_bar(reason.message())).await?;
+        } else if is_straw {
+            sleep_vote.lay_down_straw(player_entity_id, head);
+        } else {
+            sleep_vote.lay_down(player_entity_id);
         }
         return Ok(());
     }

@@ -4146,6 +4146,13 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    fn encode_action_bar(&self, message: &str) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::SYSTEM_CHAT,
+            payload: encode_system_chat(message, true),
+        }
+    }
+
     fn encode_system_chat_component(&self, message: &Text) -> ServerDirective {
         let mut payload = encode_component_nbt(message);
         payload.push(0);
