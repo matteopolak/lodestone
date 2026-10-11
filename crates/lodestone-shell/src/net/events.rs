@@ -274,6 +274,14 @@ pub enum NetUpdate {
         /// boundary.
         state: BlockStateRef,
     },
+    /// A brushable block finished being brushed (level event 3008): the block's
+    /// completion sound and its destroy particles, drawn from the state it held.
+    BrushCompleted {
+        /// Block position that finished.
+        pos: lodestone_model::BlockPos,
+        /// The block state the cell held before it became its base block.
+        state: BlockStateRef,
+    },
     /// The server asked for a burst of particles at a world position
     /// (`LEVEL_PARTICLES`) — vanilla's general particle-effect packet, as
     /// opposed to the `LevelEvent` 2001 shortcut [`Self::BlockDestroyed`]

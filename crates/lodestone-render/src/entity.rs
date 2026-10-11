@@ -3347,6 +3347,39 @@ mod tests {
         );
     }
 
+    /// The brush sweep spans -90 to 60 degrees: the reference's stated swipe limits.
+    ///
+    /// With `remaining = 200 - held` taken modulo ten, `held = 191` is `remaining = 9`, where
+    /// the phase is zero and the cosine is at its peak (60); `held = 196` is `remaining = 4`,
+    /// half a period on, at its trough (-90); `held = 193` is a quarter period, at the
+    /// centre -15.
+    #[test]
+    fn brush_sweep_hits_the_reference_limits() {
+        assert!((brush_swipe_angle(191.0) - 60.0).abs() < 1e-3, "{}", brush_swipe_angle(191.0));
+        assert!((brush_swipe_angle(196.0) + 90.0).abs() < 1e-3, "{}", brush_swipe_angle(196.0));
+        assert!((brush_swipe_angle(193.5) + 15.0).abs() < 1.0, "{}", brush_swipe_angle(193.5));
+    }
+
+    /// The right-hand pose at a known phase, composed independently from the reference's
+    /// listed steps with `glam` builders, must match the chain.
+    #[test]
+    fn brush_pose_right_hand_matches_the_reference_steps() {
+        let held = 196.0;
+        let expected = Mat4::from_translation(Vec3::new(0.56, -0.52, -0.72))
+            * Mat4::from_translation(Vec3::new(-0.25, 0.22, 0.35))
+            * Mat4::from_rotation_x((-80.0f32).to_radians())
+            * Mat4::from_rotation_y(90.0f32.to_radians())
+            * Mat4::from_rotation_x((-90.0f32).to_radians());
+        let actual = first_person_brush_chain(Arm::Right, held, 0.0);
+        let spread = actual
+            .to_cols_array()
+            .iter()
+            .zip(expected.to_cols_array())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(spread < 1e-4, "brush pose off the reference steps by {spread}");
+    }
+
     /// The equip dip must actually reach the bow pose.
     ///
     /// The gate above pins one `inverse_arm_height`; this one pins the *response*,

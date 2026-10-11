@@ -626,7 +626,7 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::LEVEL_EVENT {
             let level_event: LevelEvent = decode_full(payload)?;
-            let data = if level_event.event == 2001 {
+            let data = if level_event.event == 2001 || level_event.event == 3008 {
                 let raw = u32::try_from(level_event.data).map_err(|_| {
                     AdapterError::Decode(format!("negative block state id {}", level_event.data))
                 })?;

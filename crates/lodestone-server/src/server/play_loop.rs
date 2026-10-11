@@ -1509,6 +1509,44 @@ where
                     }
                 }
 
+                // A held brush strokes on its own clock the same way, and a tick
+                // whose ray finds no block ends the use.
+                if let Some(started) = item_in_use.clone()
+                    && started.item == brushing::BRUSH_ITEM
+                {
+                    let now = mobs.with(|sim| sim.tick_count());
+                    let remaining = started.finish_tick.saturating_sub(now);
+                    let from = started.last_effect_remaining.map_or(0, |r| brushing::USE_TICKS.saturating_sub(u64::from(r)));
+                    let to = brushing::USE_TICKS.saturating_sub(remaining);
+                    let held_ok = brushing::is_brush(inventory.native(started.native));
+                    if !held_ok {
+                        item_in_use = None;
+                    } else if to > from
+                        && let (Some((x, y, z)), Some(rotation)) = (player_pos, player_rot)
+                    {
+                        if let Some(live) = item_in_use.as_mut() {
+                            live.last_effect_remaining = Some(u32::try_from(remaining).unwrap_or(u32::MAX));
+                        }
+                        let brush_world = brushing::BrushWorld {
+                            source: source.get(),
+                            block_entities,
+                            block_ticks,
+                            mobs,
+                            tables: crate::block_drops::bundled_tables(),
+                            game_time: u64::try_from(world.time().game_time).unwrap_or(0),
+                            creative: game_mode == GameMode::Creative,
+                        };
+                        let aim = brushing::Aim { feet: Vec3::new(x, y, z), yaw: rotation.yaw, pitch: rotation.pitch };
+                        let result = brushing::tick(&brush_world, &aim, &mut drops_rng, from, to);
+                        if result.release {
+                            item_in_use = None;
+                        }
+                        if result.wear > 0 && game_mode != GameMode::Creative {
+                            wear_item_in_slot(conn, &mut state, proto, &mut inventory, started.native, result.wear).await?;
+                        }
+                    }
+                }
+
                 // Vanilla's own update-using-item routine: a consume ends on the server's
                 // own clock, not on a packet — the client sends nothing when a
                 // steak finishes, so without this arm every bite starts and none

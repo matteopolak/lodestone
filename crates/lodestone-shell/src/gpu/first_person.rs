@@ -472,6 +472,13 @@ impl RenderState {
                     Some(FirstPersonItemUse::Bow {
                         held_ticks: use_state.ticks as f32,
                     })
+                } else if use_state.using
+                    && held.item.namespace() == "minecraft"
+                    && held.item.path() == "brush"
+                {
+                    Some(FirstPersonItemUse::Brush {
+                        held_ticks: use_state.ticks as f32,
+                    })
                 } else {
                     use_state.eat.map(|(curr_usage_time, use_duration)| {
                         FirstPersonItemUse::Eat {

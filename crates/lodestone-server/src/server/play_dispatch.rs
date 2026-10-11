@@ -579,6 +579,28 @@ where
                     world.crafting_hooks(),
                 )
                 .await?;
+                // A brush that was not swallowed by the clicked block (a container
+                // opens instead) starts a use when the crosshair is on any block.
+                if open_container.is_none()
+                    && brushing::is_brush(inventory.native(held_native))
+                    && let Some((x, y, z)) = *player_pos
+                    && let Some(rotation) = *player_rot
+                {
+                    let brush_world = brushing::BrushWorld {
+                        source: source.get(),
+                        block_entities,
+                        block_ticks,
+                        mobs,
+                        tables: crate::block_drops::bundled_tables(),
+                        game_time: u64::try_from(world.time().game_time).unwrap_or(0),
+                        creative: *game_mode == GameMode::Creative,
+                    };
+                    let aim = brushing::Aim { feet: Vec3::new(x, y, z), yaw: rotation.yaw, pitch: rotation.pitch };
+                    if brushing::aims_at_block(&brush_world, &aim) {
+                        *bow_draw = None;
+                        *item_in_use = Some(brushing::begin(held_native, mobs.with(|sim| sim.tick_count())));
+                    }
+                }
             }
         }
         ServerBound::DifficultyChanged { difficulty } => {

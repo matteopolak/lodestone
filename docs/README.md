@@ -56,6 +56,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   converter into one deterministic world-directory import. It imports only canonical
   terrain files under `region/`; player, entity, POI, metadata, and auxiliary data
   remain separate migration choices.
+- [Archaeology brushing](./archaeology.md) — Suspicious sand and gravel hold a loot
+  table until a player brushes them 10 times, when the rolled item drops and the block
+  becomes plain sand or gravel. The block entity is `BlockEntity::Brushable`
+  (`minecraft:brushable_block`).
 - [Architecture](./architecture.md) — The map of the project: how the crates fit
   together, why protocol knowledge is confined to one crate per family, and the
   load-bearing constraints (physics parity, memory layout, renderer budgets, the

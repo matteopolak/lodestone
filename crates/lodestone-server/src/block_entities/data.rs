@@ -57,6 +57,11 @@ impl BlockEntityRegistry {
         Ok(())
     }
 
+    /// Queues `pos`'s update tag for the next tick's client publish.
+    pub(crate) fn mark_client_dirty(&mut self, pos: BlockPos) {
+        self.client_dirty.insert(pos);
+    }
+
     /// The positions whose client-visible data changed since the last call, in a
     /// fixed order, clearing the set; each with the update packet's tag.
     pub fn take_client_dirty(&mut self) -> Vec<(BlockPos, super::BlockEntityKind, Nbt)> {

@@ -5412,9 +5412,9 @@ impl ServerProtocol for V770ServerProtocol {
     /// [`crate::packets::game::LevelEvent`]'s own field order.
     fn encode_level_event(&self, event: i32, pos: BlockPos, data: i32, global: bool) -> ServerDirective {
         let mut w = Writer::default();
-        // A block-destruction event carries the block state it shows, which is
+        // A block-destruction or brush-completion event carries the block state it shows, which is
         // a release-specific id.
-        let data = if event == lodestone_server::effects::PARTICLES_DESTROY_BLOCK {
+        let data = if event == lodestone_server::effects::PARTICLES_DESTROY_BLOCK || event == lodestone_server::effects::BRUSH_BLOCK_COMPLETE {
             u32::try_from(data)
                 .ok()
                 .and_then(StateId::new)

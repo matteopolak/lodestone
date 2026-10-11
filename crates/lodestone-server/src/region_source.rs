@@ -883,6 +883,27 @@ fn refuse_unreadable_world(region_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Brushable entities a column still carries that the live registry has not hydrated. The
+/// registry is authoritative for everything else, but a generated suspicious block is only
+/// hydrated when first brushed, so dropping it here would erase its loot on the first save of an
+/// edited chunk.
+fn append_unhydrated_brushables(
+    column: &ChunkColumn,
+    entities: &mut Vec<(BlockPos, crate::block_entities::BlockEntity)>,
+) {
+    for (pos, entity) in column.block_entities() {
+        if !matches!(entity, crate::block_entities::BlockEntity::Brushable(_))
+            || entities.iter().any(|(held, _)| held == pos)
+        {
+            continue;
+        }
+        let state = column.block_state_id(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16));
+        if crate::structure_loot::is_brushable_block(state.name()) {
+            entities.push((*pos, entity.clone()));
+        }
+    }
+}
+
 /// The chunk a block position belongs to.
 ///
 /// `>> 4` rather than `/ 16`: an arithmetic shift floors, and truncating
@@ -1894,6 +1915,8 @@ impl WorldSaveHandle {
             // The live registry is authoritative, including when its list is
             // empty: a removed container must not reappear from a stale column
             // copy retained by the Anvil loader.
+            let mut entities = entities;
+            append_unhydrated_brushables(&column, &mut entities);
             column.set_block_entities(entities);
             snapshots.push(NativeDirtyChunkSnapshot {
                 column_x,
@@ -2378,8 +2401,9 @@ impl WorldSaveHandle {
             let Some(column) = column else {
                 continue;
             };
-            let empty = ChunkExtras::default();
-            let extras = extras_by_chunk.get(&(cx, cz)).unwrap_or(&empty);
+            let mut extras = extras_by_chunk.get(&(cx, cz)).cloned().unwrap_or_default();
+            append_unhydrated_brushables(&column, &mut extras.block_entities);
+            let extras = &extras;
             self.state
                 .stats
                 .block_entities_written

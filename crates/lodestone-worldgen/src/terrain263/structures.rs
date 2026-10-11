@@ -247,8 +247,9 @@ impl Terrain263 {
     /// border writes its own half here and the neighbour's half when the neighbour decorates.
     /// `read` supplies the chunk's current canonical blocks. Returns the positions that changed.
     /// Places every structure piece of `step` that reaches chunk `(cx, cz)`, returning the
-    /// changed blocks and the loot containers the placement itself seeded (a fortress's chests,
-    /// whose seeds are drawn while its pieces are placed).
+    /// changed blocks and the loot tables the placement itself seeded: a fortress's chests, whose
+    /// seeds are drawn while its pieces are placed, and the suspicious blocks a template's rule
+    /// processors attached a table to.
     pub fn place_structures(&self, cx: i32, cz: i32, step: i32, read: &mut dyn FnMut(i32, i32, i32) -> StateId) -> (Vec<Write>, Vec<CodedLoot>) {
         let Some(structures) = &self.structures else {
             return (Vec::new(), Vec::new());
@@ -351,6 +352,7 @@ impl Terrain263 {
                 }
             }
         }
+        loot.append(&mut world.take_loot());
         let writes = world.finish_change_capture().into_iter().map(|change| (change.position.0, change.position.1, change.position.2, change.state)).collect();
         (writes, loot)
     }

@@ -638,8 +638,8 @@ pub fn swamp_hut_pieces<R: RandomSource>(
 ///
 /// * The chests (own chest placement ×4) attach their table and roll seed to the
 ///   resulting [`StructurePiece`]; the server consumes that side list when it
-///   builds container block entities. Suspicious sand remains gameplay-inert:
-///   brushing is outside this structure generator.
+///   builds container block entities. Each surviving suspicious sand block joins the
+///   same list with the archaeology table, seeded by its packed position.
 #[must_use]
 pub fn desert_pyramid_pieces<R: RandomSource>(
     cx: i32,
@@ -1054,10 +1054,32 @@ fn after_place_suspicious_sand(
             state,
         });
     }
+    // Each suspicious block that survives the walk carries the pyramid's archaeology table,
+    // rolled from a seed that is the block's own packed position. A roof block the walk turned
+    // back into plain sand carries nothing.
+    let mut verdicts: std::collections::BTreeMap<(i32, i32, i32), bool> = std::collections::BTreeMap::new();
+    for block in &out {
+        verdicts.insert((block.pos[0], block.pos[1], block.pos[2]), block.state == suspicious);
+    }
+    piece.loot.extend(verdicts.into_iter().filter(|&(_, is_suspicious)| is_suspicious).map(|((x, y, z), _)| {
+        super::CodedLoot {
+            pos: [x, y, z],
+            table: DESERT_PYRAMID_ARCHAEOLOGY.to_owned(),
+            seed: packed_block_pos([x, y, z]),
+        }
+    }));
     let blocks = piece.blocks.take().map(|b| (*b).clone()).unwrap_or_default();
     let mut blocks = blocks;
     blocks.extend(out);
     piece.blocks = Some(Arc::new(blocks));
+}
+
+/// The loot table of a desert pyramid's suspicious sand.
+const DESERT_PYRAMID_ARCHAEOLOGY: &str = "minecraft:archaeology/desert_pyramid";
+
+/// A block position packed into the 64-bit form the roll seed of a coded suspicious block is.
+fn packed_block_pos([x, y, z]: [i32; 3]) -> i64 {
+    ((i64::from(x) & 0x3FF_FFFF) << 38) | ((i64::from(z) & 0x3FF_FFFF) << 12) | (i64::from(y) & 0xFFF)
 }
 
 /// A jungle temple's footprint width. Public for the same reason
@@ -1654,12 +1676,34 @@ mod tests {
                 .collect();
             assert_eq!(actual_shuffle, *expected_shuffle, "shuffle case {world_seed}");
 
-            let loot_seeds: Vec<i64> = pieces[0].loot.iter().map(|loot| loot.seed).collect();
+            let loot_seeds: Vec<i64> = pieces[0]
+                .loot
+                .iter()
+                .filter(|loot| loot.table != DESERT_PYRAMID_ARCHAEOLOGY)
+                .map(|loot| loot.seed)
+                .collect();
             assert_eq!(loot_seeds, expected_loot, "loot stream case {world_seed}");
+            let sand_loot: Vec<[i32; 3]> = pieces[0]
+                .loot
+                .iter()
+                .filter(|loot| loot.table == DESERT_PYRAMID_ARCHAEOLOGY)
+                .inspect(|loot| assert_eq!(loot.seed, packed_block_pos(loot.pos), "sand seed is its packed position"))
+                .map(|loot| loot.pos)
+                .collect();
+            let mut suspicious: Vec<[i32; 3]> = blocks
+                .iter()
+                .filter(|block| block.state.canonical_state().starts_with("minecraft:suspicious_sand"))
+                .map(|block| block.pos)
+                .collect();
+            suspicious.sort_unstable();
+            suspicious.dedup();
+            assert_eq!(sand_loot.len(), suspicious.len(), "one table per suspicious block, case {world_seed}");
+            let chest_loot: Vec<_> =
+                pieces[0].loot.iter().filter(|loot| loot.table != DESERT_PYRAMID_ARCHAEOLOGY).cloned().collect();
             if let Some(previous) = &baseline_loot {
-                assert_eq!(previous, &pieces[0].loot, "world seed must not redraw loot");
+                assert_eq!(previous, &chest_loot, "world seed must not redraw loot");
             } else {
-                baseline_loot = Some(pieces[0].loot.clone());
+                baseline_loot = Some(chest_loot);
             }
         }
 

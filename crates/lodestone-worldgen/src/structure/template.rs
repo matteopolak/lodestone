@@ -1066,6 +1066,7 @@ impl StructureTemplate {
             let mut current = Some(ProcessedBlock {
                 pos: world,
                 state: *state,
+                loot: None,
             });
             for processor in &settings.processors {
                 let Some(block_now) = current.take() else { break };
@@ -1109,6 +1110,9 @@ impl StructureTemplate {
                 final_state = with_waterlogged(final_state, true);
             }
             grid.set_id(block.pos[0], block.pos[1], block.pos[2], final_state);
+            if let Some(loot) = &block.loot {
+                grid.attach_loot(block.pos, loot);
+            }
             written_states.push((block.pos, final_state));
             written += 1;
         }

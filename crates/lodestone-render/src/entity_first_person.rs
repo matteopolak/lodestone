@@ -818,6 +818,60 @@ pub enum FirstPersonItemUse {
         /// Ticks elapsed since the bow use began.
         held_ticks: f32,
     },
+    /// Vanilla's brush use-animation state: a ten-tick sweep across the block.
+    Brush {
+        /// Ticks elapsed since the use began.
+        held_ticks: f32,
+    },
+}
+
+/// Ticks a brush use lasts, which the sweep's phase counts down from.
+pub const BRUSH_USE_TICKS: f32 = 200.0;
+
+/// The brush sweep angle in degrees: a cosine between -90 and 60 over each ten-tick period.
+#[must_use]
+pub fn brush_swipe_angle(held_ticks: f32) -> f32 {
+    let remaining = (BRUSH_USE_TICKS - held_ticks.max(0.0)).rem_euclid(10.0);
+    let scaled = 1.0 - (remaining + 1.0) / 10.0;
+    -15.0 + 75.0 * lodestone_physics::mth::cos(f64::from(scaled * 2.0 * std::f32::consts::PI))
+}
+
+/// The brush use-animation transform, after the shared item-arm translation and before the
+/// item's own `firstperson_?hand` display transform.
+#[must_use]
+pub fn first_person_brush_chain(arm: Arm, held_ticks: f32, inverse_arm_height: f32) -> Mat4 {
+    let [ox, oy, oz] = FIRST_PERSON_ITEM_OFFSET;
+    let i = arm.invert();
+    let lead = Mat4::from_translation(Vec3::new(
+        i * ox,
+        oy + inverse_arm_height * FIRST_PERSON_ITEM_EQUIP_DIP,
+        oz,
+    ));
+    let swipe = Mat4::from_rotation_x(brush_swipe_angle(held_ticks).to_radians());
+    if arm.is_left() {
+        lead * Mat4::from_translation(Vec3::new(0.1, 0.83, 0.35))
+            * Mat4::from_rotation_x((-80.0f32).to_radians())
+            * Mat4::from_rotation_y((-90.0f32).to_radians())
+            * swipe
+            * Mat4::from_translation(Vec3::new(-0.3, 0.22, 0.35))
+    } else {
+        lead * Mat4::from_translation(Vec3::new(-0.25, 0.22, 0.35))
+            * Mat4::from_rotation_x((-80.0f32).to_radians())
+            * Mat4::from_rotation_y(90.0f32.to_radians())
+            * swipe
+    }
+}
+
+/// [`first_person_brush_chain`] followed by the item's own `firstperson_?hand` display transform.
+#[must_use]
+pub fn first_person_brush_matrix(
+    arm: Arm,
+    held_ticks: f32,
+    inverse_arm_height: f32,
+    transform: &DisplayTransform,
+) -> Mat4 {
+    first_person_brush_chain(arm, held_ticks, inverse_arm_height)
+        * display_matrix_for_hand(transform, arm.is_left())
 }
 
 /// Vanilla's bow draw-power function: the nonlinear charge fraction shared by its
@@ -934,6 +988,9 @@ pub fn first_person_item_mesh_with_use(
         ),
         Some(FirstPersonItemUse::Bow { held_ticks }) => {
             first_person_bow_matrix(arm, held_ticks, inverse_arm_height, transform)
+        }
+        Some(FirstPersonItemUse::Brush { held_ticks }) => {
+            first_person_brush_matrix(arm, held_ticks, inverse_arm_height, transform)
         }
         None => first_person_item_matrix(arm, attack_anim, inverse_arm_height, transform),
     };

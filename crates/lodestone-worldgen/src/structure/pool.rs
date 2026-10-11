@@ -736,24 +736,27 @@ impl PoolStore {
             "minecraft:rule" => {
                 let mut rules = Vec::new();
                 for rule in value["rules"].as_array().cloned().unwrap_or_default() {
-                    // `append_loot` chooses the *state* and additionally writes a
-                    // loot table into the block entity. The state half is honoured;
-                    // the loot half is ledgered under `block_entity:append_loot`,
-                    // because a worldgen chunk here has no block entities at all.
-                    // Any other modifier type is still refused — its effect is not
-                    // confined to something we can name.
-                    match rule["block_entity_modifier"]["type"].as_str() {
-                        None | Some("minecraft:passthrough") | Some("minecraft:clear")
-                        | Some("minecraft:append_loot") => {}
+                    // `append_loot` chooses the state and writes a loot table and
+                    // roll seed into the block entity. Any other modifier type is
+                    // refused — its effect is not confined to something we can name.
+                    let append_loot = match rule["block_entity_modifier"]["type"].as_str() {
+                        None | Some("minecraft:passthrough") | Some("minecraft:clear") => None,
+                        Some("minecraft:append_loot") => {
+                            let table = rule["block_entity_modifier"]["loot_table"]
+                                .as_str()
+                                .ok_or_else(|| "append_loot without a loot_table".to_string())?;
+                            Some(std::sync::Arc::<str>::from(table))
+                        }
                         Some(other) => {
                             return Err(format!("rule block_entity_modifier '{other}'"));
                         }
-                    }
+                    };
                     rules.push(ProcessorRule {
                         input: self.rule_test(resolver, &rule["input_predicate"])?,
                         location: self.rule_test(resolver, &rule["location_predicate"])?,
                         position: parse_pos_test(&rule["position_predicate"])?,
                         output: parse_state(&rule["output_state"]),
+                        append_loot,
                     });
                 }
                 Ok(Processor::Rule(rules))

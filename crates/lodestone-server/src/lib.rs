@@ -109,6 +109,8 @@ mod advancements;
 /// side effect (payment consumption, `ActiveEffects::apply`, the wire).
 pub mod beacon;
 mod block_breaking;
+mod archaeology;
+pub use archaeology::{Brushable, PendingLoot};
 mod block_entities;
 mod block_removal;
 pub(crate) mod container_signal;

@@ -194,6 +194,11 @@ pub enum WorldEffect {
 /// sound packet, which is why breaking a block needs one effect rather than two.
 pub const PARTICLES_DESTROY_BLOCK: i32 = 2001;
 
+/// The level event for a finished brushing: `data` is the block-state id the
+/// block had, and the client plays that block's completion sound and its
+/// destroy particles.
+pub const BRUSH_BLOCK_COMPLETE: i32 = 3008;
+
 /// Vanilla's own `COMPOSTER_FILL` level-event constant. `data` is `1` when the
 /// insert raised the composter's level (vanilla's own composter block
 /// fires this event with `data` set to whether the level actually rose).
@@ -487,6 +492,17 @@ pub fn player_burped(pos: Vec3, roll: f32, seed: i64) -> WorldEffect {
 pub fn block_destroyed(pos: BlockPos, state: StateId) -> Option<WorldEffect> {
     Some(WorldEffect::LevelEvent {
         event: PARTICLES_DESTROY_BLOCK,
+        pos,
+        data: i32::try_from(state.raw()).ok()?,
+        global: false,
+    })
+}
+
+/// The level event for a brushable block finished at `pos`, which held `state`.
+#[must_use]
+pub fn brush_completed(pos: BlockPos, state: StateId) -> Option<WorldEffect> {
+    Some(WorldEffect::LevelEvent {
+        event: BRUSH_BLOCK_COMPLETE,
         pos,
         data: i32::try_from(state.raw()).ok()?,
         global: false,

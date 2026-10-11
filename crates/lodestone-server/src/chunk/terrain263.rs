@@ -183,7 +183,8 @@ impl Terrain263ChunkSource {
                 let state = lodestone_data::block::Block::from_name(block).map_or_else(lodestone_data::block_states::air_state, lodestone_data::block::Block::default_state);
                 column.set_block_id(lx, chest.pos.y, lz, state);
             }
-            if column.block_state_id(lx, chest.pos.y, lz).name() == "minecraft:chest" {
+            let held = column.block_state_id(lx, chest.pos.y, lz).name();
+            if held == "minecraft:chest" || crate::structure_loot::is_brushable_block(held) {
                 entities.push((chest.pos, chest.entity));
             }
         }

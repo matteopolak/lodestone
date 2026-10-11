@@ -143,6 +143,12 @@ fn context_at(column: &ChunkColumn, pos: BlockPos) -> LootContext {
     }
 }
 
+/// Whether `name` is a block that holds a brushable entity.
+#[must_use]
+pub(crate) fn is_brushable_block(name: &str) -> bool {
+    matches!(name, "minecraft:suspicious_sand" | "minecraft:suspicious_gravel")
+}
+
 /// Resolves coded container sidecars whose position and seed were already
 /// decided by the structure-placement pass.
 #[must_use]
@@ -157,6 +163,15 @@ pub fn chests_from_coded(
             continue;
         };
         let pos = BlockPos::new(coded.pos[0], coded.pos[1], coded.pos[2]);
+        // Suspicious sand and gravel keep the table unrolled until the first brush stroke.
+        if is_brushable_block(column.block_state_id(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16)).name()) {
+            out.push(StructureChest {
+                pos,
+                entity: BlockEntity::Brushable(Box::new(crate::archaeology::Brushable::with_loot(coded.table.clone(), coded.seed))),
+                block: None,
+            });
+            continue;
+        }
         let mut rng = SpawnRng::new(coded.seed as u64);
         let items = tables.roll(&table, &context_at(column, pos), &mut rng);
         out.push(StructureChest {

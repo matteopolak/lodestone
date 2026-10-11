@@ -202,6 +202,35 @@ fn field<'a>(compound: &'a Nbt, key: &str) -> Option<&'a Nbt> {
     }
 }
 
+/// The save-form fields of a brushable block: the unrolled loot table and seed, or else the
+/// rolled item. The face is not saved; it only rides the update tag.
+fn brushable_save_fields(brushable: &crate::archaeology::Brushable) -> Vec<(String, Nbt)> {
+    let mut fields = Vec::new();
+    if let Some(loot) = brushable.loot() {
+        fields.push(("LootTable".to_owned(), Nbt::String(loot.table.clone())));
+        if loot.seed != 0 {
+            fields.push(("LootTableSeed".to_owned(), Nbt::Long(loot.seed)));
+        }
+    } else if let Some(item) = brushable.item() {
+        fields.push(("item".to_owned(), Nbt::Compound(crate::item_nbt::stack_to_nbt(item).fields)));
+    }
+    fields
+}
+
+/// Inverse of [`brushable_save_fields`]; also reads the update tag's face.
+fn brushable_from_nbt(nbt: &Nbt) -> crate::archaeology::Brushable {
+    let loot = string_field(nbt, "LootTable").map(|table| crate::archaeology::PendingLoot {
+        table: table.to_owned(),
+        seed: match field(nbt, "LootTableSeed") {
+            Some(Nbt::Long(seed)) => *seed,
+            _ => 0,
+        },
+    });
+    let item = field(nbt, "item").and_then(crate::item_nbt::stack_from_nbt);
+    let face = int_field(nbt, "hit_direction").and_then(crate::archaeology::face_from_legacy_id);
+    crate::archaeology::Brushable::restore(loot, item, face)
+}
+
 fn bad(field_path: &str) -> Error {
     Error::BadField {
         field: field_path.to_owned(),
@@ -1675,6 +1704,7 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             }
             ("minecraft:beacon", fields)
         }
+        BlockEntity::Brushable(brushable) => ("minecraft:brushable_block", brushable_save_fields(brushable)),
         BlockEntity::Lectern(lectern) => {
             let page_count = lectern.book.as_ref().map_or(1, |book| {
                 book.components
@@ -1786,6 +1816,17 @@ pub fn block_entity_update_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
         }
         BlockEntity::Sign(_) | BlockEntity::Beacon(_) | BlockEntity::Lectern(_) => {
             strip_block_entity_metadata(block_entity_to_nbt(pos, entity))
+        }
+        // Only the revealed item and the face it was brushed from reach the client.
+        BlockEntity::Brushable(brushable) => {
+            let mut fields = Vec::new();
+            if let Some(face) = brushable.hit_direction() {
+                fields.push(("hit_direction".to_owned(), Nbt::Byte(crate::archaeology::legacy_direction_id(face))));
+            }
+            if let Some(item) = brushable.item() {
+                fields.push(("item".to_owned(), Nbt::Compound(crate::item_nbt::stack_to_nbt(item).fields)));
+            }
+            Nbt::Compound(fields)
         }
         BlockEntity::Opaque { id, nbt } => {
             // These types inherit the empty default update tag in 26.2. Their
@@ -2211,6 +2252,7 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
             }
             BlockEntity::Crafter { slots: Box::new(slots), disabled }
         }
+        "minecraft:brushable_block" => BlockEntity::Brushable(Box::new(brushable_from_nbt(nbt))),
         _ => BlockEntity::Opaque {
             id: crate::block_entities::BlockEntityKind::from_name(id),
             nbt: nbt.clone(),

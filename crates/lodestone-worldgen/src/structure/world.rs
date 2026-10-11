@@ -13,5 +13,8 @@ pub trait StructureWorld: WorldRead + std::fmt::Debug + Send {
     fn get_id(&self, x: i32, y: i32, z: i32) -> StateId;
     fn set_id(&mut self, x: i32, y: i32, z: i32, state: StateId);
     fn base_facts(&self, x: i32, y: i32, z: i32) -> BaseStateFacts;
+    /// Records the loot table and roll seed a rule attached to the block just
+    /// written at `pos`.
+    fn attach_loot(&mut self, pos: [i32; 3], loot: &super::processor::BlockLoot);
 }
 

@@ -42,10 +42,10 @@
 //!   clipped at write time. That is not an optimisation detail: the shuffled index
 //!   walk is over the full list, so clipping first would put a different number of
 //!   suspicious blocks in each chunk a trail-ruins house spans.
-//! * `block_entity_modifier` is honoured only as far as the **block state** goes:
-//!   `append_loot` selects the state (`suspicious_gravel`) and the loot table it
-//!   appends needs block entities in worldgen, which is ledgered under
-//!   `block_entity:append_loot`. Any other modifier type is still refused.
+//! * `block_entity_modifier`: `append_loot` carries its table and a roll seed
+//!   ([`BlockLoot`]) with the block to the write, where the grid records it
+//!   ([`super::StructureWorld::attach_loot`]); `passthrough` and `clear` carry
+//!   nothing. Any other modifier type is refused.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -88,6 +88,20 @@ pub struct ProcessedBlock {
     pub pos: [i32; 3],
     /// The state, still unrotated (`mirror().rotate()` happens after the chain).
     pub state: CanonicalStateId,
+    /// The loot table a rule's `append_loot` modifier attached to the block.
+    pub loot: Option<BlockLoot>,
+}
+
+/// A loot table and roll seed a rule attached to the block entity of the block it placed.
+///
+/// The seed is one draw from the rule's position-seeded stream, taken after the rule's
+/// predicates, so it is a function of the block's position alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockLoot {
+    /// The loot table id, e.g. `minecraft:archaeology/trail_ruins_common`.
+    pub table: Arc<str>,
+    /// The roll seed.
+    pub seed: i64,
 }
 
 /// Everything a processor can see besides the block itself.
@@ -271,6 +285,9 @@ pub struct ProcessorRule {
     pub position: PosTest,
     /// `output_state`.
     pub output: CanonicalStateId,
+    /// The loot table of an `append_loot` block-entity modifier, or `None` for
+    /// `passthrough`/`clear`.
+    pub append_loot: Option<Arc<str>>,
 }
 
 /// Per-column surface heights over a rectangle, precomputed for
@@ -462,9 +479,17 @@ impl Processor {
                             .position
                             .test(ctx.local, block.pos, ctx.reference, &mut random)
                     {
+                        let loot = match &rule.append_loot {
+                            Some(table) => Some(BlockLoot {
+                                table: Arc::clone(table),
+                                seed: random.next_long(),
+                            }),
+                            None => block.loot,
+                        };
                         return Some(ProcessedBlock {
                             pos: block.pos,
                             state: rule.output,
+                            loot,
                         });
                     }
                 }
@@ -495,6 +520,7 @@ impl Processor {
                     Some(ProcessedBlock {
                         pos: block.pos,
                         state,
+                        loot: None,
                     })
                 }
             }
@@ -503,6 +529,7 @@ impl Processor {
                 Some(ProcessedBlock {
                     pos: [block.pos[0], height + ctx.local[1], block.pos[2]],
                     state: block.state,
+                    loot: block.loot,
                 })
             }
             // Vanilla's own capped processor's per-block step is the structure
@@ -530,7 +557,7 @@ impl Processor {
                     None
                 };
                 Some(match new_state {
-                    Some(state) => ProcessedBlock { pos: block.pos, state },
+                    Some(state) => ProcessedBlock { pos: block.pos, state, loot: block.loot },
                     None => block,
                 })
             }
@@ -543,6 +570,7 @@ impl Processor {
                     Some(ProcessedBlock {
                         pos: block.pos,
                         state: Block::Lava.default_state(),
+                        loot: block.loot,
                     })
                 } else {
                     Some(block)
@@ -563,7 +591,7 @@ impl Processor {
                 }
                 let state = Properties::state_for_block(replacement, &properties)
                     .expect("carried blackstone replacement properties resolve to a target state");
-                Some(ProcessedBlock { pos: block.pos, state })
+                Some(ProcessedBlock { pos: block.pos, state, loot: block.loot })
             }
         }
     }
@@ -878,6 +906,7 @@ mod tests {
         ProcessedBlock {
             pos,
             state: state(name),
+            loot: None,
         }
     }
 
@@ -1003,6 +1032,7 @@ mod tests {
             location: RuleTest::BlockMatch(Block::Water),
             position: PosTest::AlwaysTrue,
             output: state("minecraft:oak_planks"),
+            append_loot: None,
         }];
         let processor = Processor::Rule(rules);
         let over_water = Water;
@@ -1136,6 +1166,7 @@ mod tests {
             location: RuleTest::AlwaysTrue,
             position: PosTest::AlwaysTrue,
             output: state("minecraft:suspicious_gravel"),
+            append_loot: None,
         }]);
         let capped = Processor::Capped {
             delegate: Box::new(delegate),
@@ -1147,6 +1178,7 @@ mod tests {
                 .map(|i| ProcessedBlock {
                     pos: [i, 64, 3],
                     state: state("minecraft:gravel"),
+                    loot: None,
                 })
                 .collect::<Vec<_>>()
         };
@@ -1185,6 +1217,7 @@ mod tests {
                 location: RuleTest::AlwaysTrue,
                 position: PosTest::AlwaysTrue,
                 output: state("minecraft:suspicious_gravel"),
+                append_loot: None,
             }])),
             limit: 6,
         };
@@ -1200,6 +1233,7 @@ mod tests {
                 location: RuleTest::AlwaysTrue,
                 position: PosTest::AlwaysTrue,
                 output: state("minecraft:suspicious_gravel"),
+                append_loot: None,
             }])),
             limit: 0,
         };
@@ -1283,7 +1317,8 @@ mod tests {
                         &ctx,
                         ProcessedBlock {
                             pos: [i, 80, 12],
-                        state: source.id,
+                            state: source.id,
+                            loot: None,
                         },
                     )
                     .expect("kept");
@@ -1355,6 +1390,7 @@ mod tests {
                 ProcessedBlock {
                     pos: [0, 0, 0],
                     state: state("minecraft:stone_brick_stairs[facing=east,half=top,waterlogged=true]"),
+                    loot: None,
                 },
             )
             .expect("kept");

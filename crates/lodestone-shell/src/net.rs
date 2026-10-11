@@ -4555,6 +4555,15 @@ fn forward(
             pos,
             state,
         },
+        ClientEvent::LevelEvent {
+            event: 3008,
+            pos,
+            data: LevelEventData::BlockState(state),
+            ..
+        } => NetUpdate::BrushCompleted {
+            pos,
+            state,
+        },
         // The general particle-effect packet. `long_distance` is named after
         // what the field actually controls downstream (see
         // vanilla's own client-level add-particle distance cutoff) rather than the

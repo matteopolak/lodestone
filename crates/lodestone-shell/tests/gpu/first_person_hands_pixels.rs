@@ -354,3 +354,30 @@ fn the_main_hand_use_poses_ignore_the_off_hand() {
         );
     }
 }
+
+/// A brush in use sweeps: at the top and the bottom of its ten-tick sweep the item sits in
+/// different places, and both differ from the resting pose.
+///
+/// The ticks are the use clock the client counts up from the press; the brush lasts 200 of them,
+/// and the sweep phase is `(200 - ticks) mod 10`, so 191 is the top of the sweep and 196 the bottom.
+/// With the brush branch of the first-person pose selection removed, the held brush draws in its
+/// resting pose at every tick and the three frames are identical.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn a_brush_in_use_sweeps_across_the_view() {
+    let mut rig = Rig::new();
+    let mut shoot_at = |use_state: ItemUseState| {
+        rig.state.set_item_use_source(move || use_state);
+        rig.shoot(frame(Some(held("minecraft:brush")), None))
+    };
+    let (rest, rest_stats) = shoot_at(ItemUseState::default());
+    assert!(rest_stats.first_person_item_drawn, "the resting brush must draw");
+    let (top, top_stats) = shoot_at(ItemUseState { using: true, ticks: 191, eat: None });
+    let (bottom, bottom_stats) = shoot_at(ItemUseState { using: true, ticks: 196, eat: None });
+    assert!(top_stats.first_person_item_drawn && bottom_stats.first_person_item_drawn, "a brush in use must draw");
+    let differing = |a: &[u8], b: &[u8]| a.chunks_exact(4).zip(b.chunks_exact(4)).filter(|(p, q)| p != q).count();
+    assert!(differing(&rest, &top) > 0, "the top of the sweep must leave the resting pose");
+    assert!(differing(&rest, &bottom) > 0, "the bottom of the sweep must leave the resting pose");
+    let swept = differing(&top, &bottom);
+    assert!(swept > 0, "the sweep must move the item between its top and its bottom");
+}

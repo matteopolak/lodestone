@@ -794,6 +794,7 @@ impl ChunkColumn {
                 BlockEntityKind::MobSpawner => {
                     BlockEntity::Spawner(crate::mob_spawner::SpawnerState::default())
                 }
+                BlockEntityKind::BrushableBlock => BlockEntity::Brushable(Box::default()),
                 id => BlockEntity::Opaque {
                     id,
                     nbt: lodestone_core::Nbt::End,

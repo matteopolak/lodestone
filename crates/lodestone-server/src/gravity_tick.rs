@@ -148,7 +148,10 @@ use crate::scheduled_tick::{ScheduledTick, ScheduledTickKind, ScheduledTickQueue
 
 #[must_use]
 pub fn is_gravity_state(state: StateId) -> bool {
-    matches!(state.block(), Block::Sand | Block::RedSand | Block::Gravel)
+    matches!(
+        state.block(),
+        Block::Sand | Block::RedSand | Block::Gravel | Block::SuspiciousSand | Block::SuspiciousGravel
+    )
 }
 
 #[must_use]

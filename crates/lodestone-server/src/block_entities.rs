@@ -95,6 +95,7 @@ pub enum BlockEntityKind {
     Beacon,
     Lectern,
     Crafter,
+    BrushableBlock,
     /// A key not known by this build, including a plugin-defined key.
     Extension(String),
 }
@@ -125,6 +126,7 @@ impl BlockEntityKind {
             "minecraft:beacon" => Self::Beacon,
             "minecraft:lectern" => Self::Lectern,
             "minecraft:crafter" => Self::Crafter,
+            "minecraft:brushable_block" => Self::BrushableBlock,
             _ => Self::Extension(name.to_owned()),
         }
     }
@@ -185,6 +187,7 @@ impl BlockEntityKind {
             Self::Beacon => "minecraft:beacon",
             Self::Lectern => "minecraft:lectern",
             Self::Crafter => "minecraft:crafter",
+            Self::BrushableBlock => "minecraft:brushable_block",
             Self::Extension(_) => return None,
         })
     }
@@ -315,6 +318,8 @@ pub enum BlockEntity {
     /// `minecraft:lectern`: one displayed book and its selected zero-based
     /// page. Page changes are menu button actions, not ordinary slot writes.
     Lectern(LecternData),
+    /// `minecraft:brushable_block`: suspicious sand or gravel. See [`crate::archaeology`].
+    Brushable(Box<crate::archaeology::Brushable>),
     /// `minecraft:crafter` — a 9-slot grid plus its per-slot enabled/disabled
     /// bitmask (`indices 0..9`). **Not modelled**: the actual auto-crafting
     /// trigger (redstone-pulse tick, recipe matching, result dispensing into
@@ -680,6 +685,7 @@ impl BlockEntity {
             }
             BlockEntity::Beacon(_) => BlockEntityKind::Beacon,
             BlockEntity::Lectern(_) => BlockEntityKind::Lectern,
+            BlockEntity::Brushable(_) => BlockEntityKind::BrushableBlock,
             BlockEntity::Crafter { .. } => BlockEntityKind::Crafter,
         }
     }
@@ -701,7 +707,7 @@ impl BlockEntity {
             BlockEntity::Crafter { slots, .. } => Some(slots.as_mut_slice()),
             BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
-            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) | BlockEntity::Lectern(_) => {
+            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) | BlockEntity::Lectern(_) | BlockEntity::Brushable(_) => {
                 None
             }
         }
@@ -767,7 +773,7 @@ impl BlockEntity {
             // A sign has no abstract container menu either — the sign block's own
             // interaction opens the dedicated text-edit screen `SIGN_UPDATE`
             // answers, not a menu.
-            | BlockEntity::Sign(_) => None,
+            | BlockEntity::Sign(_) | BlockEntity::Brushable(_) => None,
             BlockEntity::Beacon(_) => Some("minecraft:beacon"),
             BlockEntity::Lectern(_) => Some("minecraft:lectern"),
             // Vanilla's own menu-type registry key for the 3x3 crafter.
@@ -795,7 +801,7 @@ impl BlockEntity {
             // array's own indexing.
             BlockEntity::Crafter { slots, .. } => slots.to_vec(),
             BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => Vec::new(),
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Brushable(_) => Vec::new(),
         }
     }
 
@@ -868,7 +874,7 @@ impl BlockEntity {
                 }
             }
             BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Brushable(_) => {}
         }
     }
 
@@ -881,7 +887,7 @@ impl BlockEntity {
             BlockEntity::Lectern(_) => 1,
             BlockEntity::Crafter { slots, .. } => slots.len(),
             BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => 0,
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Brushable(_) => 0,
         }
     }
 
@@ -960,7 +966,7 @@ impl BlockEntity {
             }
             BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::Beehive(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Lectern(_) => {
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Lectern(_) | BlockEntity::Brushable(_) => {
                 Vec::new()
             }
         }
@@ -1019,7 +1025,7 @@ impl BlockEntity {
             // follows from not having a driver here.
             // No `craftingTicksRemaining` countdown here — see this variant's
             // own doc comment for why the trigger itself is out of scope.
-            BlockEntity::Crafter { .. } | BlockEntity::Lectern(_) => None,
+            BlockEntity::Crafter { .. } | BlockEntity::Lectern(_) | BlockEntity::Brushable(_) => None,
             BlockEntity::EndGateway { .. } | BlockEntity::Comparator { .. } | BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             // A hive needs the sky, the block in front of it and the live bee
             // population, so `BlockEntityRegistry::tick_hives` drives it.
@@ -1105,6 +1111,7 @@ enum PlacedBlockEntity {
     Beacon,
     Lectern,
     Crafter,
+    Brushable,
     /// An empty spawner: it ticks but spawns nothing until given an entity.
     Spawner,
     Beehive,
@@ -1133,6 +1140,7 @@ impl PlacedBlockEntity {
             PlacedBlockEntity::Beacon => BlockEntity::Beacon(BeaconData::default()),
             PlacedBlockEntity::Lectern => BlockEntity::lectern(),
             PlacedBlockEntity::Crafter => BlockEntity::crafter(),
+            PlacedBlockEntity::Brushable => BlockEntity::Brushable(Box::default()),
             PlacedBlockEntity::Spawner => BlockEntity::Spawner(crate::mob_spawner::SpawnerState::default()),
             PlacedBlockEntity::Beehive => BlockEntity::Beehive(Beehive::default()),
             PlacedBlockEntity::Sign { hanging } => BlockEntity::Sign(SignData {
@@ -1188,6 +1196,8 @@ fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlock
         "minecraft:beacon" => ("minecraft:beacon", PlacedBlockEntity::Beacon),
         "minecraft:lectern" => ("minecraft:lectern", PlacedBlockEntity::Lectern),
         "minecraft:crafter" => ("minecraft:crafter", PlacedBlockEntity::Crafter),
+        "minecraft:suspicious_sand" => ("minecraft:suspicious_sand", PlacedBlockEntity::Brushable),
+        "minecraft:suspicious_gravel" => ("minecraft:suspicious_gravel", PlacedBlockEntity::Brushable),
         "minecraft:spawner" => ("minecraft:spawner", PlacedBlockEntity::Spawner),
         "minecraft:beehive" => ("minecraft:beehive", PlacedBlockEntity::Beehive),
         "minecraft:bee_nest" => ("minecraft:bee_nest", PlacedBlockEntity::Beehive),

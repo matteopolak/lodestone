@@ -1941,6 +1941,8 @@ async fn run_tick_loop_with_weather_impl<W>(
     let mut pending_vacated_beds: Vec<BlockPos> = Vec::new();
     let mut pending_occupied_beds: Vec<BlockPos> = Vec::new();
     let mut pending_falling_block_effects: Vec<crate::gravity_tick::FallingBlockEffect> = Vec::new();
+    // The block entity a falling brushable block carries, by falling-entity id, until it lands.
+    let mut falling_block_entities: std::collections::HashMap<i32, crate::block_entities::BlockEntity> = std::collections::HashMap::new();
     let mut pending_block_entity_effects: Vec<crate::block_entities::BlockEntityTickEffect> = Vec::new();
     let mut pending_reinforcement_calls: Vec<crate::mobs::ReinforcementCall> = Vec::new();
     // `crate::lightning`'s two independent streams: strike target selection and a
@@ -3608,13 +3610,51 @@ async fn run_tick_loop_with_weather_impl<W>(
             // see `gravity_tick::FallingBlockEffect` for why that order is a
             // returned value rather than two statements here.
             if due.kind == ScheduledTickKind::Gravity {
+                if crate::structure_loot::is_brushable_block(state.name()) {
+                    if !resident_tick_footprint(&*world, x, z, 0) {
+                        requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
+                        continue 'block_ticks;
+                    }
+                    let origin = BlockPos::new(x, y, z);
+                    let settled = block_entities.with(|registry| {
+                        let Some(crate::block_entities::BlockEntity::Brushable(entity)) = registry.get_mut(origin) else { return None };
+                        let settled = entity.settle(game_tick);
+                        if settled.dusted.is_some() || !settled.again {
+                            registry.mark_client_dirty(origin);
+                        }
+                        Some(settled)
+                    });
+                    if let Some(settled) = settled {
+                        if let Some(next) = settled.dusted.and_then(|dusted| crate::archaeology::with_dusted(state, dusted))
+                            && resident_tick_set_block(&*world, x, y, z, next)
+                        {
+                            column.set_block_id(lx, y, lz, next);
+                            block_tick_out.publish_change(x, y, z, state, next);
+                        }
+                        if settled.again {
+                            block_ticks.schedule((x, y, z), ScheduledTickKind::Gravity, game_tick + crate::gravity_tick::DELAY_AFTER_PLACE, TickPriority::Normal);
+                        }
+                    }
+                }
                 if let Some(settle) =
                     crate::random_tick::settle_gravity_at(&column, min_x, min_z, x, y, z)
                 {
                     let origin = BlockPos::new(x, y, z);
-                    let (_id, effects) = mobs.with(|sim| {
+                    let carried = crate::structure_loot::is_brushable_block(settle.state.name())
+                        .then(|| {
+                            // A column's own generated entity has not reached the registry
+                            // until something touched it.
+                            block_entities
+                                .with(|registry| registry.destroy_at(origin, settle.state).entity)
+                                .or_else(|| world.block_entity(x, y, z))
+                        })
+                        .flatten();
+                    let (falling_id, effects) = mobs.with(|sim| {
                         sim.spawn_falling_block(settle.state, origin, settle.landing_y)
                     });
+                    if let Some(entity) = carried {
+                        falling_block_entities.insert(falling_id, entity);
+                    }
                     let mut effects = effects.into_iter();
                     let mut gravity_deferred = false;
                     while let Some(effect) = effects.next() {
@@ -4824,7 +4864,10 @@ async fn run_tick_loop_with_weather_impl<W>(
                 pending_falling_block_effects.extend(&mut falling_effects);
                 break;
             }
-            if let crate::gravity_tick::FallingBlockEffect::Placed { pos, .. } = &effect {
+            if let crate::gravity_tick::FallingBlockEffect::Placed { pos, entity_id, .. } = &effect {
+                if let Some(carried) = falling_block_entities.remove(entity_id) {
+                    block_entities.with(|registry| registry.insert(*pos, carried));
+                }
                 // The neighbour-notification half of a write, at the landing
                 // cell: the placed block notifies its neighbours, which is what
                 // lets a pile settle rather than one block land on top of something

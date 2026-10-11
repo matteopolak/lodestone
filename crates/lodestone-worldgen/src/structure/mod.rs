@@ -2384,6 +2384,7 @@ fn rule_random_replace(source: Block, probability: f32, target: CanonicalStateId
         location: RuleTest::AlwaysTrue,
         position: PosTest::AlwaysTrue,
         output: target,
+        append_loot: None,
     }
 }
 
@@ -2395,6 +2396,7 @@ fn rule_replace(source: Block, target: CanonicalStateId) -> ProcessorRule {
         location: RuleTest::AlwaysTrue,
         position: PosTest::AlwaysTrue,
         output: target,
+        append_loot: None,
     }
 }
 
@@ -2574,9 +2576,9 @@ fn ocean_ruin_add_piece<R: RandomSource>(
 /// draws nothing; the five positions come from the shuffled index walk over the
 /// piece's already-rotted block list.
 fn ocean_ruin_archaeology(temperature: OceanRuinTemperature) -> Processor {
-    let (candidate, replacement) = match temperature {
-        OceanRuinTemperature::Warm => (Block::Sand, Block::SuspiciousSand.default_state()),
-        OceanRuinTemperature::Cold => (Block::Gravel, Block::SuspiciousGravel.default_state()),
+    let (candidate, replacement, table) = match temperature {
+        OceanRuinTemperature::Warm => (Block::Sand, Block::SuspiciousSand.default_state(), "minecraft:archaeology/ocean_ruin_warm"),
+        OceanRuinTemperature::Cold => (Block::Gravel, Block::SuspiciousGravel.default_state(), "minecraft:archaeology/ocean_ruin_cold"),
     };
     Processor::Capped {
         delegate: Box::new(Processor::Rule(vec![processor::ProcessorRule {
@@ -2586,6 +2588,7 @@ fn ocean_ruin_archaeology(temperature: OceanRuinTemperature) -> Processor {
             location: processor::RuleTest::AlwaysTrue,
             position: processor::PosTest::AlwaysTrue,
             output: replacement,
+            append_loot: Some(table.into()),
         }])),
         limit: 5,
     }
@@ -3116,19 +3119,6 @@ impl StructureRegistry {
         // structure id (the placement oracle asserts implemented structures are
         // *absent* from this map).
         if !templates.is_empty() {
-            // Archaeology's state change is real, but using it still needs gameplay
-            // support. The container-loot paths below are deliberately absent from
-            // this ledger: their server-side consumers now attach filled containers.
-            unsupported.insert(
-                "block_entity:append_loot".into(),
-                "a `capped` archaeology rule places its `suspicious_sand`/\
-                 `suspicious_gravel` block (ocean ruins, trail ruins, desert pyramid) \
-                 and its `append_loot` table is bundled \
-                 (`assets/loot_table/archaeology/`), but **nothing in the game brushes**: \
-                 there is no `brushable_block` block entity and no brush interaction, so \
-                 the blocker is gameplay-side and not in worldgen at all"
-                    .into(),
-            );
             // `template:mirrored_shape` is **gone**, and its absence is the record:
             // it said a rail `shape` was not remapped under a mirror, which was true
             // for as long as nothing placed a rail. A mineshaft corridor places one

@@ -109,6 +109,8 @@ pub struct DenseBlockGrid {
     raw_introductions: Vec<StateId>,
     raw_introduction_index: FastMap<StateId, ()>,
     change_capture: Option<FastMap<usize, StateId>>,
+    /// Loot tables rules attached to blocks written here, in write order.
+    loot: Vec<crate::structure::CodedLoot>,
 }
 
 #[derive(Debug, Clone)]
@@ -292,6 +294,7 @@ impl DenseBlockGrid {
             raw_introductions: Vec::new(),
             raw_introduction_index: FastMap::default(),
             change_capture: None,
+            loot: Vec::new(),
         }
     }
 
@@ -327,6 +330,7 @@ impl DenseBlockGrid {
             raw_introductions,
             raw_introduction_index,
             change_capture: None,
+            loot: Vec::new(),
         }
     }
 
@@ -691,6 +695,11 @@ impl DenseBlockGrid {
             let id = self.palette_index(state);
             Arc::make_mut(self.storage.dense_cells_mut())[i] = id;
         }
+    }
+
+    /// The loot tables attached to blocks written since the last call.
+    pub(crate) fn take_loot(&mut self) -> Vec<crate::structure::CodedLoot> {
+        std::mem::take(&mut self.loot)
     }
 
     pub(crate) fn begin_change_capture(&mut self) {
@@ -1231,6 +1240,15 @@ impl crate::structure::StructureWorld for DenseBlockGrid {
 
     fn base_facts(&self, x: i32, y: i32, z: i32) -> BaseStateFacts {
         self.base_facts_untracked(x, y, z)
+    }
+
+    fn attach_loot(&mut self, pos: [i32; 3], loot: &crate::structure::processor::BlockLoot) {
+        // A later piece writing the same cell replaces the earlier entity, as it replaces the block.
+        let entry = crate::structure::CodedLoot { pos, table: loot.table.to_string(), seed: loot.seed };
+        match self.loot.iter_mut().find(|existing| existing.pos == pos) {
+            Some(existing) => *existing = entry,
+            None => self.loot.push(entry),
+        }
     }
 }
 

@@ -703,6 +703,22 @@ impl Sim {
         self.play_block_surface_sound(block, state, lodestone_data::sound_types::break_sound_name);
     }
 
+    /// Plays the completion sound of a finished brushable block at its centre,
+    /// on the players bus at full volume and neutral pitch.
+    pub(crate) fn play_brush_completed_sound(&mut self, block: [i32; 3], state: BlockStateRef) {
+        let Some(state) = canonical_sound_state(state) else {
+            return;
+        };
+        let name = match state.name() {
+            "minecraft:suspicious_sand" => "minecraft:item.brush.brushing.sand.complete",
+            "minecraft:suspicious_gravel" => "minecraft:item.brush.brushing.gravel.complete",
+            _ => return,
+        };
+        let centre = glam::Vec3::new(block[0] as f32 + 0.5, block[1] as f32 + 0.5, block[2] as f32 + 0.5);
+        let seed = self.block_sound_seed(block);
+        self.play_local_sound(name, lodestone_model::event::SoundCategory::Player, centre, 1.0, 1.0, seed);
+    }
+
     /// Play a block's place sound at the centre of `block` — vanilla's
     /// The block item's place tail, which passes the placing
     /// player as the *excluded* entity, so on the acting client the sound is

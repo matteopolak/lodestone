@@ -27,6 +27,7 @@ mod block_actions;
 pub(crate) use self::block_actions::*;
 mod brewing_stand;
 use self::brewing_stand::*;
+mod brushing;
 mod chunk_encoding;
 pub use self::chunk_encoding::*;
 mod client_commands;

@@ -729,6 +729,14 @@ impl Sim {
                     // in `interact.rs` on the same asymmetry for the particles.
                     self.play_block_break_sound([pos.x, pos.y, pos.z], state);
                 }
+                NetUpdate::BrushCompleted { pos, state } => {
+                    // Level event 3008: the finished block's completion sound and
+                    // its destroy particles, both from the state it held.
+                    self.particles_mut(|p| {
+                        p.destroy_block([pos.x, pos.y, pos.z], state, [1.0, 1.0, 1.0]);
+                    });
+                    self.play_brush_completed_sound([pos.x, pos.y, pos.z], state);
+                }
                 NetUpdate::Particles {
                     kind,
                     long_distance,
