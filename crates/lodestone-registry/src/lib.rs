@@ -345,6 +345,18 @@ pub fn physics_profile_for_protocol(protocol: i32) -> lodestone_physics::Physics
         })
 }
 
+/// The release whose gameplay rules a connection speaking `protocol` plays under.
+/// Every protocol this build does not know as 26.3 plays 26.2's rules.
+#[must_use]
+pub fn game_data_version_for_protocol(protocol: i32) -> lodestone_data::GameDataVersion {
+    #[cfg(feature = "v26-3")]
+    if protocol == lodestone_v26_3::PROTOCOL {
+        return lodestone_data::GameDataVersion::V26_3;
+    }
+    let _ = protocol;
+    lodestone_data::GameDataVersion::V26_2
+}
+
 /// A compiled-in family's **server** side: the thing that lets the integrated
 /// server speak this family's wire format.
 ///
@@ -670,6 +682,11 @@ mod tests {
         assert!(!adapter.supports(776));
         assert!(server_protocol_for_protocol(777).is_some());
         assert!(compiled_server_families().contains(&"v26-3"));
+        // The hosted wire and the joining client agree on the release, so the
+        // rules the server applies are the ones the client predicts.
+        let hosted = server_protocol_for_protocol(777).expect("hosted").game_data_version();
+        assert_eq!(hosted, lodestone_data::GameDataVersion::V26_3);
+        assert_eq!(game_data_version_for_protocol(777), hosted);
         assert_eq!(
             physics_profile_for_protocol(777),
             lodestone_physics::PhysicsProfile::mc_1_21()
@@ -680,6 +697,7 @@ mod tests {
     #[cfg(feature = "v26-2")]
     #[test]
     fn v770_maps_to_the_modern_physics_profile() {
+        assert_eq!(game_data_version_for_protocol(776), lodestone_data::GameDataVersion::V26_2);
         assert_eq!(
             physics_profile_for_protocol(776),
             lodestone_physics::PhysicsProfile::mc_1_21()

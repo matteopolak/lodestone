@@ -121,3 +121,37 @@ fn the_container_component_reaches_the_client_decoded() {
         [Some(("minecraft:stone".to_owned(), 5)), None, Some(("minecraft:cobblestone".to_owned(), 2))]
     );
 }
+
+/// A decorated pot with sherds on the back and front only. In 26.3
+/// `minecraft:pot_decorations` (component 76) is four optional item templates
+/// in back, left, right, front order, a plain face being absent. Item ids from
+/// the 26.3 report: decorated_pot 392 (`88 03`), angler sherd 1598 (`be 0c`),
+/// archer sherd 1599 (`bf 0c`).
+const SHERDED_POT: [u8; 18] = [
+    0, 0, 0, 36, // window 0, state 0, slot 36
+    1, 0x88, 0x03, // count, item
+    1, 0, 76, // one added component, none removed, pot_decorations
+    1, 0xbe, 0x0c, 1, 0, 0, // back: angler sherd x1, empty patch
+    0, 0, // left, right absent
+];
+
+#[test]
+fn pot_decorations_are_four_optional_templates_in_26_3() {
+    let mut pot = stack("minecraft:decorated_pot", 1);
+    pot.components.pot_decorations = Some(lodestone_model::PotDecorations {
+        back: Some("minecraft:angler_pottery_sherd".parse().unwrap()),
+        front: Some("minecraft:archer_pottery_sherd".parse().unwrap()),
+        ..Default::default()
+    });
+    let payload = send(lodestone_v26_3::server_protocol().encode_container_slot(0, 0, 36, Some(&pot)));
+    let mut expected = SHERDED_POT.to_vec();
+    expected.extend_from_slice(&[1, 0xbf, 0x0c, 1, 0, 0]);
+    assert_eq!(payload, expected);
+    let directives = lodestone_v26_3::adapter()
+        .handle_packet(&mut World::new(), ConnectionState::Play, packet_ids::play::clientbound::CONTAINER_SET_SLOT, &payload)
+        .expect("decodes");
+    let [Directive::Emit(ClientEvent::ContainerSlot { item: Some(item), .. })] = directives.as_slice() else {
+        panic!("expected one ContainerSlot, got {directives:?}");
+    };
+    assert_eq!(item.components.pot_decorations, pot.components.pot_decorations);
+}

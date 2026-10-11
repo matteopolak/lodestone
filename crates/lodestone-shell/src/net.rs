@@ -592,6 +592,9 @@ fn wasm_block_mutation_refusal(
 /// A live client running on a background thread. Drop to request shutdown.
 #[derive(Debug)]
 pub struct NetClient {
+    /// The protocol number this session speaks; selects the release's gameplay
+    /// rules where the client predicts them.
+    protocol: i32,
     rx: Receiver<NetUpdate>,
     relay_drained: Arc<Notify>,
     /// Outbound actions queued for the net thread to hand to the client. The
@@ -1418,6 +1421,7 @@ impl NetClient {
         ));
 
         Self {
+            protocol,
             rx,
             relay_drained,
             action_tx,
@@ -1445,6 +1449,18 @@ impl NetClient {
             #[cfg(test)]
             session: None,
         }
+    }
+
+    /// The game-data release this session's protocol hosts.
+    #[must_use]
+    pub fn game_data_version(&self) -> lodestone_data::GameDataVersion {
+        lodestone_registry::game_data_version_for_protocol(self.protocol)
+    }
+
+    /// Re-point a loopback at another protocol number.
+    #[cfg(test)]
+    pub(crate) fn set_protocol(&mut self, protocol: i32) {
+        self.protocol = protocol;
     }
 
     /// Drain all updates received since the last poll (non-blocking).
@@ -1937,6 +1953,7 @@ impl NetClient {
         let (_tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let (action_tx, action_rx) = action_relay();
         let client = Self {
+            protocol: 777,
             rx,
             relay_drained: Arc::new(Notify::new()),
             action_tx,
@@ -2018,6 +2035,7 @@ impl NetClient {
         let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let (action_tx, action_rx) = action_relay();
         let client = Self {
+            protocol: 777,
             rx,
             relay_drained: Arc::new(Notify::new()),
             action_tx,

@@ -116,6 +116,7 @@ fn a_held_player_head_reaches_pixels_and_a_held_chest_still_does_too() {
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),
+                pot_decorations: None,
                 base_color: None,
                 skin: None,
             })
@@ -241,6 +242,7 @@ fn a_held_custom_head_draws_its_own_skin_rather_than_the_default_sheet() {
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),
+                pot_decorations: None,
                 base_color: None,
                 skin: skin.clone(),
             })

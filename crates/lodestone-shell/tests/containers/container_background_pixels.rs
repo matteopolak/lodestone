@@ -199,6 +199,7 @@ fn the_real_container_art_draws_and_it_dims_the_hotbar_behind_it() {
         dyed_color: None,
         potion_color: None,
         banner_patterns: Vec::new(),
+        pot_decorations: None,
         base_color: None,
         skin: None,
     };

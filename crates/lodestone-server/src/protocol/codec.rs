@@ -192,6 +192,13 @@ pub trait ServerProtocol: Send + Sync {
         true
     }
 
+    /// The release whose gameplay rules this connection plays under. Rules that
+    /// changed between releases (which tools defer to an off-hand shield, for
+    /// one) are selected by it; a protocol that does not say plays 26.2.
+    fn game_data_version(&self) -> lodestone_data::GameDataVersion {
+        lodestone_data::GameDataVersion::V26_2
+    }
+
     /// Emits the online-mode encryption request, mirroring
     /// Hello packet: an empty server-id string, the DER-encoded
     /// RSA public key, the verify-token challenge, and a fixed
@@ -1959,6 +1966,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn has_configuration_phase(&self) -> bool {
         (**self).has_configuration_phase()
+    }
+
+    fn game_data_version(&self) -> lodestone_data::GameDataVersion {
+        (**self).game_data_version()
     }
 
     fn sends_player_loaded(&self) -> bool {

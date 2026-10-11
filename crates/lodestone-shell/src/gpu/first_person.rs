@@ -787,21 +787,23 @@ impl RenderState {
         // pair. Unlike a banner's layers these are ordinary opaque draws, so
         // there is no translucent list to return alongside them.
         //
-        // **The four sherds are vanilla's own empty-decorations sentinel here,
-        // not the stack's own.** That is exactly what vanilla does for a
-        // stack carrying no
-        // `minecraft:pot_decorations`, so
-        // an undecorated pot — the overwhelmingly common one — is *correct*
-        // rather than approximate. A pot that really does carry sherds draws
-        // with the four default side sprites, and the missing link is named
-        // rather than left to be rediscovered: `lodestone_model` already
-        // decodes the component into a real `PotDecorations`, but the shell's
-        // hotbar record does not carry it, so it never reaches `MainHandItem`
-        // and cannot reach here. Threading it is the same one-field-per-layer
-        // walk `banner_patterns` and `base_color` already made; do that rather
-        // than reading this as an unported rig.
+        // The four sherds come off the stack's `minecraft:pot_decorations`; a stack
+        // without the component is the undecorated pot.
         if form.kind == "minecraft:decorated_pot" && item.path() == "decorated_pot" {
-            let rig = lodestone_render::decorated_pot_item_rig(None, None, None, None);
+            let sherd = |key: Option<&lodestone_model::ResourceKey>| key.map(|key| key.path().to_owned());
+            let decorations = held.pot_decorations.clone().unwrap_or_default();
+            let (back, left, right, front) = (
+                sherd(decorations.back.as_ref()),
+                sherd(decorations.left.as_ref()),
+                sherd(decorations.right.as_ref()),
+                sherd(decorations.front.as_ref()),
+            );
+            let rig = lodestone_render::decorated_pot_item_rig(
+                back.as_deref(),
+                left.as_deref(),
+                right.as_deref(),
+                front.as_deref(),
+            );
             let draws: Vec<SpecialHandDraw<'a>> = rig
                 .parts()
                 .into_iter()
@@ -1479,6 +1481,7 @@ mod tests {
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),
+            pot_decorations: None,
             base_color: None,
             skin: None,
         }

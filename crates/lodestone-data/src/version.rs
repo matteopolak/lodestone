@@ -27,6 +27,22 @@ pub struct StateFacts {
 pub struct StatePredicates(GameDataVersion);
 
 impl GameDataVersion {
+    /// Whether a block-transforming tool used from the main hand does nothing
+    /// when the off hand holds a shield and the player is not sneaking, so the
+    /// click falls through to raising the shield.
+    ///
+    /// 26.2 applied this to axes only; hoes and shovels transformed the block
+    /// regardless. 26.3 applies it to every tool that transforms blocks (axe,
+    /// hoe, shovel). `item_path` is an item id with or without namespace.
+    #[must_use]
+    pub fn tool_yields_to_offhand_shield(self, item_path: &str) -> bool {
+        let path = item_path.rsplit_once(':').map_or(item_path, |(_, path)| path);
+        match self {
+            Self::V26_2 => path.ends_with("_axe"),
+            Self::V26_3 => path.ends_with("_axe") || path.ends_with("_hoe") || path.ends_with("_shovel"),
+        }
+    }
+
     pub const fn block_count(self) -> u32 {
         match self {
             Self::V26_2 => identity::v26_2::WIRE_BLOCK_COUNT,
@@ -204,6 +220,26 @@ const _: () = assert!(behavior::STATE_COUNT == crate::block_states::STATE_COUNT)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 26.2 gave only axes the off-hand-shield deferral; 26.3 gives it to every
+    /// tool carrying a block transformer. The expected rows come from reading
+    /// each release's tool code, not from this function.
+    #[test]
+    fn tool_deferral_to_an_offhand_shield_widened_in_26_3() {
+        let (old, new) = (GameDataVersion::V26_2, GameDataVersion::V26_3);
+        for (item, in_26_2, in_26_3) in [
+            ("minecraft:iron_axe", true, true),
+            ("minecraft:iron_hoe", false, true),
+            ("minecraft:diamond_shovel", false, true),
+            ("copper_shovel", false, true),
+            ("minecraft:iron_pickaxe", false, false),
+            ("minecraft:shears", false, false),
+            ("minecraft:shield", false, false),
+        ] {
+            assert_eq!(old.tool_yields_to_offhand_shield(item), in_26_2, "26.2 {item}");
+            assert_eq!(new.tool_yields_to_offhand_shield(item), in_26_3, "26.3 {item}");
+        }
+    }
 
     #[test]
     fn selected_wire_identity_preserves_the_canonical_prefix() {

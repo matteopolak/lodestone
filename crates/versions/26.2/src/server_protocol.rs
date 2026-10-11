@@ -1678,6 +1678,9 @@ fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemCompo
     if let Some(map_id) = components.map_id {
         entry("minecraft:map_id", &|w| w.var_i32(map_id));
     }
+    if let Some(decorations) = &components.pot_decorations {
+        entry("minecraft:pot_decorations", &|w| write_pot_decorations(wire, w, decorations));
+    }
     if let Some(color) = components.dyed_color {
         // A bare fixed-width INT, unlike the VarInt scalars around it.
         entry("minecraft:dyed_color", &|w| w.i32(color as i32));
@@ -1709,6 +1712,36 @@ fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemCompo
     w.var_i32(count);
     w.var_i32(0); // removed components: this crate never sends a removal.
     w.bytes(entries.as_slice());
+}
+
+/// `pot_decorations` in back, left, right, front order. 26.2 sends a counted
+/// list of item ids with a brick for each plain face; 26.3 sends four optional
+/// item templates, a plain face being absent.
+fn write_pot_decorations(wire: Wire, w: &mut Writer, decorations: &lodestone_model::PotDecorations) {
+    let faces = [&decorations.back, &decorations.left, &decorations.right, &decorations.front];
+    let id = |face: &Option<lodestone_model::ResourceKey>| {
+        let name = face.as_ref().map_or_else(|| "minecraft:brick".to_owned(), ToString::to_string);
+        item_registry_id_by_name(wire, &name)
+    };
+    if wire.game_data() == lodestone_data::GameDataVersion::V26_3 {
+        for face in faces {
+            match face.as_ref().and_then(|_| id(face)) {
+                Some(item) => {
+                    w.bool(true);
+                    w.var_i32(item);
+                    w.var_i32(1);
+                    w.var_i32(0);
+                    w.var_i32(0);
+                }
+                None => w.bool(false),
+            }
+        }
+    } else {
+        w.var_i32(4);
+        for face in faces {
+            w.var_i32(id(face).or_else(|| item_registry_id_by_name(wire, "minecraft:brick")).unwrap_or(0));
+        }
+    }
 }
 
 /// One text component as the network NBT every chat-carrying component uses.
@@ -3533,6 +3566,10 @@ impl ServerProtocol for V770ServerProtocol {
             None => self.decode_base(state, packet_id, payload),
             Some(dialect) => self.decode_release(dialect, state, packet_id, payload),
         }
+    }
+
+    fn game_data_version(&self) -> lodestone_data::GameDataVersion {
+        self.wire.game_data()
     }
 
     // Mirrors vanilla's own

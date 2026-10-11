@@ -149,7 +149,7 @@ fn horizontal_angle(source: Vec3, position: Vec3, yaw: f32) -> f64 {
     (tx * facing.0 + tz * facing.1).clamp(-1.0, 1.0).acos()
 }
 
-/// Wears `stack` by `amount`; `true` when it broke and must be removed.
+/// Wears any damageable `stack` by `amount`; `true` when it broke and must be removed.
 pub fn wear(stack: &mut ItemStack, amount: u32) -> bool {
     let Some(max) = crate::anvil::effective_max_damage(stack) else { return false };
     let worn = stack.components.damage.unwrap_or(0) + amount;

@@ -272,6 +272,7 @@ fn a_block_item_in_the_hotbar_reaches_pixels() {
         dyed_color: None,
         potion_color: None,
         banner_patterns: Vec::new(),
+        pot_decorations: None,
         base_color: None,
         skin: None,
     }))

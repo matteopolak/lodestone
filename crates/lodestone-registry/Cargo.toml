@@ -39,6 +39,9 @@ lodestone-server = { path = "../lodestone-server" }
 # has zero dependencies of its own, so pulling it in unconditionally adds
 # nothing to the version-free build.
 lodestone-physics = { path = "../lodestone-physics" }
+# Required for the same reason: `game_data_version_for_protocol` is called
+# unconditionally and answers the 26.2 default when no family is compiled in.
+lodestone-data = { workspace = true }
 
 # Optional family edges keep the default build version-free. Removing a family
 # also removes its declared compatibility dependents and their registry entries.
@@ -75,7 +78,6 @@ v1-21-11 = ["dep:lodestone-v1-21-11"]
 # production registry resolution remains independent of the client crate.
 lodestone-client = { workspace = true }
 lodestone-core = { workspace = true }
-lodestone-data = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 # The host-registration controls exercise the same externally consumable

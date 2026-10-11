@@ -240,6 +240,7 @@ fn a_held_shield_shows_its_back_so_every_dye_renders_identically() {
             dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),
+                pot_decorations: None,
                 base_color: base_color.clone(),
                 skin: None,
             })

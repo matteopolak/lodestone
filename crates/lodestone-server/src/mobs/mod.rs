@@ -2370,6 +2370,8 @@ pub struct AttackOutcome {
 #[derive(Debug)]
 pub struct MobSim<'w> {
     world: &'w ChunkWorld,
+    /// The release whose behaviour rules this simulation follows where they differ.
+    release: lodestone_data::GameDataVersion,
     mobs: Vec<SimMob<'w>>,
     projectiles: ProjectileRegistry,
     projectile_meta: HashMap<i32, ProjectileMeta>,

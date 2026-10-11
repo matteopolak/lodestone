@@ -513,6 +513,7 @@ mod server;
 mod shield;
 mod sleep;
 mod spawn;
+pub mod tool_use;
 /// Spawn eggs: which entity a `*_spawn_egg` names, and where a right-click puts
 /// it. Public because the right-click dispatcher and a future dispenser
 /// behaviour are both callers, and because the item→entity derivation is worth

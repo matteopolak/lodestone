@@ -187,7 +187,9 @@ impl MobHandle {
         // replacement, and production replaces it exactly once per world.
         let world: &'static ChunkWorld = Box::leak(Box::new(world));
         self.with(|sim| {
+            let release = sim.release();
             *sim = MobSim::new(world);
+            sim.set_release(release);
             // See `MobSim::set_next_id`'s own doc comment: id `1` collides
             // with `LOCAL_PLAYER_ENTITY_ID` on the wire.
             sim.set_next_id(1000);

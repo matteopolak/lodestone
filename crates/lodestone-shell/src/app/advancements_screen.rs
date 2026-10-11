@@ -280,6 +280,7 @@ pub(super) fn advancement_toast_view(
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),
+                pot_decorations: None,
                 base_color: None,
                 // Nor a `minecraft:profile`: an advancement whose icon is a
                 // player head means the plain one, and `None` draws exactly

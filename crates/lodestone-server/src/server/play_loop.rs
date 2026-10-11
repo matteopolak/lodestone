@@ -1917,7 +1917,7 @@ where
                                 player_rot.unwrap_or_default().yaw,
                             );
                             if let Some(blocked) = blocked {
-                                wear_blocking_shield(conn, &mut state, proto, &mut inventory, blocked.native, blocked.item_damage)
+                                wear_item_in_slot(conn, &mut state, proto, &mut inventory, blocked.native, blocked.item_damage)
                                     .await?;
                                 if blocked.disable_ticks > 0 {
                                     shield.disable_until(now + blocked.disable_ticks);
@@ -4160,10 +4160,10 @@ where
     }
 }
 
-/// Wears the shield in `native` by `amount`, resending the slot and, when it
+/// Wears the item in `native` by `amount`, resending the slot and, when it
 /// breaks, removing it and sending the break event first so the client plays the
 /// break sound and particles from the stack that is still there.
-async fn wear_blocking_shield<T, P>(
+pub(super) async fn wear_item_in_slot<T, P>(
     conn: &mut lodestone_net::Connection<T>,
     state: &mut State,
     proto: &P,

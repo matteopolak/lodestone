@@ -152,6 +152,9 @@ pub struct ItemIcon {
     /// [`dyed_color`](Self::dyed_color) documents, fed into
     /// [`push_special_icon`]'s translucent pattern-layer draws.
     pub banner_patterns: Vec<lodestone_model::BannerPatternLayer>,
+    /// The stack's `minecraft:pot_decorations`; `None` is an undecorated pot and
+    /// every non-pot item.
+    pub pot_decorations: Option<lodestone_model::PotDecorations>,
     /// The stack's `minecraft:base_color`, straight off
     /// `lodestone_game::item::ItemStack::base_color`. `None` for a
     /// never-dyed shield and for every non-shield item — the same "no live
@@ -327,6 +330,7 @@ pub(crate) fn stack_icon(st: &lodestone_game::item::ItemStack) -> Option<ItemIco
         // without this a banner in the hotbar drew its base
         // colour only, never its pattern.
         banner_patterns: st.banner_patterns().to_vec(),
+        pot_decorations: st.pot_decorations(),
         // Same crate-boundary loss as the pattern line above,
         // for a shield's own dye tint rather than its loom
         // patterns.
@@ -355,6 +359,7 @@ pub(crate) fn held_item_record(record: &ItemIcon) -> crate::gpu::MainHandItem {
         dyed_color: record.dyed_color,
         potion_color: record.potion_color,
         banner_patterns: record.banner_patterns.clone(),
+        pot_decorations: record.pot_decorations.clone(),
         base_color: record.base_color.clone(),
         skin: record.skin.clone(),
     }
@@ -3516,6 +3521,7 @@ mod pop_tests {
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),
+            pot_decorations: None,
             base_color: None,
             skin: None,
         }
@@ -3824,6 +3830,7 @@ mod tint_wiring_tests {
             dyed_color,
             potion_color,
             banner_patterns: Vec::new(),
+            pot_decorations: None,
             base_color: None,
             skin: None,
         }

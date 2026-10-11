@@ -1369,6 +1369,10 @@ impl Sim {
             self.use_item_generic(false, uses_item);
             return;
         };
+        if self.tool_click_yields_to_offhand_shield(held.as_deref()) {
+            self.raise_offhand_shield();
+            return;
+        }
         let clicked = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
         let face = face_from_normal(hit.normal);
         let cursor = hit_cursor(hit);
@@ -1553,6 +1557,48 @@ impl Sim {
         if matches!(decision, UseOnDecision::Nothing { .. }) && placeable.is_none() && !swings {
             self.use_item_generic(false, uses_item);
         }
+    }
+
+    /// Whether a main-hand click with `held` on a block does nothing in the
+    /// connected release because an off-hand shield takes the click instead.
+    fn tool_click_yields_to_offhand_shield(&self, held: Option<&str>) -> bool {
+        let Some(held) = held else { return false };
+        let offhand = self
+            .player_menu()
+            .player_native(crate::sim::OFFHAND_NATIVE_INDEX)
+            .filter(|stack| !stack.is_empty())
+            .map(|stack| stack.item().to_string());
+        let release = self
+            .net
+            .as_ref()
+            .map_or(lodestone_data::GameDataVersion::V26_2, |net| net.game_data_version());
+        lodestone_server::tool_use::yields_to_offhand_shield(
+            release,
+            true,
+            held,
+            offhand.as_deref(),
+            self.movement_intent().sneak,
+        )
+    }
+
+    /// Starts using the off-hand shield: no swing, the use state armed as for any
+    /// held use, and the use packet sent for the off hand.
+    fn raise_offhand_shield(&mut self) {
+        let local = self.local;
+        self.write(|w| {
+            w.resource_mut::<UsingItem>().0 = true;
+            w.resource_mut::<ItemUseTicks>().0 = Some(0);
+            if let Some(mut effects) = w.get_mut::<ItemUseEffects>(local) {
+                effects.0 = Some(UseEffects::DEFAULT);
+            }
+        });
+        let rotation = Rotation::new(self.player().yaw, self.player().pitch);
+        let sequence =
+            self.write(|w| w.resource_mut::<PlacementPredictor>().0.take_use_sequence());
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::UseItem { hand: Hand::Off, rotation, sequence });
+        }
+        self.first_person_item_used(Hand::Off);
     }
 
     /// Vanilla's unconditional generic-use fallback at the bottom of

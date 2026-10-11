@@ -169,6 +169,7 @@ fn a_held_banner_draws_its_own_dye_colour_not_nothing() {
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),
+                pot_decorations: None,
                 base_color: None,
                 skin: None,
             })
@@ -338,6 +339,7 @@ fn a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour() {
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: patterns.clone(),
+                pot_decorations: None,
                 base_color: None,
                 skin: None,
             })

@@ -163,6 +163,10 @@ Mobs tick against the live terrain (`tick_in`): an absent column is blocked for 
 - **Tick drivers**: keep wire identity in the owner's maps, drop registry entry and map entry together, and test `tick()` itself.
 - **Live wiring**: the sim must stay `Send`. Preserve the atomic revision/list read in `LiveMobSource`, keep revisions connection-local, and note that forwarding only an inner source's revision misses independent player changes.
 
+### Cat morning gift
+
+After the gift roll passes (`MobSim::resolve_cat_gifts`) the cat first moves to a random spot (`gift_relocation`): +-5 blocks on x and z and +-2 on y of its block, then down the column to the first block entities may stand on, at the whole-number coordinates drawn; it stays put if its box overlaps a collider or liquid. 26.3 also refuses a landing block or overlapped block tagged dangerous for teleportation; 26.2 has no filter. `MobSim::set_release` selects the rule (default 26.2; `integrated` sets it from the hosted protocol, and `MobHandle::replace_world` keeps it). A leashed cat relocates around itself, not its holder.
+
 ## Configuration
 
 - Roster tables are `const`, no feature flag.

@@ -238,6 +238,37 @@ pub fn pop_resource_placement(pos: BlockPos, rng: &mut SpawnRng) -> (Vec3, Vec3)
     (position, dropped_item_velocity(rng))
 }
 
+/// A resource popped out of `face` of the block at `pos`: along the face's axis
+/// the item starts just outside the block and moves off it at `0.1` (plus a
+/// further `0.2` of lift on an upward face); along each other axis it is jittered
+/// inside the face. Draws go x, y, z for position, then x, y, z for velocity,
+/// skipping the axis the face sits on.
+#[must_use]
+pub fn pop_resource_from_face(pos: BlockPos, face: lodestone_model::BlockFace, rng: &mut SpawnRng) -> (Vec3, Vec3) {
+    use lodestone_model::BlockFace;
+    const ITEM_HALF_WIDTH: f64 = 0.25 / 2.0;
+    let (step_x, step_y, step_z) = match face {
+        BlockFace::Down => (0.0, -1.0, 0.0),
+        BlockFace::Up => (0.0, 1.0, 0.0),
+        BlockFace::North => (0.0, 0.0, -1.0),
+        BlockFace::South => (0.0, 0.0, 1.0),
+        BlockFace::West => (-1.0, 0.0, 0.0),
+        BlockFace::East => (1.0, 0.0, 0.0),
+    };
+    let mut place = |step: f64, half: f64, base: i32| {
+        f64::from(base)
+            + 0.5
+            + if step == 0.0 { next_in_range(rng, -POP_SPREAD, POP_SPREAD) } else { step * (0.5 + half) }
+    };
+    let x = place(step_x, ITEM_HALF_WIDTH, pos.x);
+    let y = place(step_y, ITEM_HALF_HEIGHT, pos.y) - ITEM_HALF_HEIGHT;
+    let z = place(step_z, ITEM_HALF_WIDTH, pos.z);
+    let velocity_x = if step_x == 0.0 { next_in_range(rng, -0.1, 0.1) } else { step_x * 0.1 };
+    let velocity_y = if step_y == 0.0 { next_in_range(rng, 0.0, 0.1) } else { step_y * 0.1 + 0.1 };
+    let velocity_z = if step_z == 0.0 { next_in_range(rng, -0.1, 0.1) } else { step_z * 0.1 };
+    (Vec3::new(x, y, z), Vec3::new(velocity_x, velocity_y, velocity_z))
+}
+
 /// The dropped-item initial velocity: two horizontal draws and a constant
 /// `0.2` upward.
 ///
@@ -600,6 +631,25 @@ pub fn is_within_pickup_range(player_feet: Vec3, item_position: Vec3) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hand arithmetic for a block at (10, 64, -3), item 0.25 wide and tall:
+    /// off the top the item starts at 64 + 0.5 + (0.5 + 0.125) - 0.125 = 65.0
+    /// rising at 0.1 + 0.1; off the bottom at 64.5 - 0.625 - 0.125 = 63.75 with
+    /// the two terms cancelling; off the east face at 10.5 + 0.5 + 0.125.
+    #[test]
+    fn a_resource_popped_from_a_face_starts_outside_it_and_leaves_along_it() {
+        use lodestone_model::BlockFace;
+        let pos = BlockPos::new(10, 64, -3);
+        let mut rng = SpawnRng::new(7);
+        let (p, v) = pop_resource_from_face(pos, BlockFace::Up, &mut rng);
+        assert!((p.y - 65.0).abs() < 1e-9 && (v.y - 0.2).abs() < 1e-9, "up: {p:?} {v:?}");
+        assert!((p.x - 10.5).abs() <= 0.25 && (p.z - -2.5).abs() <= 0.25, "up jitter: {p:?}");
+        let (p, v) = pop_resource_from_face(pos, BlockFace::Down, &mut rng);
+        assert!((p.y - 63.75).abs() < 1e-9 && v.y.abs() < 1e-9, "down: {p:?} {v:?}");
+        let (p, v) = pop_resource_from_face(pos, BlockFace::East, &mut rng);
+        assert!((p.x - 11.125).abs() < 1e-9 && (v.x - 0.1).abs() < 1e-9, "east: {p:?} {v:?}");
+        assert!((0.0..=0.1).contains(&v.y), "east lift: {v:?}");
+    }
 
     fn state(value: &str) -> StateId {
         StateId::from_state_str(value).expect("test state is in the generated census")

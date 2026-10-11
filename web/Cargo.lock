@@ -3076,6 +3076,7 @@ dependencies = [
 name = "lodestone-registry"
 version = "0.1.0"
 dependencies = [
+ "lodestone-data",
  "lodestone-model",
  "lodestone-physics",
  "lodestone-server",

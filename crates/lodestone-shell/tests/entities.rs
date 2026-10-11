@@ -29,6 +29,8 @@ mod entity_shadow_z_fight_pixels;
 mod entity_sprite_pixels;
 #[path = "entities/first_person_banner_hand_pixels.rs"]
 mod first_person_banner_hand_pixels;
+#[path = "entities/first_person_pot_hand_pixels.rs"]
+mod first_person_pot_hand_pixels;
 #[path = "entities/first_person_hand_light_pixels.rs"]
 mod first_person_hand_light_pixels;
 #[path = "entities/first_person_head_hand_pixels.rs"]

@@ -760,6 +760,9 @@ pub struct MainHandItem {
     /// `lodestone_game::item::ItemStack::banner_patterns`. Empty for every
     /// non-banner item and for a plain banner carrying no loom patterns.
     pub banner_patterns: Vec<lodestone_model::BannerPatternLayer>,
+    /// The stack's `minecraft:pot_decorations`; `None` is an undecorated pot and
+    /// every non-pot item.
+    pub pot_decorations: Option<lodestone_model::PotDecorations>,
     /// The stack's `minecraft:base_color`, straight off
     /// `lodestone_game::item::ItemStack::base_color`. `None` for a
     /// never-dyed shield and for every non-shield item.

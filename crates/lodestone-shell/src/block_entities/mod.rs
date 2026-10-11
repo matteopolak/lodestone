@@ -2909,6 +2909,31 @@ mod decorated_pot_tests {
         assert_eq!(decorated_pot_sherds(&bad_count), [None, None, None, None]);
     }
 
+    /// The 26.3 named-stack form and the older four-id list describe the same
+    /// pot, so both must reach the same spawn faces.
+    #[test]
+    fn named_stacks_and_the_legacy_list_resolve_to_the_same_spawn() {
+        let named = compound(vec![("sherds", compound(vec![
+            ("back", stack("minecraft:miner_pottery_sherd")),
+            ("right", stack("minecraft:angler_pottery_sherd")),
+            ("front", stack("minecraft:archer_pottery_sherd")),
+        ]))]);
+        let legacy = compound(vec![("sherds", Nbt::List {
+            element_type: NbtTag::String,
+            elements: [
+                "minecraft:miner_pottery_sherd",
+                "minecraft:brick",
+                "minecraft:angler_pottery_sherd",
+                "minecraft:archer_pottery_sherd",
+            ]
+            .into_iter()
+            .map(|id| Nbt::String(id.into()))
+            .collect(),
+        })]);
+        assert_eq!(decorated_pot_sherds(&named), decorated_pot_sherds(&legacy));
+        assert_eq!(decorated_pot_sherds(&named)[1], None);
+    }
+
     #[test]
     fn ordered_id_list_still_maps_to_the_same_faces() {
         let nbt = compound(vec![("sherds", Nbt::List {

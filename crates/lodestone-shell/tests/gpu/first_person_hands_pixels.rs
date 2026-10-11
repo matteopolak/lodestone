@@ -53,6 +53,7 @@ fn held(id: &str) -> MainHandItem {
         dyed_color: None,
         potion_color: None,
         banner_patterns: Vec::new(),
+        pot_decorations: None,
         base_color: None,
         skin: None,
     }

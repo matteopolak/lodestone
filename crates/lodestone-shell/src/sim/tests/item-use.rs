@@ -1184,3 +1184,64 @@ fn holding_use_restarts_food_after_its_consume_duration() {
         "holding use through bread's 32-tick duration must send a fresh UseItem, got {sent:?}"
     );
 }
+
+fn give_offhand_item(sim: &mut Sim, item: &str) {
+    let local = sim.local;
+    sim.write(|w| {
+        if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+            menus.0.apply(&lodestone_model::ClientEvent::InventorySlotChanged {
+                slot: crate::sim::OFFHAND_NATIVE_INDEX as i32,
+                item: Some(lodestone_model::ItemStack::new(item.parse().expect("valid item id"), 1)),
+            });
+        }
+    });
+}
+
+/// Clicks a block face with `held` in the main hand and a shield in the off
+/// hand on a client connected over `protocol`; returns what went on the wire.
+fn click_block_with_offhand_shield(protocol: i32, held: &str) -> (Vec<ClientAction>, bool, bool) {
+    let (mut net, actions, _feed) = NetClient::loopback_with_feed();
+    net.set_protocol(protocol);
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, held);
+    give_offhand_item(&mut sim, "minecraft:shield");
+    sim.set_ray_target_for_test(Some(RayHit::face_center([4, 64, 4], [0, 1, 0])));
+    sim.use_item_live();
+    let sent = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    let using = sim.read(|world| world.resource::<UsingItem>().0);
+    (sent, using, sim.body_pose.is_swinging())
+}
+
+/// 26.3 (protocol 777): a hoe or shovel click on a block is not sent and the
+/// off-hand shield is raised instead. 26.2 (776) sends the block use as before.
+#[test]
+fn a_26_3_hoe_click_raises_the_offhand_shield_and_a_26_2_one_uses_the_block() {
+    for tool in ["minecraft:iron_hoe", "minecraft:iron_shovel"] {
+        let (sent, using, swinging) = click_block_with_offhand_shield(777, tool);
+        assert!(
+            !sent.iter().any(|a| matches!(a, ClientAction::UseItemOn { .. } | ClientAction::SwingArm { .. })),
+            "26.3 {tool}: the block use and swing are withheld: {sent:?}"
+        );
+        assert!(
+            sent.iter().any(|a| matches!(a, ClientAction::UseItem { hand: Hand::Off, .. })),
+            "26.3 {tool}: the off-hand use is sent: {sent:?}"
+        );
+        assert!(using && !swinging, "26.3 {tool}: use armed, no swing");
+
+        let (sent, _, _) = click_block_with_offhand_shield(776, tool);
+        assert!(
+            sent.iter().any(|a| matches!(a, ClientAction::UseItemOn { .. })),
+            "26.2 {tool}: the block use is sent: {sent:?}"
+        );
+        assert!(!sent.iter().any(|a| matches!(a, ClientAction::UseItem { hand: Hand::Off, .. })));
+    }
+}
+
+/// A sword has no tilling to defer, so it never takes the off-hand path.
+#[test]
+fn a_sword_click_never_defers_to_the_offhand_shield() {
+    let (sent, _, _) = click_block_with_offhand_shield(777, "minecraft:iron_sword");
+    assert!(!sent.iter().any(|a| matches!(a, ClientAction::UseItem { hand: Hand::Off, .. })), "{sent:?}");
+}

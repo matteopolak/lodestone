@@ -350,3 +350,28 @@ fn encode_set_equipment_round_trips_slots_items_and_banner_layers_through_the_re
     assert_eq!(head.item, key("minecraft:white_banner"));
     assert_eq!(head.components.banner_patterns, banner.components.banner_patterns);
 }
+
+/// 26.2 writes `minecraft:pot_decorations` as a counted list of item ids with a
+/// brick for each plain face; the real adapter reads back the same four faces,
+/// each sherd different so a transposition shows.
+#[test]
+fn encode_container_slot_round_trips_pot_decorations_through_the_real_adapter() {
+    use lodestone_model::{ItemStack, PotDecorations};
+    let key = |s: &str| s.parse::<ResourceKey>().expect("valid key");
+    let mut pot = ItemStack::new(key("minecraft:decorated_pot"), 1);
+    let sent = PotDecorations {
+        back: Some(key("minecraft:angler_pottery_sherd")),
+        left: None,
+        right: Some(key("minecraft:howl_pottery_sherd")),
+        front: Some(key("minecraft:snort_pottery_sherd")),
+    };
+    pot.components.pot_decorations = Some(sent.clone());
+    let ServerDirective::Send { packet_id, payload } = V770ServerProtocol.encode_container_slot(0, 0, 36, Some(&pot)) else {
+        panic!("expected a Send directive");
+    };
+    let events = decode_events(packet_id, &payload);
+    let [ClientEvent::ContainerSlot { item: Some(item), .. }] = events.as_slice() else {
+        panic!("expected one ContainerSlot, got {events:?}");
+    };
+    assert_eq!(item.components.pot_decorations.as_ref(), Some(&sent));
+}

@@ -241,6 +241,20 @@ pub fn cushion_sound(kind: CushionSound, pos: Vec3, seed: i64) -> Option<WorldEf
     })
 }
 
+/// The sound a tool makes transforming the block at `pos`: full volume and pitch
+/// in the block category, heard by every player including the one who used it.
+#[must_use]
+pub fn block_tool_sound(sound: &'static str, pos: BlockPos, seed: i64) -> Option<WorldEffect> {
+    sound_exists(sound).then(|| WorldEffect::Sound {
+        sound: sound.to_owned(),
+        category: SoundCategory::Block,
+        pos: block_centre(pos),
+        volume: 1.0,
+        pitch: 1.0,
+        seed,
+    })
+}
+
 /// A shield sound at the player's `pos`: the block sound at full volume, the
 /// disable sound at 0.8, both in the player category with a pitch of
 /// `0.8 + 0.4 * pitch_roll`.

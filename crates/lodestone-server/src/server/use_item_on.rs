@@ -1018,6 +1018,37 @@ where
         }
     }
 
+    // A hoe or shovel transforming the clicked block. A tool in the main hand
+    // does nothing while an off-hand shield wants the click, which then falls
+    // through to the use-item packet that raises the shield; which tools defer is
+    // release-dependent (`crate::tool_use`).
+    if let Some(tool_item) = inventory.native(hand_native).map(|stack| stack.item.to_string())
+        && let Some(tool) = crate::tool_use::Tool::of(&tool_item)
+    {
+        let offhand = inventory.native(crate::inventory::OFFHAND_NATIVE).map(|stack| stack.item.to_string());
+        if crate::tool_use::yields_to_offhand_shield(proto.game_data_version(), hand == 0, &tool_item, offhand.as_deref(), sneaking) {
+            return Ok(());
+        }
+        let air_above = crate::random_tick::is_air_variant_id(source.block_state_id(pos.x, pos.y + 1, pos.z));
+        if let Some(change) = crate::tool_use::transform(tool, clicked.block(), face, air_above) {
+            source.set_block(pos.x, pos.y, pos.z, change.to);
+            apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, change.to)).await?;
+            if let Some(sound) = crate::effects::block_tool_sound(change.sound, pos, enchant_seed_roll) {
+                block_ticks.publish_effect(sound);
+            }
+            if change.drops_hanging_roots {
+                let mut rng = SpawnRng::new(enchant_seed_roll as u64);
+                let (position, velocity) = crate::block_drops::pop_resource_from_face(pos, face, &mut rng);
+                let stack = ItemStack::new("minecraft:hanging_roots".parse().expect("static item key parses"), 1);
+                crate::block_removal::spawn(mobs, vec![crate::block_drops::PoppedItem { stack, position, velocity }]);
+            }
+            if game_mode != GameMode::Creative {
+                super::play_loop::wear_item_in_slot(conn, state, proto, inventory, hand_native, 1).await?;
+            }
+            return Ok(());
+        }
+    }
+
     // Lighting a nether portal. **Ahead of the placement branch**, for the same
     // reason the `hand_use` block above is: `flint_and_steel` is not a block item,
     // so the placement branch below cannot reach it at all.

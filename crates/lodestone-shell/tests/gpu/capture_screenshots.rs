@@ -791,6 +791,7 @@ fn shoot(
             dyed_color: record.dyed_color,
             potion_color: record.potion_color,
             banner_patterns: record.banner_patterns.clone(),
+            pot_decorations: record.pot_decorations.clone(),
             base_color: record.base_color.clone(),
             skin: None,
         });
@@ -1082,6 +1083,7 @@ fn hotbar_records(sim: &Sim) -> Vec<Option<ItemIcon>> {
                     dyed_color: st.dyed_color(),
                     potion_color: st.potion_color(),
                     banner_patterns: st.banner_patterns().to_vec(),
+                    pot_decorations: st.pot_decorations(),
                     base_color: st.base_color().map(str::to_owned),
                     skin: None,
                 })

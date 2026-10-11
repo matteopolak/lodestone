@@ -574,6 +574,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
         dyed_color: None,
         potion_color: None,
         banner_patterns: Vec::new(),
+        pot_decorations: None,
         base_color: None,
         skin: None,
     }))
@@ -887,6 +888,7 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
         dyed_color: None,
         potion_color: None,
         banner_patterns: Vec::new(),
+        pot_decorations: None,
         base_color: None,
         skin: None,
     }))
@@ -1159,6 +1161,7 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),
+            pot_decorations: None,
             base_color: None,
             skin: None,
         })
@@ -1418,6 +1421,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
             dyed_color: None,
             potion_color: None,
             banner_patterns: patterns,
+            pot_decorations: None,
             base_color: None,
             skin: None,
         })
@@ -1645,6 +1649,7 @@ fn shields_with_different_base_colours_draw_different_colours_and_a_plain_one_dr
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),
+            pot_decorations: None,
             base_color: base_color.map(str::to_string),
             skin: None,
         })
@@ -1870,6 +1875,7 @@ fn a_based_shield_with_a_loom_pattern_shows_both_colours_in_one_cell() {
             dyed_color: None,
             potion_color: None,
             banner_patterns: patterns,
+            pot_decorations: None,
             base_color: Some("red".to_string()),
             skin: None,
         })

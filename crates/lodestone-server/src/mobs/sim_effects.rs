@@ -424,8 +424,13 @@ impl<'w> MobSim<'w> {
     /// position — the same loot-table-then-`spawn_item` shape
     /// [`drop_death_loot`](Self::drop_death_loot) already uses.
     ///
-    /// **Disclosed simplification**: no random relocation occurs before the
-    /// drop. The item spawns at the cat's current position.
+    /// The cat first tries to move to a random spot within five blocks
+    /// horizontally and two vertically ([`Self::gift_relocation`]), and the item
+    /// spawns where it ends up.
+    ///
+    /// **Disclosed simplifications**: a leashed cat relocates around itself
+    /// rather than its holder, and the item spawns at the cat's position rather
+    /// than one block behind its body yaw.
     pub(super) fn resolve_cat_gifts(&mut self, gift_requests: Vec<i32>) {
         if gift_requests.is_empty() {
             return;
@@ -447,6 +452,15 @@ impl<'w> MobSim<'w> {
             if rng.next_f32() >= chance {
                 continue;
             }
+            let pos = match self.gift_relocation(pos, &mut rng) {
+                Some(moved) => {
+                    if let Some(cat) = self.get_mut(id) {
+                        cat.teleport_to(moved);
+                    }
+                    moved
+                }
+                None => pos,
+            };
             let rolled = tables.roll(&table, &crate::loot::LootContext::default(), &mut rng);
             for stack in rolled {
                 if stack.count == 0 {
@@ -465,6 +479,68 @@ impl<'w> MobSim<'w> {
                 );
             }
         }
+    }
+
+    /// Where a cat giving its morning gift moves to, or `None` when the random
+    /// spot is unusable and it stays put.
+    ///
+    /// A spot is drawn within +-5 blocks on x and z and +-2 on y of the cat's
+    /// block, then the search drops down that column to the first block entities
+    /// may teleport onto. The cat stands there at the whole-number coordinates
+    /// drawn, and the move fails if its box overlaps a collider or a liquid. 26.3
+    /// also refuses a landing block or any block the box overlaps that is
+    /// dangerous for teleportation (fire, campfires, lava cauldrons, cactus,
+    /// magma, sweet berries, wither roses, pointed dripstone, powder snow);
+    /// 26.2 has no such filter.
+    fn gift_relocation(&self, from: Vec3, rng: &mut SpawnRng) -> Option<Vec3> {
+        use lodestone_data::GameDataVersion;
+        use lodestone_entity::pathfinding::{Aabb, PathWorld};
+        const CAT_WIDTH: f64 = 0.6;
+        const CAT_HEIGHT: f64 = 0.7;
+        let dangerous = |state: lodestone_data::block_states::StateId| {
+            self.release == GameDataVersion::V26_3
+                && lodestone_data::tool::block_tag_contains("minecraft:dangerous_for_teleportation", state.block())
+        };
+        let x = from.x.floor() as i32 + rng.next_int(11) - 5;
+        let mut y = from.y.floor() as i32 + rng.next_int(5) - 2;
+        let z = from.z.floor() as i32 + rng.next_int(11) - 5;
+        let mut below = y;
+        while below > self.world.min_y {
+            below -= 1;
+            let landing = self.world.block_state_id(x, below, z);
+            if lodestone_data::tool::block_tag_contains("minecraft:entities_can_teleport_to", landing.block()) {
+                if dangerous(landing) {
+                    return None;
+                }
+                let half = CAT_WIDTH / 2.0;
+                let (cx, cy, cz) = (f64::from(x), f64::from(y), f64::from(z));
+                let aabb = Aabb {
+                    min_x: cx - half,
+                    min_y: cy,
+                    min_z: cz - half,
+                    max_x: cx + half,
+                    max_y: cy + CAT_HEIGHT,
+                    max_z: cz + half,
+                };
+                if PathWorld::collides(self.world, aabb) {
+                    return None;
+                }
+                let cells = |lo: f64, hi: f64| (lo.floor() as i32)..=((hi - 1e-7).floor() as i32);
+                for bx in cells(aabb.min_x, aabb.max_x) {
+                    for by in cells(aabb.min_y, aabb.max_y) {
+                        for bz in cells(aabb.min_z, aabb.max_z) {
+                            let state = self.world.block_state_id(bx, by, bz);
+                            if crate::fluid::fluid_state_of_id(state).is_some() || dangerous(state) {
+                                return None;
+                            }
+                        }
+                    }
+                }
+                return Some(Vec3::new(cx, cy, cz));
+            }
+            y -= 1;
+        }
+        None
     }
 
     /// Resolves every shoulder-mount request recorded this tick. This crate has

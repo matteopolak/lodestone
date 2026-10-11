@@ -180,3 +180,45 @@ fn a_freshly_mounted_parrot_does_not_dismount_before_the_grace_period() {
         "a parrot inside its 20-tick minimum ride must not dismount just because the owner sleeps"
     );
 }
+
+/// Cats that were relocated by the gift: standing more than a block from where
+/// they began (one tick of idle movement is far below that; the relocation
+/// lands on whole-number coordinates up to five blocks away).
+fn relocated_cats(release: lodestone_data::GameDataVersion, floor: &str) -> usize {
+    let mut world = ChunkWorld::new(-64, 384);
+    for x in -8..=8 {
+        for z in -8..=8 {
+            world.set_block(x, -1, z, floor);
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    sim.set_release(release);
+    sim.day_time = 23_800;
+    let mut cats = Vec::new();
+    for i in 0..40 {
+        let start = Vec3::new(f64::from(i % 5) * 3.0 - 6.0 + 0.5, 0.0, f64::from(i / 5) * 1.5 - 5.0 + 0.5);
+        let id = sim.spawn_species(cat_key(), start).id();
+        sim.get_mut(id).expect("just spawned").mob.request_gift();
+        cats.push((id, start));
+    }
+    sim.tick();
+    cats.iter()
+        .filter(|(id, start)| {
+            let now = sim.get(*id).expect("cat is still in the world").position();
+            (now.x - start.x).hypot(now.z - start.z) > 1.0
+        })
+        .count()
+}
+
+/// The gift moves the cat to a random spot first. 26.3 refuses a spot on or in
+/// a block that is dangerous for teleportation, so over a magma floor no cat
+/// moves; 26.2 has no such filter. The stone floor is the control: the same
+/// cats do move there in 26.3, so the zero is the filter and not a detector
+/// that cannot see movement.
+#[test]
+fn a_gift_cat_moves_in_26_2_over_magma_but_26_3_leaves_it_where_it_stands() {
+    use lodestone_data::GameDataVersion::{V26_2, V26_3};
+    assert!(relocated_cats(V26_3, "minecraft:stone") >= 15, "control: cats relocate over stone");
+    assert!(relocated_cats(V26_2, "minecraft:magma_block") >= 15, "26.2 relocates over magma");
+    assert_eq!(relocated_cats(V26_3, "minecraft:magma_block"), 0, "26.3 refuses the dangerous landing block");
+}

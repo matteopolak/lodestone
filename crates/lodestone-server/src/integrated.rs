@@ -2381,6 +2381,9 @@ impl IntegratedServer {
         );
         let live_mobs = primary_runtime.entities().clone();
         let mob_handle = primary_runtime.mobs().clone();
+        mob_handle.with(|sim| {
+            sim.set_release(protocol.game_data_version());
+        });
         let player_registry = world_state.player_registry().clone();
         // shared with the tick task the same way
         // `block_entities` is, above — see [`BlockTickFeed`]'s own doc
