@@ -310,7 +310,7 @@ async fn a_player_standing_in_air_never_burns() {
 ///
 /// The input carries separate sprint (`0x40`) and shift (`0x20`) flags. This
 /// drives the real `dispatch_play_packet` path, where the shift flag reaches
-/// `MobSim::dismount_rider`, and asserts both the simulation state and the wire.
+/// `MobSim::dismount`, and asserts both the simulation state and the wire.
 ///
 /// Mounting goes through the real `MobSim` API rather than a wire-level
 /// `INTERACT_ENTITY` (this file's stand-in protocol has no decode arm for that
@@ -332,7 +332,7 @@ async fn sneaking_dismounts_a_boat_on_the_wire() {
             &mut conn,
             &FakeProtocol,
             &source,
-            &NoEntities,
+            &mobs_for_server,
             0,
             &BlockEntityHandle::default(),
             &mobs_for_server,
@@ -356,11 +356,22 @@ async fn sneaking_dismounts_a_boat_on_the_wire() {
         "precondition: mounting must succeed while not sneaking"
     );
     assert_eq!(
-        mobs.with(|sim| sim.vehicle_ridden_by(LOCAL_PLAYER_ENTITY_ID)),
+        mobs.with(|sim| sim.vehicle_of(LOCAL_PLAYER_ENTITY_ID)),
         Some(boat),
         "precondition: the player is aboard before the sneak packet is sent"
     );
-    let _ = drain_available(&mut client).await;
+    // The streaming pass is the only sender of the passenger list: boarding
+    // reaches the client through it.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let boarding = drain_available(&mut client).await;
+    let seated = boarding
+        .iter()
+        .find(|(id, _)| *id == SET_PASSENGERS_S2C)
+        .map(|(_, payload)| {
+            let mut r = Reader::new(payload);
+            (r.var_i32().expect("vehicle id"), r.var_i32().expect("passenger count"), r.var_i32().expect("passenger"))
+        });
+    assert_eq!(seated, Some((boat, 1, LOCAL_PLAYER_ENTITY_ID)), "boarding streams the vehicle's passenger list");
 
     // A real `PLAYER_INPUT` with `shift: true`, through
     // the real dispatch path.
@@ -385,6 +396,12 @@ async fn sneaking_dismounts_a_boat_on_the_wire() {
     assert_eq!(
         count, 0,
         "dismounting sends the vehicle's whole (now empty) passenger list, not a delta"
+    );
+
+    let order = |wanted: i32| packets.iter().position(|(id, _)| *id == wanted);
+    assert!(
+        order(SET_PASSENGERS_S2C) < order(PLAYER_POSITION_S2C),
+        "a client still seated ignores a position packet, so the passenger list must come first"
     );
 
     let teleport = packets
@@ -413,10 +430,83 @@ async fn sneaking_dismounts_a_boat_on_the_wire() {
     assert_eq!((yaw, pitch), (0.0, 0.0));
 
     assert_eq!(
-        mobs.with(|sim| sim.vehicle_ridden_by(LOCAL_PLAYER_ENTITY_ID)),
+        mobs.with(|sim| sim.vehicle_of(LOCAL_PLAYER_ENTITY_ID)),
         None,
         "the sim itself must actually vacate the boat, not just announce it on the wire"
     );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
+/// An entity source whose publication can be held back, as the live tick loop's
+/// is between sim ticks.
+struct LaggingEntities {
+    mobs: MobHandle,
+    frozen: std::sync::Mutex<Option<Vec<EntitySnapshot>>>,
+}
+
+impl lodestone_server::EntitySource for LaggingEntities {
+    fn snapshots(&self) -> Vec<EntitySnapshot> {
+        let held = self.frozen.lock().expect("frozen lock").clone();
+        held.unwrap_or_else(|| self.mobs.with(|sim| sim.snapshots()))
+    }
+}
+
+/// The dismount placement waits for the passenger list that frees the client:
+/// while the published entities still show the player seated, no position
+/// packet goes out (a seated client would ignore it); once the list is sent the
+/// placement follows.
+#[tokio::test(start_paused = true)]
+async fn a_dismount_placement_waits_until_the_client_is_told_it_left() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+    let mobs = MobHandle::default();
+    let lagging = Arc::new(LaggingEntities { mobs: mobs.clone(), frozen: std::sync::Mutex::new(None) });
+    let for_server = Arc::clone(&lagging);
+    let mobs_for_server = mobs.clone();
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &*for_server,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Sailor", 1).await;
+    let boat = mobs.with(|sim| {
+        sim.spawn_vehicle("minecraft:oak_boat".parse().expect("valid key"), Vec3::new(8.0, 8.0, 8.0), 0.0)
+    });
+    assert!(mobs.with(|sim| sim.mount_vehicle(boat, LOCAL_PLAYER_ENTITY_ID, false)));
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let _ = drain_available(&mut client).await;
+
+    *lagging.frozen.lock().expect("frozen lock") = Some(mobs.with(|sim| sim.snapshots()));
+    send_player_input(&mut client, false, true, false).await;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let held = drain_available(&mut client).await;
+    assert_eq!(mobs.with(|sim| sim.vehicle_of(LOCAL_PLAYER_ENTITY_ID)), None, "the sim has dismounted");
+    assert!(
+        !held.iter().any(|(id, _)| *id == PLAYER_POSITION_S2C || *id == SET_PASSENGERS_S2C),
+        "nothing may overtake the passenger list: {:?}",
+        held.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+    );
+
+    *lagging.frozen.lock().expect("frozen lock") = None;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let released = drain_available(&mut client).await;
+    let order = |wanted: i32| released.iter().position(|(id, _)| *id == wanted);
+    assert!(order(SET_PASSENGERS_S2C).is_some(), "the list is sent once the publication shows the dismount");
+    assert!(order(SET_PASSENGERS_S2C) < order(PLAYER_POSITION_S2C), "and the placement follows it");
+    assert!(order(PLAYER_POSITION_S2C).is_some());
 
     drop(client);
     let _ = server.await.expect("server task panicked");

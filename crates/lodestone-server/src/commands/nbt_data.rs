@@ -24,18 +24,23 @@
 //!   sends the client the kind's data-update packet. A block entity that exists
 //!   only in generated chunk data enters the registry on its first write.
 //!   A position with none is refused "The target block is not a block entity".
-//! - `modify <path> (set|merge|insert <index>|prepend|append) value <nbt>`.
+//! - `modify <path> (set|merge|insert <index>|prepend|append)` takes its source tags
+//!   from `value <nbt>`, `from <target> [path]` or `string <target> [path [start [end]]]`.
+//!   The source is read before the destination, so a missing source is refused first. `set`
+//!   writes the last source tag, `merge` folds them into one compound, the inserts add all of
+//!   them. `string` turns a string or number into text and slices it by character, a negative
+//!   index counting from the end; a container is "Expected a value".
 //!
 //! # How to change it
 //!
 //! A new target implements [`Target`]'s five methods and registers its literal
-//! and argument in [`register_target`]. A new modify operation is one arm in
-//! [`register_modify`].
+//! and argument in [`register_target`]; it is then a destination and a source. A new
+//! modify operation is one arm in [`register_modify`]; a new source kind goes in
+//! [`register_sources`].
 //!
 //! # Gaps
 //!
-//! The `modify` sources `from <target>`, `string` and `compute` are absent, so
-//! no target can feed another.
+//! The `modify` source `compute` (loot-context number providers) is absent.
 
 use std::sync::Arc;
 
@@ -47,7 +52,8 @@ use lodestone_model::BlockPos;
 
 use super::block_commands::resolve_block_pos;
 use super::entity_data::{nbt_to_snbt, resolve_single, snbt_to_nbt, target_nbt};
-use super::registrar::{Ctx, Registrar};
+use super::registrar::{ArgKey, Ctx, Registrar};
+use super::CommandResult;
 use super::source::CommandTarget;
 
 /// The game-masters permission level, matching `/scoreboard`/`/team`.
@@ -166,7 +172,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     for verb in ["merge", "get", "remove"] {
         let verb_node = registrar.literal(data, verb);
         for kind in ["block", "entity", "storage"] {
-            let (node, resolver) = register_target(registrar, verb_node, kind);
+            let (node, resolver) = register_target(registrar, verb_node, kind, "target");
             match verb {
                 "merge" => register_merge(registrar, node, &resolver),
                 "get" => register_get(registrar, node, &resolver),
@@ -176,21 +182,22 @@ pub(super) fn register(registrar: &mut Registrar) {
     }
     let modify = registrar.literal(data, "modify");
     for kind in ["block", "entity", "storage"] {
-        let (node, resolver) = register_target(registrar, modify, kind);
+        let (node, resolver) = register_target(registrar, modify, kind, "target");
         register_modify(registrar, node, &resolver);
     }
 }
 
-/// Registers `<kind> <target>` under `parent`; returns the target argument's
-/// node and the resolver that turns its value into a [`Target`].
-fn register_target(registrar: &mut Registrar, parent: NodeId, kind: &str) -> (NodeId, Resolver) {
+/// Registers `<kind> <name>` under `parent`; returns the argument's node and the
+/// resolver that turns its value into a [`Target`]. `name` is `target` for a
+/// destination and `source` for a modify source.
+fn register_target(registrar: &mut Registrar, parent: NodeId, kind: &str, name: &str) -> (NodeId, Resolver) {
     let literal = registrar.literal(parent, kind);
     if kind == "storage" {
-        let (node, key) = registrar.arg(literal, "target", StorageIdArg);
+        let (node, key) = registrar.arg(literal, name, StorageIdArg);
         let resolver: Resolver = Arc::new(move |ctx| Ok(Target::Storage(ctx.get(key).clone())));
         (node, resolver)
     } else if kind == "block" {
-        let (node, key) = registrar.arg(literal, "targetPos", BlockPosArg);
+        let (node, key) = registrar.arg(literal, &format!("{name}Pos"), BlockPosArg);
         let resolver: Resolver = Arc::new(move |ctx| {
             let (x, y, z) = resolve_block_pos(ctx, *ctx.get(key));
             let pos = BlockPos::new(x, y, z);
@@ -198,7 +205,7 @@ fn register_target(registrar: &mut Registrar, parent: NodeId, kind: &str) -> (No
         });
         (node, resolver)
     } else {
-        let (node, key) = registrar.arg(literal, "target", EntityArg::entity());
+        let (node, key) = registrar.arg(literal, name, EntityArg::entity());
         let resolver: Resolver = Arc::new(move |ctx| {
             let selector = ctx.get(key).clone();
             resolve_single(ctx, &selector).map(Target::Entity)
@@ -312,79 +319,160 @@ fn register_remove(registrar: &mut Registrar, node: NodeId, resolver: &Resolver)
     });
 }
 
-/// How a `modify` operation changes the target compound; returns the count of
-/// places changed.
-type Operation = Arc<dyn Fn(&NbtPath, &mut SnbtValue, &SnbtValue) -> Result<usize, String> + Send + Sync>;
+/// How a `modify` operation changes the target compound from its source tags;
+/// returns the count of places changed.
+type Operation = Arc<dyn Fn(&NbtPath, &mut SnbtValue, &[SnbtValue]) -> Result<usize, String> + Send + Sync>;
+
+/// Builds the [`Operation`], which may depend on an argument parsed before it.
+type OperationFactory = Arc<dyn Fn(&Ctx<'_>) -> Operation + Send + Sync>;
 
 fn register_modify(registrar: &mut Registrar, node: NodeId, resolver: &Resolver) {
     let (path_node, path_key) = registrar.arg(node, "targetPath", NbtPathArg);
 
-    let set: Operation = Arc::new(|path, data, value| path.set(data, value));
-    let merge: Operation = Arc::new(|path, data, value| {
-        if too_deep(value, 0) {
-            return Err(TOO_DEEP.to_owned());
+    let set: Operation = Arc::new(|path, data, sources| {
+        path.set(data, sources.last().expect("a modify source is never empty"))
+    });
+    let merge: Operation = Arc::new(|path, data, sources| {
+        let mut combined: Vec<(String, SnbtValue)> = Vec::new();
+        for source in sources {
+            if too_deep(source, 0) {
+                return Err(TOO_DEEP.to_owned());
+            }
+            let SnbtValue::Compound(entries) = source else {
+                return Err(format!("Expected an object: got {source}"));
+            };
+            lodestone_command_mc::merge_compound(&mut combined, entries);
         }
-        let SnbtValue::Compound(entries) = value else {
-            return Err(format!("Expected an object: got {value}"));
-        };
-        path.merge(data, entries)
+        path.merge(data, &combined)
     });
     for (literal, operation) in [("set", set), ("merge", merge)] {
         let op_node = registrar.literal(path_node, literal);
-        register_value(registrar, op_node, path_key, resolver, &operation);
+        let factory: OperationFactory = Arc::new(move |_| operation.clone());
+        register_sources(registrar, op_node, path_key, resolver, &factory);
     }
 
-    for (literal, index) in [("prepend", Some(0)), ("append", Some(-1))] {
+    for (literal, index) in [("prepend", 0), ("append", -1)] {
         let op_node = registrar.literal(path_node, literal);
-        let operation: Operation =
-            Arc::new(move |path, data, value| path.insert(index.unwrap_or(0), data, std::slice::from_ref(value)));
-        register_value(registrar, op_node, path_key, resolver, &operation);
+        let operation: Operation = Arc::new(move |path, data, sources| path.insert(index, data, sources));
+        let factory: OperationFactory = Arc::new(move |_| operation.clone());
+        register_sources(registrar, op_node, path_key, resolver, &factory);
     }
 
     let insert = registrar.literal(path_node, "insert");
     let (index_node, index_key) = registrar.arg(insert, "index", IntegerArgument::new());
-    register_value_with(registrar, index_node, path_key, resolver, move |ctx| {
+    let factory: OperationFactory = Arc::new(move |ctx| {
         let index = *ctx.get(index_key);
-        let operation: Operation = Arc::new(move |path, data, value| path.insert(index, data, std::slice::from_ref(value)));
-        operation
+        Arc::new(move |path, data, sources| path.insert(index, data, sources))
     });
+    register_sources(registrar, index_node, path_key, resolver, &factory);
 }
 
-fn register_value(
+/// Hangs the three source forms under a modify operation's node.
+fn register_sources(
     registrar: &mut Registrar,
     op_node: NodeId,
-    path_key: super::registrar::ArgKey<NbtPath>,
-    resolver: &Resolver,
-    operation: &Operation,
-) {
-    let operation = operation.clone();
-    register_value_with(registrar, op_node, path_key, resolver, move |_| operation.clone());
-}
-
-fn register_value_with(
-    registrar: &mut Registrar,
-    op_node: NodeId,
-    path_key: super::registrar::ArgKey<NbtPath>,
-    resolver: &Resolver,
-    operation: impl Fn(&Ctx<'_>) -> Operation + Send + Sync + 'static,
+    path_key: ArgKey<NbtPath>,
+    target: &Resolver,
+    factory: &OperationFactory,
 ) {
     let value_literal = registrar.literal(op_node, "value");
     let (value_node, value_key) = registrar.arg(value_literal, "value", NbtTagArg);
-    let resolver = resolver.clone();
+    let (resolver, operation) = (target.clone(), factory.clone());
     registrar.exec(value_node, move |ctx| {
-        let target = resolver(ctx)?;
-        let path = ctx.get(path_key).clone();
         let value = ctx.get(value_key).clone();
-        let operation = operation(ctx);
-        let mut data = target.read(ctx)?;
-        let changed = operation(&path, &mut data, &value)?;
-        if changed == 0 {
-            return Err(UNCHANGED.to_owned());
-        }
-        target.write(ctx, data)?;
-        ctx.send_success(target.modified());
-        Ok(i32::try_from(changed).unwrap_or(i32::MAX))
+        modify(ctx, &resolver, path_key, &operation, vec![value])
     });
+
+    for as_text in [false, true] {
+        let head = registrar.literal(op_node, if as_text { "string" } else { "from" });
+        for kind in ["block", "entity", "storage"] {
+            let (node, source) = register_target(registrar, head, kind, "source");
+            let (resolver, operation, whole) = (target.clone(), factory.clone(), source.clone());
+            registrar.exec(node, move |ctx| {
+                let tags = vec![whole(ctx)?.read(ctx)?];
+                let tags = if as_text { stringified(tags, |text| Ok(text))? } else { tags };
+                modify(ctx, &resolver, path_key, &operation, tags)
+            });
+            let (path_node, source_path_key) = registrar.arg(node, "sourcePath", NbtPathArg);
+            let (resolver, operation, by_path) = (target.clone(), factory.clone(), source.clone());
+            let read_at = move |ctx: &Ctx<'_>| -> Result<Vec<SnbtValue>, String> {
+                let path = ctx.get(source_path_key).clone();
+                path.get(&by_path(ctx)?.read(ctx)?)
+            };
+            let read = read_at.clone();
+            registrar.exec(path_node, move |ctx| {
+                let tags = read(ctx)?;
+                let tags = if as_text { stringified(tags, |text| Ok(text))? } else { tags };
+                modify(ctx, &resolver, path_key, &operation, tags)
+            });
+            if !as_text {
+                continue;
+            }
+            let (start_node, start_key) = registrar.arg(path_node, "start", IntegerArgument::new());
+            let (resolver_from, operation_from, read_from) = (target.clone(), factory.clone(), read_at.clone());
+            registrar.exec(start_node, move |ctx| {
+                let start = *ctx.get(start_key);
+                let tags = stringified(read_from(ctx)?, |text| substring(&text, start, None))?;
+                modify(ctx, &resolver_from, path_key, &operation_from, tags)
+            });
+            let (end_node, end_key) = registrar.arg(start_node, "end", IntegerArgument::new());
+            let (resolver, operation) = (target.clone(), factory.clone());
+            registrar.exec(end_node, move |ctx| {
+                let (start, end) = (*ctx.get(start_key), *ctx.get(end_key));
+                let tags = stringified(read_at(ctx)?, |text| substring(&text, start, Some(end)))?;
+                modify(ctx, &resolver, path_key, &operation, tags)
+            });
+        }
+    }
+}
+
+/// Resolves the destination and applies the operation to it with `sources`.
+fn modify(
+    ctx: &mut Ctx<'_>,
+    resolver: &Resolver,
+    path_key: ArgKey<NbtPath>,
+    operation: &OperationFactory,
+    sources: Vec<SnbtValue>,
+) -> CommandResult {
+    let target = resolver(ctx)?;
+    let path = ctx.get(path_key).clone();
+    let operation = operation(ctx);
+    let mut data = target.read(ctx)?;
+    let changed = operation(&path, &mut data, &sources)?;
+    if changed == 0 {
+        return Err(UNCHANGED.to_owned());
+    }
+    target.write(ctx, data)?;
+    ctx.send_success(target.modified());
+    Ok(i32::try_from(changed).unwrap_or(i32::MAX))
+}
+
+/// Each tag as a string tag holding `process` of its text: a string as it is, a
+/// number as its SNBT form, anything else refused.
+fn stringified(
+    tags: Vec<SnbtValue>,
+    process: impl Fn(String) -> Result<String, String>,
+) -> Result<Vec<SnbtValue>, String> {
+    tags.into_iter()
+        .map(|tag| match &tag {
+            SnbtValue::String(text) => process(text.clone()).map(SnbtValue::String),
+            SnbtValue::Byte(_) | SnbtValue::Short(_) | SnbtValue::Int(_) | SnbtValue::Long(_)
+            | SnbtValue::Float(_) | SnbtValue::Double(_) => process(tag.to_string()).map(SnbtValue::String),
+            other => Err(format!("Expected a value: got {other}")),
+        })
+        .collect()
+}
+
+/// `text` from character `start` to `end` (the end by default), a negative index
+/// counting back from the end; refused unless `0 <= start <= end <= length`.
+fn substring(text: &str, start: i32, end: Option<i32>) -> Result<String, String> {
+    let length = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
+    let absolute = |index: i32| if index >= 0 { i64::from(index) } else { length + i64::from(index) };
+    let (from, to) = (absolute(start), end.map_or(length, absolute));
+    if from < 0 || to > length || from > to {
+        return Err(format!("Invalid substring indices: {from} to {to}"));
+    }
+    Ok(text.chars().skip(from as usize).take((to - from) as usize).collect())
 }
 
 fn too_deep(value: &SnbtValue, depth: usize) -> bool {

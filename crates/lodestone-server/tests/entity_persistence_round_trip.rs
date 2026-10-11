@@ -374,6 +374,42 @@ async fn a_mob_and_a_dropped_item_survive_close_and_reopen() {
 /// assertions must fail.
 ///
 /// Without this, a broken restore path could be mistaken for a populated world.
+/// A mob riding a boat is written inside the boat's record and comes back riding
+/// it, with both uuids intact and no second copy of either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_riding_a_boat_survives_close_and_reopen_still_riding() {
+    let dir = tempdir("riders");
+    let (server, _client) = open(&dir).await;
+    assert!(wait_for_reseed(&server).await, "the mob seed task never ran");
+    let (boat_uuid, cow_uuid) = server.mobs().expect("mob sim").with(|sim| {
+        let boat = sim.spawn_vehicle("minecraft:oak_boat".parse().expect("valid key"), COW_POS, 0.0);
+        let boat_uuid = sim.command_entities().into_iter().find(|e| e.entity_id == boat).expect("the boat").uuid;
+        let cow = sim.spawn_species(COW.parse().expect("valid key"), COW_POS);
+        let cow_uuid = cow.uuid();
+        let outcome = sim.mount_forced(boat_uuid, lodestone_server::Rider::Mob(cow_uuid));
+        assert_eq!(outcome, lodestone_server::MountOutcome::Mounted { vehicle: boat });
+        (boat_uuid, cow_uuid)
+    });
+    server.shutdown().await;
+
+    let (server, _client) = open(&dir).await;
+    let mobs = server.mobs().expect("a persistent world has a mob sim");
+    let mut seated = None;
+    for _ in 0..600 {
+        seated = mobs.with(|sim| {
+            let id_of = |uuid: Uuid| sim.command_entities().into_iter().find(|e| e.uuid == uuid).map(|e| e.entity_id);
+            let (boat, cow) = (id_of(boat_uuid)?, id_of(cow_uuid)?);
+            Some((sim.vehicle_of(cow) == Some(boat), sim.command_entities().len()))
+        });
+        if seated.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(seated, Some((true, 2)), "the cow rides its boat again, and neither came back twice");
+    server.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fresh_world_has_no_entities_so_the_gate_above_cannot_pass_vacuously() {
     let dir = tempdir("entities-control");

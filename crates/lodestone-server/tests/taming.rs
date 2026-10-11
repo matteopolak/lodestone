@@ -831,8 +831,8 @@ fn an_empty_handed_click_on_a_tamed_adult_horse_mounts_it() {
         .tame(MobOwner::Player(alice().uuid));
 
     assert_eq!(sim.interact(horse, alice(), None), InteractOutcome::Mounted);
-    assert_eq!(sim.mob_rider(horse), Some(alice().entity_id));
-    assert_eq!(sim.mob_ridden_by(alice().entity_id), Some(horse));
+    assert_eq!(sim.controlling_player(horse), Some(alice().entity_id));
+    assert_eq!(sim.vehicle_of(alice().entity_id), Some(horse));
 }
 
 /// The occupancy rule `mount_mob` shares with `mount_vehicle`: a second
@@ -852,7 +852,7 @@ fn a_second_player_cannot_board_an_already_mounted_horse() {
 
     assert_eq!(sim.interact(horse, bob(), None), InteractOutcome::Pass);
     assert_eq!(
-        sim.mob_rider(horse),
+        sim.controlling_player(horse),
         Some(alice().entity_id),
         "the incumbent rider must not be displaced by a refused second click"
     );
@@ -878,7 +878,7 @@ fn a_tame_baby_horse_cannot_be_boarded_by_an_empty_handed_click() {
     }
 
     assert_eq!(sim.interact(horse, alice(), None), InteractOutcome::Pass);
-    assert_eq!(sim.mob_rider(horse), None);
+    assert_eq!(sim.controlling_player(horse), None);
 }
 
 /// Entity's stop riding: an explicit dismount clears the link both ways and
@@ -892,11 +892,11 @@ fn dismount_mob_clears_the_link_and_returns_the_mob() {
         .id();
     assert!(sim.mount_mob(horse, alice().entity_id));
 
-    assert_eq!(sim.dismount_mob(alice().entity_id), Some(horse));
-    assert_eq!(sim.mob_rider(horse), None);
-    assert_eq!(sim.mob_ridden_by(alice().entity_id), None);
+    assert_eq!(sim.dismount(alice().entity_id), Some(horse));
+    assert_eq!(sim.controlling_player(horse), None);
+    assert_eq!(sim.vehicle_of(alice().entity_id), None);
     // A second dismount with nobody aboard has nothing to report.
-    assert_eq!(sim.dismount_mob(alice().entity_id), None);
+    assert_eq!(sim.dismount(alice().entity_id), None);
 }
 
 /// The handover `tick_vehicles` documents for a boat, ported to a mounted mob:
@@ -941,7 +941,7 @@ fn a_rider_absent_from_a_non_empty_roster_is_evicted_from_its_mount() {
     // not evict anyone — the control side of this gate.
     sim.tick();
     assert_eq!(
-        sim.mob_rider(horse),
+        sim.controlling_player(horse),
         Some(alice().entity_id),
         "an empty roster is not evidence alice disconnected"
     );
@@ -951,7 +951,7 @@ fn a_rider_absent_from_a_non_empty_roster_is_evicted_from_its_mount() {
     sim.set_players(vec![seen(bob(), Vec3::new(10.0, 0.0, 10.0))]);
     sim.tick();
     assert_eq!(
-        sim.mob_rider(horse),
+        sim.controlling_player(horse),
         None,
         "a rider absent from a non-empty roster has disconnected"
     );

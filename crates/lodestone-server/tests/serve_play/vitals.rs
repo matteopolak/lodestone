@@ -481,6 +481,44 @@ async fn respawn_after_death_refills_health_and_air() {
     let _ = server.await.unwrap();
 }
 
+/// A player who dies aboard a boat stops riding when they respawn.
+#[tokio::test(start_paused = true)]
+async fn respawn_after_death_lifts_the_player_off_their_boat() {
+    let (client_end, server_end) = memory_pair();
+    let source = WaterSource;
+    let mobs = MobHandle::default();
+    let for_server = mobs.clone();
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &for_server)
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Drowned", 1).await;
+    send_player_moved(&mut client, 8.0, 8.0, 8.0).await;
+    let boat = mobs.with(|sim| {
+        let boat = sim.spawn_vehicle("minecraft:oak_boat".parse().expect("valid key"), Vec3::new(8.0, 8.0, 8.0), 0.0);
+        assert!(sim.mount_vehicle(boat, LOCAL_PLAYER_ENTITY_ID, false));
+        boat
+    });
+    loop {
+        let (_air, health) = read_until_health_update(&mut client).await;
+        if health <= 0.0 {
+            break;
+        }
+    }
+    assert_eq!(mobs.with(|sim| sim.vehicle_of(LOCAL_PLAYER_ENTITY_ID)), Some(boat), "dead, but still seated");
+
+    send_client_command(&mut client, 0).await;
+    let _ = read_until(&mut client, AIR_SUPPLY_S2C).await;
+    assert_eq!(mobs.with(|sim| sim.vehicle_of(LOCAL_PLAYER_ENTITY_ID)), None);
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
 /// **Control**: a respawn request from a player who is not dead must be a
 /// no-op, proving the health/air refill is gated on death, not unconditional.
 #[tokio::test(start_paused = true)]

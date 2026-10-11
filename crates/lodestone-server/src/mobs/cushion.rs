@@ -10,8 +10,8 @@
 //!
 //! # How it works
 //!
-//! * One passenger at most. [`MobSim::mount_cushion`] refuses a sneaking
-//!   player and an occupied cushion (the current rider included).
+//! * One passenger by interaction. [`MobSim::mount_cushion`] refuses a sneaking
+//!   player and an occupied cushion.
 //! * A hit by a player breaks it ([`MobSim::break_cushion`]): the entity goes
 //!   and its coloured item drops, unless the breaker is in creative.
 //! * Every 101st tick a cushion checks itself: fire in its box breaks
@@ -27,9 +27,8 @@
 //!
 //! Sounds and break particles are published by the callers that spawn, seat or
 //! break a cushion (`effects::cushion_sound`, `effects::cushion_break_particles`),
-//! not here. Breaking a seated cushion queues the rider's ejection, the same
-//! queue a thrown-off mount uses, so every breaker (a hit, fire, lost support)
-//! reaches the rider's connection without a path of its own.
+//! not here. A broken cushion's riders are dropped by the next rider sync, so
+//! every breaker (a hit, fire, lost support) lifts them the same way.
 
 use lodestone_core::Nbt;
 use lodestone_data::block_states::StateId;
@@ -57,8 +56,6 @@ pub(super) fn cushion_entity_type() -> ResourceKey {
 pub struct CushionBroken {
     /// Where it stood.
     pub position: Vec3,
-    /// The player entity id that was seated on it, if any.
-    pub rider: Option<i32>,
     /// The dye ordinal it had.
     pub color: u8,
 }
@@ -76,7 +73,6 @@ impl<'w> MobSim<'w> {
                 position,
                 yaw,
                 color: color & 0x0F,
-                rider: None,
                 ticks_since_check: 0,
             },
         );
@@ -109,60 +105,19 @@ impl<'w> MobSim<'w> {
             .any(|c| Aabb::cushion_at(c.position).intersects(bb))
     }
 
-    /// The player entity id seated on cushion `id`.
-    #[must_use]
-    pub fn cushion_rider(&self, id: i32) -> Option<i32> {
-        self.cushions.get(&id).and_then(|c| c.rider)
-    }
-
-    /// The cushion `player_entity_id` is seated on.
-    #[must_use]
-    pub fn cushion_ridden_by(&self, player_entity_id: i32) -> Option<i32> {
-        self.cushions
-            .iter()
-            .find(|(_, c)| c.rider == Some(player_entity_id))
-            .map(|(&id, _)| id)
-    }
-
-    /// Seats a player on cushion `id`. Returns whether they are now aboard, the
-    /// caller's cue to send the passenger list.
-    ///
-    /// Refused for a sneaking player and for an occupied cushion. A player
-    /// seated elsewhere is lifted off that seat first.
+    /// Seats a player on cushion `id` by interaction. Refused for a sneaking
+    /// player and for an occupied cushion.
     pub fn mount_cushion(&mut self, id: i32, player_entity_id: i32, using_secondary_action: bool) -> bool {
-        if using_secondary_action || self.cushions.get(&id).is_none_or(|c| c.rider.is_some()) {
+        if using_secondary_action || !self.cushions.contains_key(&id) {
             return false;
         }
-        self.dismount_rider(player_entity_id);
-        self.dismount_minecart_rider(player_entity_id);
-        self.dismount_mob(player_entity_id);
-        if let Some(previous) = self.cushion_ridden_by(player_entity_id)
-            && let Some(old) = self.cushions.get_mut(&previous)
-        {
-            old.rider = None;
-        }
-        if let Some(cushion) = self.cushions.get_mut(&id) {
-            cushion.rider = Some(player_entity_id);
-        }
-        true
-    }
-
-    /// Lifts `player_entity_id` off its cushion, returning the cushion id.
-    pub fn dismount_cushion_rider(&mut self, player_entity_id: i32) -> Option<i32> {
-        let id = self.cushion_ridden_by(player_entity_id)?;
-        if let Some(cushion) = self.cushions.get_mut(&id) {
-            cushion.rider = None;
-        }
-        Some(id)
+        self.board(id, player_entity_id, true, false)
     }
 
     /// Removes cushion `id`; when `drop_item` is set its coloured item drops at
     /// its position. `None` when `id` is not a cushion.
     pub fn break_cushion(&mut self, id: i32, drop_item: bool) -> Option<CushionBroken> {
         let cushion = self.cushions.remove(&id)?;
-        if let Some(rider) = cushion.rider {
-            self.pending_ejections.push((id, rider));
-        }
         if drop_item {
             self.spawn_item(
                 cushion::item_for_color(cushion.color),
@@ -176,7 +131,6 @@ impl<'w> MobSim<'w> {
         }
         Some(CushionBroken {
             position: cushion.position,
-            rider: cushion.rider,
             color: cushion.color,
         })
     }
@@ -252,14 +206,6 @@ impl<'w> MobSim<'w> {
         let id = self.spawn_cushion(saved.pos, saved.rotation.yaw, color);
         if let Some(cushion) = self.cushions.get_mut(&id) {
             cushion.uuid = saved.uuid;
-        }
-    }
-
-    pub(super) fn clear_disconnected_cushion_riders(&mut self, connected: &[i32]) {
-        for cushion in self.cushions.values_mut() {
-            if cushion.rider.is_some_and(|rider| !connected.contains(&rider)) {
-                cushion.rider = None;
-            }
         }
     }
 

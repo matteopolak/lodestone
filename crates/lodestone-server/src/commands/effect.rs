@@ -98,13 +98,6 @@ pub enum Effect {
         damage_type: String,
         from: Option<lodestone_model::Vec3>,
     },
-    /// `/ride <player> mount` — the player now rides network entity
-    /// `vehicle`; the connection tells its client with the vehicle's whole
-    /// passenger list. Dismounting needs no effect: the sim queues an ejection
-    /// the connection already drains.
-    Mount {
-        vehicle: i32,
-    },
     /// `/experience add` — the real give-experience-points/give-experience-levels rule,
     /// `levels` selecting which.
     GiveExperience {

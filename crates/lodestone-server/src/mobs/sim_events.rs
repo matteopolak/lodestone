@@ -151,21 +151,6 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_grazes)
     }
 
-    /// Drains the mounts that threw `player_entity_id` off since the last call,
-    /// so the connection can send the empty passenger list.
-    pub fn take_ejections_of(&mut self, player_entity_id: i32) -> Vec<i32> {
-        let mut mine = Vec::new();
-        self.pending_ejections.retain(|&(mount, player)| {
-            if player == player_entity_id {
-                mine.push(mount);
-                false
-            } else {
-                true
-            }
-        });
-        mine
-    }
-
     /// Tells the mob that asked for an acknowledged edit whether it landed.
     pub fn report_edit_result(&mut self, mob: i32, landed: bool) {
         if let Some(m) = self.get_mut(mob) {

@@ -909,7 +909,7 @@ fn a_mob_riding_a_boat_streams_the_boats_passenger_list() {
     let out = s.sync(&TagProto, &mobs.with(|sim| sim.snapshots()));
     assert!(out.iter().all(|d| sent(d).0 != PASSENGERS), "an unmounted pair streams no passenger list: {out:?}");
 
-    mobs.with(|sim| assert_eq!(sim.mount_mob_rider(boat_uuid, zombie_uuid), crate::MobMountOutcome::Mounted { vehicle: boat }));
+    mobs.with(|sim| assert_eq!(sim.mount_forced(boat_uuid, crate::Rider::Mob(zombie_uuid)), crate::MountOutcome::Mounted { vehicle: boat }));
     let out = s.sync(&TagProto, &mobs.with(|sim| sim.snapshots()));
     assert_eq!(sent(out.last().unwrap()), (PASSENGERS, ids(&[boat, zombie]).as_slice()));
 
@@ -920,7 +920,35 @@ fn a_mob_riding_a_boat_streams_the_boats_passenger_list() {
     assert_eq!(sent(out.last().unwrap()), (PASSENGERS, ids(&[boat, zombie]).as_slice()));
     assert!(out.iter().filter(|d| sent(d).0 == ADD).count() == 2, "both spawns precede the list: {out:?}");
 
-    mobs.with(|sim| assert_eq!(sim.dismount_mob_rider(zombie), Some(boat)));
+    mobs.with(|sim| assert_eq!(sim.dismount(zombie), Some(boat)));
     let out = s.sync(&TagProto, &mobs.with(|sim| sim.snapshots()));
     assert_eq!(sent(out.last().unwrap()), (PASSENGERS, ids(&[boat]).as_slice()));
+}
+
+/// A player and a mob on one boat travel in one passenger list. The riding
+/// player's own client names itself with the constant its login claimed, while
+/// every other viewer sees the player's real id; the player goes first.
+#[test]
+fn a_player_and_a_mob_on_one_boat_stream_one_list_that_names_each_viewer_correctly() {
+    let mobs = crate::MobHandle::default();
+    let (boat, boat_uuid, zombie, zombie_uuid) = mobs.with(|sim| {
+        let boat = sim.spawn_vehicle("minecraft:oak_boat".parse().unwrap(), Vec3::new(2.0, 64.0, 0.0), 0.0);
+        let boat_uuid = sim.command_entities().into_iter().find(|e| e.entity_id == boat).unwrap().uuid;
+        let zombie = sim.spawn_species("minecraft:zombie".parse().unwrap(), Vec3::new(5.0, 64.0, 0.0));
+        (boat, boat_uuid, zombie.id(), zombie.uuid())
+    });
+    const RIDER: i32 = 4001;
+    mobs.with(|sim| {
+        assert_eq!(sim.mount_forced(boat_uuid, crate::Rider::Mob(zombie_uuid)), crate::MountOutcome::Mounted { vehicle: boat });
+        assert_eq!(sim.mount_forced(boat_uuid, crate::Rider::Player(RIDER)), crate::MountOutcome::Mounted { vehicle: boat });
+    });
+    let ids = |list: &[i32]| -> Vec<u8> { list.iter().copied().flat_map(i32::to_be_bytes).collect() };
+
+    let mut riding = EntityStreamer { viewer: RIDER, ..EntityStreamer::default() };
+    let out = riding.sync(&TagProto, &mobs.with(|sim| sim.snapshots()));
+    assert_eq!(sent(out.last().unwrap()), (PASSENGERS, ids(&[boat, LOCAL_PLAYER_ENTITY_ID, zombie]).as_slice()));
+
+    let mut watching = EntityStreamer { viewer: 2002, ..EntityStreamer::default() };
+    let out = watching.sync(&TagProto, &mobs.with(|sim| sim.snapshots()));
+    assert_eq!(sent(out.last().unwrap()), (PASSENGERS, ids(&[boat, RIDER, zombie]).as_slice()));
 }

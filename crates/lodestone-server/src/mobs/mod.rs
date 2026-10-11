@@ -447,9 +447,9 @@ mod sim_events;
 mod sim_snapshots;
 mod sim_command_entities;
 mod sim_entity_data;
-pub use sim_entity_data::{DamageOutcome, EntityDataError, MountOutcome};
-mod mob_riders;
-pub use mob_riders::MobMountOutcome;
+pub use sim_entity_data::{DamageOutcome, EntityDataError};
+mod riders;
+pub use riders::{MountOutcome, Rider};
 pub use sim_command_entities::{CommandEntity, EntityKill, TeleportOutcome};
 
 // No re-export: `ProjectileHit`/`projectile_damage_type`/`first_solid_along`
@@ -1418,16 +1418,16 @@ fn camel_sit_roll(id: u64, tick_count: u64) -> bool {
 ///
 /// Gated on the conditions this sim can see: at least
 /// [`CAMEL_RANDOM_SITTING_MIN_TICKS`] since the last pose change, not
-/// leashed, and not ridden (`m.rider`, the same field
-/// [`MobSim::tick`]'s goal-tick gate already reads for "is something else
+/// leashed, and not ridden (`ridden`, the same signal
+/// [`MobSim::tick`]'s goal-tick gate reads for "is something else
 /// driving this mob's movement"). **Disclosed simplification**: the simulation
 /// also omits grounded and panicking checks; `on_ground` has no
 /// per-tick reading for a walking land mob in this sim, and `is_panicking`
 /// exists but is deliberately left out here — it already forces a mob's
 /// *movement* into fleeing, so a hurt camel refuses to path toward a sit target
 /// without this function needing to duplicate that gate.
-fn camel_random_sitting(m: &mut SimMob<'_>, tick_count: u64) {
-    if m.is_leashed() || m.rider.is_some() {
+fn camel_random_sitting(m: &mut SimMob<'_>, ridden: bool, tick_count: u64) {
+    if m.is_leashed() || ridden {
         return;
     }
     let pose_time = tick_count as i64 - m.camel_pose_tick;
@@ -2107,14 +2107,6 @@ pub struct SimMob<'w> {
     /// deal its own periodic damage or heal — see [`crate::mob_effects`]'s
     /// module doc for the splash side of this gap.
     effects: crate::mob_effects::ActiveEffects,
-    /// The **player entity id** riding this mob, or `None` — the mob-mounted-by-
-    /// player half of the passenger model (vanilla's own horse-family mount
-    /// interaction leads into its generic start-riding path), independent of
-    /// [`TrackedVehicle::rider`] (boats) and [`TrackedMinecart::rider`]
-    /// (minecarts): those are AI-less item-entities in their own maps, while a
-    /// mounted mob keeps its full [`SimMob`] identity, health and (when
-    /// unridden) goal AI. See [`MobSim::mount_mob`] for the occupancy rules.
-    rider: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -2542,11 +2534,11 @@ pub struct MobSim<'w> {
     pending_crop_growths: Vec<(BlockPos, lodestone_data::block_states::StateId)>,
     /// World changes mobs asked for, drained by [`take_block_edits`](Self::take_block_edits).
     pending_block_edits: Vec<lodestone_entity::ai::BlockEdit>,
-    /// `(mount, player entity id)` pairs thrown off an untamed mount, awaiting the
-    /// connection that owns the player.
-    pending_ejections: Vec<(i32, i32)>,
-    /// `(rider mob id, vehicle id)` links in boarding order; see [`mob_riders`].
-    mob_riders: Vec<(i32, i32)>,
+    /// Every rider-to-vehicle link in boarding order; see [`riders`].
+    riders: Vec<riders::Ride>,
+    /// Where a player who left a vehicle by sneaking is to be placed, by player id
+    /// and vehicle; see [`MobSim::queue_dismount_placement`].
+    dismount_placements: Vec<(i32, i32, Vec3, Rotation)>,
     /// Rolls whether a mob standing on a turtle egg crushes it.
     trample_rng: SpawnRng,
     /// The `mob_griefing` game rule.
@@ -2913,9 +2905,6 @@ struct TrackedVehicle {
     /// Vanilla's own boat between-tick state, so the server's float pass and the
     /// client's are literally the same code over the same fields.
     boat: lodestone_physics::vehicle::BoatState,
-    /// The **player entity id** of the controlling passenger, or `None` for an
-    /// empty boat. `Some` suspends the server-side tick entirely.
-    rider: Option<i32>,
     /// Vanilla's own boat paddle-left/right metadata fields — the rider's last reported
     /// paddle-boat packet, purely cosmetic (a *second* connected
     /// player's own paddle animation; the rider's own client always animates
@@ -2947,8 +2936,6 @@ struct TrackedCushion {
     yaw: f32,
     /// Dye ordinal, `0..=15`.
     color: u8,
-    /// The player entity id seated on it.
-    rider: Option<i32>,
     /// Ticks since the last support check.
     ticks_since_check: u32,
 }
@@ -3099,9 +3086,6 @@ struct TrackedMinecart {
     /// direction reverses near a dead stop, the sprite's *heading* flips
     /// 180° instead of visibly spinning through it.
     flipped: bool,
-    /// The **player entity id** riding this cart, or `None`. Only
-    /// [`minecart::MinecartKind::is_rideable`] kinds are ever `Some`.
-    rider: Option<i32>,
     /// A container kind's own inventory (`MinecartKind::container_size`
     /// slots; empty for every non-container kind). See `mobs::minecart`'s
     /// own module doc for why nothing yet opens a menu against this.

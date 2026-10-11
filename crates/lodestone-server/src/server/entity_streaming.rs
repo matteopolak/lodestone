@@ -132,6 +132,7 @@ where
     E: EntitySource,
 {
     let mut directives = Vec::new();
+    streamer.viewer = ticket.map_or(LOCAL_PLAYER_ENTITY_ID, PlayerTicket::entity_id);
     if let Some(registry) = entities.players() {
         let publication = entities.snapshots_if_changed(streamer.last_publication);
         let view = registry.view(ticket.map(PlayerTicket::entity_id));
@@ -154,6 +155,57 @@ where
     }
     directives.extend(streamer.sync_boss_bars(proto, &entities.boss_bars()));
     directives
+}
+
+/// [`stream_pass`], then the dismount placement the sim queued for this player
+/// once the client has been told it left the vehicle: a client still seated
+/// ignores a position packet, so the placement cannot overtake the passenger
+/// list that frees it.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn stream_and_place<T, P, E>(
+    conn: &mut Connection<T>,
+    state: &mut State,
+    proto: &P,
+    entities: &E,
+    streamer: &mut EntityStreamer,
+    player_list: &mut PlayerListStreamer,
+    ticket: Option<&PlayerTicket>,
+    mobs: &MobHandle,
+    player_pos: &mut Option<(f64, f64, f64)>,
+    player_rot: &mut Option<Rotation>,
+    teleports: &mut Option<TeleportAcknowledgements>,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    E: EntitySource,
+{
+    for directive in stream_pass(proto, entities, streamer, player_list, ticket) {
+        apply(conn, state, directive).await?;
+    }
+    let viewer = streamer.viewer;
+    let Some((vehicle, position, rotation)) = mobs.with(|sim| sim.dismount_placement(viewer)) else {
+        return Ok(());
+    };
+    if streamer.last_sent.get(&vehicle).is_some_and(|sent| sent.passengers.contains(&viewer)) {
+        return Ok(());
+    }
+    mobs.with(|sim| sim.take_dismount_placement(viewer));
+    *player_pos = Some((position.x, position.y, position.z));
+    *player_rot = Some(rotation);
+    apply(
+        conn,
+        state,
+        proto.encode_teleport_with_id(
+            issue_teleport_id(teleports),
+            position.x,
+            position.y,
+            position.z,
+            rotation.yaw,
+            rotation.pitch,
+        ),
+    )
+    .await
 }
 
 /// An [`EntitySource`] carrying no entities — for callers that only stream
@@ -180,6 +232,10 @@ pub(super) struct EntityStreamer {
     pub(super) last_sent: HashMap<i32, EntitySnapshot>,
     pub(super) players_last_sent: HashMap<i32, EntitySnapshot>,
     pub(super) last_publication: Option<u64>,
+    /// The sim's id for the player this connection serves. A passenger list names
+    /// that player under [`LOCAL_PLAYER_ENTITY_ID`], the only id its own client
+    /// recognises as itself.
+    pub(super) viewer: i32,
     /// The boss bars this connection has been sent `ADD` for and not yet
     /// `REMOVE` — the same last-sent-state shape [`last_sent`](Self::last_sent)
     /// keeps for entities, one level simpler (a bar has no spawn/update split
@@ -224,10 +280,14 @@ impl EntityStreamer {
         if !removed.is_empty() {
             directives.push(proto.encode_remove_entity(&removed));
         }
+        // Passenger lists wait until every spawn of the pass has been sent: a
+        // client ignores a rider it has not been told to spawn yet.
+        let mut passenger_lists = Vec::new();
         if let Some(current) = current {
-            Self::sync_updates(proto, &mut self.last_sent, current, &mut directives);
+            Self::sync_updates(proto, &mut self.last_sent, current, self.viewer, &mut directives, &mut passenger_lists);
         }
-        Self::sync_updates(proto, &mut self.players_last_sent, players, &mut directives);
+        Self::sync_updates(proto, &mut self.players_last_sent, players, self.viewer, &mut directives, &mut passenger_lists);
+        directives.extend(passenger_lists);
         directives
     }
 
@@ -251,11 +311,13 @@ impl EntityStreamer {
         proto: &P,
         last_sent: &mut HashMap<i32, EntitySnapshot>,
         current: &[EntitySnapshot],
+        viewer: i32,
         directives: &mut Vec<ServerDirective>,
+        passenger_lists: &mut Vec<ServerDirective>,
     ) {
-        // Passenger lists wait for the end of the pass: a client ignores a rider
-        // it has not been told to spawn yet.
-        let mut passenger_lists: Vec<ServerDirective> = Vec::new();
+        let local = |passengers: &[i32]| -> Vec<i32> {
+            passengers.iter().map(|&p| if p == viewer { LOCAL_PLAYER_ENTITY_ID } else { p }).collect()
+        };
         // Spawns and updates, in the source's iteration order.
         for entity in current {
             match last_sent.get(&entity.id) {
@@ -282,7 +344,7 @@ impl EntityStreamer {
                         directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
                     }
                     if !entity.passengers.is_empty() {
-                        passenger_lists.push(proto.encode_set_passengers(entity.id, &entity.passengers));
+                        passenger_lists.push(proto.encode_set_passengers(entity.id, &local(&entity.passengers)));
                     }
                     last_sent.insert(entity.id, entity.clone());
                 }
@@ -316,14 +378,13 @@ impl EntityStreamer {
                         directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
                     }
                     if prev.passengers != entity.passengers {
-                        passenger_lists.push(proto.encode_set_passengers(entity.id, &entity.passengers));
+                        passenger_lists.push(proto.encode_set_passengers(entity.id, &local(&entity.passengers)));
                     }
                     last_sent.insert(entity.id, entity.clone());
                 }
                 Some(_) => {}
             }
         }
-        directives.extend(passenger_lists);
     }
 
     /// The `BOSS_EVENT` twin of [`sync`](Self::sync) — diffs `current` against

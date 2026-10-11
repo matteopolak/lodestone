@@ -55,8 +55,8 @@ impl<'w> MobSim<'w> {
             pending_hive_entries: Vec::new(),
             pending_crop_growths: Vec::new(),
             pending_block_edits: Vec::new(),
-            pending_ejections: Vec::new(),
-            mob_riders: Vec::new(),
+            riders: Vec::new(),
+            dismount_placements: Vec::new(),
             trample_rng: SpawnRng::new(TRAMPLE_SEED),
             mob_griefing: true,
             pending_player_hits: Vec::new(),
@@ -595,7 +595,6 @@ impl<'w> MobSim<'w> {
             conversion: None,
             unsafe_dimension_ticks: 0,
             effects: crate::mob_effects::ActiveEffects::new(),
-            rider: None,
         });
         self.mobs.last_mut().expect("just pushed")
     }

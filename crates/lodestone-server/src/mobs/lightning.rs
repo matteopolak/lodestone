@@ -690,7 +690,7 @@ mod tests {
         assert!(sim.is_cushion(far), "a cushion 4.5 blocks away is outside the 3-block reach");
         let broken = sim.take_lightning_broken_cushions();
         assert_eq!(broken.len(), 1);
-        assert_eq!((broken[0].color, broken[0].rider), (14, Some(77)));
+        assert_eq!(broken[0].color, 14);
         assert!(sim.take_lightning_broken_cushions().is_empty(), "the drain empties the queue");
         assert_eq!(sim.item_count(), 1, "the broken cushion drops its item");
     }

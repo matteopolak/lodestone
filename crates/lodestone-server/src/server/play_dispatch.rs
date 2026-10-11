@@ -1158,12 +1158,6 @@ where
                         mobs.with(|sim| sim.break_cushion(entity_id, *game_mode != GameMode::Creative))
                 {
                     crate::cushion::publish_broken(block_ticks, broken.position, broken.color);
-                    if broken.rider == Some(player_entity_id) {
-                        // Sent now rather than at the next ejection drain, which
-                        // would repeat it.
-                        mobs.with(|sim| sim.take_ejections_of(player_entity_id));
-                        apply(conn, state, proto.encode_set_passengers(entity_id, &[])).await?;
-                    }
                 }
                 return Ok(());
             }
@@ -1224,31 +1218,9 @@ where
                 // `using_secondary_action` prevents boarding while the player
                 // is sneaking.
                 if mobs.with(|sim| sim.vehicle_type(entity_id).is_some()) {
-                    let boarded = mobs.with(|sim| {
+                    mobs.with(|sim| {
                         sim.mount_vehicle(entity_id, player_entity_id, using_secondary_action)
                     });
-                    if boarded {
-                        // Send the vehicle's **whole** passenger list rather than
-                        // a delta. Without this packet the client
-                        // has no way to know it is aboard and
-                        // `lodestone_ecs::vehicle::tick_controlled_vehicle` never
-                        // engages, so the boat is placeable and unusable.
-                        //
-                        // `LOCAL_PLAYER_ENTITY_ID`, not `player_entity_id`: this goes
-                        // straight to `conn`, this connection's own socket, and the
-                        // client only recognises itself among the passengers under
-                        // the constant its own login entity-id field claimed — see
-                        // `publish_health`'s call sites for the same rule.
-                        // `sim.mount_vehicle` above still records the real
-                        // `player_entity_id`, which is what a *future* multi-connection
-                        // broadcast of this vehicle's passengers would need.
-                        apply(
-                            conn,
-                            state,
-                            proto.encode_set_passengers(entity_id, &[LOCAL_PLAYER_ENTITY_ID]),
-                        )
-                        .await?;
-                    }
                     // Boarding consumes no item, and a refused board must not fall
                     // through to the taming chain — a boat is not tameable and the
                     // fall-through would only cost a wasted roll.
@@ -1315,12 +1287,6 @@ where
                         if let Some((position, ..)) = mobs.with(|sim| sim.cushion_state(entity_id)) {
                             crate::cushion::publish_sound(block_ticks, crate::effects::CushionSound::Sit, position);
                         }
-                        apply(
-                            conn,
-                            state,
-                            proto.encode_set_passengers(entity_id, &[LOCAL_PLAYER_ENTITY_ID]),
-                        )
-                        .await?;
                     }
                     return Ok(());
                 }
@@ -1354,17 +1320,7 @@ where
                             }
                         }
                     } else if kind.is_rideable() && !using_secondary_action {
-                        // Mount the minecart and send the same passenger-list
-                        // handoff used by the boat arm above.
-                        let boarded = mobs.with(|sim| sim.mount_minecart(entity_id, player_entity_id));
-                        if boarded {
-                            apply(
-                                conn,
-                                state,
-                                proto.encode_set_passengers(entity_id, &[LOCAL_PLAYER_ENTITY_ID]),
-                            )
-                            .await?;
-                        }
+                        mobs.with(|sim| sim.mount_minecart(entity_id, player_entity_id));
                     }
                     // Chest, hopper, and TNT minecarts have no modeled
                     // interaction; their slots have no menu wired to them.
@@ -1460,16 +1416,6 @@ where
                     // Each open replaces the connection's active merchant
                     // screen and its associated entity id.
                     *open_merchant = Some(OpenMerchant { entity_id });
-                }
-                // A successful mount is recorded in `MobSim`; send the complete
-                // passenger list so the client learns that it is aboard.
-                if outcome == Some(crate::mobs::InteractOutcome::Mounted) {
-                    apply(
-                        conn,
-                        state,
-                        proto.encode_set_passengers(entity_id, &[LOCAL_PLAYER_ENTITY_ID]),
-                    )
-                    .await?;
                 }
                 // `consume_one` handles creative mode. A sit toggle has no item
                 // cost, as encoded by `InteractOutcome::consumes_item`.
@@ -1787,53 +1733,25 @@ where
             if jump {
                 mobs.with(|sim| sim.trigger_camel_dash(player_entity_id));
             }
-            // The client sends a true shift bit on the input edge. Try the
-            // vehicle, minecart, and mob mounts in sequence; only one can carry
-            // this player at a time.
+            // The client sends a true shift bit on the input edge: leave whatever
+            // the player rides.
             if shift {
                 let rotation = player_rot.unwrap_or_default();
                 let terrain = source.get();
                 let dismounted = mobs.with(|sim| {
-                    if let Some(vehicle_id) = sim.vehicle_ridden_by(player_entity_id) {
-                        let position = sim.vehicle_dismount_position(
-                            vehicle_id,
-                            rotation.yaw,
-                            &|x, y, z| terrain.block_state_id(x, y, z),
-                        );
-                        sim.dismount_rider(player_entity_id)
-                            .map(|id| (id, position))
-                    } else {
-                        sim.dismount_minecart_rider(player_entity_id)
-                            .or_else(|| sim.dismount_cushion_rider(player_entity_id))
-                            .or_else(|| sim.dismount_mob(player_entity_id))
-                            .map(|id| (id, None))
+                    let vehicle = sim.vehicle_of(player_entity_id)?;
+                    let position = sim.vehicle_dismount_position(vehicle, rotation.yaw, &|x, y, z| {
+                        terrain.block_state_id(x, y, z)
+                    });
+                    if let Some(position) = position {
+                        sim.queue_dismount_placement(player_entity_id, vehicle, position, rotation);
                     }
+                    sim.dismount(player_entity_id)
                 });
-                if let Some((vehicle_id, dismount_position)) = dismounted {
-                    if let Some((position, ..)) = mobs.with(|sim| sim.cushion_state(vehicle_id)) {
-                        crate::cushion::publish_sound(block_ticks, crate::effects::CushionSound::GetUp, position);
-                    }
-                    // Send the vehicle's complete, empty passenger list.
-                    apply(conn, state, proto.encode_set_passengers(vehicle_id, &[])).await?;
-                    if let Some(position) = dismount_position {
-                        // Apply the authoritative dismount location locally and
-                        // send it before processing the next movement delta.
-                        *player_pos = Some((position.x, position.y, position.z));
-                        *player_rot = Some(rotation);
-                        apply(
-                            conn,
-                            state,
-                            proto.encode_teleport_with_id(
-                                issue_teleport_id(teleport_acknowledgements),
-                                position.x,
-                                position.y,
-                                position.z,
-                                rotation.yaw,
-                                rotation.pitch,
-                            ),
-                        )
-                        .await?;
-                    }
+                if let Some(vehicle_id) = dismounted
+                    && let Some((position, ..)) = mobs.with(|sim| sim.cushion_state(vehicle_id))
+                {
+                    crate::cushion::publish_sound(block_ticks, crate::effects::CushionSound::GetUp, position);
                 }
             }
         }
@@ -1841,6 +1759,10 @@ where
             apply_creative_mode_slot_set(inventory, slot, item, *game_mode == GameMode::Creative);
         }
         ServerBound::ClientCommand { action } => {
+            // A player who dies stops riding; the respawn is where the sim learns of it.
+            if action == 0 && vitals.health() <= 0.0 {
+                mobs.with(|sim| sim.dismount(player_entity_id));
+            }
             apply_client_command(
                 conn,
                 proto,

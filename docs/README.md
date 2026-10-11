@@ -945,6 +945,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the End: the bed or respawn anchor they set, in whichever dimension it stands, or
   the world spawn when there is none. One resolver, `respawn::plan`, serves both
   cases, and the point is saved with the player.
+- [Riding](./riding.md) — One rider-to-vehicle relation, `MobSim::riders`
+  (`mobs/riders.rs`), covers players and mobs on boats, minecarts, cushions and mobs.
+  Nothing else records who sits where.
 - [Runtime presentation attach/detach](./runtime-presentation.md) — Lets a running
   session switch between headless and windowed while it runs. A session can start with
   no window, GPU or presentation-only ECS systems and later get a window, or a

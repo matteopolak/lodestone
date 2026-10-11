@@ -275,11 +275,6 @@ where
                 .await?;
             }
         }
-        crate::commands::Effect::Mount { vehicle } => {
-            // The client only learns it is aboard from the vehicle's whole passenger
-            // list, under the constant id its own login claimed.
-            apply(conn, state, proto.encode_set_passengers(vehicle, &[LOCAL_PLAYER_ENTITY_ID])).await?;
-        }
         crate::commands::Effect::GiveExperience { levels, amount } => {
             if levels {
                 // `take_levels` is a level *subtraction*; negating the delta is

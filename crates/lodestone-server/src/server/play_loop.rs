@@ -1278,15 +1278,10 @@ where
                     registry.set_rotation(ticket.entity_id(), rotation);
                 }
                 republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
-                for directive in stream_pass(
-                    proto,
-                    entities,
-                    &mut streamer,
-                    &mut player_list,
-                    player_ticket.as_ref(),
-                ) {
-                    apply(conn, &mut state, directive).await?;
-                }
+                stream_and_place(
+                    conn, &mut state, proto, entities, &mut streamer, &mut player_list,
+                    player_ticket.as_ref(), mobs, &mut player_pos, &mut player_rot, &mut teleport_acknowledgements,
+                ).await?;
                 // The arm that owns the view update, and therefore the longest pass
                 // this loop has. A `PlayerMoved` that crosses a chunk boundary
                 // awaits a whole strip of columns inside `dispatch_play_packet`.
@@ -1304,15 +1299,10 @@ where
             _ = entity_stream_tick.tick() => {
                 watch.enter();
                 republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
-                for directive in stream_pass(
-                    proto,
-                    entities,
-                    &mut streamer,
-                    &mut player_list,
-                    player_ticket.as_ref(),
-                ) {
-                    apply(conn, &mut state, directive).await?;
-                }
+                stream_and_place(
+                    conn, &mut state, proto, entities, &mut streamer, &mut player_list,
+                    player_ticket.as_ref(), mobs, &mut player_pos, &mut player_rot, &mut teleport_acknowledgements,
+                ).await?;
                 watch.pass("entity_stream_tick");
             }
 
@@ -2218,10 +2208,6 @@ where
                     }
                 }
 
-                // Untamed mounts that threw this player off.
-                for mount in mobs.with(|sim| sim.take_ejections_of(player_entity_id)) {
-                    apply(conn, &mut state, proto.encode_set_passengers(mount, &[])).await?;
-                }
                 // The raid-completion queue carries the effect a player earns for
                 // a killing blow. It fires when a raid this player earned a killing
                 // blow in reaches `RaidStatus::Victory`. That transition
@@ -3751,15 +3737,10 @@ where
                 // so a dropped item appears and falls even when the player
                 // sends no movement packets.
                 republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
-                for directive in stream_pass(
-                    proto,
-                    entities,
-                    &mut streamer,
-                    &mut player_list,
-                    player_ticket.as_ref(),
-                ) {
-                    apply(conn, &mut state, directive).await?;
-                }
+                stream_and_place(
+                    conn, &mut state, proto, entities, &mut streamer, &mut player_list,
+                    player_ticket.as_ref(), mobs, &mut player_pos, &mut player_rot, &mut teleport_acknowledgements,
+                ).await?;
                 None
             }
             encoded = std::future::poll_fn(|cx| pending_join_encodes.poll_next(cx)), if !pending_join_encodes.is_empty() => {
@@ -4121,15 +4102,10 @@ where
                 registry.set_rotation(ticket.entity_id(), rotation);
             }
             republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
-            for directive in stream_pass(
-                proto,
-                entities,
-                &mut streamer,
-                &mut player_list,
-                player_ticket.as_ref(),
-            ) {
-                apply(conn, &mut state, directive).await?;
-            }
+            stream_and_place(
+                conn, &mut state, proto, entities, &mut streamer, &mut player_list,
+                player_ticket.as_ref(), mobs, &mut player_pos, &mut player_rot, &mut teleport_acknowledgements,
+            ).await?;
         }
 
     }

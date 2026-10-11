@@ -176,6 +176,8 @@ struct MinecartTickEffect {
     id: i32,
     minecart: TrackedMinecart,
     detonation: Option<(Vec3, f32)>,
+    /// An activator rail threw the riders off.
+    eject: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +185,8 @@ struct MinecartTickInput {
     owner: MinecartTickOwner,
     serial: usize,
     id: i32,
+    /// Whether anything rides the cart at tick start.
+    ridden: bool,
     minecart: TrackedMinecart,
 }
 
@@ -579,7 +583,6 @@ impl<'w> MobSim<'w> {
                 yaw: 0.0,
                 yaw_o: 0.0,
                 flipped: false,
-                rider: None,
                 slots: vec![None; kind.container_size()],
                 fuel: 0,
                 push: Vec3d::ZERO,
@@ -612,21 +615,6 @@ impl<'w> MobSim<'w> {
         })
     }
 
-    /// The controlling passenger's player entity id, if occupied.
-    #[must_use]
-    pub fn minecart_rider(&self, id: i32) -> Option<i32> {
-        self.minecarts.get(&id).and_then(|c| c.rider)
-    }
-
-    /// The minecart `player_entity_id` is riding, if any.
-    #[must_use]
-    pub fn minecart_ridden_by(&self, player_entity_id: i32) -> Option<i32> {
-        self.minecarts
-            .iter()
-            .find(|(_, c)| c.rider == Some(player_entity_id))
-            .map(|(&id, _)| id)
-    }
-
     /// A container minecart's own slots (empty, all-`None`, for a
     /// non-container kind). See this module's own doc comment for why
     /// nothing yet opens a menu against them.
@@ -648,11 +636,9 @@ impl<'w> MobSim<'w> {
         self.minecarts.get(&id).map_or(-1, |c| c.fuse)
     }
 
-    /// A player boards the cart. Refuses (vanilla
-    /// `PASS`) when `id` is not a minecart, the kind is not
-    /// [`MinecartKind::is_rideable`], or the seat is already taken by someone
-    /// else. A player already riding something else is dismounted first —
-    /// see [`MobSim::mount_vehicle`]'s own doc for why.
+    /// A player boards the cart by interaction. Refuses when `id` is not a
+    /// minecart, the kind is not [`MinecartKind::is_rideable`], or the seat is
+    /// taken.
     pub fn mount_minecart(&mut self, id: i32, player_entity_id: i32) -> bool {
         let Some(cart) = self.minecarts.get(&id) else {
             return false;
@@ -660,37 +646,7 @@ impl<'w> MobSim<'w> {
         if !cart.kind.is_rideable() {
             return false;
         }
-        if cart.rider.is_some_and(|rider| rider != player_entity_id) {
-            return false;
-        }
-        if let Some(previous) = self.minecart_ridden_by(player_entity_id) {
-            if previous != id {
-                if let Some(old) = self.minecarts.get_mut(&previous) {
-                    old.rider = None;
-                }
-            }
-        }
-        // A player already aboard a *boat* must be dismounted from it first —
-        // Entity's start riding's own "already riding something" precondition,
-        // the cross-family half `MobSim::mount_vehicle`'s own doc comment
-        // only states for two boats. `dismount_rider` is a no-op when the
-        // player rides no boat.
-        self.dismount_rider(player_entity_id);
-        if let Some(cart) = self.minecarts.get_mut(&id) {
-            cart.rider = Some(player_entity_id);
-        }
-        true
-    }
-
-    /// Entity's stop riding for whatever `player_entity_id` rides, returning
-    /// the minecart it left. Called on disconnect exactly as
-    /// [`MobSim::dismount_rider`] is for a boat.
-    pub fn dismount_minecart_rider(&mut self, player_entity_id: i32) -> Option<i32> {
-        let id = self.minecart_ridden_by(player_entity_id)?;
-        if let Some(cart) = self.minecarts.get_mut(&id) {
-            cart.rider = None;
-        }
-        Some(id)
+        self.board(id, player_entity_id, true, false)
     }
 
     /// Whether the item is furnace-cart fuel: the fuel tag is
@@ -733,16 +689,21 @@ impl<'w> MobSim<'w> {
     /// spawn-time snapshot, so a driver with the real `ChunkSource` supplies
     /// the answer instead (`tick::run_tick_loop`).
     pub fn tick_minecarts(&mut self, block_state: &dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId) {
-        self.clear_disconnected_minecart_riders();
+        self.clear_disconnected_riders();
         let mut ids: Vec<i32> = self.minecarts.keys().copied().collect();
         ids.sort_unstable();
         let mut detonated = Vec::new();
         for id in ids {
+            let ridden = !self.riders_of(id).is_empty();
             let Some(cart) = self.minecarts.get_mut(&id) else {
                 continue;
             };
-            if let Some(detonation) = tick_one_minecart(cart, block_state) {
+            let (detonation, eject) = tick_one_minecart(cart, ridden, block_state);
+            if let Some(detonation) = detonation {
                 detonated.push((id, detonation));
+            }
+            if eject {
+                self.eject_riders(id);
             }
         }
         self.apply_minecart_detonations(detonated);
@@ -757,7 +718,7 @@ impl<'w> MobSim<'w> {
         &mut self,
         block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
     ) -> Vec<MinecartTickOwnerBatch> {
-        self.clear_disconnected_minecart_riders();
+        self.clear_disconnected_riders();
         self.minecart_owner_plan = self
             .minecart_owner_plan
             .checked_add(1)
@@ -795,6 +756,7 @@ impl<'w> MobSim<'w> {
                 owner,
                 serial,
                 id,
+                ridden: !self.riders_of(id).is_empty(),
                 minecart,
             };
             if let Some((_, inputs)) = jobs
@@ -815,13 +777,14 @@ impl<'w> MobSim<'w> {
                     .into_iter()
                     .map(|input| {
                         let mut minecart = input.minecart;
-                        let detonation = tick_one_minecart(&mut minecart, block_state);
+                        let (detonation, eject) = tick_one_minecart(&mut minecart, input.ridden, block_state);
                         MinecartTickEffect {
                             owner: input.owner,
                             serial: input.serial,
                             id: input.id,
                             minecart,
                             detonation,
+                            eject,
                         }
                     })
                     .collect();
@@ -870,34 +833,15 @@ impl<'w> MobSim<'w> {
                 "a minecart owner completion may update only a live tick-start minecart"
             );
             self.minecarts.insert(effect.id, effect.minecart);
+            if effect.eject {
+                self.eject_riders(effect.id);
+            }
             if let Some(detonation) = effect.detonation {
                 detonated.push((effect.id, detonation));
             }
         }
         self.apply_minecart_detonations(detonated);
         self.applied_minecart_owner_plan = plan;
-    }
-
-    fn clear_disconnected_minecart_riders(&mut self) {
-        // The disconnect self-heal, identical in shape to `tick_vehicles`'
-        // own: a rider whose connection vanished without an explicit
-        // dismount must not freeze forever with a phantom occupant. Guarded
-        // on a non-empty roster for the same "empty means no information"
-        // reason `tick_vehicles`' own comment gives.
-        if !self.players.is_empty() {
-            let connected: Vec<i32> = self
-                .players
-                .iter()
-                .filter_map(|p| p.identity.map(|identity| identity.entity_id))
-                .collect();
-            if !connected.is_empty() {
-                for cart in self.minecarts.values_mut() {
-                    if cart.rider.is_some_and(|rider| !connected.contains(&rider)) {
-                        cart.rider = None;
-                    }
-                }
-            }
-        }
     }
 
     fn apply_minecart_detonations(&mut self, detonated: Vec<(i32, (Vec3, f32))>) {
@@ -958,10 +902,13 @@ fn merge_minecart_tick_owner_batches(
     effects
 }
 
+/// Ticks one cart; returns its detonation, if any, and whether an activator
+/// rail ejected the riders.
 fn tick_one_minecart(
     cart: &mut TrackedMinecart,
+    ridden: bool,
     block_state: &dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId,
-) -> Option<(Vec3, f32)> {
+) -> (Option<(Vec3, f32)>, bool) {
     let view = MinecartCollision { block_state };
     let profile = PhysicsProfile::default();
     let prev_position = cart.motion.position;
@@ -971,11 +918,12 @@ fn tick_one_minecart(
 
     let pos = current_block_pos_or_rail_below(&view, cart.motion.position);
     let state = view.state_at(pos.x, pos.y, pos.z);
+    let mut eject = false;
     if is_rail_block_id(state) {
-        move_along_track(cart, pos, state, &view, &profile, wet);
+        move_along_track(cart, ridden, pos, state, &view, &profile, wet);
         if state.block() == crate::redstone_rail::ACTIVATOR_RAIL {
             let active = get_bool_property(state, PropertyKey::Powered).unwrap_or(false);
-            apply_activation(cart, active);
+            eject = apply_activation(cart, active);
         }
     } else {
         come_off_track(cart, &view, &profile, wet);
@@ -1009,7 +957,7 @@ fn tick_one_minecart(
 
     let speed_sqr = cart.motion.velocity.x * cart.motion.velocity.x
         + cart.motion.velocity.z * cart.motion.velocity.z;
-    if cart.fuse > 0 {
+    let detonation = if cart.fuse > 0 {
         cart.fuse -= 1;
         None
     } else if cart.fuse == 0 {
@@ -1025,7 +973,8 @@ fn tick_one_minecart(
         ))
     } else {
         None
-    }
+    };
+    (detonation, eject)
 }
 
 /// The activator-rail producer shared
@@ -1038,14 +987,12 @@ fn tick_one_minecart(
 /// the TNT minecart calls *before* its own
 /// fuse-decrement code). A deferred, end-of-loop application would prime a
 /// fuse one whole tick late.
-fn apply_activation(cart: &mut TrackedMinecart, active: bool) {
+fn apply_activation(cart: &mut TrackedMinecart, active: bool) -> bool {
     if !active {
-        return;
+        return false;
     }
     match cart.kind {
-        MinecartKind::Plain => {
-            cart.rider = None;
-        }
+        MinecartKind::Plain => return true,
         MinecartKind::Tnt => {
             if cart.fuse < 0 {
                 cart.fuse = TNT_MINECART_FUSE;
@@ -1053,12 +1000,14 @@ fn apply_activation(cart: &mut TrackedMinecart, active: bool) {
         }
         _ => {}
     }
+    false
 }
 
 /// Legacy on-rail movement — see this module's own doc comment
 /// for what it does and what is cut.
 fn move_along_track(
     cart: &mut TrackedMinecart,
+    ridden: bool,
     pos: BlockPos,
     state: lodestone_data::block_states::StateId,
     view: &MinecartCollision<'_>,
@@ -1145,7 +1094,7 @@ fn move_along_track(
     cart.motion.position.y = y;
     cart.motion.position.z = z0 + zd * progress;
 
-    let scale = if cart.rider.is_some() { 0.75 } else { 1.0 };
+    let scale = if ridden { 0.75 } else { 1.0 };
     let max_speed = max_speed(cart, wet);
     cart.motion.velocity = Vec3d::new(
         (scale * cart.motion.velocity.x).clamp(-max_speed, max_speed),
@@ -1162,7 +1111,7 @@ fn move_along_track(
         cart.motion.position.y += f64::from(exit1.1);
     }
 
-    cart.motion.velocity = apply_natural_slowdown(cart, cart.motion.velocity, wet);
+    cart.motion.velocity = apply_natural_slowdown(cart, ridden, cart.motion.velocity, wet);
 
     let new_pos = current_pos_along_rail(view, cart.motion.position.x, cart.motion.position.y, cart.motion.position.z);
     if let (Some(np), Some(op)) = (new_pos, old_pos) {
@@ -1242,7 +1191,7 @@ fn max_speed(cart: &TrackedMinecart, wet: bool) -> f64 {
 /// Natural slowdown, with the furnace cart's own
 /// override folded in ahead of the base multiply — see this file's own
 /// [`calculate_new_push_along`] for the push re-aim it performs first.
-fn apply_natural_slowdown(cart: &mut TrackedMinecart, movement: Vec3d, wet: bool) -> Vec3d {
+fn apply_natural_slowdown(cart: &mut TrackedMinecart, ridden: bool, movement: Vec3d, wet: bool) -> Vec3d {
     let pre = if cart.kind.is_furnace() && (cart.push.x * cart.push.x + cart.push.z * cart.push.z) > 1.0e-7 {
         cart.push = calculate_new_push_along(cart.push, movement);
         let combined = Vec3d::new(movement.x * 0.8 + cart.push.x, movement.y, movement.z * 0.8 + cart.push.z);
@@ -1253,7 +1202,7 @@ fn apply_natural_slowdown(cart: &mut TrackedMinecart, movement: Vec3d, wet: bool
         movement
     };
 
-    let slowdown = if cart.rider.is_some() { SLOWDOWN_RIDDEN } else { SLOWDOWN_UNRIDDEN };
+    let slowdown = if ridden { SLOWDOWN_RIDDEN } else { SLOWDOWN_UNRIDDEN };
     let mut out = Vec3d::new(pre.x * slowdown, 0.0, pre.z * slowdown);
     if wet {
         out = out.scale(WATER_SLOWDOWN);
@@ -1627,11 +1576,11 @@ mod tests {
 
         let plain = sim.spawn_minecart(MinecartKind::Plain, Vec3::new(8.5, 61.0625, 8.5));
         assert!(sim.mount_minecart(plain, 7));
-        assert_eq!(sim.minecart_rider(plain), Some(7));
+        assert_eq!(sim.controlling_player(plain), Some(7));
         assert!(!sim.mount_minecart(plain, 9), "a seated cart refuses a second rider");
-        assert_eq!(sim.minecart_rider(plain), Some(7));
-        assert_eq!(sim.dismount_minecart_rider(7), Some(plain));
-        assert_eq!(sim.minecart_rider(plain), None);
+        assert_eq!(sim.controlling_player(plain), Some(7));
+        assert_eq!(sim.dismount(7), Some(plain));
+        assert_eq!(sim.controlling_player(plain), None);
     }
 
     /// **TNT minecart activation and explosion**, reusing the same

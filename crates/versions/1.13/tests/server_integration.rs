@@ -12,7 +12,7 @@ use lodestone_model::{
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, ChunkWorld, IntegratedServer, MobHandle, MobOwner,
-    NoEntities, ServerBound, serve_connection,
+    ServerBound, serve_connection,
 };
 use lodestone_v1_13::{adapter, V404Adapter, V404ServerProtocol};
 
@@ -257,7 +257,7 @@ async fn registry_selected_404_entity_actions_reach_live_mob_consumers() {
             &mut conn,
             &V404ServerProtocol,
             &source,
-            &NoEntities,
+            &server_mobs,
             0,
             &block_entities,
             &server_mobs,
@@ -307,7 +307,7 @@ async fn registry_selected_404_entity_actions_reach_live_mob_consumers() {
         .expect("interact action must reach the client transport");
     let mount_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if mob_handle.with(|sim| sim.mob_ridden_by(1) == Some(horse_id)) {
+        if mob_handle.with(|sim| sim.vehicle_of(1) == Some(horse_id)) {
             break;
         }
         assert!(

@@ -163,9 +163,7 @@ impl<'w> MobSim<'w> {
                 self.falling_blocks.remove(&id);
             }
             Located::Vehicle(id) => {
-                if let Some(rider) = self.vehicles.remove(&id).and_then(|v| v.rider) {
-                    self.pending_ejections.push((id, rider));
-                }
+                self.vehicles.remove(&id);
             }
             Located::Cushion(id) => {
                 self.break_cushion(id, false);
@@ -178,9 +176,7 @@ impl<'w> MobSim<'w> {
                 self.eyes.remove(&id);
             }
             Located::Minecart(id) => {
-                if let Some(rider) = self.minecarts.remove(&id).and_then(|c| c.rider) {
-                    self.pending_ejections.push((id, rider));
-                }
+                self.minecarts.remove(&id);
             }
             Located::Bolt(id) => {
                 self.lightning_bolts.remove(&id);

@@ -357,9 +357,9 @@ mod tests {
         assert_eq!(world.take_weather_request(), Some(request));
         assert_eq!(expected[0].perception.held_item.as_ref().unwrap().to_string(), "minecraft:wheat");
         assert!((expected[0].perception.view_direction.x + 1.0).abs() < 1e-12);
-        assert_eq!(runtime.mobs().with(|sim| sim.mob_rider(horse)), Some(first.entity_id()),
+        assert_eq!(runtime.mobs().with(|sim| sim.controlling_player(horse)), Some(first.entity_id()),
             "the connected rider control must remain mounted");
-        assert_eq!(runtime.mobs().with(|sim| sim.vehicle_rider(boat)), Some(second.entity_id()));
+        assert_eq!(runtime.mobs().with(|sim| sim.controlling_player(boat)), Some(second.entity_id()));
         drop(first);
         drop(second);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -367,9 +367,9 @@ mod tests {
                 tokio::time::sleep(crate::tick::TICK_PERIOD).await;
             }
         }).await.expect("disconnect must clear the tick's perception input");
-        assert_eq!(runtime.mobs().with(|sim| sim.mob_rider(horse)), None,
+        assert_eq!(runtime.mobs().with(|sim| sim.controlling_player(horse)), None,
             "the last departing rider must not freeze a mob");
-        assert_eq!(runtime.mobs().with(|sim| sim.vehicle_rider(boat)), None,
+        assert_eq!(runtime.mobs().with(|sim| sim.controlling_player(boat)), None,
             "the last departing rider must not freeze a vehicle");
         shutdown.trigger();
         assert_eq!(world.tick_anchors().snapshot().len(), 1);

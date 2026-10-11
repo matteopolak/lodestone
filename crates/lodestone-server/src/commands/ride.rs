@@ -2,30 +2,23 @@
 //!
 //! # What it is
 //!
-//! Seats an entity on a vehicle, or lifts it off. A player boards through the
-//! passenger mechanics boarding by hand uses (`MobSim::mount_player`, which
-//! picks the boat, minecart, cushion or mob rule by the vehicle's kind); a mob
-//! boards through `MobSim::mount_mob_rider`, the link table in
-//! `crate::mobs`' `mob_riders` module.
+//! Seats an entity on a vehicle, or lifts it off, through the one rider relation
+//! in `crate::mobs`' `riders` module (`MobSim::mount_forced`, `MobSim::dismount`).
 //!
 //! # How it works
 //!
 //! The refusals are the reference's, in its order: already riding, players as
 //! vehicles, the vehicle being the target or one of its passengers, then the
-//! boarding refusal ("couldn't start riding"). A player's vehicle may also
-//! refuse for its own rule (occupied, capsized, a cart that is not rideable);
-//! a mob rider ignores occupancy, as the forced reference mount does.
+//! boarding refusal ("couldn't start riding"). The mount is forced, as in the
+//! reference: it skips capacity, sneaking and capsizing, so a vehicle can be
+//! over-filled and can carry a player and mobs together.
 //!
-//! A player's rider's connection sends the vehicle's passenger list when it
-//! applies `Effect::Mount`, and an ejection the connection already drains
-//! sends the empty list on dismount. A mob rider reaches clients through
-//! `EntitySnapshot::passengers`, which the entity streamer diffs per viewer.
+//! Clients learn the new passenger list from the entity streamer, which diffs
+//! `EntitySnapshot::passengers` per viewer; the command sends no packet.
 //!
 //! # Gaps
 //!
-//! Only players and mobs ride. A vehicle never carries a player and a mob
-//! together (the two passenger lists travel by different routes), mob riders
-//! are not saved, and dimension is not compared; the server hosts one.
+//! Dimension is not compared; the server hosts one.
 
 use lodestone_command_mc::EntityArg;
 
@@ -75,41 +68,22 @@ fn mount_command(
     };
     let (target_name, vehicle_label) = (target.display_name(), vehicle.display_name());
 
-    let current = match &target {
-        CommandTarget::Player(player) => mobs.with(|sim| sim.ridden_by(player.entity_id)).map(|(id, _)| id),
-        CommandTarget::World(entity) => mobs.with(|sim| sim.mob_rider_vehicle(entity.entity_id)),
-    };
-    if let Some(current) = current {
+    if let Some(current) = mobs.with(|sim| sim.vehicle_of(target.entity_id())) {
         return Err(format!("{target_name} is already riding {}", vehicle_name(ctx, current)));
     }
-    if matches!(vehicle, CommandTarget::Player(_)) {
+    let CommandTarget::World(vehicle_entity) = &vehicle else {
         return Err("Players can't be ridden".to_owned());
-    }
+    };
     if mobs.with(|sim| sim.self_and_passengers(target.entity_id()).contains(&vehicle.entity_id())) {
         return Err("Can't mount entity on itself or any of its passengers".to_owned());
     }
-    let refused = || format!("{target_name} couldn't start riding {vehicle_label}");
-    let CommandTarget::World(vehicle_entity) = &vehicle else { unreachable!("players were refused above") };
-    let boarded = match &target {
-        CommandTarget::Player(player) => {
-            if !mobs.with(|sim| sim.mob_riders_of(vehicle.entity_id()).is_empty()) {
-                return Err(refused());
-            }
-            match mobs.with(|sim| sim.mount_player(vehicle_entity.uuid, player.entity_id)) {
-                crate::mobs::MountOutcome::Mounted { vehicle: id } => {
-                    ctx.effect(player.uuid, crate::commands::Effect::Mount { vehicle: id });
-                    true
-                }
-                _ => false,
-            }
-        }
-        CommandTarget::World(rider) => matches!(
-            mobs.with(|sim| sim.mount_mob_rider(vehicle_entity.uuid, rider.uuid)),
-            crate::mobs::MobMountOutcome::Mounted { .. }
-        ),
+    let rider = match &target {
+        CommandTarget::Player(player) => crate::mobs::Rider::Player(player.entity_id),
+        CommandTarget::World(entity) => crate::mobs::Rider::Mob(entity.uuid),
     };
-    if !boarded {
-        return Err(refused());
+    match mobs.with(|sim| sim.mount_forced(vehicle_entity.uuid, rider)) {
+        crate::mobs::MountOutcome::Mounted { .. } => {}
+        _ => return Err(format!("{target_name} couldn't start riding {vehicle_label}")),
     }
     ctx.send_success(format!("{target_name} started riding {vehicle_label}"));
     Ok(1)
@@ -122,24 +96,14 @@ fn dismount_command(
     let target_selector = ctx.get(target_key).clone();
     let target = resolve_single(ctx, &target_selector)?;
     let name = target.display_name();
-    let not_riding = || format!("{name} is not riding any vehicle");
     let Some(mobs) = ctx.world.mobs else {
         return Err("This command needs a live connection and is not available here".to_owned());
     };
-    let vehicle = match &target {
-        CommandTarget::Player(player) => mobs.with(|sim| sim.ridden_by(player.entity_id)).map(|(id, _)| id),
-        CommandTarget::World(rider) => mobs.with(|sim| sim.mob_rider_vehicle(rider.entity_id)),
+    let Some(vehicle) = mobs.with(|sim| sim.vehicle_of(target.entity_id())) else {
+        return Err(format!("{name} is not riding any vehicle"));
     };
-    let Some(vehicle) = vehicle else { return Err(not_riding()) };
     let label = vehicle_name(ctx, vehicle);
-    match &target {
-        CommandTarget::Player(player) => {
-            mobs.with(|sim| sim.dismount_player(player.entity_id));
-        }
-        CommandTarget::World(rider) => {
-            mobs.with(|sim| sim.dismount_mob_rider(rider.entity_id));
-        }
-    }
+    mobs.with(|sim| sim.dismount(target.entity_id()));
     ctx.send_success(format!("{name} stopped riding {label}"));
     Ok(1)
 }

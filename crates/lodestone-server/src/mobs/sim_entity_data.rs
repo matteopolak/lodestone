@@ -29,18 +29,6 @@ pub enum EntityDataError {
     Unreadable,
 }
 
-/// What a mount attempt did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MountOutcome {
-    /// The player now rides network entity `vehicle`.
-    Mounted { vehicle: i32 },
-    /// The vehicle exists but cannot take this rider: occupied, capsized,
-    /// a cart that is not rideable, or a kind that carries no passengers.
-    Refused,
-    /// No live entity has that uuid.
-    Missing,
-}
-
 /// How a `/damage` hit ended.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DamageOutcome {
@@ -57,7 +45,7 @@ impl<'w> MobSim<'w> {
     /// The record the save path would write for `uuid`, or a header-only one
     /// for a kind it does not persist.
     fn entity_record(&self, uuid: Uuid) -> Option<SavedEntity> {
-        if let Some(record) = self.saved_entities().into_iter().find(|r| r.uuid == uuid) {
+        if let Some(record) = self.saved_trees().into_iter().find(|r| r.uuid == uuid) {
             return Some(record);
         }
         self.command_entities().into_iter().find(|e| e.uuid == uuid).map(|e| self.header_record(&e))
@@ -91,7 +79,7 @@ impl<'w> MobSim<'w> {
     #[must_use]
     pub fn entity_nbt_table(&self) -> HashMap<Uuid, Nbt> {
         let mut table: HashMap<Uuid, Nbt> =
-            self.saved_entities().into_iter().map(|record| (record.uuid, record.to_nbt())).collect();
+            self.saved_trees().into_iter().map(|record| (record.uuid, record.to_nbt())).collect();
         for entity in self.command_entities() {
             table.entry(entity.uuid).or_insert_with(|| self.header_record(&entity).to_nbt());
         }
@@ -243,44 +231,5 @@ impl<'w> MobSim<'w> {
             }
             _ => DamageOutcome::Unhurt,
         }
-    }
-
-    /// The network id of the entity the player `player_entity_id` rides, and
-    /// that entity's uuid.
-    #[must_use]
-    pub fn ridden_by(&self, player_entity_id: i32) -> Option<(i32, Uuid)> {
-        let id = self
-            .vehicle_ridden_by(player_entity_id)
-            .or_else(|| self.minecart_ridden_by(player_entity_id))
-            .or_else(|| self.cushion_ridden_by(player_entity_id))
-            .or_else(|| self.mob_ridden_by(player_entity_id))?;
-        self.command_entities().into_iter().find(|e| e.entity_id == id).map(|e| (id, e.uuid))
-    }
-
-    /// Seats the player `player_entity_id` on the entity `vehicle`, through the
-    /// mount rule of the vehicle's own kind.
-    pub fn mount_player(&mut self, vehicle: Uuid, player_entity_id: i32) -> MountOutcome {
-        let Some(located) = self.locate(vehicle) else { return MountOutcome::Missing };
-        let (id, seated) = match located {
-            Located::Vehicle(id) => (id, self.mount_vehicle(id, player_entity_id, false)),
-            Located::Minecart(id) => (id, self.mount_minecart(id, player_entity_id)),
-            Located::Cushion(id) => (id, self.mount_cushion(id, player_entity_id, false)),
-            Located::Mob(id) => (id, self.mount_mob(id, player_entity_id)),
-            _ => return MountOutcome::Refused,
-        };
-        if seated { MountOutcome::Mounted { vehicle: id } } else { MountOutcome::Refused }
-    }
-
-    /// Lifts the player `player_entity_id` off whatever they ride and queues the
-    /// ejection their connection turns into an empty passenger list. The
-    /// vehicle's network id, or `None` when the player rides nothing.
-    pub fn dismount_player(&mut self, player_entity_id: i32) -> Option<i32> {
-        let id = self
-            .dismount_rider(player_entity_id)
-            .or_else(|| self.dismount_minecart_rider(player_entity_id))
-            .or_else(|| self.dismount_cushion_rider(player_entity_id))
-            .or_else(|| self.dismount_mob(player_entity_id))?;
-        self.pending_ejections.push((id, player_entity_id));
-        Some(id)
     }
 }

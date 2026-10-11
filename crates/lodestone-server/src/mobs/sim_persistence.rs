@@ -1,6 +1,10 @@
 //! Persistence and despawn-facing entity lifecycle operations.
 
+use std::collections::HashSet;
+
+use super::sim_command_entities::Located;
 use super::*;
+use crate::entity_record::SavedEntity;
 
 impl<'w> MobSim<'w> {
     /// Every mob and dropped item in this sim, as the records
@@ -18,8 +22,32 @@ impl<'w> MobSim<'w> {
     /// [`saved_projectiles`](Self::saved_projectiles), and reach both record
     /// paths: their saved fields are the state
     /// [`native_entities`](Self::native_entities) keeps.
+    ///
+    /// A mob riding a saved vehicle is nested in the vehicle's record as a
+    /// `Passengers` list rather than listed beside it, as the reference save
+    /// format does; players are saved on their own.
     #[must_use]
     pub fn saved_entities(&self) -> Vec<crate::entity_record::SavedEntity> {
+        let (flat, links) = self.flat_saved_entities();
+        let riders: HashSet<Uuid> = links.iter().map(|&(rider, _)| rider).collect();
+        let by_uuid: HashMap<Uuid, SavedEntity> = flat.iter().map(|r| (r.uuid, r.clone())).collect();
+        flat.into_iter()
+            .filter(|record| !riders.contains(&record.uuid))
+            .map(|record| with_passengers(record, &by_uuid, &links))
+            .collect()
+    }
+
+    /// Every saved record with its `Passengers` nested, riders included as
+    /// records of their own: the view `/data get` and `nbt=` read.
+    pub(super) fn saved_trees(&self) -> Vec<crate::entity_record::SavedEntity> {
+        let (flat, links) = self.flat_saved_entities();
+        let by_uuid: HashMap<Uuid, SavedEntity> = flat.iter().map(|r| (r.uuid, r.clone())).collect();
+        flat.into_iter().map(|record| with_passengers(record, &by_uuid, &links)).collect()
+    }
+
+    /// The saved records with no nesting, and the `(rider, vehicle)` uuid links
+    /// of the mobs that ride a saved vehicle, in boarding order.
+    fn flat_saved_entities(&self) -> (Vec<SavedEntity>, Vec<(Uuid, Uuid)>) {
         let mut out: Vec<crate::entity_record::SavedEntity> =
             self.mobs.iter().map(|mob| self.saved_mob(mob)).collect();
         for (&id, state) in &self.item_state {
@@ -40,10 +68,96 @@ impl<'w> MobSim<'w> {
         out.extend(self.saved_projectiles());
         out.extend(self.saved_cushions());
         out.extend(self.saved_frames());
+        out.extend(self.saved_vehicles());
         for record in &mut out {
             self.attach_tags(record);
         }
-        out
+        let saved: HashSet<Uuid> = out.iter().map(|r| r.uuid).collect();
+        let links = self
+            .riders
+            .iter()
+            .filter(|ride| !ride.player)
+            .filter_map(|ride| Some((self.seat_uuid(ride.rider)?, self.seat_uuid(ride.vehicle)?)))
+            .filter(|(rider, vehicle)| saved.contains(rider) && saved.contains(vehicle))
+            .collect();
+        (out, links)
+    }
+
+    /// The uuid of the mob, boat, minecart or cushion `id`.
+    fn seat_uuid(&self, id: i32) -> Option<Uuid> {
+        self.get(id)
+            .map(|m| m.uuid)
+            .or_else(|| self.vehicles.get(&id).map(|v| v.uuid))
+            .or_else(|| self.minecarts.get(&id).map(|c| c.uuid))
+            .or_else(|| self.cushions.get(&id).map(|c| c.uuid))
+    }
+
+    /// Boats, rafts and minecarts: type, uuid, position, motion and yaw. A
+    /// container cart's slots, a furnace cart's fuel and a TNT cart's fuse are
+    /// not saved.
+    fn saved_vehicles(&self) -> Vec<SavedEntity> {
+        let record = |id: ResourceKey, uuid: Uuid, motion: &lodestone_physics::EntityMotion, yaw: f32| SavedEntity {
+            id,
+            uuid,
+            pos: Vec3::new(motion.position.x, motion.position.y, motion.position.z),
+            motion: Vec3::new(motion.velocity.x, motion.velocity.y, motion.velocity.z),
+            rotation: Rotation::new(yaw, 0.0),
+            health: None,
+            item: None,
+            age: None,
+            pickup_delay: None,
+            extra: Vec::new(),
+        };
+        let mut boats: Vec<_> = self.vehicles.iter().collect();
+        boats.sort_unstable_by_key(|&(id, _)| *id);
+        let mut carts: Vec<_> = self.minecarts.iter().collect();
+        carts.sort_unstable_by_key(|&(id, _)| *id);
+        boats
+            .into_iter()
+            .map(|(_, v)| record(v.entity_type.clone(), v.uuid, &v.motion, v.yaw))
+            .chain(carts.into_iter().map(|(_, c)| record(c.kind.entity_type(), c.uuid, &c.motion, c.yaw)))
+            .collect()
+    }
+
+    /// Re-creates a saved boat or minecart with its stored uuid; `false` when
+    /// the record is neither.
+    fn restore_vehicle(&mut self, saved: &SavedEntity) -> bool {
+        let at = lodestone_physics::Vec3d::new(saved.motion.x, saved.motion.y, saved.motion.z);
+        if crate::boat::is_boat_type_path(saved.id.path()) {
+            let id = self.spawn_vehicle(saved.id.clone(), saved.pos, saved.rotation.yaw);
+            if let Some(boat) = self.vehicles.get_mut(&id) {
+                boat.uuid = saved.uuid;
+                boat.motion.velocity = at;
+            }
+            return true;
+        }
+        let Some(kind) = minecart::MinecartKind::from_item(&saved.id.to_string()) else { return false };
+        let id = self.spawn_minecart(kind, saved.pos);
+        if let Some(cart) = self.minecarts.get_mut(&id) {
+            cart.uuid = saved.uuid;
+            cart.yaw = saved.rotation.yaw;
+            cart.yaw_o = saved.rotation.yaw;
+            cart.motion.velocity = at;
+        }
+        true
+    }
+
+    /// Restores the `Passengers` nested in `parent`, then seats them on it.
+    fn restore_passengers(&mut self, parent: &SavedEntity) -> usize {
+        let Some((_, lodestone_core::Nbt::List { elements, .. })) =
+            parent.extra.iter().find(|(name, _)| name == "Passengers")
+        else {
+            return 0;
+        };
+        let children: Vec<SavedEntity> = elements.iter().filter_map(SavedEntity::from_nbt).collect();
+        let restored = self.restore_saved(&children);
+        let Some(vehicle) = self.entity_id_of(parent.uuid) else { return restored };
+        for child in &children {
+            if let Some(Located::Mob(rider)) = self.locate(child.uuid) {
+                self.board(vehicle, rider, false, true);
+            }
+        }
+        restored
     }
 
     /// Writes the entity's `/tag` tags into `record` as a `Tags` list, when it has any.
@@ -200,6 +314,13 @@ impl<'w> MobSim<'w> {
                 restored += 1;
                 continue;
             }
+            if (crate::boat::is_boat_type_path(saved.id.path())
+                || minecart::MinecartKind::from_item(&saved.id.to_string()).is_some())
+                && self.restore_vehicle(saved)
+            {
+                restored += 1;
+                continue;
+            }
             if saved.id.path() == "cushion" {
                 self.restore_cushion(saved);
                 restored += 1;
@@ -268,8 +389,34 @@ impl<'w> MobSim<'w> {
                 }
             }
         }
+        for saved in entities {
+            restored += self.restore_passengers(saved);
+        }
         restored
     }
+}
+
+/// `record` with the records riding it nested as a `Passengers` list, as the
+/// reference save format writes them; riders of riders nest in turn.
+fn with_passengers(
+    mut record: SavedEntity,
+    by_uuid: &HashMap<Uuid, SavedEntity>,
+    links: &[(Uuid, Uuid)],
+) -> SavedEntity {
+    let riders: Vec<lodestone_core::Nbt> = links
+        .iter()
+        .filter(|&&(_, vehicle)| vehicle == record.uuid)
+        .filter_map(|(rider, _)| by_uuid.get(rider))
+        .map(|rider| with_passengers(rider.clone(), by_uuid, links).to_nbt())
+        .collect();
+    if !riders.is_empty() {
+        record.extra.retain(|(name, _)| name != "Passengers");
+        record.extra.push((
+            "Passengers".to_owned(),
+            lodestone_core::Nbt::List { element_type: lodestone_core::NbtTag::Compound, elements: riders },
+        ));
+    }
+    record
 }
 
 /// The ageable-mob growth fields vanilla writes: an `Int` age timer (negative

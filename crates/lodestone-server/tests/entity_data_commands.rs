@@ -5,7 +5,7 @@
 //! Every command runs through the production [`ServerCommands`] tree against a
 //! live [`MobHandle`]. Expected values are hand arithmetic or the reference's
 //! message text, never read back from the code under test. Alice stands at
-//! (0, 64, 0), survival, entity id 1001.
+//! (0, 64, 0), survival, entity id 4001.
 
 use lodestone_model::{GameMode, Rotation, Vec3};
 use lodestone_server::commands::registrar::RuleStore;
@@ -58,7 +58,7 @@ impl Server {
         let uuid = Uuid::from_u128(1);
         let source = CommandSource::player(
             uuid,
-            1001,
+            4001,
             "alice",
             Vec3::new(0.0, 64.0, 0.0),
             Rotation { yaw: 0.0, pitch: 0.0 },
@@ -67,7 +67,7 @@ impl Server {
         );
         let player = PlayerCandidate {
             uuid,
-            entity_id: 1001,
+            entity_id: 4001,
             username: "alice".to_owned(),
             position: Vec3::new(0.0, 64.0, 0.0),
             rotation: Rotation { yaw: 0.0, pitch: 0.0 },
@@ -309,8 +309,8 @@ fn ride_mounts_a_player_on_a_boat_and_dismounts() {
     let boat = server.mobs.with(|sim| sim.spawn_vehicle("minecraft:oak_boat".parse().unwrap(), Vec3::new(2.0, 64.0, 0.0), 0.0));
     let lines = server.run("ride @s mount @e[type=oak_boat,limit=1]").expect("mounted");
     assert_eq!(lines[0], "alice started riding minecraft:oak_boat");
-    assert!(lines[1].contains(&format!("Mount {{ vehicle: {boat} }}")), "{lines:?}");
-    assert_eq!(server.mobs.with(|sim| sim.vehicle_rider(boat)), Some(1001));
+    assert_eq!(lines.len(), 1, "boarding sends no connection effect: {lines:?}");
+    assert_eq!(server.mobs.with(|sim| sim.controlling_player(boat)), Some(4001));
 
     assert_eq!(
         refusal(server.run("ride @s mount @e[type=oak_boat,limit=1]")),
@@ -318,8 +318,7 @@ fn ride_mounts_a_player_on_a_boat_and_dismounts() {
     );
     let lines = server.run("ride @s dismount").expect("dismounted");
     assert_eq!(lines[0], "alice stopped riding minecraft:oak_boat");
-    assert_eq!(server.mobs.with(|sim| sim.vehicle_rider(boat)), None);
-    assert_eq!(server.mobs.with(|sim| sim.take_ejections_of(1001)), vec![boat]);
+    assert_eq!(server.mobs.with(|sim| sim.controlling_player(boat)), None);
     assert_eq!(refusal(server.run("ride @s dismount")), "alice is not riding any vehicle");
 }
 
@@ -467,7 +466,7 @@ fn ids(server: &Server) -> (i32, i32, i32) {
 
 fn riders(server: &Server, vehicle: i32) -> Vec<i32> {
     let passengers = server.mobs.with(|sim| sim.snapshots()).into_iter().find(|s| s.id == vehicle).expect("a snapshot").passengers;
-    assert_eq!(passengers, server.mobs.with(|sim| sim.mob_riders_of(vehicle)));
+    assert_eq!(passengers, server.mobs.with(|sim| sim.riders_of(vehicle)));
     passengers
 }
 
@@ -521,16 +520,11 @@ fn ride_mounts_a_mob_on_another_mob_and_refuses_the_cycle() {
 }
 
 #[test]
-fn ride_refuses_a_rider_that_is_not_a_mob_and_a_player_on_a_crowded_vehicle() {
+fn ride_refuses_a_rider_that_is_not_a_mob() {
     let server = ride_fixture();
     assert_eq!(
         refusal(server.run("ride @e[type=oak_boat,limit=1] mount @e[type=cow,limit=1]")),
         "minecraft:oak_boat couldn't start riding minecraft:cow"
-    );
-    server.run("ride @e[type=zombie,limit=1] mount @e[type=oak_boat,limit=1]").unwrap();
-    assert_eq!(
-        refusal(server.run("ride @s mount @e[type=oak_boat,limit=1]")),
-        "alice couldn't start riding minecraft:oak_boat"
     );
 }
 
@@ -541,5 +535,192 @@ fn a_rider_is_released_when_its_vehicle_is_removed() {
     server.run("ride @e[type=zombie,limit=1] mount @e[type=oak_boat,limit=1]").unwrap();
     server.run("kill @e[type=oak_boat]").unwrap();
     server.mobs.with(|sim| sim.tick());
-    assert_eq!(server.mobs.with(|sim| sim.mob_rider_vehicle(zombie)), None);
+    assert_eq!(server.mobs.with(|sim| sim.vehicle_of(zombie)), None);
+}
+
+fn controlling_player(server: &Server, vehicle: i32) -> Option<i32> {
+    server.mobs.with(|sim| sim.controlling_player(vehicle))
+}
+
+#[test]
+fn a_player_and_a_mob_share_one_boat_and_the_player_steers() {
+    let server = ride_fixture();
+    let (zombie, _, boat) = ids(&server);
+    server.run("ride @e[type=zombie,limit=1] mount @e[type=oak_boat,limit=1]").unwrap();
+    assert_eq!(controlling_player(&server, boat), None, "a mob does not steer");
+    server.run("ride @s mount @e[type=oak_boat,limit=1]").unwrap();
+    // A boarding player goes ahead of a first passenger who is not a player.
+    assert_eq!(riders(&server, boat), vec![4001, zombie]);
+    assert_eq!(controlling_player(&server, boat), Some(4001));
+
+    server.run("ride @s dismount").unwrap();
+    assert_eq!(riders(&server, boat), vec![zombie], "the mob stays aboard");
+    assert_eq!(controlling_player(&server, boat), None);
+}
+
+#[test]
+fn a_forced_mount_ignores_capacity_that_interaction_boarding_keeps() {
+    let server = ride_fixture();
+    let (zombie, cow, boat) = ids(&server);
+    server.run("ride @e[type=zombie,limit=1] mount @e[type=oak_boat,limit=1]").unwrap();
+    server.run("ride @e[type=cow,limit=1] mount @e[type=oak_boat,limit=1]").unwrap();
+    // A boat takes two riders by interaction.
+    assert!(!server.mobs.with(|sim| sim.mount_vehicle(boat, 4001, false)), "the boat is full");
+    assert_eq!(riders(&server, boat), vec![zombie, cow]);
+    // The command mount is forced and fills it past that.
+    server.run("ride @s mount @e[type=oak_boat,limit=1]").unwrap();
+    assert_eq!(riders(&server, boat), vec![4001, zombie, cow]);
+
+    // A chest boat takes one.
+    server.summon("oak_chest_boat", 11.0, 64.0, 0.0);
+    let chest = server.entities("oak_chest_boat")[0].entity_id;
+    server.run("ride @e[type=zombie,limit=1] dismount").unwrap();
+    server.run("ride @e[type=zombie,limit=1] mount @e[type=oak_chest_boat,limit=1]").unwrap();
+    assert!(!server.mobs.with(|sim| sim.mount_vehicle(chest, 2002, false)), "a chest boat holds one");
+}
+
+#[test]
+fn a_mob_rider_is_saved_inside_its_vehicle_and_reloaded_riding() {
+    use lodestone_core::{Nbt, NbtTag};
+    let server = ride_fixture();
+    let (zombie, cow, boat) = ids(&server);
+    server.run("ride @e[type=zombie,limit=1] mount @e[type=oak_boat,limit=1]").unwrap();
+    server.mobs.with(|sim| sim.tick());
+    let uuid_of = |kind: &str| server.entities(kind)[0].uuid;
+    let (zombie_uuid, boat_uuid) = (uuid_of("zombie"), uuid_of("oak_boat"));
+
+    let saved = server.mobs.with(|sim| sim.saved_entities());
+    let mut kinds: Vec<String> = saved.iter().map(|record| record.id.to_string()).collect();
+    kinds.sort();
+    assert_eq!(kinds, ["minecraft:cow", "minecraft:oak_boat"], "the rider is nested, not listed beside its boat");
+
+    // The reference save format: the vehicle's compound carries a `Passengers`
+    // list of the riders' own compounds, each with `id`, `UUID` (four ints, most
+    // significant first) and `Pos`, and no vehicle link of its own.
+    let Nbt::Compound(fields) = saved.iter().find(|r| r.uuid == boat_uuid).unwrap().to_nbt() else { panic!() };
+    let Some((_, Nbt::List { element_type, elements })) = fields.iter().find(|(name, _)| name == "Passengers") else {
+        panic!("the boat has no Passengers list: {fields:?}")
+    };
+    assert_eq!((*element_type, elements.len()), (NbtTag::Compound, 1));
+    let Nbt::Compound(rider) = &elements[0] else { panic!() };
+    let field = |name: &str| rider.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone());
+    let bits = zombie_uuid.as_u128();
+    assert_eq!(field("id"), Some(Nbt::String("minecraft:zombie".to_owned())));
+    assert_eq!(
+        field("UUID"),
+        Some(Nbt::IntArray(vec![(bits >> 96) as i32, (bits >> 64) as i32, (bits >> 32) as i32, bits as i32]))
+    );
+    // The tick carried the rider to the boat's seat at (2, 64, 0).
+    assert_eq!(
+        field("Pos"),
+        Some(Nbt::List { element_type: NbtTag::Double, elements: vec![Nbt::Double(2.0), Nbt::Double(64.0), Nbt::Double(0.0)] })
+    );
+    assert!(field("Passengers").is_none());
+
+    // `/data get` reads the same nesting.
+    let line = only(server.run("data get entity @e[type=oak_boat,limit=1] Passengers[0].id"));
+    assert!(line.ends_with("\"minecraft:zombie\""), "{line}");
+
+    // Reloaded into an empty sim, the rider sits on its boat again and the cow does not.
+    let fresh = MobHandle::default();
+    assert_eq!(fresh.with(|sim| sim.restore_saved(&saved)), 3);
+    fresh.with(|sim| {
+        let id_of = |uuid: Uuid| sim.command_entities().into_iter().find(|e| e.uuid == uuid).unwrap().entity_id;
+        let (restored_zombie, restored_boat) = (id_of(zombie_uuid), id_of(boat_uuid));
+        assert_eq!(sim.vehicle_of(restored_zombie), Some(restored_boat));
+        assert_eq!(sim.riders_of(restored_boat), vec![restored_zombie]);
+        assert_eq!(sim.command_entities().len(), 3, "no rider was duplicated");
+    });
+    let _ = (zombie, cow, boat);
+}
+
+fn data_text(server: &Server, text: &str) -> String {
+    only(server.run(text))
+}
+
+#[test]
+fn data_modify_takes_its_source_from_storage_entity_and_block() {
+    let server = Server::new();
+    server.summon("cow", 4.0, 64.0, 0.0);
+    server.run("data merge storage lodestone:src {name:\"Notch\",n:5,list:[1,2,3]}").unwrap();
+    server.run("data merge storage lodestone:dst {names:[\"a\"]}").unwrap();
+
+    server.run("data modify storage lodestone:dst copy set from storage lodestone:src name").unwrap();
+    assert_eq!(
+        data_text(&server, "data get storage lodestone:dst copy"),
+        "Storage lodestone:dst has the following contents: \"Notch\""
+    );
+    // The whole source compound, when no path follows.
+    server.run("data modify storage lodestone:dst whole set from storage lodestone:src").unwrap();
+    assert_eq!(
+        data_text(&server, "data get storage lodestone:dst whole.n"),
+        "Storage lodestone:dst has the following contents: 5"
+    );
+    // An entity source appends its float to an existing list; a cow starts at 10 health.
+    server.run("data modify storage lodestone:dst names append from entity @e[type=cow,limit=1] Health").unwrap();
+    assert_eq!(
+        data_text(&server, "data get storage lodestone:dst names[1]"),
+        "Storage lodestone:dst has the following contents: 10.0f"
+    );
+    // A list source inserts every element it selects, in order.
+    server.run("data modify storage lodestone:dst names insert 0 from storage lodestone:src list[]").unwrap();
+    for (index, expected) in [(0, "1"), (2, "3"), (3, "\"a\""), (4, "10.0f")] {
+        assert_eq!(
+            data_text(&server, &format!("data get storage lodestone:dst names[{index}]")),
+            format!("Storage lodestone:dst has the following contents: {expected}")
+        );
+    }
+    // A block source.
+    sign_at(&server, SIGN, ["", "", "", ""]);
+    server.run("data modify storage lodestone:dst kind set from block 3 64 3 id").unwrap();
+    assert_eq!(
+        data_text(&server, "data get storage lodestone:dst kind"),
+        "Storage lodestone:dst has the following contents: \"minecraft:sign\""
+    );
+    // A compound source merges into a compound path.
+    server.run("data merge storage lodestone:src {patch:{extra:1b}}").unwrap();
+    server.run("data modify storage lodestone:dst whole merge from storage lodestone:src patch").unwrap();
+    assert_eq!(
+        data_text(&server, "data get storage lodestone:dst whole.extra"),
+        "Storage lodestone:dst has the following contents: 1b"
+    );
+    // A source can write an entity.
+    server.run("data merge storage lodestone:src {title:\"Bessie\"}").unwrap();
+    server.run("data modify entity @e[type=cow,limit=1] CustomName set from storage lodestone:src title").unwrap();
+    assert_eq!(server.entities("cow")[0].name, "Bessie");
+}
+
+#[test]
+fn data_modify_reads_its_source_before_its_destination() {
+    let server = Server::new();
+    assert_eq!(
+        refusal(server.run("data modify block 9 64 9 x set from storage lodestone:none y")),
+        "Found no elements matching y"
+    );
+    assert_eq!(
+        refusal(server.run("data modify storage lodestone:dst x set from entity @e[type=pig,limit=1] Health")),
+        "No entity was found"
+    );
+}
+
+#[test]
+fn data_modify_string_slices_by_character_and_refuses_what_is_not_text() {
+    let server = Server::new();
+    server.run("data merge storage lodestone:src {name:\"Notch\",n:5,list:[1,2,3]}").unwrap();
+    let text = |args: &str| {
+        server.run(&format!("data modify storage lodestone:dst s set string storage lodestone:src {args}")).unwrap();
+        data_text(&server, "data get storage lodestone:dst s")
+    };
+    let said = |value: &str| format!("Storage lodestone:dst has the following contents: \"{value}\"");
+    assert_eq!(text("name"), said("Notch"));
+    assert_eq!(text("name 1"), said("otch"));
+    assert_eq!(text("name 1 3"), said("ot"));
+    assert_eq!(text("name -3"), said("tch"), "a negative start counts from the end");
+    assert_eq!(text("name 1 -1"), said("otc"));
+    assert_eq!(text("n"), said("5"), "a number is its text form");
+    let bad = |args: &str| refusal(server.run(&format!("data modify storage lodestone:dst s set string storage lodestone:src {args}")));
+    assert_eq!(bad("name 4 2"), "Invalid substring indices: 4 to 2");
+    assert_eq!(bad("name 0 9"), "Invalid substring indices: 0 to 9");
+    assert_eq!(bad("name -9"), "Invalid substring indices: -4 to 5");
+    assert!(bad("list").starts_with("Expected a value: got "), "a container is not text");
 }

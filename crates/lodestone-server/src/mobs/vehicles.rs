@@ -65,6 +65,8 @@ struct VehicleTickInput {
     owner: VehicleTickOwner,
     serial: usize,
     id: i32,
+    /// Whether a player steers the vehicle this tick.
+    controlled: bool,
     vehicle: TrackedVehicle,
 }
 
@@ -107,7 +109,6 @@ impl<'w> MobSim<'w> {
                 )),
                 yaw,
                 boat: lodestone_physics::vehicle::BoatState::default(),
-                rider: None,
                 paddle_left: false,
                 paddle_right: false,
                 // The vehicle's registered defaults, and
@@ -208,88 +209,22 @@ impl<'w> MobSim<'w> {
         })
     }
 
-    /// The controlling passenger's player entity id, if the vehicle is occupied.
-    #[must_use]
-    pub fn vehicle_rider(&self, id: i32) -> Option<i32> {
-        self.vehicles.get(&id).and_then(|v| v.rider)
-    }
-
-    /// Returns the typed id of a vehicle's rider, when occupied.
-    #[must_use]
-    #[cfg(test)]
-    pub fn vehicle_rider_typed(&self, id: EntityNetworkId) -> Option<EntityNetworkId> {
-        self.vehicle_rider(server_entity_raw(id)?).map(server_entity_id)
-    }
-
-    /// The vehicle `player_entity_id` is riding, if any.
-    #[must_use]
-    pub fn vehicle_ridden_by(&self, player_entity_id: i32) -> Option<i32> {
-        self.vehicles
-            .iter()
-            .find(|(_, v)| v.rider == Some(player_entity_id))
-            .map(|(&id, _)| id)
-    }
-
-    /// Returns the typed vehicle occupied by a typed player id.
-    #[must_use]
-    #[cfg(test)]
-    pub fn vehicle_ridden_by_typed(
-        &self,
-        player_entity_id: EntityNetworkId,
-    ) -> Option<EntityNetworkId> {
-        self.vehicle_ridden_by(server_entity_raw(player_entity_id)?)
-            .map(server_entity_id)
-    }
-
-    /// A player boards the boat.
+    /// A player boards the boat by interaction.
     ///
-    /// Returns `true` when the player is now aboard, which is the caller's signal
-    /// to send `SET_PASSENGERS`. Refuses — vanilla's `PASS` — when:
-    ///
-    /// * `id` is not a vehicle;
-    /// * `using_secondary_action` is set (player's is secondary use active, i.e.
-    ///   sneak-clicking a boat does *not* board it);
-    /// * the boat is out of control (`outOfControlTicks >= 60`, a fully submerged
-    ///   hull);
-    /// * someone else is already aboard. Vanilla's real limit is
-    ///   get max passengers — **2** for a boat and **1** for a chest boat — and
-    ///   this crate seats one for every type. A narrower gap than it looks: the
-    ///   second seat needs a passenger *list* on the wire and a second seat
-    ///   attachment, and seating two players in the same spot would be worse than
-    ///   refusing.
-    ///
-    /// A player already riding something else is dismounted from it first, so a
-    /// stale link cannot leave one player recorded in two boats.
-    pub fn mount_vehicle(
-        &mut self,
-        id: i32,
-        player_entity_id: i32,
-        using_secondary_action: bool,
-    ) -> bool {
+    /// Refuses when `id` is not a boat, the player is sneaking
+    /// (`using_secondary_action`), the hull is out of control (submerged for 60 ticks), or the boat is full ([`MobSim::seat_capacity`]).
+    /// A player already riding something is lifted off it first.
+    pub fn mount_vehicle(&mut self, id: i32, player_entity_id: i32, using_secondary_action: bool) -> bool {
         if using_secondary_action {
             return false;
         }
         let Some(vehicle) = self.vehicles.get(&id) else {
             return false;
         };
-        if vehicle.rider.is_some_and(|rider| rider != player_entity_id) {
-            return false;
-        }
-        // `!(this.outOfControlTicks < 60.0F)` — a capsized boat cannot be boarded.
         if vehicle.boat.out_of_control_ticks >= 60.0 {
             return false;
         }
-        if let Some(previous) = self.vehicle_ridden_by(player_entity_id) {
-            if previous != id {
-                if let Some(old) = self.vehicles.get_mut(&previous) {
-                    old.rider = None;
-                }
-            }
-        }
-        if let Some(vehicle) = self.vehicles.get_mut(&id) {
-            vehicle.rider = Some(player_entity_id);
-        }
-        true
+        self.board(id, player_entity_id, true, false)
     }
 
     /// Mounts a typed player id on a typed vehicle id.
@@ -307,30 +242,6 @@ impl<'w> MobSim<'w> {
             return false;
         };
         self.mount_vehicle(id, player_entity_id, using_secondary_action)
-    }
-
-    /// Entity's stop riding for whatever `player_entity_id` is aboard, returning the
-    /// vehicle it left.
-    ///
-    /// Called on disconnect as well as on an explicit dismount: a vehicle whose
-    /// rider vanished must resume its own server-side tick, or it stays frozen
-    /// mid-lake forever.
-    pub fn dismount_rider(&mut self, player_entity_id: i32) -> Option<i32> {
-        let id = self.vehicle_ridden_by(player_entity_id)?;
-        if let Some(vehicle) = self.vehicles.get_mut(&id) {
-            vehicle.rider = None;
-        }
-        Some(id)
-    }
-
-    /// Dismounts a typed player id and returns the typed vehicle it left.
-    #[cfg(test)]
-    pub fn dismount_rider_typed(
-        &mut self,
-        player_entity_id: EntityNetworkId,
-    ) -> Option<EntityNetworkId> {
-        self.dismount_rider(server_entity_raw(player_entity_id)?)
-            .map(server_entity_id)
     }
 
     /// Vanilla's boat dismount location for one tracked
@@ -380,7 +291,10 @@ impl<'w> MobSim<'w> {
         position: Vec3,
         yaw: f32,
     ) -> Option<i32> {
-        let id = self.vehicle_ridden_by(player_entity_id)?;
+        let id = self.vehicle_of(player_entity_id)?;
+        if self.controlling_player(id) != Some(player_entity_id) {
+            return None;
+        }
         let vehicle = self.vehicles.get_mut(&id)?;
         let next = Vec3d::new(position.x, position.y, position.z);
         vehicle.motion.velocity = next.subtract(vehicle.motion.position);
@@ -406,7 +320,10 @@ impl<'w> MobSim<'w> {
     /// server-streamed field — so this only ever matters to a *second*
     /// connected player watching the boat from outside.
     pub fn apply_boat_paddle(&mut self, player_entity_id: i32, left: bool, right: bool) -> Option<i32> {
-        let id = self.vehicle_ridden_by(player_entity_id)?;
+        let id = self.vehicle_of(player_entity_id)?;
+        if self.controlling_player(id) != Some(player_entity_id) {
+            return None;
+        }
         let vehicle = self.vehicles.get_mut(&id)?;
         vehicle.paddle_left = left;
         vehicle.paddle_right = right;
@@ -430,14 +347,15 @@ impl<'w> MobSim<'w> {
     /// literally the same functions the client's `tick_controlled_vehicle` calls,
     /// so a boat cannot behave one way while watched and another while ridden.
     pub fn tick_vehicles(&mut self, block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId) {
-        self.clear_disconnected_vehicle_riders();
+        self.clear_disconnected_riders();
+        let controlled = self.controlled_vehicles();
         let mut ids: Vec<i32> = self.vehicles.keys().copied().collect();
         ids.sort_unstable();
         for id in ids {
             let Some(vehicle) = self.vehicles.get_mut(&id) else {
                 continue;
             };
-            tick_one_vehicle(vehicle, block_state);
+            tick_one_vehicle(vehicle, controlled.contains(&id), block_state);
         }
     }
 
@@ -450,7 +368,7 @@ impl<'w> MobSim<'w> {
         &mut self,
         block_state: &(dyn Fn(i32, i32, i32) -> block_states::StateId + Sync),
     ) -> Vec<VehicleTickOwnerBatch> {
-        self.clear_disconnected_vehicle_riders();
+        self.clear_disconnected_riders();
         self.vehicle_owner_plan = self
             .vehicle_owner_plan
             .checked_add(1)
@@ -476,6 +394,7 @@ impl<'w> MobSim<'w> {
     ) -> Vec<VehicleTickOwnerBatch> {
         let mut ids: Vec<i32> = self.vehicles.keys().copied().collect();
         ids.sort_unstable();
+        let controlled = self.controlled_vehicles();
         let mut jobs = Vec::<(VehicleTickOwner, Vec<VehicleTickInput>)>::new();
         for (serial, id) in ids.into_iter().enumerate() {
             let vehicle = self
@@ -488,6 +407,7 @@ impl<'w> MobSim<'w> {
                 owner,
                 serial,
                 id,
+                controlled: controlled.contains(&id),
                 vehicle,
             };
             if let Some((_, inputs)) = jobs
@@ -510,7 +430,7 @@ impl<'w> MobSim<'w> {
                         owner: input.owner,
                         serial: input.serial,
                         id: input.id,
-                        vehicle: ticked_vehicle(input.vehicle, block_state),
+                        vehicle: ticked_vehicle(input.vehicle, input.controlled, block_state),
                     })
                     .collect();
                 VehicleTickOwnerBatch {
@@ -560,32 +480,6 @@ impl<'w> MobSim<'w> {
         self.applied_vehicle_owner_plan = plan;
     }
 
-    fn clear_disconnected_vehicle_riders(&mut self) {
-        // **The disconnect self-heal.** A rider is cleared by an explicit
-        // dismount, and a client that simply *vanishes* sends none — so without
-        // this a boat whose rider crashed or quit stays `Some(id)` forever and is
-        // skipped by every tick below, frozen mid-lake and unmountable by anyone.
-        //
-        // Guarded on a **non-empty** roster, which is the whole subtlety:
-        // [`set_players`](Self::set_players) is refreshed from a movement packet,
-        // so the list is legitimately empty before anyone has moved, and treating
-        // that as "nobody is connected" would evict a rider the instant they
-        // boarded. Empty means "no information", not "no players".
-        if !self.players.is_empty() {
-            let connected: Vec<i32> = self
-                .players
-                .iter()
-                .filter_map(|p| p.identity.map(|identity| identity.entity_id))
-                .collect();
-            if !connected.is_empty() {
-                for vehicle in self.vehicles.values_mut() {
-                    if vehicle.rider.is_some_and(|rider| !connected.contains(&rider)) {
-                        vehicle.rider = None;
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Converts an id from the typed server-facing vehicle API to the raw key used
@@ -647,6 +541,7 @@ fn merge_vehicle_tick_owner_batches(
 
 fn tick_one_vehicle(
     vehicle: &mut TrackedVehicle,
+    controlled: bool,
     block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId,
 ) {
     use lodestone_physics::vehicle::{BOAT_STEP_HEIGHT, boat_status, float_boat};
@@ -663,7 +558,7 @@ fn tick_one_vehicle(
     if vehicle.damage > 0.0 {
         vehicle.damage -= 1.0;
     }
-    if vehicle.rider.is_some() {
+    if controlled {
         return;
     }
     let view = VehicleCollision { block_state };
@@ -705,9 +600,10 @@ fn tick_one_vehicle(
 
 fn ticked_vehicle(
     mut vehicle: TrackedVehicle,
+    controlled: bool,
     block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId,
 ) -> TrackedVehicle {
-    tick_one_vehicle(&mut vehicle, block_state);
+    tick_one_vehicle(&mut vehicle, controlled, block_state);
     vehicle
 }
 
@@ -1124,23 +1020,24 @@ mod vehicle_tests {
         if sim.mount_vehicle(boat, 7, true) {
             wrong.push("a sneak-click must not board");
         }
-        if sim.vehicle_rider(boat).is_some() {
+        if sim.controlling_player(boat).is_some() {
             wrong.push("and must leave the boat empty");
         }
         if !sim.mount_vehicle(boat, 7, false) {
             wrong.push("an ordinary click boards");
         }
-        if sim.vehicle_rider(boat) != Some(7) {
+        if sim.controlling_player(boat) != Some(7) {
             wrong.push("and records the rider");
         }
-        // A second player is refused: this crate seats one, and vanilla's
-        // `getMaxPassengers` of 2 for a plain boat is a documented gap rather than
-        // an accident. Seating two in the same spot would be worse than refusing.
-        if sim.mount_vehicle(boat, 8, false) {
-            wrong.push("an occupied boat refuses a second rider");
+        // A plain boat seats two; a third rider is refused.
+        if !sim.mount_vehicle(boat, 8, false) {
+            wrong.push("a plain boat seats a second rider");
         }
-        if sim.vehicle_rider(boat) != Some(7) {
-            wrong.push("and keeps the one it has");
+        if sim.mount_vehicle(boat, 9, false) {
+            wrong.push("a full boat refuses a third rider");
+        }
+        if sim.controlling_player(boat) != Some(7) {
+            wrong.push("and keeps its first rider in control");
         }
         // A non-vehicle id is not a boat.
         if sim.mount_vehicle(boat + 500, 7, false) {
@@ -1165,14 +1062,15 @@ mod vehicle_tests {
             Some("minecraft:oak_boat".to_owned()),
         );
         assert!(sim.mount_vehicle_typed(boat, player, false));
-        assert_eq!(sim.vehicle_rider_typed(boat), Some(player));
-        assert_eq!(sim.vehicle_ridden_by_typed(player), Some(boat));
-        assert_eq!(sim.dismount_rider_typed(player), Some(boat));
-        assert_eq!(sim.vehicle_rider_typed(boat), None);
+        let (boat_raw, player_raw) = (server_entity_raw(boat).unwrap(), server_entity_raw(player).unwrap());
+        assert_eq!(sim.controlling_player(boat_raw), Some(player_raw));
+        assert_eq!(sim.vehicle_of(player_raw), Some(boat_raw));
+        assert_eq!(sim.dismount(player_raw), Some(boat_raw));
+        assert_eq!(sim.controlling_player(boat_raw), None);
 
         let plugin_id = EntityNetworkId::plugin(-1).expect("a plugin id");
         assert!(!sim.mount_vehicle_typed(boat, plugin_id, false));
-        assert_eq!(sim.vehicle_ridden_by_typed(plugin_id), None);
+        assert_eq!(server_entity_raw(plugin_id), None);
     }
 
     /// **The handover, which is the whole point of the vehicle registry.**
@@ -1217,7 +1115,7 @@ mod vehicle_tests {
         // 0.04, so five ticks of free fall move it by strictly more than one tick's
         // worth — the prediction is a floor derived from the constant rather than a
         // "did it move at all" sign check.
-        assert_eq!(sim.dismount_rider(7), Some(boat));
+        assert_eq!(sim.dismount(7), Some(boat));
         for _ in 0..5 {
             sim.tick_vehicles(&lake());
         }
@@ -1451,7 +1349,7 @@ mod vehicle_tests {
         assert!(kept.mount_vehicle(boat, 7, false));
         kept.tick_vehicles(&lake());
         assert_eq!(
-            kept.vehicle_rider(boat),
+            kept.controlling_player(boat),
             Some(7),
             "an empty roster means 'no information', not 'nobody is connected'"
         );
@@ -1477,7 +1375,7 @@ mod vehicle_tests {
         }]);
         evicted.tick_vehicles(&lake());
         assert_eq!(
-            evicted.vehicle_rider(boat),
+            evicted.controlling_player(boat),
             None,
             "a rider absent from a non-empty roster has gone"
         );

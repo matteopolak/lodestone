@@ -51,11 +51,7 @@ pub(super) fn end_gateway_contact_allowed(dimension: crate::dimension::Dimension
 }
 
 pub(super) fn player_has_mount(mobs: &MobHandle, player_entity_id: i32) -> bool {
-    mobs.with(|sim| {
-        sim.vehicle_ridden_by(player_entity_id).is_some()
-            || sim.minecart_ridden_by(player_entity_id).is_some()
-            || sim.mob_ridden_by(player_entity_id).is_some()
-    })
+    mobs.with(|sim| sim.vehicle_of(player_entity_id).is_some())
 }
 
 pub(super) const END_GATEWAY_CONTACT_COOLDOWN: u8 = 40;

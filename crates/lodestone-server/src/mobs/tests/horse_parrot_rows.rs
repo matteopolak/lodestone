@@ -219,7 +219,7 @@ fn ride(tame: bool, temper: i32) -> (bool, bool, i32) {
     let mut thrown = false;
     for _ in 0..600 {
         sim.tick();
-        thrown |= sim.take_ejections_of(77).contains(&id);
+        thrown |= sim.vehicle_of(77).is_none();
     }
     let horse = sim.get(id).expect("horse");
     (thrown, horse.is_tame(), horse.temper())

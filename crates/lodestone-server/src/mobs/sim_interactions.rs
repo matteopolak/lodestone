@@ -666,13 +666,13 @@ impl<'w> MobSim<'w> {
     /// Resolves every untamed mount that tried to throw its rider this tick: a
     /// player rider tames it when a draw under the mount's maximum temper falls
     /// below its temper, and otherwise raises its temper by five; either way a
-    /// failure throws the rider off, rears the mount, and queues the ejection
-    /// for the rider's connection.
+    /// failure throws the rider off, rears the mount, and lifts the rider
+    /// off.
     pub(super) fn resolve_bucks(&mut self) {
         let bucking: Vec<i32> = self.mobs.iter_mut().filter_map(|m| m.mob.take_buck().then_some(m.id)).collect();
         for id in bucking {
             let Some(mount) = self.get(id) else { continue };
-            let (Some(rider), false) = (mount.rider, mount.is_tame()) else { continue };
+            let (Some(rider), false) = (self.controlling_player(id), mount.is_tame()) else { continue };
             let max_temper = match species::tame_mechanism(mount.entity_type().path()) {
                 Some(species::TameMechanism::Temper { max_temper }) => max_temper,
                 _ => 0,
@@ -695,11 +695,10 @@ impl<'w> MobSim<'w> {
                     mount.set_temper((temper + 5).clamp(0, max_temper.max(temper)));
                 }
             }
+            self.dismount(rider);
             if let Some(mount) = self.get_mut(id) {
-                mount.rider = None;
                 lodestone_entity::ai::MobController::rear_up(&mut mount.mob);
             }
-            self.pending_ejections.push((id, rider));
         }
     }
 

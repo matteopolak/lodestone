@@ -189,7 +189,7 @@ fn removing_the_support_breaks_it_on_the_101st_tick_and_drops_its_colour() {
             assert!(!sim.plan_cushion_checks(&supported).contains(&other));
         }
         let broken = sim.break_cushion(id, true).expect("the cushion exists");
-        assert_eq!((broken.rider, broken.color), (None, 14));
+        assert_eq!(broken.color, 14);
         assert!(sim.cushion_state(id).is_none());
         assert_eq!(sim.dropped_items(), vec![("minecraft:red_cushion".to_owned(), 1)]);
     });
@@ -213,14 +213,15 @@ fn one_player_sits_and_a_sneaking_or_second_player_does_not() {
         let id = sim.spawn_cushion(Vec3::new(0.5, 65.0, 0.5), 0.0, 0);
         assert!(!sim.mount_cushion(id, 7, true), "sneaking does not sit");
         assert!(sim.mount_cushion(id, 7, false));
-        assert_eq!(sim.cushion_rider(id), Some(7));
-        assert_eq!(sim.cushion_ridden_by(7), Some(id));
+        assert_eq!(sim.controlling_player(id), Some(7));
+        assert_eq!(sim.vehicle_of(7), Some(id));
         assert!(!sim.mount_cushion(id, 8, false), "occupied");
         assert!(!sim.mount_cushion(id, 7, false), "the rider clicking again does not re-sit");
-        assert_eq!(sim.dismount_cushion_rider(7), Some(id));
+        assert_eq!(sim.dismount(7), Some(id));
         assert!(sim.mount_cushion(id, 8, false));
-        let broken = sim.break_cushion(id, true).unwrap();
-        assert_eq!(broken.rider, Some(8));
+        sim.break_cushion(id, true).unwrap();
+        sim.tick();
+        assert_eq!(sim.vehicle_of(8), None, "the next rider sync lifts the rider off a broken seat");
     });
 }
 
@@ -237,7 +238,7 @@ fn a_cushion_streams_its_colour_as_metadata() {
 }
 
 #[test]
-fn a_seated_cushion_that_loses_its_support_breaks_and_queues_the_riders_ejection() {
+fn a_seated_cushion_that_loses_its_support_breaks_and_lifts_the_rider() {
     let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
     let unsupported = |_x: i32, _y: i32, _z: i32| air_state();
     mobs.with(|sim| {
@@ -248,21 +249,9 @@ fn a_seated_cushion_that_loses_its_support_breaks_and_queues_the_riders_ejection
         }
         assert_eq!(sim.plan_cushion_checks(&unsupported), vec![id], "a rider does not exempt it");
         let broken = sim.break_cushion(id, true).expect("the cushion exists");
-        assert_eq!(broken.rider, Some(7));
         assert_eq!(broken.position, Vec3::new(0.5, 65.0, 0.5));
-        assert_eq!(sim.take_ejections_of(8), Vec::<i32>::new(), "another player is not told");
-        assert_eq!(sim.take_ejections_of(7), vec![id]);
-        assert!(sim.take_ejections_of(7).is_empty(), "drained once");
-    });
-}
-
-#[test]
-fn an_unseated_break_queues_no_ejection() {
-    let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
-    mobs.with(|sim| {
-        let id = sim.spawn_cushion(Vec3::new(0.5, 65.0, 0.5), 0.0, 1);
-        sim.break_cushion(id, false);
-        assert!(sim.take_ejections_of(7).is_empty());
+        sim.tick();
+        assert_eq!(sim.vehicle_of(7), None);
     });
 }
 

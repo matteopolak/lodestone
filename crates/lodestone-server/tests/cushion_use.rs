@@ -272,19 +272,20 @@ async fn a_cushion_places_streams_seats_the_player_and_breaks_to_its_item() {
     // Sneaking does not sit; a plain click does.
     client.write_packet(SNEAK_INTERACT, &id.to_be_bytes()).await.expect("sneak interact");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(mobs.with(|sim| sim.cushion_rider(id)), None);
+    assert_eq!(mobs.with(|sim| sim.controlling_player(id)), None);
     client.write_packet(INTERACT, &id.to_be_bytes()).await.expect("interact");
     until("the passenger list", || {
         observed.passengers.lock().expect("passengers lock").contains(&(id, vec![LOCAL_PLAYER]))
     })
     .await;
-    assert!(mobs.with(|sim| sim.cushion_rider(id)).is_some());
+    let rider = mobs.with(|sim| sim.controlling_player(id)).expect("the player sits");
 
-    // A hit breaks it, frees the seat on the wire and drops the red cushion.
+    // A hit breaks it, removes the seat from the wire (a client drops a rider whose
+    // vehicle is removed) and drops the red cushion.
     client.write_packet(ATTACK, &id.to_be_bytes()).await.expect("attack");
     until("the removal", || observed.removed.lock().expect("removed lock").contains(&id)).await;
     assert_eq!(mobs.with(|sim| sim.cushion_count()), 0);
-    assert!(observed.passengers.lock().expect("passengers lock").contains(&(id, Vec::new())));
+    until("the rider freed", || mobs.with(|sim| sim.vehicle_of(rider)).is_none()).await;
     until("the dropped item", || {
         observed.added.lock().expect("added lock").iter().any(|e| {
             e.entity_type.to_string() == "minecraft:item"

@@ -421,7 +421,7 @@ impl<'w> MobSim<'w> {
         // spawns them with `spawn_species`, exactly as a patrol does — so
         // there is nothing to append here.
         for snap in &mut out {
-            snap.passengers = self.mob_riders_of(snap.id);
+            snap.passengers = self.riders_of(snap.id);
         }
         out
     }

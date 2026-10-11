@@ -34,6 +34,8 @@ How a live mob survives a world reload: `MobSim::saved_entities` writes each mob
 - Passive mobs are persistent by species, so `PersistenceRequired: 0` never makes one despawnable; only `1` or a `CustomName` upgrades a mob. On save the flag is written only for a persistent hostile species.
 - `LastRestock` and `LastGossipDecay` are absolute game times, clamped on restore to the sim's tick count.
 
+**Riders and vehicles.** Boats, rafts and minecarts save as type, uuid, position, motion and yaw (`MobSim::saved_vehicles`). A mob riding a saved vehicle is nested in the vehicle's record as a `Passengers` list of full entity compounds, and omitted from the flat list, as in the reference format; riders of riders nest in turn. `restore_saved` restores each `Passengers` list after its parent (`restore_passengers`) and seats the riders by uuid. Players are saved on their own and are not nested. `/data get entity` shows the same nesting (`saved_trees`).
+
 ### The native store
 
 `world_storage::NativeEntityRecord` is `SavedEntity` in the native store's terms: identity, type, dimension, pose, motion and `NativeEntityState { health, item, age, pickup_delay, fields }` (`item` a whole `ItemStack`; [item save format](item-save-format.md)). `fields` is every other saved field under its vanilla name, so mobs, projectiles, thrown and dropped items round-trip; `MobSim::native_entities`/`restore_native` are thin conversions. On the wire (`EntityRecord` in `storage.proto`) `fields` is `state_nbt`; `EntityRecord.schema_version` 0 is the original pose plus `durable_state` layout and 2 (`ENTITY_SCHEMA_VERSION`) adds `state_nbt`. `world_storage::migrate_entity_body` upgrades 0 to 2 on read and refuses unknown versions; old bodies are rewritten by the next `replace_live_entities`. Fixtures: `lodestone-storage-schema/tests/fixtures/native-entity-*-v1.hex`.
@@ -54,7 +56,7 @@ None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/` (
 
 ## Not persisted yet
 
-Tipped-arrow contents; active effects, burn time and piglin/warden/allay/sniffer/camel/armadillo/axolotl timers (carried verbatim from an import, but the sim's own values are not written); saddles and horse armour (carried, not modelled); all-black cats and lightning-brown mooshrooms; name-tag styling; passengers, boats and minecarts; projectiles on the native path other than via `fields`; villager trades the generated table lacks (replaced by table offers, use counts lost).
+Tipped-arrow contents; active effects, burn time and piglin/warden/allay/sniffer/camel/armadillo/axolotl timers (carried verbatim from an import, but the sim's own values are not written); saddles and horse armour (carried, not modelled); all-black cats and lightning-brown mooshrooms; name-tag styling; a container cart's slots, a furnace cart's fuel and a TNT cart's fuse; boats and carts on the native store when empty; projectiles on the native path other than via `fields`; villager trades the generated table lacks (replaced by table offers, use counts lost).
 
 ## Dependencies
 

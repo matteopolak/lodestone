@@ -3,26 +3,6 @@
 use super::*;
 
 impl<'w> MobSim<'w> {
-    /// Clears riders absent from an authoritative roster, including an empty one.
-    pub(crate) fn reconcile_player_riders(&mut self, connected: &[i32]) {
-        for mob in &mut self.mobs {
-            if mob.rider.is_some_and(|rider| !connected.contains(&rider)) {
-                mob.rider = None;
-            }
-        }
-        for vehicle in self.vehicles.values_mut() {
-            if vehicle.rider.is_some_and(|rider| !connected.contains(&rider)) {
-                vehicle.rider = None;
-            }
-        }
-        self.clear_disconnected_cushion_riders(connected);
-        for cart in self.minecarts.values_mut() {
-            if cart.rider.is_some_and(|rider| !connected.contains(&rider)) {
-                cart.rider = None;
-            }
-        }
-    }
-
     /// Advances every mob one tick: run its goals (which drive A\* and path
     /// following through the [`MobController`] seam), then step the follower.
     /// Each mob's `no_action_time` ages by one tick and is first cleared for any
@@ -419,17 +399,9 @@ impl<'w> MobSim<'w> {
         let tick_count = self.tick_count;
         // Compatibility perception may omit identity. The world runtime also
         // reconciles its authoritative roster before this pass, including empty.
-        if !self.players.is_empty() {
-            let connected: Vec<i32> = self
-                .players
-                .iter()
-                .filter_map(|p| p.identity.map(|identity| identity.entity_id))
-                .collect();
-            if !connected.is_empty() {
-                self.reconcile_player_riders(&connected);
-            }
-        }
-        let riding = self.sync_mob_riders();
+        self.clear_disconnected_riders();
+        let riding = self.sync_riders();
+        let controlled = self.controlled_vehicles();
         let sky = self.sky;
         let sea_level = sky.dimension.sea_level();
         let sky_darkening = sky.darkening(self.day_time);
@@ -450,8 +422,8 @@ impl<'w> MobSim<'w> {
                 terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some()
             };
             // An untamed mount is not steered by its rider, so its goals keep ticking.
-            if (m.rider.is_none() || (!m.tame && matches!(m.entity_type.path(), "horse" | "donkey" | "mule"))) && column_loaded && !riding.contains(&m.id) {
-                m.mob.set_ridden(m.rider.is_some());
+            if (!controlled.contains(&m.id) || (!m.tame && matches!(m.entity_type.path(), "horse" | "donkey" | "mule"))) && column_loaded && !riding.contains(&m.id) {
+                m.mob.set_ridden(controlled.contains(&m.id));
                 let helmeted = m.equipment.head.is_some();
                 m.mob.set_sea_level(sea_level);
                 if m.mob.bee_state().active {
@@ -593,7 +565,7 @@ impl<'w> MobSim<'w> {
                     m.camel_sitting = false;
                     m.camel_pose_tick = tick_count as i64;
                 } else {
-                    camel_random_sitting(m, tick_count);
+                    camel_random_sitting(m, controlled.contains(&m.id), tick_count);
                 }
                 // A living camel decrements its dash cooldown; corpse fields
                 // remain frozen like every other per-mob timer in this loop.
@@ -1110,7 +1082,7 @@ impl<'w> MobSim<'w> {
         // bypass merely because it ran later in the tick order.
         for mob in &mut self.mobs {
             let at = mob.position();
-            if mob.rider.is_none() && terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some() {
+            if !controlled.contains(&mob.id) && terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some() {
                 let before_live_collision = mob.mob.live_collision_origin();
                 // This pass only resolves motion added after the main AI sweep. Do
                 // not integrate gravity twice when a mined floor left a mob
