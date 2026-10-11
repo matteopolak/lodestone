@@ -1952,7 +1952,27 @@ where
                     // everyone else's roster entry.
                     xp_level: experience.level(),
                     xp_points: experience.query_points(),
+                    nbt: None,
                 });
+            }
+            // The caller's own save-shaped NBT, from the live connection state the
+            // player save writes, for `/data get entity @s` and `nbt=`.
+            let own_nbt = crate::player_data::PlayerData::capture(
+                position,
+                player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 }),
+                vitals.health(),
+                vitals.air_supply(),
+                *game_mode,
+                inventory,
+                *experience,
+                Vec::new(),
+                chunk_source.dimension(),
+            )
+            .to_nbt()
+            .ok()
+            .map(std::sync::Arc::new);
+            for candidate in candidates.iter_mut().filter(|c| c.uuid == player_uuid) {
+                candidate.nbt.clone_from(&own_nbt);
             }
             let respawn_dimension = source.dimension();
             let source = crate::commands::CommandSource::player(

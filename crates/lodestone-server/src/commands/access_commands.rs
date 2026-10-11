@@ -266,6 +266,7 @@ mod tests {
             game_mode: lodestone_model::GameMode::Survival,
             xp_level: 0,
             xp_points: 0,
+            nbt: None,
         }
     }
 

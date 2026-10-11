@@ -41,6 +41,7 @@ fn alice() -> (CommandSource, Vec<PlayerCandidate>) {
         game_mode: GameMode::Survival,
         xp_level: 0,
         xp_points: 0,
+        nbt: None,
     };
     (source, vec![player])
 }

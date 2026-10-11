@@ -41,19 +41,25 @@ impl<'w> MobSim<'w> {
         out.extend(self.saved_cushions());
         out.extend(self.saved_frames());
         for record in &mut out {
-            let tags = self.entity_tags(record.uuid);
-            if !tags.is_empty() {
-                record.extra.retain(|(name, _)| name != "Tags");
-                record.extra.push((
-                    "Tags".to_owned(),
-                    lodestone_core::Nbt::List {
-                        element_type: lodestone_core::NbtTag::String,
-                        elements: tags.into_iter().map(lodestone_core::Nbt::String).collect(),
-                    },
-                ));
-            }
+            self.attach_tags(record);
         }
         out
+    }
+
+    /// Writes the entity's `/tag` tags into `record` as a `Tags` list, when it has any.
+    pub(super) fn attach_tags(&self, record: &mut crate::entity_record::SavedEntity) {
+        let tags = self.entity_tags(record.uuid);
+        if tags.is_empty() {
+            return;
+        }
+        record.extra.retain(|(name, _)| name != "Tags");
+        record.extra.push((
+            "Tags".to_owned(),
+            lodestone_core::Nbt::List {
+                element_type: lodestone_core::NbtTag::String,
+                elements: tags.into_iter().map(lodestone_core::Nbt::String).collect(),
+            },
+        ));
     }
 
     /// One mob as the record [`crate::entity_storage`] persists.
@@ -284,7 +290,7 @@ fn growth_fields(mob: &SimMob<'_>) -> Vec<(String, lodestone_core::Nbt)> {
 
 /// Applies [`growth_fields`] back to a freshly spawned mob. Goes through
 /// [`SimMob::set_age`] so a restored baby also gets its baby hitbox and step.
-fn restore_growth(mob: &mut SimMob<'_>, extra: &[(String, lodestone_core::Nbt)]) {
+pub(super) fn restore_growth(mob: &mut SimMob<'_>, extra: &[(String, lodestone_core::Nbt)]) {
     use lodestone_core::Nbt;
     for (name, value) in extra {
         match (name.as_str(), value) {

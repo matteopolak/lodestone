@@ -247,6 +247,39 @@ where
             )
             .await?;
         }
+        crate::commands::Effect::Damage { amount, damage_type, from } => {
+            let flags = lodestone_entity::DamageFlags::for_damage_type_name(&damage_type)
+                .expect("the command only emits registered damage types");
+            let landed = vitals
+                .apply_damage(amount, &effects.overlay_defenses(inventory.combat_stats().defenses), flags)
+                .is_some();
+            if landed {
+                let at = player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default();
+                let direction = from.map_or(crate::vitals::HurtDirection::PURE_ROLL, |source| {
+                    crate::vitals::HurtDirection::from_source(source, at, player_rot.unwrap_or_default().yaw)
+                });
+                publish_health(
+                    conn,
+                    state,
+                    proto,
+                    vitals,
+                    effects,
+                    at,
+                    player_entity_id,
+                    username,
+                    crate::vitals::DeathCause::Generic,
+                    advancements,
+                    player_uuid,
+                    Some(direction),
+                )
+                .await?;
+            }
+        }
+        crate::commands::Effect::Mount { vehicle } => {
+            // The client only learns it is aboard from the vehicle's whole passenger
+            // list, under the constant id its own login claimed.
+            apply(conn, state, proto.encode_set_passengers(vehicle, &[LOCAL_PLAYER_ENTITY_ID])).await?;
+        }
         crate::commands::Effect::GiveExperience { levels, amount } => {
             if levels {
                 // `take_levels` is a level *subtraction*; negating the delta is

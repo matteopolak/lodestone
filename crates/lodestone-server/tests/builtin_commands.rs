@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use lodestone_command_mc::{EntityArg, GameModeArg, SnbtValue};
+use lodestone_command_mc::{EntityArg, GameModeArg, NbtPath, SnbtValue};
 use lodestone_data::block_states::StateId;
 use lodestone_model::{GameMode, Rotation, Vec3};
 use lodestone_server::commands::registrar::{Ctx, RuleStore};
@@ -117,6 +117,7 @@ fn candidate(n: u128, name: &str, x: f64, mode: GameMode) -> PlayerCandidate {
         game_mode: mode,
         xp_level: 0,
         xp_points: 0,
+        nbt: None,
     }
 }
 
@@ -2561,10 +2562,9 @@ fn get_merge_and_remove_round_trip_through_the_store() {
 
     let merged = commands.run(&world, &alice, "data merge storage test:foo {a:1,b:{c:2}}").expect("root matched");
     assert!(merged.response.is_ran(), "{merged:?}");
-    assert_eq!(state.nbt_storage().get("test:foo", &["a".to_string()]), Some(SnbtValue::Int(1)));
+    assert_eq!(state.nbt_storage().get("test:foo", &NbtPath::parse("a").unwrap()), Ok(vec![SnbtValue::Int(1)]));
     assert_eq!(
-        state.nbt_storage().get("test:foo", &["b".to_string(), "c".to_string()]),
-        Some(SnbtValue::Int(2))
+        state.nbt_storage().get("test:foo", &NbtPath::parse("b.c").unwrap()), Ok(vec![SnbtValue::Int(2)])
     );
 
     let read_path = commands.run(&world, &alice, "data get storage test:foo a").expect("root matched");
@@ -2577,11 +2577,10 @@ fn get_merge_and_remove_round_trip_through_the_store() {
 
     let removed = commands.run(&world, &alice, "data remove storage test:foo a").expect("root matched");
     assert!(removed.response.is_ran(), "{removed:?}");
-    assert_eq!(state.nbt_storage().get("test:foo", &["a".to_string()]), None);
+    assert!(state.nbt_storage().get("test:foo", &NbtPath::parse("a").unwrap()).is_err());
     // b.c must still be there — removing `a` must not touch a sibling key.
     assert_eq!(
-        state.nbt_storage().get("test:foo", &["b".to_string(), "c".to_string()]),
-        Some(SnbtValue::Int(2))
+        state.nbt_storage().get("test:foo", &NbtPath::parse("b.c").unwrap()), Ok(vec![SnbtValue::Int(2)])
     );
 
     // Removing the same path again is a refusal, not a second success.
@@ -3277,8 +3276,8 @@ fn execute_store_data_storage_scales_and_types_the_value() {
         .expect("root matched");
     assert!(outcome.response.is_ran(), "{outcome:?}");
     assert_eq!(
-        state.nbt_storage().get("test:out", &["value".to_string()]),
-        Some(SnbtValue::Int(42)),
+        state.nbt_storage().get("test:out", &NbtPath::parse("value").unwrap()),
+        Ok(vec![SnbtValue::Int(42)]),
         "{outcome:?}"
     );
 }

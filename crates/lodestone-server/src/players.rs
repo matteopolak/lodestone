@@ -865,6 +865,7 @@ impl PlayerRegistry {
                 game_mode: p.game_mode,
                 xp_level: p.xp_level,
                 xp_points: p.xp_points,
+                nbt: None,
             })
             .collect()
     }

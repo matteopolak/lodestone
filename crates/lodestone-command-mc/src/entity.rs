@@ -16,11 +16,11 @@
 //! `dx`/`dy`/`dz`, `scores`, each with vanilla's `!` inversion where vanilla
 //! has it.
 //!
-//! plus `tag`, `x_rotation`, `y_rotation` and `type=#<tag>`. `nbt`,
+//! plus `tag`, `nbt`, `x_rotation`, `y_rotation` and `type=#<tag>`.
 //! `advancements`, `predicate` and `level` are **not** parsed, and each is
 //! refused by name rather than silently ignored — a selector that quietly
 //! matched more entities than the author asked for is the worst available
-//! failure. They need infrastructure this server does not have (entity NBT, an
+//! failure. They need infrastructure this server does not have (an
 //! advancement predicate engine, experience levels).
 //!
 //! **None of that is visible on the wire.** `minecraft:entity`'s network
@@ -201,6 +201,9 @@ pub enum SelectorPredicate {
     XRotation(Bounds<f32>),
     /// `y_rotation=` — the entity's yaw in degrees, as [`Self::XRotation`].
     YRotation(Bounds<f32>),
+    /// `nbt=` / `nbt=!` — the entity's NBT must contain this compound under the
+    /// reference partial-match rule ([`crate::compare_nbt`]).
+    Nbt { nbt: Vec<(String, crate::SnbtValue)>, inverted: bool },
 }
 
 /// Whether `rotation`, wrapped to `[-180, 180)`, lies in `bounds` under the
@@ -697,10 +700,15 @@ fn parse_option(
             });
         }
         // Known to vanilla, not implemented here, and named so the author knows
-        // which it is. Each needs a subsystem that does not exist: entity NBT
-        // (`nbt`), the advancement predicate engine (`advancements`,
-        // `predicate`), or experience levels (`level`).
-        "nbt" | "advancements" | "predicate" | "level" => {
+        // which it is. Each needs a subsystem that does not exist: the
+        // advancement predicate engine (`advancements`, `predicate`) or
+        // experience levels (`level`).
+        "nbt" => {
+            let inverted = read_inversion(reader);
+            let nbt = crate::snbt::read_compound_value(reader)?;
+            selector.predicates.push(SelectorPredicate::Nbt { nbt, inverted });
+        }
+        "advancements" | "predicate" | "level" => {
             Err(refuse(key_position, format!("selector option '{key}' is not supported yet")))?;
         }
         _ => Err(refuse(key_position, key.to_string()))?,
@@ -1051,7 +1059,7 @@ mod tests {
     /// widening the match.
     #[test]
     fn deferred_and_unknown_options_are_both_refused_and_say_which() {
-        let deferred = parse(EntityArg::players(), "@a[nbt={}]").expect_err("nbt is deferred");
+        let deferred = parse(EntityArg::players(), "@a[level=1]").expect_err("level is deferred");
         assert!(
             deferred.to_string().contains("not supported yet"),
             "a deferred option must say so: {deferred}"
@@ -1066,6 +1074,21 @@ mod tests {
         // The control: the same bracket syntax with a *supported* option parses,
         // so the two refusals above are about the option and not the brackets.
         assert!(parse(EntityArg::players(), "@a[limit=1]").is_ok());
+    }
+
+    #[test]
+    fn nbt_parses_to_a_compound_predicate_and_takes_inversion() {
+        let s = players("@a[nbt={NoAI:1b}]");
+        assert_eq!(
+            s.predicates,
+            [SelectorPredicate::Nbt {
+                nbt: vec![("NoAI".to_owned(), crate::SnbtValue::Byte(1))],
+                inverted: false
+            }]
+        );
+        let s = players("@a[nbt=!{a:{b:2}}]");
+        assert!(matches!(&s.predicates[..], [SelectorPredicate::Nbt { inverted: true, .. }]));
+        assert!(parse(EntityArg::players(), "@a[nbt=5]").is_err(), "a non-compound is refused");
     }
 
     fn entities(text: &str) -> EntitySelector {

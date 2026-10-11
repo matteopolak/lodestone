@@ -528,7 +528,7 @@ pub fn import_player_file(
     else {
         return Ok(None);
     };
-    let player = PlayerData::from_nbt(&root).map_err(Error::PlayerDat)?;
+    let player = PlayerData::from_nbt(&root).map_err(|e| Error::PlayerDat(e.into()))?;
     import_player(storage, uuid, &player, authorization).map(Some)
 }
 
@@ -542,7 +542,7 @@ pub fn preflight_player_file(path: &Path) -> Result<Option<PlayerImportReport>, 
     else {
         return Ok(None);
     };
-    let player = PlayerData::from_nbt(&root).map_err(Error::PlayerDat)?;
+    let player = PlayerData::from_nbt(&root).map_err(|e| Error::PlayerDat(e.into()))?;
     Ok(Some(preflight_player(&player)))
 }
 
@@ -567,7 +567,7 @@ pub fn preflight_player_batch(
                 path: file.path.clone(),
             });
         };
-        let player = PlayerData::from_nbt(&root).map_err(Error::PlayerDat)?;
+        let player = PlayerData::from_nbt(&root).map_err(|e| Error::PlayerDat(e.into()))?;
         let report = preflight_player(&player);
         players.push(player_data_from_player_unchecked(file.uuid, &player));
         reports.push(PlayerFileImportReport {

@@ -634,6 +634,14 @@ impl<'a> Ctx<'a> {
         // (`WorldTime`'s own doc), so two `@r` resolutions inside the same
         // tick draw the same permutation; two a tick apart do not.
         let shuffle = super::source::seeded_shuffle(self.world.state.tick_time().game_time as u64);
+        // The entity NBT table is built once per resolution, and only when the
+        // selector asks about NBT.
+        let nbt_table = selector
+            .predicates
+            .iter()
+            .any(|p| matches!(p, lodestone_command_mc::entity::SelectorPredicate::Nbt { .. }))
+            .then(|| super::entity_data::nbt_table(self.world))
+            .unwrap_or_default();
         super::source::resolve_subjects(
             selector,
             &self.source,
@@ -642,6 +650,7 @@ impl<'a> Ctx<'a> {
             &|holder, objective| scoreboard.get_score(holder, objective).ok(),
             &|holder| teams.team_of(holder),
             &|uuid| tags.get(&uuid).cloned().unwrap_or_default(),
+            &|uuid, pattern| super::entity_data::contains(&nbt_table, uuid, pattern),
         )
     }
 }

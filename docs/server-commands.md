@@ -40,9 +40,17 @@ Access control is four JSON files (`ops.json`, `whitelist.json`, `banned-players
 
 Players-only arguments (`/gamemode`, `/give`) resolve through `Ctx::resolve`, which matches connected players alone, so a mob source or uuid gives "No player was found" and `@e` is refused at parse time. Entity arguments (`/kill`, `/tp`, `/execute as|at|positioned as|rotated as|facing entity|if entity`, `/effect`, `/tag`) resolve through `Ctx::resolve_targets`, which pools players with `MobSim::command_entities`, the one enumeration of everything the sim streams (mobs, items, orbs, projectiles, boats, minecarts, cushions, frames, TNT, eyes, bolts, crystals, bobbers, wither, dragon). It is built from `MobSim::snapshots`, so a new streamed kind is selectable with no second registration. Each entity carries uuid, type, position, rotation, custom name and tags; the dimension is the source's, since a sim serves one dimension.
 
-Supported options: `type` (`!`, `#tag` from `lodestone_data::entity_type_tags`), `name`, `tag`, `distance`, `x/y/z`, `dx/dy/dz`, `limit`, `sort`, `x_rotation`, `y_rotation`, `gamemode`, `scores`, `team`. `nbt`, `advancements`, `predicate` and `level` are refused by name.
+Supported options: `type` (`!`, `#tag` from `lodestone_data::entity_type_tags`), `name`, `tag`, `distance`, `x/y/z`, `dx/dy/dz`, `limit`, `sort`, `x_rotation`, `y_rotation`, `gamemode`, `scores`, `team`, `nbt` (partial, type-strict subset match via `lodestone_command_mc::compare_nbt`, with `!` inversion; the table is built only when a selector uses it). `advancements`, `predicate` and `level` are refused by name.
 
-Tags live in `MobSim` keyed by uuid (players included) and persist through the entity record's `Tags` list. By-uuid actions are `MobSim::kill_entity`, `teleport_entity`, `apply_effect_to` and `clear_effect_of`. Gotchas: a mob `/kill` is lethal damage through the normal death pass (loot drops); frames, falling blocks, bolts, bobbers and the dragon cannot be teleported and are skipped; `/data`, `/damage` and `/ride` have no entity form.
+Tags live in `MobSim` keyed by uuid (players included) and persist through the entity record's `Tags` list. By-uuid actions are `MobSim::kill_entity`, `teleport_entity`, `apply_effect_to` and `clear_effect_of`. Gotchas: a mob `/kill` is lethal damage through the normal death pass (loot drops); frames, falling blocks, bolts, bobbers and the dragon cannot be teleported and are skipped; 
+
+### Entity data, `/damage`, `/ride`
+
+`/data get|merge|modify|remove entity` reads and writes `MobSim::entity_nbt`, the same `SavedEntity::to_nbt` the save path uses, and applies writes with `apply_entity_nbt` through the `/summon` restore reader, so view, save and summon cannot drift. Paths use `lodestone_command_mc::NbtPath` (shared with storage targets: create-parents, filters, `[]`, counts; zero changes is "Nothing changed"). `get ... <scale>` truncates a numeric value. Players read from `PlayerData::capture(..).to_nbt()` (carried on `PlayerCandidate.nbt`) and are refused for writes. Mobs apply in place; item entities respawn at the same id; other kinds only move. `commands/entity_data.rs` holds the shared resolver.
+
+`/damage <target> <amount> [type] [at <pos> | by <entity> [from <cause>]]` goes through `MobSim::damage_entity` (mobs, dragon, wither, crystal) with `DamageFlags::for_damage_type`, so armor and invulnerability apply; a player target gets `Effect::Damage` applied on its own connection. `/ride <t> mount|dismount` uses `MobSim::mount_player` / `dismount_player` (boat, minecart, cushion, mob rules); the rider's connection sends the passenger list from `Effect::Mount`.
+
+Gaps: `/data` has no block target; `/ride` only seats players (vehicles hold one player-id rider slot); `advancements` and `predicate` stay refused.
 
 ### Client decode
 

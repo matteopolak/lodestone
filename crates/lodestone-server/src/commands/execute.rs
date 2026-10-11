@@ -410,7 +410,7 @@ fn register_store_scale(
     execute: NodeId,
     store_result: bool,
     id_key: ArgKey<String>,
-    path_key: ArgKey<Vec<String>>,
+    path_key: ArgKey<lodestone_command_mc::NbtPath>,
     construct: fn(f64) -> SnbtValue,
 ) {
     let type_lit = registrar.literal(path_node, literal);
@@ -994,12 +994,9 @@ fn register_block_condition(
 
 /// `data storage <source> <path>` — the real data-command's own
 /// numeric-conditional shape (an NBT path's match count), matching `if entity`'s count
-/// rather than `if score`'s boolean: a real NBT path can carry wildcards
-/// that match more than one element, so the underlying primitive is a count
-/// even though [`lodestone_command_mc::NbtPathArg`]'s v1 grammar (no
-/// indices, no filter compounds) can only ever produce `0` or `1` here.
-/// `if data entity`/`if data block` are not registered — see
-/// `crate::commands::nbt_data`'s module doc for why only `storage` exists.
+/// rather than `if score`'s boolean: a path can carry wildcards that match
+/// more than one element, so the primitive is a count.
+/// `if data entity`/`if data block` are not registered.
 fn register_data_storage_condition(
     registrar: &mut Registrar,
     parent: NodeId,
@@ -1013,7 +1010,7 @@ fn register_data_storage_condition(
     add_numeric_conditional(registrar, path_node, execute, expected, move |ctx| {
         let id = ctx.get(id_key).clone();
         let path = ctx.get(path_key).clone();
-        Ok(i32::from(ctx.world.state.nbt_storage().get(&id, &path).is_some()))
+        Ok(ctx.world.state.nbt_storage().get(&id, &path).map_or(0, |found| i32::try_from(found.len()).unwrap_or(i32::MAX)))
     });
 }
 

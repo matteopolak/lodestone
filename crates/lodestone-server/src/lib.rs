@@ -425,9 +425,8 @@ mod redstone_torch;
 mod redstone_tripwire;
 mod redstone_wire;
 /// Per-player `.dat` persistence — inventory, position, health and
-/// game mode across a disconnect. Native only, for the same reason
-/// `region_source` is: it is a `std::fs` schema over `lodestone-anvil`.
-#[cfg(not(target_arch = "wasm32"))]
+/// game mode across a disconnect. The record compiles everywhere; only
+/// `PlayerDataStore`, the `std::fs` store over `lodestone-anvil`, is native.
 pub mod player_data;
 /// The explicit selection and dirty-record write seam for persistent worlds.
 ///
@@ -665,7 +664,7 @@ pub use mob_spawn::{
 };
 pub use natural_spawn::NaturalSpawner;
 pub use mobs::{
-    AttackOutcome, ChunkWorld, CommandEntity, Detonation, EntityKill, InteractOutcome, LiveMobSource, MobHandle, MobOwner,
+    AttackOutcome, ChunkWorld, CommandEntity, DamageOutcome, Detonation, EntityDataError, EntityKill, MountOutcome, InteractOutcome, LiveMobSource, MobHandle, MobOwner,
     MobSim, PerceivedPlayer, PlayerHit, PlayerIdentity, PlayerPerception, SimMob, TeleportOutcome,
 };
 pub use neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};

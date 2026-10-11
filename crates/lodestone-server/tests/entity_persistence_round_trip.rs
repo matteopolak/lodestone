@@ -684,7 +684,7 @@ fn a_player_file_from_another_game_version_is_refused_rather_than_overwritten() 
     assert!(
         matches!(
             PlayerData::from_nbt(&Nbt::Compound(fields)),
-            Err(lodestone_anvil::Error::UnsupportedDataVersion { found: Some(3700), .. })
+            Err(lodestone_server::player_data::PlayerDataError::UnsupportedDataVersion { found: Some(3700), .. })
         ),
         "an older DataVersion must be refused; reading it with 26.2's schema and \
          then writing it back is how a save gets destroyed"

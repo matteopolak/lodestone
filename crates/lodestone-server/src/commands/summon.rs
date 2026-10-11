@@ -149,7 +149,7 @@ fn summon_record(entity_type: &lodestone_model::ResourceKey, pos: Vec3, nbt: &[(
     let mut fields: Vec<(String, Nbt)> = nbt
         .iter()
         .filter(|(name, _)| !matches!(name.as_str(), "id" | "UUID" | "Pos"))
-        .map(|(name, value)| (name.clone(), snbt_to_nbt(value)))
+        .map(|(name, value)| (name.clone(), super::entity_data::snbt_to_nbt(value)))
         .collect();
     fields.push(("id".to_owned(), Nbt::String(entity_type.to_string())));
     fields.push((
@@ -160,41 +160,4 @@ fn summon_record(entity_type: &lodestone_model::ResourceKey, pos: Vec3, nbt: &[(
         .expect("id and Pos are always present");
     record.uuid = Uuid::new_v4();
     record
-}
-
-fn snbt_to_nbt(value: &SnbtValue) -> Nbt {
-    match value {
-        SnbtValue::Byte(v) => Nbt::Byte(*v),
-        SnbtValue::Short(v) => Nbt::Short(*v),
-        SnbtValue::Int(v) => Nbt::Int(*v),
-        SnbtValue::Long(v) => Nbt::Long(*v),
-        SnbtValue::Float(v) => Nbt::Float(*v),
-        SnbtValue::Double(v) => Nbt::Double(*v),
-        SnbtValue::String(v) => Nbt::String(v.clone()),
-        SnbtValue::ByteArray(v) => Nbt::ByteArray(v.clone()),
-        SnbtValue::IntArray(v) => Nbt::IntArray(v.clone()),
-        SnbtValue::LongArray(v) => Nbt::LongArray(v.clone()),
-        SnbtValue::Compound(entries) => {
-            Nbt::Compound(entries.iter().map(|(name, value)| (name.clone(), snbt_to_nbt(value))).collect())
-        }
-        SnbtValue::List(items) => {
-            let elements: Vec<Nbt> = items.iter().map(snbt_to_nbt).collect();
-            let element_type = match items.first() {
-                None => NbtTag::End,
-                Some(SnbtValue::Byte(_)) => NbtTag::Byte,
-                Some(SnbtValue::Short(_)) => NbtTag::Short,
-                Some(SnbtValue::Int(_)) => NbtTag::Int,
-                Some(SnbtValue::Long(_)) => NbtTag::Long,
-                Some(SnbtValue::Float(_)) => NbtTag::Float,
-                Some(SnbtValue::Double(_)) => NbtTag::Double,
-                Some(SnbtValue::String(_)) => NbtTag::String,
-                Some(SnbtValue::ByteArray(_)) => NbtTag::ByteArray,
-                Some(SnbtValue::IntArray(_)) => NbtTag::IntArray,
-                Some(SnbtValue::LongArray(_)) => NbtTag::LongArray,
-                Some(SnbtValue::List(_)) => NbtTag::List,
-                Some(SnbtValue::Compound(_)) => NbtTag::Compound,
-            };
-            Nbt::List { element_type, elements }
-        }
-    }
 }

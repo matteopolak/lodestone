@@ -45,7 +45,7 @@ pub enum TeleportOutcome {
 }
 
 /// Where an entity lives, so a by-uuid operation finds its store once.
-enum Located {
+pub(super) enum Located {
     Mob(i32),
     Projectile(i32),
     Item(i32),
@@ -303,7 +303,7 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    fn locate(&self, uuid: Uuid) -> Option<Located> {
+    pub(super) fn locate(&self, uuid: Uuid) -> Option<Located> {
         fn find<T>(map: &HashMap<i32, T>, uuid: Uuid, uuid_of: impl Fn(&T) -> Uuid) -> Option<i32> {
             map.iter().find(|(_, v)| uuid_of(v) == uuid).map(|(&id, _)| id)
         }

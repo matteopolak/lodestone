@@ -87,12 +87,45 @@
 //! [`lodestone_anvil::player_dat`] for the container, `lodestone-core` for NBT,
 //! and [`crate::inventory::PlayerInventory`] as the in-memory shape.
 
-use std::path::{Path, PathBuf};
-
 use lodestone_core::{Nbt, NbtTag};
 use lodestone_model::{GameMode, ItemStack, Rotation, Vec3};
 
 use crate::inventory::{PLAYER_NATIVE_SIZE, PlayerInventory};
+
+/// Why a player record would not encode or decode.
+///
+/// Free of any filesystem or container dependency so the record compiles on
+/// every target; the native store converts it into `lodestone_anvil::Error`.
+#[derive(Debug, thiserror::Error)]
+pub enum PlayerDataError {
+    /// The NBT codec failed, or an inventory stack has no saved form.
+    #[error("nbt error: {0}")]
+    Nbt(#[source] lodestone_core::Error),
+    /// The record was written by a game version this build cannot read.
+    #[error("unsupported DataVersion {found:?}, this build reads only {expected}")]
+    UnsupportedDataVersion {
+        /// The version found, or `None` when the field was absent.
+        found: Option<i32>,
+        /// The only version this build reads and writes.
+        expected: i32,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<PlayerDataError> for lodestone_anvil::Error {
+    fn from(error: PlayerDataError) -> Self {
+        match error {
+            PlayerDataError::Nbt(e) => Self::Nbt(e),
+            PlayerDataError::UnsupportedDataVersion { found, expected } => {
+                Self::UnsupportedDataVersion { found, expected }
+            }
+        }
+    }
+}
+
+/// The only `DataVersion` this build reads and writes (a unit test pins it to
+/// the container crate's constant).
+const DATA_VERSION: i32 = 4903;
 
 /// Every root field [`PlayerData`] models itself, and therefore the ones
 /// [`PlayerData::from_nbt`] must **not** copy into
@@ -282,15 +315,15 @@ impl PlayerData {
     ///
     /// # Errors
     ///
-    /// [`lodestone_anvil::Error::Nbt`] when an inventory item's custom-data
+    /// [`PlayerDataError::Nbt`] when an inventory item's custom-data
     /// bytes are not one complete compound-shaped network-NBT value, or when
     /// a stack contains an item component this schema does not model.
     #[must_use]
-    pub fn to_nbt(&self) -> Result<Nbt, lodestone_anvil::Error> {
+    pub fn to_nbt(&self) -> Result<Nbt, PlayerDataError> {
         let mut fields = vec![
             (
                 "DataVersion".to_owned(),
-                Nbt::Int(lodestone_anvil::level_dat::DATA_VERSION_26_2),
+                Nbt::Int(DATA_VERSION),
             ),
             ("Pos".to_owned(), doubles(self.pos)),
             ("Motion".to_owned(), doubles(self.motion)),
@@ -346,10 +379,13 @@ impl PlayerData {
     ///
     /// # Errors
     ///
-    /// [`lodestone_anvil::Error::UnsupportedDataVersion`] when the file was
+    /// [`PlayerDataError::UnsupportedDataVersion`] when the file was
     /// written by a different game version.
-    pub fn from_nbt(nbt: &Nbt) -> Result<Self, lodestone_anvil::Error> {
-        lodestone_anvil::require_supported_data_version(int_field(nbt, "DataVersion"))?;
+    pub fn from_nbt(nbt: &Nbt) -> Result<Self, PlayerDataError> {
+        let found = int_field(nbt, "DataVersion");
+        if found != Some(DATA_VERSION) {
+            return Err(PlayerDataError::UnsupportedDataVersion { found, expected: DATA_VERSION });
+        }
         let mut data = Self {
             pos: read_doubles(field(nbt, "Pos")).unwrap_or(Self::default().pos),
             motion: read_doubles(field(nbt, "Motion")).unwrap_or(Vec3::new(0.0, 0.0, 0.0)),
@@ -402,89 +438,6 @@ impl PlayerData {
                 .collect();
         }
         Ok(data)
-    }
-}
-
-/// Reads and writes player `.dat` files under one world directory.
-///
-/// # Why this holds no lock
-///
-/// It is a path and nothing else — every operation goes straight to the
-/// filesystem, so two clones are interchangeable and there is no shared mutable
-/// state to migrate when the server moves to an ECS proposal queue. Cloning is
-/// an `Arc` bump of the directory path.
-///
-/// One player's file is only ever touched by that player's own connection task,
-/// so there is no cross-connection race to guard: offline mode derives the uuid
-/// from the username, which means two connections with the *same name* would
-/// share a file — and vanilla refuses the second such login before it reaches
-/// here.
-#[derive(Debug, Clone)]
-pub struct PlayerDataStore {
-    dir: std::sync::Arc<PathBuf>,
-    world: std::sync::Arc<PathBuf>,
-}
-
-impl PlayerDataStore {
-    /// Roots a store at `world_dir`, creating `players/data` eagerly.
-    ///
-    /// Eager creation for the reason [`crate::region_source::RegionChunkSource::new`]
-    /// gives: a later save must not fail for a reason the caller could have been
-    /// told about at world open.
-    ///
-    /// # Errors
-    ///
-    /// [`lodestone_anvil::Error::Io`] if the directory cannot be created.
-    pub fn new(world_dir: &Path) -> Result<Self, lodestone_anvil::Error> {
-        let dir = lodestone_anvil::player_dat::dir_in(world_dir);
-        std::fs::create_dir_all(&dir).map_err(lodestone_anvil::Error::Io)?;
-        Ok(Self {
-            dir: std::sync::Arc::new(dir),
-            world: std::sync::Arc::new(world_dir.to_path_buf()),
-        })
-    }
-
-    /// The world folder this store is rooted at.
-    #[must_use]
-    pub fn world_dir(&self) -> &Path {
-        &self.world
-    }
-
-    /// The file `uuid`'s data lives in.
-    #[must_use]
-    pub fn path_for(&self, uuid: uuid::Uuid) -> PathBuf {
-        self.dir.join(format!("{uuid}.dat"))
-    }
-
-    /// Loads `uuid`'s saved state, or `Ok(None)` for a player who has never
-    /// saved.
-    ///
-    /// # Errors
-    ///
-    /// The file exists but will not decode, or was written by another game
-    /// version. Both are refusals rather than a silent empty
-    /// player: overwriting a save we cannot read is the one outcome that loses
-    /// data irrecoverably.
-    pub fn read(&self, uuid: uuid::Uuid) -> Result<Option<PlayerData>, lodestone_anvil::Error> {
-        let Some(root) = lodestone_anvil::player_dat::read_from_file(&self.path_for(uuid))? else {
-            return Ok(None);
-        };
-        PlayerData::from_nbt(&root).map(Some)
-    }
-
-    /// Writes `data` as `uuid`'s saved state.
-    ///
-    /// # Errors
-    ///
-    /// [`lodestone_anvil::Error::Io`] on a filesystem failure, or
-    /// [`lodestone_anvil::Error::Nbt`] if the tree will not encode.
-    pub fn write(
-        &self,
-        uuid: uuid::Uuid,
-        data: &PlayerData,
-    ) -> Result<(), lodestone_anvil::Error> {
-        let root = data.to_nbt()?;
-        lodestone_anvil::player_dat::write_to_file(&root, &self.path_for(uuid))
     }
 }
 
@@ -568,7 +521,7 @@ fn game_type_from_value(value: i32) -> Option<GameMode> {
 /// 12 entries, not 41). Each stack is [`crate::item_nbt`]'s form; one carrying
 /// a component without a saved form makes [`item_to_nbt`] refuse before a save
 /// can replace the previous player file.
-fn inventory_to_nbt(slots: &[Option<ItemStack>]) -> Result<Nbt, lodestone_anvil::Error> {
+fn inventory_to_nbt(slots: &[Option<ItemStack>]) -> Result<Nbt, PlayerDataError> {
     let elements = slots
         .iter()
         .enumerate()
@@ -583,10 +536,10 @@ fn inventory_to_nbt(slots: &[Option<ItemStack>]) -> Result<Nbt, lodestone_anvil:
     })
 }
 
-fn item_to_nbt(index: usize, stack: &ItemStack) -> Result<Nbt, lodestone_anvil::Error> {
+fn item_to_nbt(index: usize, stack: &ItemStack) -> Result<Nbt, PlayerDataError> {
     let persisted = crate::item_nbt::stack_to_nbt(stack);
     if !persisted.complete {
-        return Err(lodestone_anvil::Error::Nbt(lodestone_core::Error::Custom(
+        return Err(PlayerDataError::Nbt(lodestone_core::Error::Custom(
             format!("inventory slot {index} contains item components with no saved form"),
         )));
     }
@@ -621,8 +574,107 @@ fn inventory_from_nbt(nbt: Option<&Nbt>) -> Vec<Option<ItemStack>> {
     out
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+mod store {
+    use std::path::{Path, PathBuf};
+
+    use super::PlayerData;
+
+    /// Reads and writes player `.dat` files under one world directory.
+    ///
+    /// # Why this holds no lock
+    ///
+    /// It is a path and nothing else — every operation goes straight to the
+    /// filesystem, so two clones are interchangeable and there is no shared mutable
+    /// state to migrate when the server moves to an ECS proposal queue. Cloning is
+    /// an `Arc` bump of the directory path.
+    ///
+    /// One player's file is only ever touched by that player's own connection task,
+    /// so there is no cross-connection race to guard: offline mode derives the uuid
+    /// from the username, which means two connections with the *same name* would
+    /// share a file — and vanilla refuses the second such login before it reaches
+    /// here.
+    #[derive(Debug, Clone)]
+    pub struct PlayerDataStore {
+        dir: std::sync::Arc<PathBuf>,
+        world: std::sync::Arc<PathBuf>,
+    }
+
+    impl PlayerDataStore {
+        /// Roots a store at `world_dir`, creating `players/data` eagerly.
+        ///
+        /// Eager creation for the reason [`crate::region_source::RegionChunkSource::new`]
+        /// gives: a later save must not fail for a reason the caller could have been
+        /// told about at world open.
+        ///
+        /// # Errors
+        ///
+        /// [`lodestone_anvil::Error::Io`] if the directory cannot be created.
+        pub fn new(world_dir: &Path) -> Result<Self, lodestone_anvil::Error> {
+            let dir = lodestone_anvil::player_dat::dir_in(world_dir);
+            std::fs::create_dir_all(&dir).map_err(lodestone_anvil::Error::Io)?;
+            Ok(Self {
+                dir: std::sync::Arc::new(dir),
+                world: std::sync::Arc::new(world_dir.to_path_buf()),
+            })
+        }
+
+        /// The world folder this store is rooted at.
+        #[must_use]
+        pub fn world_dir(&self) -> &Path {
+            &self.world
+        }
+
+        /// The file `uuid`'s data lives in.
+        #[must_use]
+        pub fn path_for(&self, uuid: uuid::Uuid) -> PathBuf {
+            self.dir.join(format!("{uuid}.dat"))
+        }
+
+        /// Loads `uuid`'s saved state, or `Ok(None)` for a player who has never
+        /// saved.
+        ///
+        /// # Errors
+        ///
+        /// The file exists but will not decode, or was written by another game
+        /// version. Both are refusals rather than a silent empty
+        /// player: overwriting a save we cannot read is the one outcome that loses
+        /// data irrecoverably.
+        pub fn read(&self, uuid: uuid::Uuid) -> Result<Option<PlayerData>, lodestone_anvil::Error> {
+            let Some(root) = lodestone_anvil::player_dat::read_from_file(&self.path_for(uuid))? else {
+                return Ok(None);
+            };
+            Ok(PlayerData::from_nbt(&root).map(Some)?)
+        }
+
+        /// Writes `data` as `uuid`'s saved state.
+        ///
+        /// # Errors
+        ///
+        /// [`lodestone_anvil::Error::Io`] on a filesystem failure, or
+        /// [`lodestone_anvil::Error::Nbt`] if the tree will not encode.
+        pub fn write(
+            &self,
+            uuid: uuid::Uuid,
+            data: &PlayerData,
+        ) -> Result<(), lodestone_anvil::Error> {
+            let root = data.to_nbt()?;
+            lodestone_anvil::player_dat::write_to_file(&root, &self.path_for(uuid))
+        }
+    }
+
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::PlayerDataStore;
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn data_version_matches_the_container_crates() {
+        assert_eq!(super::DATA_VERSION, lodestone_anvil::level_dat::DATA_VERSION_26_2);
+    }
+
     use super::{inventory_from_nbt, inventory_to_nbt, PlayerData};
     use crate::inventory::PLAYER_NATIVE_SIZE;
     use lodestone_core::{Nbt, NbtTag};

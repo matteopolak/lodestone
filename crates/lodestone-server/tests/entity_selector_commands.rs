@@ -47,6 +47,7 @@ impl Server {
             game_mode: GameMode::Survival,
             xp_level: 0,
             xp_points: 0,
+            nbt: None,
         };
         Self {
             commands: ServerCommands::new(),

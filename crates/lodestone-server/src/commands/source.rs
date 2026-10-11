@@ -149,6 +149,10 @@ pub struct PlayerCandidate {
     /// [`crate::experience::PlayerExperience::total`] tracks. `/xp query …
     /// points` is the only reader.
     pub xp_points: i32,
+    /// The player's full save-shaped NBT (inventory, health, ...), when the
+    /// connection that owns it supplied one. `/data get entity` and `nbt=` read
+    /// it; absent, they fall back to a view built from the fields above.
+    pub nbt: Option<std::sync::Arc<lodestone_core::Nbt>>,
 }
 
 /// What a selector needs to know about an entity to match it.
@@ -389,6 +393,8 @@ pub fn resolve_subjects<T: SelectorSubject + Clone>(
     team: &dyn Fn(&str) -> String,
     // `tag=` resolution: the tags on an entity, by uuid.
     tags: &dyn Fn(Uuid) -> Vec<String>,
+    // `nbt=` resolution: whether the entity's NBT contains the compound.
+    nbt: &dyn Fn(Uuid, &[(String, lodestone_command_mc::SnbtValue)]) -> bool,
 ) -> Result<Vec<T>, SelectorError> {
     if selector.current_entity {
         let Some(entity) = source.entity.as_ref() else {
@@ -397,7 +403,7 @@ pub fn resolve_subjects<T: SelectorSubject + Clone>(
         let Some(me) = candidates.iter().find(|c| c.uuid() == entity.uuid) else {
             return Err(SelectorError::NoPlayersFound);
         };
-        return if matches_predicates(me, selector, score, team, tags) {
+        return if matches_predicates(me, selector, score, team, tags, nbt) {
             Ok(vec![me.clone()])
         } else {
             Err(SelectorError::NoPlayersFound)
@@ -430,7 +436,7 @@ pub fn resolve_subjects<T: SelectorSubject + Clone>(
 
     let mut matched: Vec<T> = candidates
         .iter()
-        .filter(|c| matches_predicates(*c, selector, score, team, tags))
+        .filter(|c| matches_predicates(*c, selector, score, team, tags, nbt))
         .filter(|c| matches_region(*c, selector, origin))
         .cloned()
         .collect();
@@ -483,6 +489,7 @@ fn matches_predicates<T: SelectorSubject>(
     score: &dyn Fn(&str, &str) -> Option<i32>,
     team: &dyn Fn(&str) -> String,
     tags: &dyn Fn(Uuid) -> Vec<String>,
+    nbt: &dyn Fn(Uuid, &[(String, lodestone_command_mc::SnbtValue)]) -> bool,
 ) -> bool {
     // A positive `type=` narrows to that type alone: `@e[type=cow]` cannot match
     // a player, and saying so here is what keeps `/give @e[type=cow] …` from
@@ -534,6 +541,7 @@ fn matches_predicates<T: SelectorSubject>(
         SelectorPredicate::YRotation(bounds) => {
             lodestone_command_mc::entity::rotation_in_bounds(bounds, candidate.rotation().yaw)
         }
+        SelectorPredicate::Nbt { nbt: pattern, inverted } => nbt(candidate.uuid(), pattern) != *inverted,
     })
 }
 

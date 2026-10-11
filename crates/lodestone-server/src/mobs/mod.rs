@@ -446,6 +446,8 @@ mod sim_effects;
 mod sim_events;
 mod sim_snapshots;
 mod sim_command_entities;
+mod sim_entity_data;
+pub use sim_entity_data::{DamageOutcome, EntityDataError, MountOutcome};
 pub use sim_command_entities::{CommandEntity, EntityKill, TeleportOutcome};
 
 // No re-export: `ProjectileHit`/`projectile_damage_type`/`first_solid_along`

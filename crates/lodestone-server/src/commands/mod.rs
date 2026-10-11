@@ -130,6 +130,7 @@ pub mod effect;
 /// `/effect give` and `/effect clear` — the producer that makes
 /// [`crate::mob_effects`] reachable from a running game.
 mod effect_command;
+mod entity_data;
 mod execute;
 mod experience;
 /// `/function` and `/reload` (datapack functions and function tags). See
@@ -140,7 +141,9 @@ mod gamemode;
 mod gamerule;
 mod give;
 mod help;
+mod damage;
 mod kill;
+mod ride;
 mod tag;
 mod nbt_data;
 pub mod nbt_storage;
@@ -252,6 +255,8 @@ impl ServerCommands {
         seed::register(&mut registrar);
         world_spawn_commands::register(&mut registrar);
         kill::register(&mut registrar);
+        damage::register(&mut registrar);
+        ride::register(&mut registrar);
         tag::register(&mut registrar);
         experience::register(&mut registrar);
         clear::register(&mut registrar);

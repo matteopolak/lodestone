@@ -662,8 +662,15 @@ impl<'w> SimMob<'w> {
     /// Returns the damage that actually reached health (`0.0` if the hit was
     /// ignored, if it was fully absorbed, or if the mob was already dead).
     pub fn apply_damage(&mut self, raw_damage: f32, flags: DamageFlags) -> f32 {
+        self.try_apply_damage(raw_damage, flags).unwrap_or(0.0)
+    }
+
+    /// [`apply_damage`](Self::apply_damage), distinguishing a hit that landed
+    /// (`Some`, possibly `0.0` after reductions) from one the mob did not take:
+    /// already dead, invulnerable, emerging, or inside its invulnerability frames.
+    pub fn try_apply_damage(&mut self, raw_damage: f32, flags: DamageFlags) -> Option<f32> {
         if self.health <= 0.0 {
-            return 0.0;
+            return None;
         }
         // Vanilla's own "is invulnerable to" check: a digging-or-emerging gate blocks every hit
         // except one tagged as bypassing invulnerability entirely (void,
@@ -676,13 +683,13 @@ impl<'w> SimMob<'w> {
         // `crate::mobs::warden`'s module doc for the `Digging` half this
         // crate does not build.
         if self.entity_type.path() == "warden" && self.warden_emerge_ticks > 0 {
-            return 0.0;
+            return None;
         }
         // An invulnerable mob shrugs off every hit that reaches the funnel. The
         // sources that ignore invulnerability (the void, `/kill`) do not come
         // through here: `/kill` writes health directly.
         if self.invulnerable {
-            return 0.0;
+            return None;
         }
         // Vanilla's own armadillo hurt-handler override, which runs *before* the
         // invulnerability-frame check below (it wraps the generic hurt
@@ -716,7 +723,7 @@ impl<'w> SimMob<'w> {
             }
         }
         let amount = match self.hurt_cooldown.on_hurt(raw_damage, flags) {
-            HurtDecision::Ignored => return 0.0,
+            HurtDecision::Ignored => return None,
             HurtDecision::Full { amount } | HurtDecision::Topup { amount } => amount,
         };
         let outcome = lodestone_entity::apply_reductions(amount, &self.defenses, flags);
@@ -738,7 +745,7 @@ impl<'w> SimMob<'w> {
         if self.entity_type.path() == "armadillo" {
             self.armadillo_danger_ticks = ARMADILLO_DANGER_TICKS;
         }
-        outcome.to_health
+        Some(outcome.to_health)
     }
 
     /// This mob's live status effects — see [`Self::apply_effect`] to add one.

@@ -285,6 +285,7 @@ fn direct_and_contextual_plugin_dispatch_keep_their_distinct_source_contracts() 
             game_mode: GameMode::Survival,
             xp_level: 0,
             xp_points: 0,
+            nbt: None,
         },
         PlayerCandidate {
             uuid: bob,
@@ -295,6 +296,7 @@ fn direct_and_contextual_plugin_dispatch_keep_their_distinct_source_contracts() 
             game_mode: GameMode::Survival,
             xp_level: 0,
             xp_points: 0,
+            nbt: None,
         },
     ];
     let source = ServerCommandSource::player(

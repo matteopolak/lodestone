@@ -88,6 +88,23 @@ pub enum Effect {
     /// Set health to zero and run the death sequence — `/kill`, a hit for
     /// the maximum representable amount through the generic-kill damage type.
     Kill,
+    /// `/damage` — a hit of `amount` through the player's own damage pipeline
+    /// (invulnerability frames, armour, effects, absorption), with the damage
+    /// type's flags. `from` is the source position the hurt direction and
+    /// knockback are taken from.
+    Damage {
+        amount: f32,
+        /// The damage type's path name, e.g. `generic`.
+        damage_type: String,
+        from: Option<lodestone_model::Vec3>,
+    },
+    /// `/ride <player> mount` — the player now rides network entity
+    /// `vehicle`; the connection tells its client with the vehicle's whole
+    /// passenger list. Dismounting needs no effect: the sim queues an ejection
+    /// the connection already drains.
+    Mount {
+        vehicle: i32,
+    },
     /// `/experience add` — the real give-experience-points/give-experience-levels rule,
     /// `levels` selecting which.
     GiveExperience {

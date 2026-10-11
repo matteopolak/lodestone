@@ -69,6 +69,7 @@ pub mod biome;
 pub mod block;
 pub mod dimension;
 pub mod entity;
+pub mod damage_type;
 pub mod entity_type;
 pub mod float_range;
 pub mod function;
@@ -92,6 +93,7 @@ pub use dimension::{DimensionArg, HOSTED_DIMENSIONS};
 pub use entity::{
     Bounds, EntityArg, EntitySelector, SelectorOrder, SelectorPosition, SelectorPredicate,
 };
+pub use damage_type::DamageTypeArg;
 pub use entity_type::{EntityTypeArg, EntityTypeInput};
 pub use float_range::{FloatRange, FloatRangeArg};
 pub use function::{FunctionArg, FunctionRef};
@@ -99,14 +101,14 @@ pub use game_mode::GameModeArg;
 pub use heightmap::{HeightmapArg, HeightmapKind};
 pub use identifier::IdentifierArg;
 pub use item::{ItemArg, ItemInput};
-pub use nbt_path::{NbtPathArg, StorageIdArg};
+pub use nbt_path::{NbtPath, NbtPathArg, StorageIdArg};
 pub use position::{BlockPosArg, Coordinate, Coordinates, Vec3Arg};
 pub use rotation::{Rotation2, RotationArg};
 pub use scoreboard::{
     IntRange, IntRangeArg, ObjectiveArg, ObjectiveCriteriaArg, OperationArg, ScoreHolderArg,
     ScoreHolderInput, ScoreOperation,
 };
-pub use snbt::{NbtCompoundArg, NbtTagArg, SnbtValue};
+pub use snbt::{NbtCompoundArg, NbtTagArg, SnbtValue, compare_nbt, merge_compound};
 pub use swizzle::{Axes, SwizzleArg};
 pub use team::{TeamArg, TeamColorArg};
 pub use time::TimeArg;

@@ -380,60 +380,209 @@ fn peek_at(reader: &StringReader, offset: usize) -> Option<char> {
 /// `crate::commands::nbt_data`'s `/data get storage` feedback line, in
 /// `lodestone-server` — this exists here rather than there because it is a
 /// property of the type, not of that one call site.
+/// The reference chat rendering of a tag: keys bare when they are plain words
+/// and quoted otherwise, strings in whichever quote the text does not contain,
+/// every numeric tag with its type suffix (floating point in the shortest
+/// round-trip digits, scientific below `1e-3` and from `1e7`), lists and
+/// arrays joined with `, `, arrays as `[B; 1b, 2b]`, and anything nested past
+/// 64 levels or beyond 128 elements folded to `<...>`.
 impl std::fmt::Display for SnbtValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Byte(v) => write!(f, "{v}b"),
-            Self::Short(v) => write!(f, "{v}s"),
-            Self::Int(v) => write!(f, "{v}"),
-            Self::Long(v) => write!(f, "{v}l"),
-            Self::Float(v) => write!(f, "{v}f"),
-            Self::Double(v) => write!(f, "{v}d"),
-            Self::String(s) => write!(f, "{s:?}"),
-            Self::List(items) => {
-                f.write_str("[")?;
-                write_joined(f, items, |f, v| write!(f, "{v}"))?;
-                f.write_str("]")
+        write_pretty(f, self, 0)
+    }
+}
+
+const FOLD_DEPTH: usize = 64;
+const FOLD_LENGTH: usize = 128;
+
+fn write_pretty(f: &mut std::fmt::Formatter<'_>, value: &SnbtValue, depth: usize) -> std::fmt::Result {
+    match value {
+        SnbtValue::Byte(v) => write!(f, "{v}b"),
+        SnbtValue::Short(v) => write!(f, "{v}s"),
+        SnbtValue::Int(v) => write!(f, "{v}"),
+        SnbtValue::Long(v) => write!(f, "{v}L"),
+        SnbtValue::Float(v) => write!(f, "{}f", java_float(f64::from(*v), format!("{v:e}"))),
+        SnbtValue::Double(v) => write!(f, "{}d", java_float(*v, format!("{v:e}"))),
+        SnbtValue::String(s) => f.write_str(&quote_and_escape(s)),
+        SnbtValue::List(items) if items.is_empty() => f.write_str("[]"),
+        SnbtValue::List(_) if depth >= FOLD_DEPTH => f.write_str("[<...>]"),
+        SnbtValue::List(items) => {
+            f.write_str("[")?;
+            for (i, item) in items.iter().take(FOLD_LENGTH).enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
+                }
+                write_pretty(f, item, depth + 1)?;
             }
-            Self::ByteArray(items) => {
-                f.write_str("[B;")?;
-                write_joined(f, items, |f, v| write!(f, "{v}b"))?;
-                f.write_str("]")
+            if items.len() > FOLD_LENGTH {
+                f.write_str(", <...>")?;
             }
-            Self::IntArray(items) => {
-                f.write_str("[I;")?;
-                write_joined(f, items, |f, v| write!(f, "{v}"))?;
-                f.write_str("]")
+            f.write_str("]")
+        }
+        SnbtValue::ByteArray(items) => write_array(f, "B", items, |v| format!("{v}b")),
+        SnbtValue::IntArray(items) => write_array(f, "I", items, |v| v.to_string()),
+        SnbtValue::LongArray(items) => write_array(f, "L", items, |v| format!("{v}L")),
+        SnbtValue::Compound(entries) if entries.is_empty() => f.write_str("{}"),
+        SnbtValue::Compound(_) if depth >= FOLD_DEPTH => f.write_str("{<...>}"),
+        SnbtValue::Compound(entries) => {
+            f.write_str("{")?;
+            for (i, (key, item)) in entries.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
+                }
+                if is_simple_key(key) {
+                    f.write_str(key)?;
+                } else {
+                    f.write_str(&quote_and_escape(key))?;
+                }
+                f.write_str(": ")?;
+                write_pretty(f, item, depth + 1)?;
             }
-            Self::LongArray(items) => {
-                f.write_str("[L;")?;
-                write_joined(f, items, |f, v| write!(f, "{v}l"))?;
-                f.write_str("]")
-            }
-            Self::Compound(entries) => {
-                f.write_str("{")?;
-                write_joined(f, entries, |f, (key, value)| write!(f, "{key:?}:{value}"))?;
-                f.write_str("}")
-            }
+            f.write_str("}")
         }
     }
 }
 
-/// Comma-joins `items` through `write_one`, with no leading/trailing
-/// delimiter of its own — every [`SnbtValue`] variant above supplies its own
-/// bracket/brace pair around the call.
-fn write_joined<T>(
+fn write_array<T>(
     f: &mut std::fmt::Formatter<'_>,
+    prefix: &str,
     items: &[T],
-    mut write_one: impl FnMut(&mut std::fmt::Formatter<'_>, &T) -> std::fmt::Result,
+    show: impl Fn(&T) -> String,
 ) -> std::fmt::Result {
-    for (i, item) in items.iter().enumerate() {
-        if i > 0 {
+    write!(f, "[{prefix};")?;
+    for (i, item) in items.iter().take(FOLD_LENGTH).enumerate() {
+        write!(f, " {}", show(item))?;
+        if i != items.len() - 1 {
             f.write_str(",")?;
         }
-        write_one(f, item)?;
     }
-    Ok(())
+    if items.len() > FOLD_LENGTH {
+        f.write_str(" <...>")?;
+    }
+    f.write_str("]")
+}
+
+fn is_simple_key(key: &str) -> bool {
+    !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+}
+
+/// Quotes `text` with `"`, or with `'` when the first quote character inside
+/// it is a `"`; the chosen quote and the backslash are escaped, as are control
+/// characters.
+fn quote_and_escape(text: &str) -> String {
+    let mut body = String::with_capacity(text.len() + 2);
+    let mut quote = None;
+    for c in text.chars() {
+        match c {
+            '\\' => body.push_str("\\\\"),
+            '"' | '\'' => {
+                let chosen = *quote.get_or_insert(if c == '"' { '\'' } else { '"' });
+                if chosen == c {
+                    body.push('\\');
+                }
+                body.push(c);
+            }
+            '\n' => body.push_str("\\n"),
+            '\r' => body.push_str("\\r"),
+            '\t' => body.push_str("\\t"),
+            '\u{8}' => body.push_str("\\b"),
+            '\u{c}' => body.push_str("\\f"),
+            c if (c as u32) < 0x20 => body.push_str(&format!("\\x{:02x}", c as u32)),
+            c => body.push(c),
+        }
+    }
+    let quote = quote.unwrap_or('"');
+    format!("{quote}{body}{quote}")
+}
+
+/// A floating-point number laid out as the reference prints it: plain decimal
+/// with at least one fractional digit for magnitudes in `[1e-3, 1e7)`, else
+/// `d.dddE<exp>`. `scientific` is Rust's shortest round-trip `{:e}` rendering of
+/// the same number, which supplies the digits and the exponent.
+fn java_float(value: f64, scientific: String) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 { "-Infinity" } else { "Infinity" }.to_owned();
+    }
+    let (mantissa, exponent) = scientific.split_once('e').expect("{:e} always has an exponent");
+    let exponent: i32 = exponent.parse().expect("{:e} exponent is an integer");
+    let negative = mantissa.starts_with('-');
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let sign = if negative { "-" } else { "" };
+    if value == 0.0 {
+        return format!("{sign}0.0");
+    }
+    if (-3..7).contains(&exponent) {
+        let point = exponent + 1;
+        let body = if point <= 0 {
+            format!("0.{}{digits}", "0".repeat((-point) as usize))
+        } else if digits.len() as i32 <= point {
+            format!("{digits}{}.0", "0".repeat((point as usize) - digits.len()))
+        } else {
+            format!("{}.{}", &digits[..point as usize], &digits[point as usize..])
+        };
+        format!("{sign}{body}")
+    } else {
+        let fraction = if digits.len() > 1 { &digits[1..] } else { "0" };
+        format!("{sign}{}.{fraction}E{exponent}", &digits[..1])
+    }
+}
+
+/// The reference partial-match rule behind `nbt=` and path filters: every key
+/// of an expected compound must be present in the actual one with a matching
+/// value of the *same tag type*, an expected list matches when each of its
+/// elements matches some element of the actual list (an empty expected list
+/// matches only an empty one), and everything else compares for equality.
+#[must_use]
+pub fn compare_nbt(expected: &SnbtValue, actual: &SnbtValue) -> bool {
+    if std::mem::discriminant(expected) != std::mem::discriminant(actual) {
+        return false;
+    }
+    match (expected, actual) {
+        (SnbtValue::Compound(want), SnbtValue::Compound(have)) => {
+            have.len() >= want.len()
+                && want.iter().all(|(key, value)| {
+                    have.iter().find(|(k, _)| k == key).is_some_and(|(_, held)| compare_nbt(value, held))
+                })
+        }
+        (SnbtValue::List(want), SnbtValue::List(have)) => {
+            if want.is_empty() {
+                return have.is_empty();
+            }
+            have.len() >= want.len() && want.iter().all(|w| have.iter().any(|h| compare_nbt(w, h)))
+        }
+        _ => expected == actual,
+    }
+}
+
+/// Merges `incoming` into `target` as the reference compound merge does:
+/// compounds on both sides merge recursively, everything else is replaced.
+pub fn merge_compound(target: &mut Vec<(String, SnbtValue)>, incoming: &[(String, SnbtValue)]) {
+    for (key, value) in incoming {
+        match target.iter_mut().find(|(k, _)| k == key) {
+            Some((_, SnbtValue::Compound(held))) if matches!(value, SnbtValue::Compound(_)) => {
+                let SnbtValue::Compound(add) = value else { unreachable!() };
+                merge_compound(held, add);
+            }
+            Some((_, held)) => *held = value.clone(),
+            None => target.push((key.clone(), value.clone())),
+        }
+    }
+}
+
+/// Reads a compound at the reader's cursor, as the `nbt=` selector option and a
+/// path filter do.
+///
+/// # Errors
+///
+/// The [`ParseError`] of the first malformed token.
+pub(crate) fn read_compound_value(reader: &mut StringReader) -> Result<Vec<(String, SnbtValue)>, ParseError> {
+    match read_compound(reader, 0)? {
+        SnbtValue::Compound(entries) => Ok(entries),
+        _ => unreachable!("read_compound yields a compound"),
+    }
 }
 
 /// `minecraft:nbt_tag` — any [`SnbtValue`].
@@ -598,6 +747,50 @@ mod tests {
         ]);
         let text = value.to_string();
         assert_eq!(parse_value(&text).unwrap_or_else(|e| panic!("{text:?} failed to re-parse: {e}")), value);
+    }
+
+    /// Expected strings are the reference's own renderings (a float always has
+    /// a fractional digit, `L` is uppercase, keys quote only when not plain
+    /// words, scientific notation outside `[1e-3, 1e7)`).
+    #[test]
+    fn display_matches_the_reference_chat_rendering() {
+        let cases: [(SnbtValue, &str); 14] = [
+            (SnbtValue::Float(20.0), "20.0f"),
+            (SnbtValue::Double(0.5), "0.5d"),
+            (SnbtValue::Double(-3.25), "-3.25d"),
+            (SnbtValue::Float(0.001), "0.001f"),
+            (SnbtValue::Float(0.0001), "1.0E-4f"),
+            (SnbtValue::Double(1_234_567.0), "1234567.0d"),
+            (SnbtValue::Double(12_345_678.0), "1.2345678E7d"),
+            (SnbtValue::Double(100.0), "100.0d"),
+            (SnbtValue::Long(7), "7L"),
+            (SnbtValue::String("it's".to_owned()), "\"it's\""),
+            (SnbtValue::String("say \"hi\"".to_owned()), "'say \"hi\"'"),
+            (SnbtValue::IntArray(vec![1, -2]), "[I; 1, -2]"),
+            (SnbtValue::ByteArray(vec![]), "[B;]"),
+            (
+                SnbtValue::Compound(vec![
+                    ("plain_key".to_owned(), SnbtValue::List(vec![SnbtValue::Byte(1), SnbtValue::Byte(0)])),
+                    ("a b".to_owned(), SnbtValue::Compound(vec![])),
+                ]),
+                "{plain_key: [1b, 0b], \"a b\": {}}",
+            ),
+        ];
+        for (value, text) in cases {
+            assert_eq!(value.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn compare_nbt_is_partial_and_type_strict() {
+        let actual = parse_value("{a: 1b, l: [1, 2, 3], c: {x: 1, y: 2}}").unwrap();
+        assert!(compare_nbt(&parse_value("{a: 1b}").unwrap(), &actual));
+        assert!(!compare_nbt(&parse_value("{a: 1}").unwrap(), &actual), "int is not byte");
+        assert!(compare_nbt(&parse_value("{l: [3, 1]}").unwrap(), &actual), "any order, subset");
+        assert!(!compare_nbt(&parse_value("{l: [4]}").unwrap(), &actual));
+        assert!(!compare_nbt(&parse_value("{l: []}").unwrap(), &actual), "empty list matches only empty");
+        assert!(compare_nbt(&parse_value("{c: {y: 2}}").unwrap(), &actual));
+        assert!(!compare_nbt(&parse_value("{missing: 1}").unwrap(), &actual));
     }
 
     #[test]
