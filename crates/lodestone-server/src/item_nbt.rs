@@ -15,7 +15,7 @@
 
 use lodestone_core::{Nbt, NbtTag, Reader, Writer, read_network_nbt, write_network_nbt};
 use lodestone_model::{
-    ItemComponents, ItemEnchantment, ItemInstrument, ItemStack, ResourceKey, Text,
+    BeeOccupant, ItemComponents, ItemEnchantment, ItemInstrument, ItemStack, ResourceKey, Text,
     WrittenBookContent,
 };
 
@@ -231,6 +231,25 @@ fn components_to_nbt(item: &ResourceKey, components: &ItemComponents) -> (Vec<(S
         }
         put("container", compound_list(entries));
     }
+    let bees = std::mem::take(&mut rest.bees);
+    if !bees.is_empty() {
+        let mut entries = Vec::with_capacity(bees.len());
+        for bee in &bees {
+            match custom_data_to_nbt(&bee.entity_data) {
+                Some(entity_data) => entries.push(Nbt::Compound(vec![
+                    ("entity_data".to_owned(), entity_data),
+                    ("ticks_in_hive".to_owned(), Nbt::Int(bee.ticks_in_hive)),
+                    ("min_ticks_in_hive".to_owned(), Nbt::Int(bee.min_ticks_in_hive)),
+                ])),
+                None => complete = false,
+            }
+        }
+        put("bees", compound_list(entries));
+    }
+    let block_state = std::mem::take(&mut rest.block_state);
+    if !block_state.is_empty() {
+        put("block_state", Nbt::Compound(block_state.into_iter().map(|(name, value)| (name, Nbt::String(value))).collect()));
+    }
     // Prototype-derived fields: the item's own defaults, restored from the
     // prototype census, never saved.
     rest.max_stack_size = None;
@@ -306,6 +325,32 @@ fn read_component(components: &mut ItemComponents, name: &str, value: &Nbt) -> b
                 slots[slot] = Some(stack);
             }
             components.container = slots;
+            true
+        }
+        ("bees", Nbt::List { elements, .. }) => {
+            let mut bees = Vec::with_capacity(elements.len());
+            for entry in elements {
+                let Some(entity_data) = field(entry, "entity_data").and_then(custom_data_from_nbt) else { return false };
+                let ticks = |name: &str| match field(entry, name) {
+                    Some(Nbt::Int(ticks)) => Some(*ticks),
+                    _ => None,
+                };
+                let (Some(ticks_in_hive), Some(min_ticks_in_hive)) = (ticks("ticks_in_hive"), ticks("min_ticks_in_hive")) else {
+                    return false;
+                };
+                bees.push(BeeOccupant { entity_data, ticks_in_hive, min_ticks_in_hive });
+            }
+            components.bees = bees;
+            true
+        }
+        ("block_state", Nbt::Compound(properties)) => {
+            let mut entries = Vec::with_capacity(properties.len());
+            for (name, value) in properties {
+                let Nbt::String(value) = value else { return false };
+                entries.push((name.clone(), value.clone()));
+            }
+            entries.sort();
+            components.block_state = entries;
             true
         }
         ("written_book_content", value) => written_book_from_nbt(value).map(|book| components.written_book_content = Some(book)).is_some(),

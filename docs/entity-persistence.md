@@ -34,7 +34,7 @@ How a live mob survives a world reload: `MobSim::saved_entities` writes each mob
 - Passive mobs are persistent by species, so `PersistenceRequired: 0` never makes one despawnable; only `1` or a `CustomName` upgrades a mob. On save the flag is written only for a persistent hostile species.
 - `LastRestock` and `LastGossipDecay` are absolute game times, clamped on restore to the sim's tick count.
 
-**Riders and vehicles.** Boats, rafts and minecarts save as type, uuid, position, motion and yaw (`MobSim::saved_vehicles`). A mob riding a saved vehicle is nested in the vehicle's record as a `Passengers` list of full entity compounds, and omitted from the flat list, as in the reference format; riders of riders nest in turn. `restore_saved` restores each `Passengers` list after its parent (`restore_passengers`) and seats the riders by uuid. Players are saved on their own and are not nested. `/data get entity` shows the same nesting (`saved_trees`).
+**Riders and vehicles.** Boats, rafts and minecarts save as type, uuid, position, motion and yaw (`MobSim::saved_vehicles`). A cart also writes its modelled state under the reference field names (`mobs/minecart_state.rs`): `Items` for container carts (written even when empty, unless a `LootTable` is carried), `PushX`/`PushZ`/`Fuel` for furnace carts, `fuse` for TNT carts, and `FlippedRotation`; everything else on the record (display block, a command or spawner cart's data) rides in `TrackedMinecart::carried` verbatim, and `/data get|merge` reads and applies the same fields. Command-block and spawner carts keep their data but do not run it. A broken or `/kill`ed container cart spills its stacks (`MobSim::break_minecart`); no player-attack path breaks carts yet. Empty boats and carts have no native state, so the native store admits them by type (`is_stateless_vehicle`). A mob riding a saved vehicle is nested in the vehicle's record as a `Passengers` list of full entity compounds, and omitted from the flat list, as in the reference format; riders of riders nest in turn. `restore_saved` restores each `Passengers` list after its parent (`restore_passengers`) and seats the riders by uuid. Players are saved on their own and are not nested. `/data get entity` shows the same nesting (`saved_trees`).
 
 ### The native store
 
@@ -56,7 +56,7 @@ None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/` (
 
 ## Not persisted yet
 
-Tipped-arrow contents; active effects, burn time and piglin/warden/allay/sniffer/camel/armadillo/axolotl timers (carried verbatim from an import, but the sim's own values are not written); saddles and horse armour (carried, not modelled); all-black cats and lightning-brown mooshrooms; name-tag styling; a container cart's slots, a furnace cart's fuel and a TNT cart's fuse; boats and carts on the native store when empty; projectiles on the native path other than via `fields`; villager trades the generated table lacks (replaced by table offers, use counts lost).
+Tipped-arrow contents; active effects, burn time and piglin/warden/allay/sniffer/camel/armadillo/axolotl timers (carried verbatim from an import, but the sim's own values are not written); saddles and horse armour (carried, not modelled); all-black cats and lightning-brown mooshrooms; name-tag styling; projectiles on the native path other than via `fields`; villager trades the generated table lacks (replaced by table offers, use counts lost).
 
 ## Dependencies
 

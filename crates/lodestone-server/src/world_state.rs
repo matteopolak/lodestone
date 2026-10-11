@@ -296,9 +296,28 @@ pub struct WorldStateHandle {
     /// runtime capability, not world data. Compatibility connection wrappers
     /// leave it absent; integrated worlds install the handle before serving.
     proposals: Arc<Mutex<Option<crate::ecs::ServerProposalHandle>>>,
+    /// This world's night-skip vote: the one roster every connection of the
+    /// world (the host, a published world's guests, an open-to-LAN guest) lays
+    /// down in and the primary tick loop counts.
+    sleep_vote: crate::sleep::SleepVote,
+    /// This world's night-skip broadcast, published by the tick loop and read
+    /// by every connection through its own cursor.
+    sleep_feed: crate::sleep::SleepFeed,
 }
 
 impl WorldStateHandle {
+    /// The world's shared sleep vote.
+    #[must_use]
+    pub fn sleep_vote(&self) -> &crate::sleep::SleepVote {
+        &self.sleep_vote
+    }
+
+    /// The world's shared night-skip broadcast.
+    #[must_use]
+    pub fn sleep_feed(&self) -> &crate::sleep::SleepFeed {
+        &self.sleep_feed
+    }
+
     /// A handle to a fresh world: every rule at its default, Normal
     /// difficulty unlocked, clock at zero.
     #[must_use]

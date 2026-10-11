@@ -16,7 +16,6 @@ use crate::dimension::Dimension;
 use crate::mob_spawn::MobCategory;
 use crate::server::EntitySource;
 use crate::scheduled_tick::ScheduledTickHandle;
-use crate::sleep::{SleepFeed, SleepVote};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock};
 use crate::tick_area::TickFollow;
 use crate::weather::{WeatherFeed, WeatherState};
@@ -76,8 +75,6 @@ async fn run(terrain: &Arc<crate::chunk::Terrain263ChunkSource>, spawn_mobs: boo
     let tick_world = world.clone();
     let tick_runtime = Arc::clone(&runtime);
     let task = tokio::spawn(async move {
-        let sleep_vote = SleepVote::new();
-        let sleep_feed = SleepFeed::default();
         let follow = TickFollow {
             dimension: Dimension::Overworld,
             radius: 3,
@@ -98,8 +95,6 @@ async fn run(terrain: &Arc<crate::chunk::Terrain263ChunkSource>, spawn_mobs: boo
             ExplosionFeed::default(),
             WeatherFeed::default(),
             WeatherState::default(),
-            &sleep_vote,
-            &sleep_feed,
             ScheduledTickHandle::default(),
             tick_world,
             follow,

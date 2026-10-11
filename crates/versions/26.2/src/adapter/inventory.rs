@@ -9,11 +9,12 @@ mod components_26_3;
 mod release_codec_tests;
 pub(crate) use context::StackCodecContext;
 use crate::dialect::FixedRegistryKind;
+use lodestone_core::{Nbt, write_network_nbt};
 // Not in `adapter::mod`'s own `lodestone_model` import list — added directly
 // here rather than widening that shared glob for one type this file alone
 // needs.
 use lodestone_model::{
-    AttackRange, BlocksAttacks, ConsumeEffect, DamageReduction, MobEffectInstance, RegistrySet,
+    AttackRange, BeeOccupant, BlocksAttacks, ConsumeEffect, DamageReduction, MobEffectInstance, RegistrySet,
     ItemInstrument, ItemSound,
 };
 
@@ -1526,9 +1527,11 @@ fn read_component_patch(
                     )));
                 }
                 for _ in 0..count {
-                    reader.string(32767).map_err(dec_err)?; // property name
-                    reader.string(32767).map_err(dec_err)?; // property value
+                    let name = reader.string(32767).map_err(dec_err)?;
+                    let value = reader.string(32767).map_err(dec_err)?;
+                    components.block_state.push((name, value));
                 }
+                components.block_state.sort();
             }
 
             // The bees stream codec: a `List<Occupant>`, each a
@@ -1543,9 +1546,10 @@ fn read_component_patch(
                     )));
                 }
                 for _ in 0..count {
-                    read_typed_entity_data(reader, context, FixedRegistryKind::Entity)?;
-                    reader.var_i32().map_err(dec_err)?;
-                    reader.var_i32().map_err(dec_err)?;
+                    let entity_data = read_typed_entity_compound(reader, context)?;
+                    let ticks_in_hive = reader.var_i32().map_err(dec_err)?;
+                    let min_ticks_in_hive = reader.var_i32().map_err(dec_err)?;
+                    components.bees.push(BeeOccupant { entity_data, ticks_in_hive, min_ticks_in_hive });
                 }
             }
 
@@ -1783,6 +1787,25 @@ fn read_typed_entity_data(
     context.fixed(kind, raw)?;
     read_network_nbt(reader).map_err(dec_err)?;
     Ok(())
+}
+
+/// [`read_typed_entity_data`] for an entity type, returning the compound with
+/// its `id` put back, as network NBT (the form a hive item keeps its bees in).
+fn read_typed_entity_compound(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<Vec<u8>, AdapterError> {
+    let raw = reader.var_i32().map_err(dec_err)?;
+    let canonical = context.fixed(FixedRegistryKind::Entity, raw)?;
+    let name = context
+        .dialect
+        .fixed_registry_name(FixedRegistryKind::Entity, canonical)
+        .ok_or_else(|| AdapterError::Decode(format!("entity type {canonical} has no name")))?;
+    let Nbt::Compound(mut fields) = read_network_nbt(reader).map_err(dec_err)? else {
+        return Err(AdapterError::Decode("typed entity data is not a compound".to_owned()));
+    };
+    fields.retain(|(field, _)| field != "id");
+    fields.insert(0, ("id".to_owned(), Nbt::String(name.to_owned())));
+    let mut writer = Writer::default();
+    write_network_nbt(&mut writer, &Nbt::Compound(fields)).map_err(dec_err)?;
+    Ok(writer.into_vec())
 }
 
 /// Consumes one item-first template and its nested component patch, reporting

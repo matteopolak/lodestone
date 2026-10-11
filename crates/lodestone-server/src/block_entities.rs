@@ -60,6 +60,7 @@ use crate::furnace::{Furnace, FurnaceKind};
 use crate::hopper::Hopper;
 
 mod data;
+mod item_components;
 mod removal;
 pub(crate) use removal::Removal;
 

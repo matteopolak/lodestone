@@ -146,9 +146,6 @@ where
         &BlockTickFeed::default(),
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
-        // No world-tick consumer is attached to this vote/feed pair.
-        &SleepVote::default(),
-        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -213,8 +210,6 @@ where
         &BlockTickFeed::default(),
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
-        &SleepVote::default(),
-        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -279,8 +274,6 @@ where
         &BlockTickFeed::default(),
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
-        &SleepVote::default(),
-        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -306,7 +299,7 @@ where
 /// have to come in on; the borrowed-source
 /// [`serve_connection_with_commands`] cannot serve it.
 ///
-/// It carries the same live view ceiling, sleep, border and save handles as
+/// It carries the same live view ceiling, border and save handles as
 /// the plain singleplayer wrapper. The local command constructor must not
 /// replace those with defaults merely to install a dispatch: doing so would
 /// make plugin commands silently change unrelated integrated-world behaviour.
@@ -333,8 +326,6 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     tickets: &TicketStoreHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
-    sleep_vote: &SleepVote,
-    sleep_feed: &SleepFeed,
     commands: &CommandDispatch,
     border: &BorderFeed,
     // The three host-supplied surfaces every other constructor
@@ -381,8 +372,6 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
-        sleep_vote,
-        sleep_feed,
         commands,
         border,
         resource_packs,
@@ -458,8 +447,6 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
-        &SleepVote::default(),
-        &SleepFeed::default(),
         commands,
         &BorderFeed::default(),
         resource_packs,
@@ -519,9 +506,6 @@ where
         block_ticks,
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
-        // No world-tick consumer is attached to this vote/feed pair.
-        &SleepVote::default(),
-        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -582,10 +566,6 @@ where
         block_ticks,
         explosions,
         weather,
-        // No caller wires a sleep vote through this wrapper; the feed-carrying
-        // variant is `serve_connection_with_mob_events_and_commands_shared`.
-        &SleepVote::default(),
-        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -655,9 +635,6 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
-        // No world-tick consumer is attached to this vote/feed pair.
-        &SleepVote::default(),
-        &SleepFeed::default(),
         commands,
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -724,9 +701,6 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
-        // No world-tick consumer is attached to this vote/feed pair.
-        &SleepVote::default(),
-        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         resource_packs,
@@ -796,9 +770,6 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
-        // No world-tick consumer is attached to this vote/feed pair.
-        &SleepVote::default(),
-        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),

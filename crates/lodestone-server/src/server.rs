@@ -150,7 +150,7 @@ use crate::redstone::WorldState;
 use crate::redstone_diode::{set_comparator, set_repeater};
 use crate::redstone_observer::set_observer;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickKind, ScheduledTickQueue};
-use crate::sleep::{SleepEvent, SleepFeed, SleepVote};
+use crate::sleep::{SleepEvent, SleepVote};
 use crate::ticket::{PLAYER_SPAWN_RADIUS, PlayerTicketGuard, TicketKind, TicketOwner, TicketStoreHandle};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::weather::WeatherFeed;

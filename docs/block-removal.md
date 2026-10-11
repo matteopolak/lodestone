@@ -8,7 +8,7 @@ The one path every block removal shares. Mining, explosions, pistons, fluids, lo
 
 `block_removal::destroy` (or `settle`, when the caller already rolled the loot) takes the cell's entity out of `BlockEntityRegistry` through `destroy_at`, the only function that can: the registry's plain `remove` is private to `block_entities`, and `block_removal/tests.rs` scans the sources for a second caller. What drops depends on the `Cause`:
 
-- `Mined`: the loot table rolls with the held tool.
+- `Mined`: the loot table rolls with the held tool. Loot rolls inside `dispose`, after the block entity is resolved, so a table can read it: `copy_components` (source `block_entity`) lifts `BlockEntity::implicit_components` onto the drop and `copy_state` writes `block_state`. A silk-touched hive or nest keeps its bees and `honey_level` this way, and `apply_implicit_components` restores them when the item is placed.
 - `Blast`: the table rolls with the blast radius, which is what thins a crater. `block_drops::blast_blocks` only writes air and reports what it destroyed; the tick loop's detonation drain does the rest. A blast that reaches a non-resident cell undoes its writes (`ResidentTickSource::roll_back`) before it retries, so the retry still sees every block and removes each entity.
 - `Natural`: a piston, fluid, lost support or `/setblock destroy`; no tool.
 - `Cleared`: a command replaced the block (`/setblock` without `destroy`); the entity goes and nothing drops.
@@ -27,7 +27,7 @@ Reaction code running over borrowed columns (the piston branch of `random_tick::
 
 A new removal site calls `destroy` with a `Cause`; never remove from the registry directly. A container kind that holds items teaches `spilled_contents` or `broken_drops` its slots. Shulker boxes are `Destroy` for pistons.
 
-Gaps: no loot tables exist for containers (they use item component copy in the reference, handled by `broken_drops`); silk-touch hive drops lose their bees (no bee-carrying item component); hive release ignores campfire sedation; there is no cartography table menu; `/fill` has no hollow, outline or replace filter; `keep` feedback counts every cell.
+Gaps: no loot tables exist for containers (they use item component copy in the reference, handled by `broken_drops`); hive release ignores campfire sedation; there is no cartography table menu; `/fill` has no hollow, outline or replace filter; `keep` feedback counts every cell.
 
 ## Configuration
 

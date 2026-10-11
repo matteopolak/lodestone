@@ -37,8 +37,10 @@ fn mentions(needle: &str) -> Vec<String> {
 #[test]
 fn only_the_removal_path_takes_an_entity_out_of_the_registry() {
     // `destroy_at` is the single remover; its callers are this module (for
-    // every immediate removal) and the registry's own deferred wrapper.
-    assert_eq!(mentions(".destroy_at("), ["block_entities/removal.rs", "block_removal.rs"]);
+    // every immediate removal), the registry's own deferred wrapper, and the
+    // blast stage, which takes a crater's entities under the lock that
+    // publishes it and hands the removals to this module to dispose.
+    assert_eq!(mentions(".destroy_at("), ["block_entities/removal.rs", "block_removal.rs", "tick.rs"]);
     // The deferred form is for reaction code that cannot spawn items.
     assert_eq!(mentions(".destroy_deferred("), ["random_tick/redstone.rs"]);
 }

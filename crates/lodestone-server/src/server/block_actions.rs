@@ -407,10 +407,10 @@ where
     // evaluate against a real item instead of an absent one.
     let env = crate::block_removal::Env { block_entities, mobs, feed: block_ticks, stored: &|p| source.block_entity(p.x, p.y, p.z) };
     let cause = crate::block_removal::Cause::Mined { held, drops: drop_loot, creative, breaker };
-    let loot = crate::block_removal::loot(cause, broken, pos, drops_rng);
-    // The block's entity goes through the shared destroy path, which also
-    // spills what it held, stops a jukebox's song and lets a hive's bees out.
-    crate::block_removal::settle(env, pos, broken, cause, loot, drops_rng);
+    // The block's entity goes through the shared destroy path, which rolls the
+    // loot with it, spills what it held, stops a jukebox's song and lets a
+    // hive's bees out.
+    crate::block_removal::destroy(env, pos, broken, cause, drops_rng);
     // The break path awards experience orbs at the **centre** of the broken
     // cell, not at the jittered positions its item drops use.
     //

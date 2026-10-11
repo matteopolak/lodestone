@@ -79,7 +79,6 @@ use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 // see each call site's own comment for why that handle, not a fresh default.
 use crate::ticket::TicketStoreHandle;
 use crate::tick::run_primary_tick_loop_with_weather;
-use crate::sleep::{SleepFeed, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -249,10 +248,6 @@ struct HostCore {
     /// guest's residency claim has to move the store that store's own eviction
     /// actually reads, exactly like `hub_block_ticks`/`subscribers` above.
     tickets: TicketStoreHandle,
-    /// The tick loop's night-skip vote, shared with every connection `publish`
-    /// accepts so a guest's bed click reaches the same roster and sees the same
-    /// sky.
-    sleep_vote: SleepVote,
 }
 
 /// Hand-written: neither [`ServerProtocol`] nor [`ChunkSource`] requires
@@ -447,8 +442,6 @@ fn start_sibling_tick_loop(
         anchors: world_state.tick_anchors().clone(),
     };
     let _ = spawn_tick_task(&shutdown, async move {
-        let sleep_vote = SleepVote::new();
-        let sleep_feed = SleepFeed::default();
         crate::tick::run_dimension_tick_loop_with_weather(
             runtime.mobs().clone(),
             runtime.entities().clone(),
@@ -460,8 +453,6 @@ fn start_sibling_tick_loop(
             ExplosionFeed::default(),
             WeatherFeed::default(),
             WeatherState::default(),
-            &sleep_vote,
-            &sleep_feed,
             scheduled,
             world_state,
             follow,
@@ -1714,8 +1705,6 @@ impl IntegratedServer {
         let live_mobs = primary_runtime.entities().clone();
         let block_ticks = BlockTickFeed::default();
         let explosions = ExplosionFeed::default();
-        let sleep_vote = SleepVote::default();
-        let sleep_feed = SleepFeed::default();
         let border = crate::border::BorderFeed::default();
 
         let spawn_world_state = world_state.clone();
@@ -1739,8 +1728,6 @@ impl IntegratedServer {
         let conn_tickets = tickets.clone();
         let conn_block_ticks = block_ticks.clone();
         let conn_explosions = explosions.clone();
-        let conn_sleep_vote = sleep_vote.clone();
-        let conn_sleep_feed = sleep_feed.clone();
         let conn_border = border.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
@@ -1760,8 +1747,6 @@ impl IntegratedServer {
                 &conn_tickets,
                 &conn_block_ticks,
                 &conn_explosions,
-                &conn_sleep_vote,
-                &conn_sleep_feed,
                 &commands,
                 &conn_border,
                 &resource_packs,
@@ -1834,8 +1819,6 @@ impl IntegratedServer {
                 tick_explosions,
                 WeatherFeed::default(),
                 WeatherState::default(),
-                &sleep_vote,
-                &sleep_feed,
                 scheduled,
                 tick_world_state,
                 follow,
@@ -2468,20 +2451,6 @@ impl IntegratedServer {
                 }
             }
         });
-        // The night-skip vote and its feed are shared between the connection
-        // task and the tick task in the
-        // same way the two feeds above are. The connection records `lay_down`/
-        // `get_up` (bed click / wake-up) and feeds the voter count on its
-        // `container_sync_tick`; the tick task's loop computes the vote and
-        // publishes any `SkippedNight` back through the feed the connection
-        // drains. One inner handle each, cloned twice — see [`SleepVote`]'s
-        // own doc comment. A fresh vote and feed are the singleplayer shape;
-        // with `player_registry` above carrying exactly the one local player
-        // once they join, the voter count reaches 1 and
-        // `SleepState::sleepers_needed`'s `max(1, …)` floor demands exactly
-        // one sleeper; the real count and the floor agree for the local player.
-        let sleep_vote = SleepVote::new();
-        let sleep_feed = SleepFeed::default();
         // the world border, shared the same way — one
         // handle cloned into the connection task (which reads it for its
         // join broadcast and per-tick damage) and into the tick loop (which
@@ -2721,10 +2690,6 @@ impl IntegratedServer {
         // below, for the same reason `clock` is — an `Arc::clone` *inside* the
         // block would move the original out of reach of the tick task, which
         // passes the same inner handle to `run_tick_loop_with_weather`.
-        let conn_sleep_vote = sleep_vote.clone();
-        #[cfg(not(target_arch = "wasm32"))]
-        let host_sleep_vote = sleep_vote.clone();
-        let conn_sleep_feed = sleep_feed.clone();
         let conn_border = border_feed.clone();
         // A third clone, held on `Self` for RCON's `/worldborder` to reach —
         // see that field's own doc comment for the scope this closes and the
@@ -2732,7 +2697,7 @@ impl IntegratedServer {
         #[cfg(not(target_arch = "wasm32"))]
         let host_border = border_feed.clone();
         // **One** world state, cloned out here for the same
-        // reason the sleep vote is: a clone made inside the `async move` below would
+        // reason the border is: a clone made inside the `async move` below would
         // move the original out of reach of the tick task, and two stores is the bug
         // — a rule set on the connection has to be the rule the loop reads, and the
         // clock the loop advances has to be the clock the connection broadcasts.
@@ -2773,8 +2738,6 @@ impl IntegratedServer {
                 &conn_tickets,
                 &conn_block_ticks,
                 &conn_explosions,
-                &conn_sleep_vote,
-                &conn_sleep_feed,
                 &conn_commands,
                 &conn_border,
                 &conn_resource_packs,
@@ -2859,10 +2822,8 @@ impl IntegratedServer {
         };
         let tick_task = spawn_world_tick_task(&shutdown, async move {
             // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
-            // the `_with_weather` variant so the real sleep vote
-            // and feed reach the loop (the plain `run_tick_loop` wrapper only
-            // forwards a fresh, disconnected vote — that is the loop `bind`'s
-            // LAN worlds run on, which is why they do not skip the night yet).
+            // the `_with_weather` variant: the sleep vote and feed ride the
+            // world state this loop shares with every connection.
             // Weather is not wired here, so a default feed and state are passed —
             // exactly what the wrapper
             // would have passed, which is why switching variants is
@@ -2879,8 +2840,6 @@ impl IntegratedServer {
                 tick_explosions,
                 WeatherFeed::default(),
                 WeatherState::default(),
-                &sleep_vote,
-                &sleep_feed,
                 scheduled,
                 world_state,
                 follow,
@@ -2980,7 +2939,6 @@ impl IntegratedServer {
                     subscribers,
                     view_radius,
                     tickets: host_tickets,
-                    sleep_vote: host_sleep_vote,
                 }),
                 #[cfg(not(target_arch = "wasm32"))]
                 relay_task: Some(relay_task),
@@ -4411,9 +4369,6 @@ impl IntegratedServer {
                 // switch buys the world-state parameter and nothing else.
                 WeatherFeed::default(),
                 WeatherState::default(),
-                // LAN stays sleep-free, matching the wrapper.
-                &crate::sleep::SleepVote::new(),
-                &crate::sleep::SleepFeed::default(),
                 // the source's own queues when it has a world on
                 // disk, so a repeater delay or a fluid tick set while hosting
                 // survives a restart; a fresh handle only for a truly in-memory
@@ -4425,9 +4380,7 @@ impl IntegratedServer {
                 // handle `IntegratedServer::border` stores below, so RCON's
                 // `/worldborder` mutates the state this loop actually ticks.
                 // Still **not** read by any accepted connection (no join
-                // broadcast, no per-tick damage) — that needs the same
-                // per-connection plumbing `bind`'s LAN relay would need for
-                // sleep, which remains a separate pass; see
+                // broadcast, no per-tick damage); see
                 // `IntegratedServer::border`'s own doc for the split.
                 tick_border,
             )
@@ -4605,8 +4558,6 @@ impl IntegratedServer {
                         // `JoinHandle` detaches, it does not abort, on drop).
                         drop(spawn(async move {
                             let mut conn = Connection::new(socket);
-                            let sleep_vote = SleepVote::default();
-                            let sleep_feed = SleepFeed::default();
                             let border = crate::border::BorderFeed::default();
                             let live_save = crate::live_save::LiveSaveSlot::default();
                             // `_shared` + `&source`: chunk
@@ -4615,11 +4566,6 @@ impl IntegratedServer {
                             // boundary no longer stalls the tick loop spawned
                             // above — which on a current-thread runtime would
                             // otherwise be the very same thread.
-                            // LAN stays sleep-free — a fresh vote
-                            // no connection calls, matching the fresh
-                            // disconnected vote `run_tick_loop` (the loop this
-                            // world's tick task runs) forwards. See
-                            // `crate::sleep`'s module doc.
                             // open-to-LAN keeps the configured
                             // `view_radius` as its live-change ceiling, which is
                             // vanilla's own server view-distance field
@@ -4659,7 +4605,7 @@ impl IntegratedServer {
                                         view_radius,
                                         &block_entities, &mobs, &tickets,
                                         &conn_block_ticks, &conn_explosions,
-                                        &sleep_vote, &sleep_feed, &commands, &border,
+                                        &commands, &border,
                                         &resource_packs, &plugin_channels, &world_state,
                                         &live_save,
                                         &access, peer_ip,
@@ -4918,7 +4864,6 @@ impl IntegratedServer {
         // the same real handle `host.tickets` carries, not a
         // fresh default — see `HostCore::tickets`'s own doc comment.
         let tickets = host.tickets.clone();
-        let guest_sleep_vote = host.sleep_vote.clone();
         let signal = self.shutdown.clone();
         // Moved out here for the same reason `open_to_lan`'s own
         // `conn_commands`/`conn_access`/`conn_online_mode` are: the accept
@@ -4941,7 +4886,6 @@ impl IntegratedServer {
                         let mobs = mobs.clone();
                         let world_state = world_state.clone();
                         let tickets = tickets.clone();
-                        let conn_sleep_vote = guest_sleep_vote.clone();
                         let commands = conn_commands.clone();
                         let access = conn_access.clone();
                         let online_mode = conn_online_mode.clone();
@@ -4967,8 +4911,6 @@ impl IntegratedServer {
                             .push(subscriber);
                         drop(spawn(async move {
                             let mut conn = Connection::new(socket);
-                            let sleep_vote = conn_sleep_vote;
-                            let sleep_feed = SleepFeed::default();
                             let border = crate::border::BorderFeed::default();
                             let live_save = crate::live_save::LiveSaveSlot::default();
                             // Same fork `open_to_lan`'s own accept loop makes,
@@ -4999,7 +4941,7 @@ impl IntegratedServer {
                                         view_radius,
                                         &block_entities, &mobs, &tickets,
                                         &conn_block_ticks, &conn_explosions,
-                                        &sleep_vote, &sleep_feed, &commands, &border,
+                                        &commands, &border,
                                         &crate::server::ResourcePackPushFeed::default(),
                                         &crate::plugin_channels::PluginChannelRegistry::default(),
                                         &world_state,

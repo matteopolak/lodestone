@@ -238,15 +238,6 @@ pub(super) async fn serve_play<T, P, S, E>(
     // Weather transitions published by the world tick loop's
     // `WeatherState`, drained on this same timer — see that arm's comment.
     weather: &WeatherFeed,
-    // The night-skip vote (see `serve_connection_inner`'s
-    // parameter comment). `dispatch_play_packet` records this connection's
-    // player `lay_down`/`get_up` on it, and the `container_sync_tick` arm
-    // feeds it the voter count from the shared `PlayerRegistry`.
-    sleep_vote: &SleepVote,
-    // Where this connection learns a night skip happened — drained
-    // on `container_sync_tick` into a real `encode_set_time`, same timer as
-    // the weather drain (see that arm's comment).
-    sleep_feed: &SleepFeed,
     // Command dispatch and the authenticated caller identity for this
     // connection.
     commands: CommandSession,
@@ -439,6 +430,12 @@ where
         player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
     // Leaving the connection by any path gets the player out of bed, which
     // clears their vote entry and destroys a straw bed they lay in.
+    // The vote and the skip broadcast are the world's: `dispatch_play_packet`
+    // records this connection's `lay_down`/`get_up` on the vote, the
+    // `container_sync_tick` arm feeds it the voter count, and a skip reaches
+    // this connection through its own cursor on the feed.
+    let sleep_vote = world.sleep_vote();
+    let mut sleep_cursor = world.sleep_feed().cursor();
     let _sleep_seat = crate::sleep::SleepSeat::new(sleep_vote, player_entity_id);
     if let (Some(registry), Some(rotation)) = (entities.players(), player_rot) {
         registry.set_rotation(player_entity_id, rotation);
@@ -2619,10 +2616,9 @@ where
                 //    this client's day clock to the morning — `encode_set_time`
                 //    with a `Some` day-time — exactly the broadcast vanilla's
                 //    skip path sends: the world's clock jumped, so every
-                //    connection must re-anchor. `SleepFeed::drain_all` is
-                //    single-consumer for the same reason the drains above are
-                //    (see that type's own doc comment).
-                for event in sleep_feed.drain_all() {
+                //    connection must re-anchor. Every connection of the world
+                //    reads the one feed through its own cursor.
+                for event in world.sleep_feed().since(&mut sleep_cursor) {
                     match event {
                         SleepEvent::SkippedNight { game_time, morning } => {
                             apply(
@@ -3346,11 +3342,6 @@ pub(super) async fn serve_play<T, P, S, E>(
     // connection loop because the shared weather feed is currently drained by
     // the native container-sync path.
     _weather: &WeatherFeed,
-    // Bed clicks and wake-up packets are handled here. Voter counts and
-    // skipped-night notifications require a container-sync timer, which is
-    // not present on the browser target.
-    sleep_vote: &SleepVote,
-    _sleep_feed: &SleepFeed,
     // Commands are packet-driven: a chat-command frame arrives, the sink
     // answers, and system chat is sent back through the same dispatch path.
     commands: CommandSession,
@@ -3459,6 +3450,10 @@ where
         player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
     // Leaving the connection by any path gets the player out of bed, which
     // clears their vote entry and destroys a straw bed they lay in.
+    // Bed clicks and wake-up packets are handled here. Voter counts and
+    // skipped-night notifications require a container-sync timer, which is
+    // not present on the browser target.
+    let sleep_vote = world.sleep_vote();
     let _sleep_seat = crate::sleep::SleepSeat::new(sleep_vote, player_entity_id);
     // The initial join dump is unacknowledged, so this gate begins `true`.
     let mut awaiting_chunk_batch_ack = true;

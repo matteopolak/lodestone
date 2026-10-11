@@ -70,9 +70,10 @@
 //! * **Spectator exclusion** is unmodelled: this crate has no spectator
 //!   concept, so every connected player counts toward the vote
 //!   so every connected player counts toward the vote.
-//! * **The LAN relay** currently runs the sleep-free `run_tick_loop` wrapper,
-//!   so a LAN world does not skip the night. When the world-loop's LAN fan-out
-//!   supports weather, sleep can use the same route.
+//! * **One vote per world.** [`SleepVote`] and [`SleepFeed`] live on
+//!   [`crate::world_state::WorldStateHandle`], so the host, a published
+//!   world's guests and open-to-LAN guests all vote in one roster and each
+//!   reads every skip through its own [`SleepCursor`].
 //! * **The client half** (a sleeping player's pose, the rest prompt
 //!   overlay, the "N players sleeping" bar) is a flagged-not-planned follow-up
 //!   per the plan's S1 — the metadata already decodes.
@@ -404,29 +405,55 @@ impl SleepState {
     }
 }
 
-/// A shared feed of night-skip events the world tick loop publishes into and a
-/// connection drains — the exact same idiom [`crate::WeatherFeed`]/
-/// [`crate::tick::ExplosionFeed`] establish for weather transitions and
-/// detonations, applied to the vote's skip broadcast instead. Same
-/// single-consumer caveat and the same resolution: singleplayer spawns exactly
-/// one connection task per feed instance.
+/// How many skips the feed keeps for a reader that has not caught up. A skip
+/// happens at most once per night, so a connection that falls this far behind
+/// has long since been dropped.
+const SLEEP_FEED_CAPACITY: usize = 16;
+
+/// The world's night-skip broadcast: the tick loop publishes each skip once and
+/// every connection of the world hears it, through a [`SleepCursor`] of its own.
+///
+/// One feed per world (`crate::world_state::WorldStateHandle::sleep_feed`), so
+/// the host, a published world's guests and an open-to-LAN guest all read the
+/// same log. A drain would give a skip to whichever connection asked first.
 #[derive(Debug, Clone, Default)]
-pub struct SleepFeed(Arc<Mutex<Vec<SleepEvent>>>);
+pub struct SleepFeed(Arc<Mutex<SleepLog>>);
+
+#[derive(Debug, Default)]
+struct SleepLog {
+    /// The position of `events[0]` in the log's whole history.
+    first: u64,
+    events: std::collections::VecDeque<SleepEvent>,
+}
+
+/// One reader's place in a [`SleepFeed`].
+#[derive(Debug, Clone, Copy)]
+pub struct SleepCursor(u64);
 
 impl SleepFeed {
-    /// Records one skip for the consumer to learn about on its next
-    /// [`drain_all`](Self::drain_all).
+    /// Records one skip for every cursor to read.
     pub fn publish(&self, event: SleepEvent) {
-        self.0
-            .lock()
-            .expect("sleep feed lock poisoned")
-            .push(event);
+        let mut log = self.0.lock().expect("sleep feed lock poisoned");
+        log.events.push_back(event);
+        if log.events.len() > SLEEP_FEED_CAPACITY {
+            log.events.pop_front();
+            log.first += 1;
+        }
     }
 
-    /// Drains and returns every skip published since the last call — safe only
-    /// for exactly one consumer, like every other feed in this crate.
-    pub fn drain_all(&self) -> Vec<SleepEvent> {
-        std::mem::take(&mut *self.0.lock().expect("sleep feed lock poisoned"))
+    /// A cursor at the end of the log: it sees only skips published after now.
+    #[must_use]
+    pub fn cursor(&self) -> SleepCursor {
+        let log = self.0.lock().expect("sleep feed lock poisoned");
+        SleepCursor(log.first + log.events.len() as u64)
+    }
+
+    /// The skips published since `cursor` last read, oldest first.
+    pub fn since(&self, cursor: &mut SleepCursor) -> Vec<SleepEvent> {
+        let log = self.0.lock().expect("sleep feed lock poisoned");
+        let start = cursor.0.max(log.first);
+        cursor.0 = log.first + log.events.len() as u64;
+        log.events.iter().skip((start - log.first) as usize).copied().collect()
     }
 }
 
@@ -607,23 +634,35 @@ mod tests {
         assert_eq!(vote.snapshot(), (2, vec![]));
     }
 
-    /// [`SleepFeed`] round-trips publish → drain in FIFO order, like every
-    /// feed in this crate.
+    /// Every cursor reads each skip once, in order; a late cursor sees only
+    /// what follows its creation.
     #[test]
-    fn sleep_feed_drains_in_order() {
+    fn every_cursor_reads_each_skip_once_in_order() {
         let feed = SleepFeed::default();
-        assert!(feed.drain_all().is_empty());
-        feed.publish(SleepEvent::SkippedNight {
-            game_time: 200,
-            morning: 24_000,
-        });
-        assert_eq!(
-            feed.drain_all(),
-            vec![SleepEvent::SkippedNight {
-                game_time: 200,
-                morning: 24_000,
-            }]
-        );
-        assert!(feed.drain_all().is_empty());
+        let (mut a, mut b) = (feed.cursor(), feed.cursor());
+        assert!(feed.since(&mut a).is_empty());
+        let skip = |game_time| SleepEvent::SkippedNight { game_time, morning: 24_000 };
+        feed.publish(skip(200));
+        feed.publish(skip(300));
+        let mut late = feed.cursor();
+        assert_eq!(feed.since(&mut a), vec![skip(200), skip(300)]);
+        assert_eq!(feed.since(&mut b), vec![skip(200), skip(300)], "a second reader is not starved by the first");
+        assert!(feed.since(&mut a).is_empty());
+        assert!(feed.since(&mut late).is_empty());
+        feed.publish(skip(400));
+        assert_eq!(feed.since(&mut late), vec![skip(400)]);
+    }
+
+    /// A reader further behind than the log keeps resumes at its oldest entry.
+    #[test]
+    fn a_cursor_behind_the_capacity_resumes_at_the_oldest_kept_skip() {
+        let feed = SleepFeed::default();
+        let mut cursor = feed.cursor();
+        for game_time in 0..(SLEEP_FEED_CAPACITY as i64 + 4) {
+            feed.publish(SleepEvent::SkippedNight { game_time, morning: 24_000 });
+        }
+        let seen = feed.since(&mut cursor);
+        assert_eq!(seen.len(), SLEEP_FEED_CAPACITY);
+        assert_eq!(seen[0], SleepEvent::SkippedNight { game_time: 4, morning: 24_000 });
     }
 }

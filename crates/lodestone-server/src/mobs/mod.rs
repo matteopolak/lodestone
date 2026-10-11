@@ -449,6 +449,7 @@ mod sim_command_entities;
 mod sim_entity_data;
 pub use sim_entity_data::{DamageOutcome, EntityDataError};
 mod riders;
+mod minecart_state;
 pub use riders::{MountOutcome, Rider};
 pub use sim_command_entities::{CommandEntity, EntityKill, TeleportOutcome};
 
@@ -3100,6 +3101,9 @@ struct TrackedMinecart {
     push: lodestone_physics::Vec3d,
     /// Vanilla's own tnt-minecart fuse field — `-1` unprimed, counts down to `0` (detonate).
     fuse: i32,
+    /// Saved fields the sim does not model (display block, a command or
+    /// spawner cart's data, a loot table), kept verbatim across a save.
+    carried: Vec<(String, lodestone_core::Nbt)>,
 }
 
 /// One per-entity animation cue a hit produced, for

@@ -24,7 +24,7 @@ use crate::scheduled_tick::{
     merge_due_owner_batches, ScheduledTick, ScheduledTickOwnerBatch, ScheduledTickQueueAccess,
     ScheduledTickKind, TickPriority,
 };
-use crate::sleep::{SleepEvent, SleepFeed, SleepState, SleepVote};
+use crate::sleep::{SleepEvent, SleepState};
 use crate::weather::{WeatherFeed, WeatherState};
 use lodestone_model::BlockPos;
 use lodestone_data::block_states::StateId;
@@ -1527,15 +1527,8 @@ pub(crate) async fn run_tick_loop<W>(
     // Production (`crate::IntegratedServer::open_in_memory_with_mobs`, and
     // `bind` calls the `_with_weather` variant with a real feed.
     //
-    // The same applies to the night-skip vote: fresh [`SleepVote`] and
-    // [`SleepFeed`] values that no connection reads. The vote's
-    // arithmetic still runs here — a `SleepState` is ticked either way, so
-    // the loop shape is identical — it just never passes. This is the loop
-    // `bind`'s LAN worlds run on, which is why LAN does not yet skip the
-    // night: the LAN connection relays world-global feeds, but a vote whose
-    // `lay_down`/`get_up` arms no connection calls is structurally
-    // disconnected, and wiring it is a separate LAN pass (see
-    // `crate::sleep`'s module doc).
+    // The sleep vote and feed ride the fresh world state below, so no
+    // connection can reach them.
     run_tick_loop_with_weather(
         mobs,
         mob_out,
@@ -1547,9 +1540,6 @@ pub(crate) async fn run_tick_loop<W>(
         explosion_out,
         WeatherFeed::default(),
         WeatherState::default(),
-        // see the wrapper doc above.
-        &SleepVote::new(),
-        &SleepFeed::default(),
         scheduled,
         // A fresh, unshared world state — the same compatibility shape as the
         // weather feed above. Rules still *apply* here (this loop reads them
@@ -1589,8 +1579,6 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     explosion_out: ExplosionFeed,
     weather_out: WeatherFeed,
     weather: WeatherState,
-    sleep_vote: &SleepVote,
-    sleep_feed: &SleepFeed,
     scheduled: crate::scheduled_tick::ScheduledTickHandle,
     world_state: crate::world_state::WorldStateHandle,
     follow: crate::tick_area::TickFollow,
@@ -1609,8 +1597,6 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         explosion_out,
         weather_out,
         weather,
-        sleep_vote,
-        sleep_feed,
         scheduled,
         world_state,
         follow,
@@ -1633,8 +1619,6 @@ pub(crate) async fn run_dimension_tick_loop_with_weather<W: ChunkSource>(
     explosion_out: ExplosionFeed,
     weather_out: WeatherFeed,
     weather: WeatherState,
-    sleep_vote: &SleepVote,
-    sleep_feed: &SleepFeed,
     scheduled: crate::scheduled_tick::ScheduledTickHandle,
     world_state: crate::world_state::WorldStateHandle,
     follow: crate::tick_area::TickFollow,
@@ -1643,7 +1627,7 @@ pub(crate) async fn run_dimension_tick_loop_with_weather<W: ChunkSource>(
 ) {
     run_tick_loop_with_weather_impl(
         mobs, mob_out, block_entities, clock, world, block_tick_out, tick_area,
-        explosion_out, weather_out, weather, sleep_vote, sleep_feed, scheduled,
+        explosion_out, weather_out, weather, scheduled,
         world_state, follow, border, None, clock_role,
     ).await;
 }
@@ -1666,8 +1650,6 @@ pub(crate) async fn run_primary_tick_loop_with_weather<W>(
     explosion_out: ExplosionFeed,
     weather_out: WeatherFeed,
     weather: WeatherState,
-    sleep_vote: &SleepVote,
-    sleep_feed: &SleepFeed,
     scheduled: crate::scheduled_tick::ScheduledTickHandle,
     world_state: crate::world_state::WorldStateHandle,
     follow: crate::tick_area::TickFollow,
@@ -1686,8 +1668,6 @@ pub(crate) async fn run_primary_tick_loop_with_weather<W>(
         explosion_out,
         weather_out,
         weather,
-        sleep_vote,
-        sleep_feed,
         scheduled,
         world_state,
         follow,
@@ -1833,22 +1813,6 @@ async fn run_tick_loop_with_weather_impl<W>(
     // test start a world already mid-cycle instead of waiting out a
     // 12k-180k-tick rain delay.
     weather: WeatherState,
-    // The night-skip vote is world-state behavior.
-    // `sleep_vote` is the shared roster and voter count — connections call
-    // `lay_down`/`get_up` on it (the `UseItemOn` bed arm and the
-    // `PlayerCommand` arm in `server.rs`) — and this loop reads it via
-    // `snapshot()` once per tick, folding it into a loop-owned
-    // [`SleepState`] (see below). The same single-consumer snapshot shape as
-    // `weather_out` makes it safe for the one connection
-    // `open_in_memory_with_mobs` spawns; a vote the wrapper's discarded
-    // default (no connection calls) can never pass.
-    sleep_vote: &SleepVote,
-    // This feed publishes a passed vote's [`SleepEvent::SkippedNight`]
-    // broadcast, drained by the connection — `serve_play`'s
-    // `container_sync_tick` arm — into a real `encode_set_time` so the
-    // client's day clock jumps to the morning. Snapshot-feed, like
-    // `weather_out`, with the same single-consumer caveat.
-    sleep_feed: &SleepFeed,
     // Persisted scheduled-tick queues. Keeping the two queues out of local state
     // here, so the queues the persistence path reads were always empty in
     // production and a pending repeater tick was lost on quit — the schema
@@ -1899,6 +1863,15 @@ async fn run_tick_loop_with_weather_impl<W>(
         mob_out.publish_boss_bars(mobs.with(|sim| sim.boss_bars()));
     }
 
+    // The night-skip vote is world-state behavior. Its roster is the world's
+    // one `SleepVote`, which every connection of the world lays down in; this
+    // loop reads it once per tick and publishes a passed vote's
+    // `SleepEvent::SkippedNight` onto the world's feed, which every connection
+    // reads through a cursor of its own. A sibling dimension's loop does not
+    // vote: it neither counts the roster nor takes the bed events the primary
+    // loop owns.
+    let sleep_vote = world_state.sleep_vote().clone();
+    let sleep_feed = world_state.sleep_feed().clone();
     let mut driver = TickDriver::new();
     let mut game_tick: u64 = 0;
     // The day clock is world-state behavior, advanced one
@@ -2564,7 +2537,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 break;
             };
             blast_rng = candidate_blast_rng;
-            let crate::block_drops::BlastOutcome { changes, destroyed, primed_tnt } = outcome;
+            let crate::block_drops::BlastOutcome { changes, primed_tnt, .. } = outcome;
             for (at, new_state) in changes {
                 block_tick_out.publish(at.x, at.y, at.z, new_state);
             }
@@ -2573,12 +2546,10 @@ async fn run_tick_loop_with_weather_impl<W>(
             // what it stored spills whatever the drop rule says.
             let drops = world_state.block_drops();
             let removal_env = crate::block_removal::Env { block_entities: &block_entities, mobs: &mobs, feed: &block_tick_out, stored: &|p| world.block_entity(p.x, p.y, p.z) };
-            for ((at, was), removal) in destroyed.into_iter().zip(removals) {
+            for removal in removals {
                 crate::block_removal::destroy_removed(
                     removal_env,
                     removal,
-                    at,
-                    was,
                     crate::block_removal::Cause::Blast { radius: detonation.radius, drops, empties_hives: detonation.empties_hives },
                     &mut blast_drops_rng,
                 );
@@ -3197,14 +3168,16 @@ async fn run_tick_loop_with_weather_impl<W>(
         // clock (`encode_set_time` on the connection side); and every sleeper
         // wakes (`wakeUpAllPlayers` → sleep status's remove all sleepers) and the
         // roster is cleared so a day-sleeping click cannot vote again tonight.
-        sleep_vote.set_dark_outside(
-            crate::natural_spawn::sky_darkening_for(
-                crate::dimension::Dimension::Overworld,
-                day_time,
-                weather.rain_level,
-                weather.rain_level * weather.thunder_level,
-            ) >= crate::sleep::DARK_SKY_DARKENING,
-        );
+        if clock_role == WorldClockRole::Owner {
+            sleep_vote.set_dark_outside(
+                crate::natural_spawn::sky_darkening_for(
+                    crate::dimension::Dimension::Overworld,
+                    day_time,
+                    weather.rain_level,
+                    weather.rain_level * weather.thunder_level,
+                ) >= crate::sleep::DARK_SKY_DARKENING,
+            );
+        }
         let (active, sleeper_ids) = sleep_vote.snapshot();
         sleep_state.reconcile(&sleeper_ids, game_tick);
         if clock_role == WorldClockRole::Owner
@@ -4696,7 +4669,9 @@ async fn run_tick_loop_with_weather_impl<W>(
         // A bed whose sleeper got up or was woken is freed: a straw bed is
         // destroyed (head cell only), any other bed loses its occupied flag on
         // both halves. A cell whose chunk is not resident is retried next tick.
-        pending_occupied_beds.extend(sleep_vote.take_newly_occupied());
+        if clock_role == WorldClockRole::Owner {
+            pending_occupied_beds.extend(sleep_vote.take_newly_occupied());
+        }
         for head in std::mem::take(&mut pending_occupied_beds) {
             let Some(head_state) = resident_tick_state_id(&*world, head.x, head.y, head.z) else {
                 pending_occupied_beds.push(head);
@@ -4722,7 +4697,9 @@ async fn run_tick_loop_with_weather_impl<W>(
                 pending_occupied_beds.push(head);
             }
         }
-        pending_vacated_beds.extend(sleep_vote.take_vacated_beds());
+        if clock_role == WorldClockRole::Owner {
+            pending_vacated_beds.extend(sleep_vote.take_vacated_beds());
+        }
         for head in std::mem::take(&mut pending_vacated_beds) {
             match resident_tick_state_id(&*world, head.x, head.y, head.z) {
                 None => pending_vacated_beds.push(head),
@@ -6546,8 +6523,6 @@ mod tests {
         // `tokio::spawn` demands `'static`. The feed the loop writes is
         // cloned out first — the test drains the original `weather_out` after
         // the spawn, so the block must not capture it.
-        let vote = SleepVote::new();
-        let feed = SleepFeed::default();
         let weather_for_loop = weather_out.clone();
         tokio::spawn(async move {
             run_tick_loop_with_weather(
@@ -6561,8 +6536,6 @@ mod tests {
                 ExplosionFeed::default(),
                 weather_for_loop,
                 weather,
-                &vote,
-                &feed,
                 crate::region_source::ScheduledTickHandle::default(),
                 crate::world_state::WorldStateHandle::default(),
                 crate::tick_area::TickFollow::default(),
@@ -6622,8 +6595,6 @@ mod tests {
         let world_state = crate::world_state::WorldStateHandle::new();
         world_state.request_weather(crate::world_state::WeatherRequest::Rain { duration: i32::MAX });
 
-        let vote = SleepVote::new();
-        let feed = SleepFeed::default();
         let weather_for_loop = weather_out.clone();
         tokio::spawn(async move {
             run_tick_loop_with_weather(
@@ -6637,8 +6608,6 @@ mod tests {
                 ExplosionFeed::default(),
                 weather_for_loop,
                 weather,
-                &vote,
-                &feed,
                 crate::region_source::ScheduledTickHandle::default(),
                 world_state,
                 crate::tick_area::TickFollow::default(),
@@ -6688,8 +6657,6 @@ mod tests {
         // vote just cannot pass). `async move` so the borrow survives
         // `tokio::spawn`'s `'static` bound; the feed the loop writes is
         // cloned out first for the same reason as the other gate.
-        let vote = SleepVote::new();
-        let feed = SleepFeed::default();
         let weather_for_loop = weather_out.clone();
         tokio::spawn(async move {
             run_tick_loop_with_weather(
@@ -6703,8 +6670,6 @@ mod tests {
                 ExplosionFeed::default(),
                 weather_for_loop,
                 weather,
-                &vote,
-                &feed,
                 crate::region_source::ScheduledTickHandle::default(),
                 crate::world_state::WorldStateHandle::default(),
                 crate::tick_area::TickFollow::default(),
@@ -6804,8 +6769,6 @@ mod tests {
         weather.rain_level = 1.0;
         weather.thunder_level = 1.0;
 
-        let vote = SleepVote::new();
-        let feed = SleepFeed::default();
         let loop_clock = Arc::clone(&clock);
         tokio::spawn(async move {
             run_tick_loop_with_weather(
@@ -6819,8 +6782,6 @@ mod tests {
                 ExplosionFeed::default(),
                 weather_out,
                 weather,
-                &vote,
-                &feed,
                 crate::region_source::ScheduledTickHandle::default(),
                 crate::world_state::WorldStateHandle::default(),
                 crate::tick_area::TickFollow::default(),
@@ -6949,16 +6910,17 @@ mod tests {
         let weather_out = WeatherFeed::default();
         // The roster is shared with the loop; nothing here calls `set_active`,
         // which is precisely the singleplayer shape (`active == 0`).
-        let vote = SleepVote::new();
-        let feed = SleepFeed::default();
+        let world_state = crate::world_state::WorldStateHandle::default();
+        let vote = world_state.sleep_vote().clone();
+        let feed = world_state.sleep_feed().clone();
+        let mut cursor = feed.cursor();
+        // A second connection (a LAN or published guest) holds a clone of the
+        // world's handle, so it reads the same feed and votes in the same roster.
+        let guest_state = world_state.clone();
+        let mut guest_cursor = guest_state.sleep_feed().cursor();
         // `LOCAL_PLAYER_ENTITY_ID` (server.rs).
-        vote.lay_down(1);
-
-        // Wrapped in `async move`: the loop borrows the vote/feed, and
-        // `tokio::spawn` demands `'static`, so the future owns them and this
-        // test keeps its own clones for the drain/roster assertions.
-        let loop_vote = vote.clone();
-        let loop_feed = feed.clone();
+        guest_state.sleep_vote().lay_down(1);
+        assert!(vote.is_sleeping(1), "a guest's bed click must land in the world's one roster");
         tokio::spawn(async move {
             run_tick_loop_with_weather(
                 mobs,
@@ -6971,10 +6933,8 @@ mod tests {
                 ExplosionFeed::default(),
                 weather_out,
                 WeatherState::default(),
-                &loop_vote,
-                &loop_feed,
                 crate::region_source::ScheduledTickHandle::default(),
-                crate::world_state::WorldStateHandle::default(),
+                world_state,
                 crate::tick_area::TickFollow::default(),
                 BorderFeed::default(),
             )
@@ -6992,7 +6952,7 @@ mod tests {
         }
         tokio::task::yield_now().await;
 
-        let events = feed.drain_all();
+        let events = feed.since(&mut cursor);
         assert_eq!(
             events.len(),
             1,
@@ -7004,6 +6964,11 @@ mod tests {
                 game_time: 101,
                 morning: 24_000,
             }
+        );
+        assert_eq!(
+            guest_state.sleep_feed().since(&mut guest_cursor),
+            events,
+            "a guest connection must hear the same night skip"
         );
         // The skip cleared the roster, so a day-sleeping click cannot vote
         // again tonight.
@@ -7019,10 +6984,9 @@ mod tests {
         for (day_time, dark) in [(14_000, true), (6_000, false)] {
             let (mobs, out, block_entities) = handles();
             let (world, block_tick_out, tick_area) = world_tick_args();
-            let vote = SleepVote::new();
             let world_state = crate::world_state::WorldStateHandle::default();
+            let vote = world_state.sleep_vote().clone();
             world_state.set_day_time(day_time);
-            let loop_vote = vote.clone();
             tokio::spawn(async move {
                 run_tick_loop_with_weather(
                     mobs,
@@ -7035,8 +6999,6 @@ mod tests {
                     ExplosionFeed::default(),
                     WeatherFeed::default(),
                     WeatherState::default(),
-                    &loop_vote,
-                    &SleepFeed::default(),
                     crate::region_source::ScheduledTickHandle::default(),
                     world_state,
                     crate::tick_area::TickFollow::default(),

@@ -14,7 +14,6 @@ use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
 use crate::mob_spawn::MobCategory;
 use crate::scheduled_tick::ScheduledTickHandle;
-use crate::sleep::{SleepFeed, SleepVote};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock};
 use crate::tick_area::{FollowArea, SPAWN_DISTANCE_CHUNKS, TickAnchor, TickFollow};
 use crate::weather::{WeatherFeed, WeatherState};
@@ -148,8 +147,6 @@ async fn run(
     let tick_world = world.clone();
     let tick_runtime = Arc::clone(&runtime);
     let task = tokio::spawn(async move {
-        let sleep_vote = SleepVote::new();
-        let sleep_feed = SleepFeed::default();
         // The radius here is the loop's initial value; the configured distance
         // on the world state replaces it from the first tick.
         let follow = TickFollow {
@@ -172,8 +169,6 @@ async fn run(
             ExplosionFeed::default(),
             WeatherFeed::default(),
             WeatherState::default(),
-            &sleep_vote,
-            &sleep_feed,
             ScheduledTickHandle::default(),
             tick_world,
             follow,

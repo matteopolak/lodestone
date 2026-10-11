@@ -4,14 +4,14 @@
 //! save path's own record ([`MobSim::saved_entities`]) encoded by
 //! [`SavedEntity::to_nbt`], so what `/data get entity` and `nbt=` read is what a
 //! save writes and what `/summon` reads back. Entity kinds the save path does
-//! not persist (boats, minecarts, primed TNT, bolts, the dragon, ...) get the
+//! not persist (primed TNT, bolts, the dragon, ...) get the
 //! common header (`id`, `UUID`, `Pos`, `Motion`, `Rotation`, `Tags`) only.
 //!
 //! [`MobSim::apply_entity_nbt`] is the inverse for an entity that already
 //! exists: it re-reads the record with [`SavedEntity::from_nbt`] and applies the
 //! owned fields through the same restore code a world load uses, in place, so
 //! the entity keeps its network id. Mobs apply everything the save path owns;
-//! dropped items apply `Item`, `Age` and `PickupDelay`; every other kind applies
+//! dropped items apply `Item`, `Age` and `PickupDelay`; minecarts apply their saved fields (`TrackedMinecart::restore_fields`); every other kind applies
 //! `Pos`, `Rotation` where it has one, and `Tags`.
 
 use lodestone_core::Nbt;
@@ -101,6 +101,12 @@ impl<'w> MobSim<'w> {
             Located::Item(id) => {
                 self.apply_item_record(id, &saved);
                 self.teleport_entity(uuid, saved.pos, None);
+            }
+            Located::Minecart(id) => {
+                self.teleport_entity(uuid, saved.pos, Some(saved.rotation.yaw));
+                if let Some(cart) = self.minecarts.get_mut(&id) {
+                    cart.restore_fields(&saved.extra);
+                }
             }
             _ => {
                 self.teleport_entity(uuid, saved.pos, Some(saved.rotation.yaw));

@@ -11,8 +11,7 @@
 //!
 //! # How it works
 //!
-//! [`destroy`] (or [`settle`], for a caller that has already rolled the loot)
-//! takes the entity out of the registry through
+//! [`destroy`] takes the entity out of the registry through
 //! [`BlockEntityRegistry::destroy_at`](crate::block_entities::BlockEntityRegistry::destroy_at),
 //! the only function that can, so a removal that skips this module cannot
 //! leave a stale entity behind either. What drops depends on the [`Cause`]:
@@ -78,29 +77,22 @@ pub(crate) struct Env<'a> {
     pub(crate) stored: &'a (dyn Fn(BlockPos) -> Option<BlockEntity> + Sync),
 }
 
-/// Rolls the cell's loot for `cause`, takes its entity out and drops
-/// everything. The caller has already written the cell.
+/// Takes the cell's entity out, rolls its loot for `cause` and drops that with
+/// the entity's contents. The caller has already written the cell.
 pub(crate) fn destroy(env: Env<'_>, pos: BlockPos, was: StateId, cause: Cause<'_>, rng: &mut SpawnRng) {
-    let loot = loot(cause, was, pos, rng);
-    settle(env, pos, was, cause, loot, rng);
+    let removal = env.block_entities.with(|registry| registry.destroy_at(pos, was));
+    dispose(env, removal, cause, rng);
 }
 
 /// [`destroy`] for a caller that already took the cell's entity out of the
 /// registry (to do so together with the block write), as `removal`.
-pub(crate) fn destroy_removed(env: Env<'_>, removal: Removal, pos: BlockPos, was: StateId, cause: Cause<'_>, rng: &mut SpawnRng) {
-    let loot = loot(cause, was, pos, rng);
-    dispose(env, removal, cause, loot, rng);
+pub(crate) fn destroy_removed(env: Env<'_>, removal: Removal, cause: Cause<'_>, rng: &mut SpawnRng) {
+    dispose(env, removal, cause, rng);
 }
 
-/// Takes the entity out and drops `loot` plus the cell's contents. For a
-/// caller that rolled the loot itself.
-pub(crate) fn settle(env: Env<'_>, pos: BlockPos, was: StateId, cause: Cause<'_>, loot: Vec<PoppedItem>, rng: &mut SpawnRng) {
-    let removal = env.block_entities.with(|registry| registry.destroy_at(pos, was));
-    dispose(env, removal, cause, loot, rng);
-}
-
-/// Drops everything an already-taken removal holds, plus `loot`.
-fn dispose(env: Env<'_>, removal: Removal, cause: Cause<'_>, loot: Vec<PoppedItem>, rng: &mut SpawnRng) {
+/// Rolls the loot with the entity in hand, then drops that plus everything the
+/// removal holds.
+fn dispose(env: Env<'_>, removal: Removal, cause: Cause<'_>, rng: &mut SpawnRng) {
     if matches!(cause, Cause::Cleared) {
         return;
     }
@@ -108,6 +100,7 @@ fn dispose(env: Env<'_>, removal: Removal, cause: Cause<'_>, loot: Vec<PoppedIte
     let entity = entity.or_else(|| {
         lodestone_data::block_entity_types::block_entity_type(was).and_then(|_| (env.stored)(pos))
     });
+    let loot = loot(cause, was, pos, entity.as_ref(), rng);
     let item_drops = match cause {
         Cause::Mined { drops, .. } | Cause::Blast { drops, .. } | Cause::Natural { drops } => drops,
         Cause::Cleared => false,
@@ -219,22 +212,23 @@ pub(crate) fn apply_edit<S: crate::chunk::ChunkSource + ?Sized>(
 pub(crate) fn drain_deferred(env: Env<'_>, drops: bool, rng: &mut SpawnRng) {
     let deferred = env.block_entities.with(|registry| registry.take_deferred());
     for removal in deferred {
-        let cause = Cause::Natural { drops };
-        let loot = loot(cause, removal.was, removal.pos, rng);
-        dispose(env, removal, cause, loot, rng);
+        dispose(env, removal, Cause::Natural { drops }, rng);
     }
 }
 
 /// The loot table's drops for `cause`.
 #[must_use]
-pub(crate) fn loot(cause: Cause<'_>, was: StateId, pos: BlockPos, rng: &mut SpawnRng) -> Vec<PoppedItem> {
+fn loot(cause: Cause<'_>, was: StateId, pos: BlockPos, entity: Option<&BlockEntity>, rng: &mut SpawnRng) -> Vec<PoppedItem> {
     let tables = crate::block_drops::bundled_tables();
+    let components = entity.map(BlockEntity::implicit_components);
     match cause {
         Cause::Mined { held, drops: true, .. } if crate::block_drops::drops_are_allowed(was, held) => {
-            crate::block_drops::drop_block_loot(tables, was, pos, held, rng)
+            crate::block_drops::drop_block_loot_in(tables, was, pos, held, None, components, rng)
         }
-        Cause::Blast { radius, drops: true, .. } => crate::block_drops::drop_explosion_loot(tables, was, pos, radius, rng),
-        Cause::Natural { drops: true } => crate::block_drops::drop_block_loot(tables, was, pos, None, rng),
+        Cause::Blast { radius, drops: true, .. } => {
+            crate::block_drops::drop_block_loot_in(tables, was, pos, None, Some(radius), components, rng)
+        }
+        Cause::Natural { drops: true } => crate::block_drops::drop_block_loot_in(tables, was, pos, None, None, components, rng),
         _ => Vec::new(),
     }
 }

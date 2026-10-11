@@ -176,7 +176,7 @@ impl<'w> MobSim<'w> {
                 self.eyes.remove(&id);
             }
             Located::Minecart(id) => {
-                self.minecarts.remove(&id);
+                self.break_minecart(id, true);
             }
             Located::Bolt(id) => {
                 self.lightning_bolts.remove(&id);

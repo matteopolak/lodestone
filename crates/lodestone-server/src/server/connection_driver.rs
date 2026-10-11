@@ -91,11 +91,6 @@ pub(super) async fn serve_connection_inner<T, P, S, E>(
     // World-tick weather transitions drained by `serve_play`'s
     // `container_sync_tick` arm. A default feed produces no transitions.
     weather: &WeatherFeed,
-    // Night-skip votes recorded by packet dispatch and consumed by the world
-    // tick loop. A default vote/feed pair leaves night skipping disabled.
-    sleep_vote: &SleepVote,
-    // Night-skip notifications drained by `serve_play` into `encode_set_time`.
-    sleep_feed: &SleepFeed,
     // Command handlers. `CommandDispatch::none()` provides fail-closed
     // behavior for wrappers without a host command dispatcher.
     commands: &CommandDispatch,
@@ -1088,8 +1083,6 @@ where
                     block_ticks,
                     explosions,
                     weather,
-                    sleep_vote,
-                    sleep_feed,
                     commands,
                     advancements,
                     player_uuid,

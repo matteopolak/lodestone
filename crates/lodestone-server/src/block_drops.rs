@@ -389,7 +389,7 @@ pub fn drop_block_loot(
     held: Option<&ItemStack>,
     rng: &mut SpawnRng,
 ) -> Vec<PoppedItem> {
-    drop_block_loot_in(tables, state, pos, held, None, rng)
+    drop_block_loot_in(tables, state, pos, held, None, None, rng)
 }
 
 /// Rolls a state's loot table for a block destroyed by an **explosion** of
@@ -415,7 +415,7 @@ pub fn drop_explosion_loot(
 ) -> Vec<PoppedItem> {
     // No tool: a blast breaks the block, not a player, so the loot context has
     // no tool value.
-    drop_block_loot_in(tables, state, pos, None, Some(radius), rng)
+    drop_block_loot_in(tables, state, pos, None, Some(radius), None, rng)
 }
 
 /// What a blast's block half did: the writes to publish, the blocks it
@@ -520,12 +520,13 @@ fn ignite_blast_cells<S: crate::chunk::ChunkSource>(
 /// The shared body of [`drop_block_loot`] and [`drop_explosion_loot`] — one
 /// implementation so the two cannot drift in their placement draws or their
 /// zero-count filtering.
-fn drop_block_loot_in(
+pub(crate) fn drop_block_loot_in(
     tables: &LootTableSet,
     state: StateId,
     pos: BlockPos,
     held: Option<&ItemStack>,
     explosion_radius: Option<f32>,
+    block_entity_components: Option<lodestone_model::ItemComponents>,
     rng: &mut SpawnRng,
 ) -> Vec<PoppedItem> {
     let Some(table_id) = block_loot_table_id(state) else {
@@ -542,6 +543,7 @@ fn drop_block_loot_in(
         // simply thrown away here, which is the whole of why every
         // `block_state_property` condition took the wrong branch.
         block_state: loot_block_state(state),
+        block_entity_components,
         ..LootContext::default()
     };
     table
@@ -824,6 +826,35 @@ mod tests {
     fn fortune(level: u32) -> LootTool {
         LootTool::new("minecraft:diamond_pickaxe".parse().unwrap())
             .with_enchantment("minecraft:fortune".parse().unwrap(), level)
+    }
+
+    /// A silk-touched hive drops itself carrying the entity's bees and the
+    /// block's `honey_level`; without silk touch the item carries neither.
+    #[test]
+    fn a_hive_table_copies_bees_and_honey_level_only_under_silk_touch() {
+        let tables = LootTableSet::load_bundled();
+        let pos = BlockPos::new(0, 64, 0);
+        let bee = lodestone_model::BeeOccupant { entity_data: vec![1, 2, 3], ticks_in_hive: 123, min_ticks_in_hive: 600 };
+        let components = lodestone_model::ItemComponents { bees: vec![bee.clone()], ..Default::default() };
+        for block in ["minecraft:beehive[honey_level=5]", "minecraft:bee_nest[honey_level=5]"] {
+            let state = state(block);
+            let held = lodestone_model::ItemStack::new("minecraft:diamond_pickaxe".parse().unwrap(), 1);
+            let mut silk = held.clone();
+            silk.components.enchantments.push(lodestone_model::ItemEnchantment {
+                id: crate::enchantment_data::id_of("minecraft:silk_touch").unwrap(),
+                level: 1,
+            });
+            let mut rng = SpawnRng::new(1);
+            let drops = drop_block_loot_in(&tables, state, pos, Some(&silk), None, Some(components.clone()), &mut rng);
+            assert_eq!(drops.len(), 1, "{block}: {drops:?}");
+            assert_eq!(drops[0].stack.components.bees, vec![bee.clone()], "{block}");
+            assert_eq!(drops[0].stack.components.block_state, vec![("honey_level".to_owned(), "5".to_owned())], "{block}");
+            let plain = drop_block_loot_in(&tables, state, pos, Some(&held), None, Some(components.clone()), &mut rng);
+            assert!(
+                plain.iter().all(|drop| drop.stack.components.bees.is_empty() && drop.stack.components.block_state.is_empty()),
+                "{block} without silk touch keeps nothing: {plain:?}"
+            );
+        }
     }
 
     /// **Silk Touch flips every silk-gated table to the block itself, exactly,

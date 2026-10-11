@@ -530,6 +530,15 @@ pub struct ItemComponents {
     /// Full pot-face templates in back, left, right, front order.
     pub pot_decoration_stacks: Option<[Option<Box<ItemStack>>; 4]>,
     pub instrument: Option<ItemInstrument>,
+    /// `minecraft:bees`: the bees a beehive or bee nest item carries, in the
+    /// order the hive held them. Empty for every other item and for an empty
+    /// hive; the two are indistinguishable here, the same absent-versus-empty
+    /// collapse [`enchantments`](Self::enchantments) uses.
+    pub bees: Vec<BeeOccupant>,
+    /// `minecraft:block_state`: block-state properties a block item places
+    /// with, by property name and serialised value, sorted by name. A hive item
+    /// carries its `honey_level` here.
+    pub block_state: Vec<(String, String)>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
@@ -539,6 +548,18 @@ pub struct ItemComponents {
     /// the item's prototype value, which is the best available answer, but is not
     /// guaranteed to be the effective one.
     pub has_unmodeled: bool,
+}
+
+/// One entry of `minecraft:bees`: a bee a hive item carries.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BeeOccupant {
+    /// The bee's saved compound including its `id`, as network NBT (the form
+    /// [`ItemComponents::custom_data`] keeps), so this type stays `Eq`.
+    pub entity_data: Vec<u8>,
+    /// Ticks the bee has been inside.
+    pub ticks_in_hive: i32,
+    /// Ticks it must stay before it may leave.
+    pub min_ticks_in_hive: i32,
 }
 
 /// `minecraft:written_book_content`'s modeled shape — vanilla's own

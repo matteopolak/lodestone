@@ -587,6 +587,75 @@ async fn a_dig_lets_the_bees_out_angry_unless_the_tool_has_silk_touch_or_the_pla
     h.shutdown().await;
 }
 
+/// A bee as the reference writes one into a hive: a nectar-laden bee stays 2400
+/// ticks, and this one has already been inside 123 of them.
+fn nectar_hive() -> BlockEntity {
+    let mut bee = bee_record(7);
+    if let Nbt::Compound(fields) = &mut bee {
+        fields.push(("HasNectar".into(), Nbt::Byte(1)));
+    }
+    BlockEntity::Beehive(Beehive::restore(vec![Occupant { entity_data: bee, ticks_in_hive: 123, min_ticks_in_hive: 2400 }], None))
+}
+
+fn hive_property(id: StateId, name: &str) -> Option<&'static str> {
+    id.properties().iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+}
+
+/// Silk touch keeps the bees and the honey level in the dropped item, and
+/// placing that item again restores both. Expected values are the reference
+/// hive table's: a `bees` component entry per occupant (`ticks_in_hive`,
+/// `min_ticks_in_hive`) and `honey_level` as the item's `block_state`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silk_touched_hive_keeps_its_bees_and_honey_and_places_them_back() {
+    let nest = BlockPos::new(4, FLOOR + 1, 4);
+    let mut h = Harness::start(&["Keeper"], |world| world.set_block(nest.x, nest.y, nest.z, state("minecraft:bee_nest[honey_level=5]"))).await;
+    h.insert(nest, nectar_hive());
+    // Far enough that the drop is not picked up before the test reads it.
+    h.sessions[0].walk_to(1.5, 1.5).await;
+    h.pump(Duration::from_millis(200)).await;
+
+    let mut silk = stacked("minecraft:diamond_pickaxe", 1);
+    silk.components.enchantments.push(lodestone_model::ItemEnchantment {
+        id: lodestone_server::enchantment_data::id_of("minecraft:silk_touch").expect("silk touch is registered"),
+        level: 1,
+    });
+    let slot = h.give(0, silk).await;
+    h.sessions[0].select(slot - 36).await;
+    h.sessions[0].dig(nest).await;
+    h.wait("the nest to break", |h| h.world.at(nest) == StateId::AIR).await;
+    h.pump(Duration::from_millis(300)).await;
+    assert!(h.bees().is_empty(), "silk touch releases nothing");
+
+    let dropped = h
+        .server
+        .mobs()
+        .expect("mob sim")
+        .with(|sim| sim.saved_entities().into_iter().filter_map(|e| e.item).find(|stack| stack.item.to_string() == "minecraft:bee_nest"))
+        .expect("the nest dropped as an item");
+    assert_eq!(dropped.components.bees.len(), 1, "the item carries its one bee");
+    // The hive keeps counting while the world ticks, so the stay is at least what was set.
+    let carried = dropped.components.bees[0].ticks_in_hive;
+    assert!(carried >= 123 && carried < 600, "ticks in hive: {carried}");
+    assert_eq!(dropped.components.bees[0].min_ticks_in_hive, 2400);
+    assert_eq!(dropped.components.block_state, vec![("honey_level".to_owned(), "5".to_owned())]);
+
+    // Place it again on the floor.
+    let held = h.give(0, dropped).await;
+    h.sessions[0].select(held - 36).await;
+    let target = BlockPos::new(7, FLOOR + 1, 7);
+    h.sessions[0].click(BlockPos::new(7, FLOOR, 7)).await;
+    h.wait("the nest to be placed", |h| h.world.at(target).name() == "minecraft:bee_nest").await;
+    assert_eq!(hive_property(h.world.at(target), "honey_level"), Some("5"));
+    h.server.block_entities().expect("block entities").with(|reg| {
+        let Some(BlockEntity::Beehive(hive)) = reg.get(target) else { panic!("the placed nest has a hive entity") };
+        let [bee] = hive.occupants() else { panic!("one bee came back, got {}", hive.occupants().len()) };
+        assert!(bee.ticks_in_hive >= carried && bee.ticks_in_hive < carried + 300, "ticks in hive: {}", bee.ticks_in_hive);
+        assert_eq!(bee.min_ticks_in_hive, 2400);
+        assert!(matches!(&bee.entity_data, Nbt::Compound(f) if f.iter().any(|(n, v)| n == "UUID" && *v == Nbt::IntArray(vec![0, 0, 0, 7]))));
+    });
+    h.shutdown().await;
+}
+
 // ---- open windows -----------------------------------------------------------
 
 /// One container per block kind that has an open-menu viewer.

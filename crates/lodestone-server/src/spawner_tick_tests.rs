@@ -7,7 +7,6 @@ use crate::chunk::{ChunkColumn, ChunkSource};
 use crate::dimension::Dimension;
 use crate::mob_spawner::{SpawnData, SpawnerState};
 use crate::scheduled_tick::ScheduledTickHandle;
-use crate::sleep::{SleepFeed, SleepVote};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock};
 use crate::tick_area::TickFollow;
 use crate::weather::{WeatherFeed, WeatherState};
@@ -123,8 +122,6 @@ async fn a_cold_spawner_does_not_stop_the_spawners_after_it() {
         let runtime = Arc::clone(&runtime);
         let block_entities = block_entities.clone();
         tokio::spawn(async move {
-            let sleep_vote = SleepVote::new();
-            let sleep_feed = SleepFeed::default();
             let follow = TickFollow {
                 dimension: Dimension::Overworld,
                 radius: 3,
@@ -145,8 +142,6 @@ async fn a_cold_spawner_does_not_stop_the_spawners_after_it() {
                 ExplosionFeed::default(),
                 WeatherFeed::default(),
                 WeatherState::default(),
-                &sleep_vote,
-                &sleep_feed,
                 ScheduledTickHandle::default(),
                 world,
                 follow,

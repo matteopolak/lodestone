@@ -349,3 +349,63 @@ fn encode_container_data_round_trips_a_furnace_property() {
     assert_eq!(*property, 3);
     assert_eq!(*value, 200);
 }
+
+/// A hive item's `minecraft:bees` and `minecraft:block_state` components, as
+/// bytes assembled by hand from the stream codecs and the reference registry
+/// ids for this release (`bees` 77, `block_state` 76, entity `bee` 11, item
+/// `bee_nest` 1410, from the generated registry report):
+/// `VarInt count, per occupant [EntityType, nameless-root NBT without id,
+/// VarInt ticks_in_hive, VarInt min_ticks_in_hive]` and
+/// `VarInt count, per property [String, String]`.
+#[test]
+fn encode_container_slot_carries_a_hives_bees_and_honey_level() {
+    let mut bee = lodestone_core::Writer::default();
+    lodestone_core::write_network_nbt(
+        &mut bee,
+        &Nbt::Compound(vec![
+            ("id".to_owned(), Nbt::String("minecraft:bee".to_owned())),
+            ("HasNectar".to_owned(), Nbt::Byte(1)),
+        ]),
+    )
+    .expect("encodes");
+    let item = ItemStack {
+        components: ItemComponents {
+            bees: vec![lodestone_model::BeeOccupant {
+                entity_data: bee.as_slice().to_vec(),
+                ticks_in_hive: 123,
+                min_ticks_in_hive: 2400,
+            }],
+            block_state: vec![("honey_level".to_owned(), "5".to_owned())],
+            ..ItemComponents::default()
+        },
+        ..stack("bee_nest", 1)
+    };
+    let ServerDirective::Send { packet_id, payload } = V770ServerProtocol.encode_container_slot(5, 8, 2, Some(&item)) else {
+        panic!("expected a Send directive");
+    };
+    let mut expected = vec![
+        0x05, 0x08, 0x00, 0x02, // window, state id, slot
+        0x01, 0x82, 0x0b, // count 1, item 1410
+        0x02, 0x00, // two added components, none removed
+        0x4d, 0x01, 0x0b, // bees (77): one occupant, entity type 11
+        0x0a, 0x01, 0x00, 0x09, // compound root, byte tag, name length 9
+    ];
+    expected.extend_from_slice(b"HasNectar");
+    expected.extend_from_slice(&[0x01, 0x00, 0x7b, 0xe0, 0x12]); // value 1, end, 123, 2400
+    expected.extend_from_slice(&[0x4c, 0x01, 0x0b]); // block_state (76): one property, name length 11
+    expected.extend_from_slice(b"honey_level");
+    expected.extend_from_slice(&[0x01, b'5']);
+    assert_eq!(payload, expected);
+
+    let events = decode_events(packet_id, &payload);
+    let ClientEvent::ContainerSlot { item: Some(decoded), .. } = &events[0] else {
+        panic!("expected a populated ContainerSlot event");
+    };
+    assert_eq!(decoded.components.block_state, vec![("honey_level".to_owned(), "5".to_owned())]);
+    let [occupant] = decoded.components.bees.as_slice() else { panic!("one occupant") };
+    assert_eq!((occupant.ticks_in_hive, occupant.min_ticks_in_hive), (123, 2400));
+    let mut reader = lodestone_core::Reader::new(&occupant.entity_data);
+    let Nbt::Compound(fields) = lodestone_core::read_network_nbt(&mut reader).expect("decodes") else { panic!("compound") };
+    assert_eq!(fields[0], ("id".to_owned(), Nbt::String("minecraft:bee".to_owned())));
+    assert!(fields.contains(&("HasNectar".to_owned(), Nbt::Byte(1))));
+}

@@ -303,6 +303,10 @@ pub enum MinecartKind {
     Furnace,
     /// TNT minecart — primes and explodes off an activator rail.
     Tnt,
+    /// Command-block minecart: its command is saved and carried, not run.
+    CommandBlock,
+    /// Spawner minecart: its spawner data is saved and carried, not run.
+    Spawner,
 }
 
 impl MinecartKind {
@@ -318,8 +322,19 @@ impl MinecartKind {
             "minecraft:hopper_minecart" => Self::Hopper,
             "minecraft:furnace_minecart" => Self::Furnace,
             "minecraft:tnt_minecart" => Self::Tnt,
+            "minecraft:command_block_minecart" => Self::CommandBlock,
             _ => return None,
         })
+    }
+
+    /// The kind whose entity type is `name`: every item-backed kind plus the
+    /// spawner cart, which has no item.
+    #[must_use]
+    pub fn from_entity(name: &str) -> Option<Self> {
+        match name {
+            "minecraft:spawner_minecart" => Some(Self::Spawner),
+            other => Self::from_item(other),
+        }
     }
 
     #[must_use]
@@ -330,6 +345,8 @@ impl MinecartKind {
             Self::Hopper => "minecraft:hopper_minecart",
             Self::Furnace => "minecraft:furnace_minecart",
             Self::Tnt => "minecraft:tnt_minecart",
+            Self::CommandBlock => "minecraft:command_block_minecart",
+            Self::Spawner => "minecraft:spawner_minecart",
         };
         name.parse().expect("every minecart kind is a valid resource key")
     }
@@ -587,9 +604,31 @@ impl<'w> MobSim<'w> {
                 fuel: 0,
                 push: Vec3d::ZERO,
                 fuse: -1,
+                carried: Vec::new(),
             },
         );
         id
+    }
+
+    /// Removes cart `id`, spilling its slots and, with `drop_item`, dropping
+    /// the cart's own item. `false` when `id` is not a minecart. Riders lose
+    /// their seat on the next `sync_riders`.
+    pub fn break_minecart(&mut self, id: i32, drop_item: bool) -> bool {
+        self.spill_minecart_contents(id);
+        let Some(cart) = self.minecarts.remove(&id) else { return false };
+        if drop_item && cart.kind != MinecartKind::Spawner {
+            let at = Vec3::new(cart.motion.position.x, cart.motion.position.y, cart.motion.position.z);
+            self.spawn_item(
+                &ItemStack::new(cart.kind.entity_type(), 1),
+                at,
+                Vec3::new(0.0, 0.2, 0.0),
+                lodestone_entity::item_entity::ItemLifecycle::newly_dropped(
+                    1,
+                    lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
+                ),
+            );
+        }
+        true
     }
 
     /// The number of live minecarts.
@@ -1672,10 +1711,13 @@ mod tests {
         assert!(!RailShape::SouthEast.is_slope());
     }
 
-    /// `MinecartKind::from_item` covers exactly the five real item ids and
-    /// nothing else.
+    /// `MinecartKind::from_item` covers exactly the six real item ids and
+    /// nothing else; the spawner cart has no item.
     #[test]
-    fn minecart_kind_from_item_covers_the_five_real_items() {
+    fn minecart_kind_from_item_covers_the_six_real_items() {
+        assert_eq!(MinecartKind::from_item("minecraft:command_block_minecart"), Some(MinecartKind::CommandBlock));
+        assert_eq!(MinecartKind::from_item("minecraft:spawner_minecart"), None);
+        assert_eq!(MinecartKind::from_entity("minecraft:spawner_minecart"), Some(MinecartKind::Spawner));
         assert_eq!(MinecartKind::from_item("minecraft:minecart"), Some(MinecartKind::Plain));
         assert_eq!(MinecartKind::from_item("minecraft:chest_minecart"), Some(MinecartKind::Chest));
         assert_eq!(MinecartKind::from_item("minecraft:hopper_minecart"), Some(MinecartKind::Hopper));

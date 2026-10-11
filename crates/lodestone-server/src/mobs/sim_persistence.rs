@@ -92,11 +92,14 @@ impl<'w> MobSim<'w> {
             .or_else(|| self.cushions.get(&id).map(|c| c.uuid))
     }
 
-    /// Boats, rafts and minecarts: type, uuid, position, motion and yaw. A
-    /// container cart's slots, a furnace cart's fuel and a TNT cart's fuse are
-    /// not saved.
+    /// Boats, rafts and minecarts: type, uuid, position, motion and yaw, plus a
+    /// cart's own fields (`TrackedMinecart::saved_fields`).
     fn saved_vehicles(&self) -> Vec<SavedEntity> {
-        let record = |id: ResourceKey, uuid: Uuid, motion: &lodestone_physics::EntityMotion, yaw: f32| SavedEntity {
+        let record = |id: ResourceKey,
+                      uuid: Uuid,
+                      motion: &lodestone_physics::EntityMotion,
+                      yaw: f32,
+                      extra: Vec<(String, lodestone_core::Nbt)>| SavedEntity {
             id,
             uuid,
             pos: Vec3::new(motion.position.x, motion.position.y, motion.position.z),
@@ -106,7 +109,7 @@ impl<'w> MobSim<'w> {
             item: None,
             age: None,
             pickup_delay: None,
-            extra: Vec::new(),
+            extra,
         };
         let mut boats: Vec<_> = self.vehicles.iter().collect();
         boats.sort_unstable_by_key(|&(id, _)| *id);
@@ -114,8 +117,8 @@ impl<'w> MobSim<'w> {
         carts.sort_unstable_by_key(|&(id, _)| *id);
         boats
             .into_iter()
-            .map(|(_, v)| record(v.entity_type.clone(), v.uuid, &v.motion, v.yaw))
-            .chain(carts.into_iter().map(|(_, c)| record(c.kind.entity_type(), c.uuid, &c.motion, c.yaw)))
+            .map(|(_, v)| record(v.entity_type.clone(), v.uuid, &v.motion, v.yaw, Vec::new()))
+            .chain(carts.into_iter().map(|(_, c)| record(c.kind.entity_type(), c.uuid, &c.motion, c.yaw, c.saved_fields())))
             .collect()
     }
 
@@ -131,9 +134,10 @@ impl<'w> MobSim<'w> {
             }
             return true;
         }
-        let Some(kind) = minecart::MinecartKind::from_item(&saved.id.to_string()) else { return false };
+        let Some(kind) = minecart::MinecartKind::from_entity(&saved.id.to_string()) else { return false };
         let id = self.spawn_minecart(kind, saved.pos);
         if let Some(cart) = self.minecarts.get_mut(&id) {
+            cart.restore_fields(&saved.extra);
             cart.uuid = saved.uuid;
             cart.yaw = saved.rotation.yaw;
             cart.yaw_o = saved.rotation.yaw;
@@ -221,7 +225,7 @@ impl<'w> MobSim<'w> {
                     pickup_delay: saved.pickup_delay,
                     fields: saved.extra,
                 };
-                if state.is_empty() {
+                if state.is_empty() && !is_stateless_vehicle(&saved.id) {
                     return None;
                 }
                 Some(crate::world_storage::NativeEntityRecord {
@@ -249,7 +253,7 @@ impl<'w> MobSim<'w> {
     ) -> usize {
         let saved: Vec<_> = entities
             .iter()
-            .filter(|entity| !entity.state.is_empty())
+            .filter(|entity| !entity.state.is_empty() || is_stateless_vehicle(&entity.entity_type))
             .map(|entity| crate::entity_record::SavedEntity {
                 id: entity.entity_type.clone(),
                 uuid: Uuid::from_bytes(entity.uuid),
@@ -315,7 +319,7 @@ impl<'w> MobSim<'w> {
                 continue;
             }
             if (crate::boat::is_boat_type_path(saved.id.path())
-                || minecart::MinecartKind::from_item(&saved.id.to_string()).is_some())
+                || minecart::MinecartKind::from_entity(&saved.id.to_string()).is_some())
                 && self.restore_vehicle(saved)
             {
                 restored += 1;
@@ -394,6 +398,13 @@ impl<'w> MobSim<'w> {
         }
         restored
     }
+}
+
+/// Whether `id` is a vehicle whose whole saved form is its pose: an empty
+/// boat or raft. Its record has no state fields, which elsewhere marks an
+/// older pose-only record that cannot be restored.
+fn is_stateless_vehicle(id: &ResourceKey) -> bool {
+    crate::boat::is_boat_type_path(id.path())
 }
 
 /// `record` with the records riding it nested as a `Passengers` list, as the

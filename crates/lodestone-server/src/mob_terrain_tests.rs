@@ -14,7 +14,6 @@ use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
 use crate::scheduled_tick::ScheduledTickHandle;
-use crate::sleep::{SleepFeed, SleepVote};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock};
 use crate::tick_area::TickFollow;
 use crate::weather::{WeatherFeed, WeatherState};
@@ -68,8 +67,6 @@ async fn start(terrain: &Arc<crate::chunk::Terrain263ChunkSource>) -> Harness {
     let tick_source = Arc::clone(&source);
     let tick_runtime = Arc::clone(&runtime);
     let task = tokio::spawn(async move {
-        let sleep_vote = SleepVote::new();
-        let sleep_feed = SleepFeed::default();
         let follow = TickFollow {
             dimension: Dimension::Overworld,
             radius: world.simulation_distance(),
@@ -90,8 +87,6 @@ async fn start(terrain: &Arc<crate::chunk::Terrain263ChunkSource>) -> Harness {
             ExplosionFeed::default(),
             WeatherFeed::default(),
             WeatherState::default(),
-            &sleep_vote,
-            &sleep_feed,
             ScheduledTickHandle::default(),
             world,
             follow,

@@ -1604,3 +1604,21 @@ mod tests {
         assert!(state.block().default_state().block() == state.block());
     }
 }
+
+/// `state` with the properties a block item's `minecraft:block_state`
+/// component names written over it. A name the block lacks, or a value it does
+/// not allow, leaves the state as it was.
+#[must_use]
+pub(crate) fn with_item_block_state(state: StateId, item_properties: &[(String, String)]) -> StateId {
+    if item_properties.is_empty() {
+        return state;
+    }
+    let mut properties: std::collections::BTreeMap<String, String> =
+        state.properties().iter().map(|&(name, value)| (name.to_owned(), value.to_owned())).collect();
+    for (name, value) in item_properties {
+        if let Some(held) = properties.get_mut(name) {
+            held.clone_from(value);
+        }
+    }
+    StateId::from_exact_parts(state.name(), &properties).unwrap_or(state)
+}

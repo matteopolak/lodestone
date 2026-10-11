@@ -195,6 +195,10 @@ pub struct LootContext {
     /// fishing table's treasure gate. `None` means the rolling entity is not a
     /// bobber, so the check fails.
     pub fishing_hook_in_open_water: Option<bool>,
+    /// The components the broken block's entity contributes to its item, for
+    /// `copy_components` with `source: block_entity`. `None` for a block with
+    /// no entity and for every non-block roll.
+    pub block_entity_components: Option<lodestone_model::ItemComponents>,
 }
 
 /// The block state a roll happens against. The production path carries one
@@ -236,12 +240,9 @@ impl LootBlockState {
 /// `lodestone_model::ItemEnchantment` carries a **network registry id**, because
 /// `minecraft:enchantment` is a datapack registry whose ids are assigned per
 /// session at configuration time — it is not in Mojang's `registries.json` at
-/// all, so no static name↔id table exists to generate. This crate is
-/// version-free and cannot resolve one. So the seam is: whoever *has* the
-/// session's registry resolves ids to keys and hands them here, and
-/// [`LootTool::from_held_item`] (which has no registry) builds a tool with an
-/// empty enchantment list — correct for every stack this server can currently
-/// hold, and honest about it. See `docs/loot-tables.md`.
+/// all. [`LootTool::from_held_item`] resolves a held stack's ids through the
+/// server's own enchantment table; a caller holding the session's registry can
+/// build the list itself with [`LootTool::with_enchantment`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LootTool {
     /// The item's registry key, e.g. `minecraft:diamond_pickaxe`. `None` is
@@ -276,16 +277,20 @@ impl LootTool {
 
     /// The tool for a held [`ItemStack`], as the server sees it.
     ///
-    /// Carries **no** enchantments, deliberately and visibly: see this type's
-    /// own doc comment. A stack whose enchantments were resolvable should be
-    /// built with [`with_enchantment`](Self::with_enchantment) instead.
+    /// Enchantment ids resolve through [`crate::enchantment_data`]'s table; an
+    /// id outside it (a datapack enchantment) reads as absent.
     #[must_use]
     pub fn from_held_item(stack: &ItemStack) -> Self {
-        Self {
-            item: Some(stack.item.clone()),
-            count: stack.count,
-            enchantments: Vec::new(),
-        }
+        let enchantments = stack
+            .components
+            .enchantments
+            .iter()
+            .filter_map(|held| {
+                let key = crate::enchantment_data::name_of(held.id)?.parse().ok()?;
+                Some((key, held.level))
+            })
+            .collect();
+        Self { item: Some(stack.item.clone()), count: stack.count, enchantments }
     }
 
     /// The item's level of `enchantment` — 0 for an enchantment this
@@ -521,6 +526,11 @@ pub const DECORATION_ONLY_UNSUPPORTED: &[&str] = &[
     "function minecraft:set_name",
     "function minecraft:set_stew_effect",
 ];
+
+/// The components `copy_components` can lift off a block entity: the ones the
+/// item model carries and [`crate::block_entities::BlockEntity::implicit_components`]
+/// supplies.
+const COPYABLE_COMPONENTS: &[&str] = &["minecraft:bees"];
 
 /// A loaded set of loot tables, keyed by id. This is the object a server holds
 /// — the analogue of `RecipeBook` — and the provider for [`roll_loot`].
@@ -1228,6 +1238,12 @@ enum LootFunction {
     },
     /// `minecraft:sequence` — applies each child in order.
     Sequence(Vec<LootFunction>),
+    /// `minecraft:copy_components` from the broken block's entity: the listed
+    /// components, of those this build models ([`COPYABLE_COMPONENTS`]).
+    CopyComponents { include: Vec<String>, conditions: Vec<LootCondition> },
+    /// `minecraft:copy_state`: the listed properties of the broken block, set
+    /// as the item's `minecraft:block_state` component.
+    CopyState { block: String, properties: Vec<String>, conditions: Vec<LootCondition> },
     /// A function this build does not apply (`minecraft:enchant_randomly`,
     /// `minecraft:set_potion`, ...). A no-op in a roll; the feature id is
     /// reported by [`LootTable::unsupported_features`].
@@ -1319,6 +1335,38 @@ impl LootFunction {
             "minecraft:sequence" => {
                 let functions = parse_functions(value.get("functions"), audit)?;
                 Ok(Self::Sequence(functions))
+            }
+            "minecraft:copy_components" => {
+                let names = |key: &str| -> Option<Vec<String>> {
+                    value.get(key).map_or(Some(Vec::new()), |list| {
+                        list.as_array()?.iter().map(|name| name.as_str().map(str::to_owned)).collect()
+                    })
+                };
+                let source = value.get("source").and_then(Value::as_str);
+                match (source, names("include"), names("exclude")) {
+                    (Some("block_entity"), Some(include), Some(exclude))
+                        if exclude.is_empty()
+                            && !include.is_empty()
+                            && include.iter().all(|name| COPYABLE_COMPONENTS.contains(&name.as_str())) =>
+                    {
+                        Ok(Self::CopyComponents { include, conditions })
+                    }
+                    _ => {
+                        audit.push("function minecraft:copy_components".to_string());
+                        Ok(Self::Unsupported)
+                    }
+                }
+            }
+            "minecraft:copy_state" => {
+                let block = value.get("block").and_then(Value::as_str).ok_or(LootError::MissingField("block"))?;
+                let properties = value
+                    .get("properties")
+                    .and_then(Value::as_array)
+                    .ok_or(LootError::MissingField("properties"))?
+                    .iter()
+                    .map(|name| name.as_str().map(str::to_owned).ok_or(LootError::UnexpectedType("copy_state property", "a string")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Self::CopyState { block: block.to_owned(), properties, conditions })
             }
             other => {
                 audit.push(format!("function {other}"));
@@ -1485,6 +1533,35 @@ impl LootFunction {
                 for function in functions {
                     function.apply(stack, context, rng);
                 }
+            }
+            Self::CopyComponents { include, conditions } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                let Some(source) = context.block_entity_components.as_ref() else { return };
+                for name in include {
+                    match name.as_str() {
+                        "minecraft:bees" => stack.components.bees.clone_from(&source.bees),
+                        _ => {}
+                    }
+                }
+            }
+            Self::CopyState { block, properties, conditions } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                let Some(state) = context.block_state else { return };
+                if state.block().name() != block {
+                    return;
+                }
+                let held = state.state_id().properties();
+                for name in properties {
+                    if let Some((name, value)) = held.iter().find(|(held, _)| held == name) {
+                        stack.components.block_state.retain(|(set, _)| set != name);
+                        stack.components.block_state.push(((*name).to_owned(), (*value).to_owned()));
+                    }
+                }
+                stack.components.block_state.sort();
             }
             Self::Unsupported => {}
         }
@@ -2875,7 +2952,7 @@ mod tests {
         let set = LootTableSet::load_bundled();
         assert_eq!(
             set.len(),
-            1361,
+            1363,
             "the bundle is the clean subset of the 1,447-table vanilla corpus; \
              if this moved, regenerate with `just regen-loot-corpus` and say why"
         );

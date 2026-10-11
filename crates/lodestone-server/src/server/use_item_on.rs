@@ -1219,11 +1219,14 @@ where
                     extra: Vec::new(),
                 },
             };
-            let placement = crate::block_placement::apply_waterlogging(
+            let mut placement = crate::block_placement::apply_waterlogging(
                 placement,
                 target,
                 |p| source.block_state_id(p.x, p.y, p.z),
             );
+            if let Some(held) = inventory.native(hand_native) {
+                placement.state = crate::block_placement::with_item_block_state(placement.state, &held.components.block_state);
+            }
             let occupied: Vec<(BlockPos, StateId)> = std::iter::once((target, placement.state))
                 .chain(placement.extra.iter().copied())
                 .collect();
@@ -1285,6 +1288,9 @@ where
                     for (slot, stack) in slots.iter_mut().zip(&held.components.container) {
                         *slot = stack.clone();
                     }
+                }
+                if let Some(held) = inventory.native(hand_native) {
+                    entity.apply_implicit_components(&held.components);
                 }
                 block_entities.with(|registry| registry.insert(target, entity));
             } else if let Some(type_name) = lodestone_data::block_entity_types::block_entity_type(state_id)

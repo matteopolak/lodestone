@@ -12,7 +12,6 @@ use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
 // The shared context must not depend on filesystem-backed terrain modules.
 use crate::scheduled_tick::ScheduledTickHandle;
-use crate::sleep::{SleepFeed, SleepVote};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock};
 use crate::tick_area::TickFollow;
 use crate::weather::{WeatherFeed, WeatherState};
@@ -114,8 +113,6 @@ pub(crate) fn spawn_for_dimension(
         // is the same "no producer reaches it" shape
         // `run_tick_loop`'s own wrapper already uses for its non-weather
         // callers, not a missing feature.
-        let sleep_vote = SleepVote::new();
-        let sleep_feed = SleepFeed::default();
         crate::tick::run_dimension_tick_loop_with_weather(
             runtime.mobs().clone(),
             runtime.entities().clone(),
@@ -127,13 +124,11 @@ pub(crate) fn spawn_for_dimension(
             ExplosionFeed::default(),
             WeatherFeed::default(),
             WeatherState::default(),
-            &sleep_vote,
-            &sleep_feed,
             scheduled,
             world_state,
             follow,
             // Same "fresh, disposable, no producer reaches it"
-            // shape as `sleep_vote`/`sleep_feed` above — the overworld is
+            // shape as the weather feed above — the overworld is
             // the one dimension a `/worldborder` command (and a real player)
             // reaches today, so a per-dimension border here would be an
             // island by construction.
@@ -501,8 +496,6 @@ mod tests {
             let tick_world = world.clone();
             let tick_runtime = Arc::clone(&runtime);
             let task = tokio::spawn(async move {
-                let sleep_vote = SleepVote::new();
-                let sleep_feed = SleepFeed::default();
                 let follow = TickFollow { dimension, radius: 3, anchors: tick_world.tick_anchors().clone() };
                 if dimension == Dimension::Overworld {
                     let mut server_world = crate::ecs::ServerApp::bootstrap().into_world();
@@ -511,13 +504,13 @@ mod tests {
                     crate::tick::run_primary_tick_loop_with_weather(server_world,
                         tick_runtime.mobs().clone(), tick_runtime.entities().clone(), BlockEntityHandle::default(), tick_clock,
                         tick_source, BlockTickFeed::default(), (-3..=3, -3..=3), ExplosionFeed::default(), WeatherFeed::default(),
-                        WeatherState::default(), &sleep_vote, &sleep_feed, ScheduledTickHandle::default(), tick_world, follow,
+                        WeatherState::default(), ScheduledTickHandle::default(), tick_world, follow,
                         crate::border::BorderFeed::default()).await;
                 } else {
                     crate::tick::run_dimension_tick_loop_with_weather(
                         tick_runtime.mobs().clone(), tick_runtime.entities().clone(), BlockEntityHandle::default(), tick_clock,
                         tick_source, BlockTickFeed::default(), (-3..=3, -3..=3), ExplosionFeed::default(), WeatherFeed::default(),
-                        WeatherState::default(), &sleep_vote, &sleep_feed, ScheduledTickHandle::default(), tick_world, follow,
+                        WeatherState::default(), ScheduledTickHandle::default(), tick_world, follow,
                         crate::border::BorderFeed::default(), crate::tick::WorldClockRole::Follower).await;
                 }
             });

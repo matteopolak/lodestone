@@ -16,6 +16,8 @@
 | `custom_name` | text component: bare string when unstyled, else a compound |
 | `lore` | list of text components; all strings, or all compounds if any line needs one |
 | `potion_contents` | `{potion: "minecraft:poison", custom_name?}` (bare-id short form also read) |
+| `bees` | list of `{entity_data, ticks_in_hive, min_ticks_in_hive}` (a hive item's occupants) |
+| `block_state` | compound of string properties (`{honey_level: "5"}`), applied on placement |
 | `instrument` | the instrument id (an inline instrument has no saved form) |
 | `writable_book_content` | `{pages: [{raw: "…"}]}` |
 | `written_book_content` | `{title: {raw}, author, generation?, pages: [{raw: <component>}], resolved?}` |

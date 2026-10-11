@@ -1643,6 +1643,38 @@ fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemCompo
             }
         });
     }
+    if !components.bees.is_empty() {
+        let bees: Vec<(i32, Nbt, &lodestone_model::BeeOccupant)> = components
+            .bees
+            .iter()
+            .filter_map(|bee| {
+                let mut reader = Reader::new(&bee.entity_data);
+                let Nbt::Compound(mut fields) = read_network_nbt(&mut reader).ok()? else { return None };
+                let at = fields.iter().position(|(name, _)| name == "id")?;
+                let Nbt::String(id) = fields.remove(at).1 else { return None };
+                let entity = lodestone_data::entity_type::EntityType::from_name(id.strip_prefix("minecraft:")?)?;
+                Some((wire.entity_type(entity)?, Nbt::Compound(fields), bee))
+            })
+            .collect();
+        entry("minecraft:bees", &|w| {
+            w.var_i32(bees.len() as i32);
+            for (entity, data, bee) in &bees {
+                w.var_i32(*entity);
+                write_network_nbt(w, data).expect("a compound encodes into a `Vec<u8>` writer");
+                w.var_i32(bee.ticks_in_hive);
+                w.var_i32(bee.min_ticks_in_hive);
+            }
+        });
+    }
+    if !components.block_state.is_empty() {
+        entry("minecraft:block_state", &|w| {
+            w.var_i32(components.block_state.len() as i32);
+            for (name, value) in &components.block_state {
+                w.string(name);
+                w.string(value);
+            }
+        });
+    }
     if let Some(map_id) = components.map_id {
         entry("minecraft:map_id", &|w| w.var_i32(map_id));
     }

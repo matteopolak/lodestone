@@ -3,6 +3,11 @@ use super::*;
 #[path = "tests/item_owner.rs"]
 mod item_owner_tests;
 
+/// Minecart and boat fields through the saved-entity and native stores.
+#[cfg(test)]
+#[path = "tests/minecart_persistence.rs"]
+mod minecart_persistence_tests;
+
 /// The `follow_range` attribute reaches the controller that bounds target
 /// acquisition, including the no-target case.
 #[cfg(test)]
