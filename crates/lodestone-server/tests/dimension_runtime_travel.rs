@@ -279,6 +279,58 @@ async fn equal_coordinate_dimension_tickets_follow_arrival_respawn_and_disconnec
     assert_eq!(world.player_registry().len(), 0);
 }
 
+/// A spectator has no physics, so standing in an end portal starts no trip. The
+/// control is the same player, still in the portal, back in survival: it travels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spectator_in_an_end_portal_stays_put_until_it_leaves_spectator_mode() {
+    use lodestone_model::GameMode;
+    use lodestone_server::commands::Effect;
+
+    let world = WorldStateHandle::new();
+    let _ = world.ensure_dimension_runtime(Dimension::Overworld);
+    let _ = world.ensure_dimension_runtime(Dimension::End);
+    let fixture = FixtureWorld::new();
+    fixture.fight_started.store(true, Ordering::Release);
+    let server_fixture = fixture.clone();
+    let server_world = world.clone();
+    let (client_io, server_io) = tokio::io::duplex(4 * 1024 * 1024);
+    let server = tokio::spawn(async move {
+        lodestone_server::serve_connection_with_access_and_state(
+            &mut Connection::new(server_io), &V770ServerProtocol, &server_fixture, &NoEntities,
+            0, &AccessHandle::default(), &server_world, &BlockEntityHandle::default(), None,
+        ).await
+    });
+    let mut client = Connection::new(client_io);
+    login(&mut client).await;
+    loop {
+        let (id, payload) = packet(&mut client).await;
+        acknowledge(&mut client, id, &payload).await;
+        if id == play::clientbound::CHUNK_BATCH_FINISHED { break; }
+    }
+    let uuid = Uuid::from_u128(91);
+    assert!(world.player_registry().push_effect(uuid, Effect::SetGameMode(GameMode::Spectator)));
+    // The game-event packet with event 3 announces the new mode.
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let (id, payload) = packet(&mut client).await;
+            acknowledge(&mut client, id, &payload).await;
+            if id == play::clientbound::GAME_EVENT && payload.first() == Some(&3) { break; }
+        }
+    }).await.expect("the spectator mode must reach the wire");
+    fixture.set_block(100, 64, 0, state("minecraft:end_portal"));
+    movement(&mut client, 100.5, 0.5).await;
+    let window = tokio::time::Instant::now() + Duration::from_secs(2);
+    while let Ok(received) = tokio::time::timeout_at(window, client.read_packet()).await {
+        let (id, payload) = received.unwrap().unwrap();
+        assert_ne!(id, play::clientbound::RESPAWN, "a spectator must not travel through an end portal");
+        acknowledge(&mut client, id, &payload).await;
+    }
+    assert!(world.player_registry().push_effect(uuid, Effect::SetGameMode(GameMode::Survival)));
+    await_dimension(&mut client, Dimension::End).await;
+    drop(client);
+    tokio::time::timeout(DEADLINE, server).await.unwrap().unwrap().unwrap();
+}
+
 async fn await_dimension(client: &mut Connection<DuplexStream>, dimension: Dimension) {
     tokio::time::timeout(DEADLINE, async {
         let mut respawned = false;

@@ -2214,6 +2214,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             sim.set_difficulty(world_state.difficulty().0);
             sim.set_universal_anger(world_state.universal_anger());
             sim.set_mob_griefing(world_state.mob_griefing());
+            sim.set_entity_drops(world_state.entity_drops());
         });
         let players: Vec<lodestone_model::Vec3> =
             mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());

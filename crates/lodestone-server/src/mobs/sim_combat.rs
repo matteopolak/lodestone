@@ -218,12 +218,7 @@ impl<'w> MobSim<'w> {
             return self.attack_dragon(target_id, raw_damage);
         }
         // End crystals live in `self.crystals` and use a one-hit destruction
-        // branch, so they do not enter the mob damage pipeline. Boats, rafts,
-        // and minecarts live in `self.vehicles` and use their own damage
-        // response without health, armor, knockback, or mob reputation state.
-        if self.vehicles.contains_key(&target_id) {
-            return self.attack_vehicle(target_id, raw_damage);
-        }
+        // branch, so they do not enter the mob damage pipeline.
         if self.crystals.contains_key(&target_id) {
             self.destroy_end_crystal(target_id)?;
             return Some(AttackOutcome {

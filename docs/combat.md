@@ -59,7 +59,7 @@ Crit is client-side dual simulation (the packet has no crit flag): full-strength
 - The defense maker's argument order is boots first (boots, legs, chest, helm, body); totals can coincide across a swap, so only a per-piece assertion catches it.
 - A weapon's damage is baseline plus material bonus (diamond sword `3.0 + 3.0`); trident `8.0` and mace `5.0` are flat.
 - The player's base `attack_damage` is `1.0`, not the registry default `2.0`.
-- Not modelled: enchantment protection and effectiveness (neutral `Defenses` fields are accurate), and shield blocking (needs an item-data model for blocking). Mob equipment feeds the same functions (see [mob spawning](mob-spawning.md)).
+- Not modelled: enchantment protection and effectiveness (neutral `Defenses` fields are accurate). Shield blocking is in `lodestone_server::shield` (below). Mob equipment feeds the same functions (see [mob spawning](mob-spawning.md)).
 
 ### Damage types and tags
 
@@ -78,6 +78,15 @@ The `minecraft:damage_type` registry (51 types, 36 tags, from the 26.3 jar; 26.2
 
 Mob-on-player damage: `MobSim` matches an attack's target position against its player list, queues a `PlayerHit`, and `serve_play`'s periodic vitals tick drains it through `PlayerVitals::apply_damage` with the player's armour. A grudge-target attack can aim at a stale remembered position. `encode_damage_event` (needing a damage-type registry id per source) is absent; `encode_hurt_animation` is sent instead for players and mobs.
 
+### Shield blocking
+
+`ShieldState` (per connection) is raised by a use-item that falls through to nothing, and lowered by release, hotbar change or hand swap. `ShieldState::block` runs before `PlayerVitals::apply_damage` and decides on game time (`world.time().game_time`; `MobSim::tick_count` is not a reliable clock):
+
+- Blocks only once up 5 ticks, for damage types outside the generated `BypassesShield` tag, with the source within 90 degrees of the head-yaw facing on the horizontal plane. A blocked hit is absorbed whole: no health change, hurt animation or knockback, but i-frames start.
+- Blocked damage under 3 costs no durability; otherwise `floor(1 + damage)` (shield durability 336). A break sends entity event 47/48.
+- A mob holding an axe (`disable_seconds_for_weapon`) disables the shield for 100 ticks: lowered, `encode_item_cooldown` for the `minecraft:shield` group, and the break sound. A disabled shield refuses to raise.
+- Sounds: `item.shield.block` on a block, `item.shield.break` (volume 0.8) on disable.
+
 ## How to change it
 
 - **New stat**: emit another `Modifier` from `item_modifiers`; nothing downstream enumerates attributes. Gates against the flat `1.0` base need updating once weapon damage lands.
@@ -85,7 +94,7 @@ Mob-on-player damage: `MobSim` matches an attack's target position against its p
 - **Facing knockback**: swap per-connection yaw into `attack_direction`.
 - **`encode_damage_event`**: a new optional `ServerProtocol` method needing a damage-type id per source; the client consumer exists.
 - **Regenerate damage types** after a bump with `just regen-damage-types`. The data lives in the inner server jar under `.cache/mc/<version>/versions/<version>/`; the outer bundler jar has none of it.
-- **Shield blocking**: unbuilt; it needs an item-data model, not a `damage.rs` change.
+- **Shield rules**: constants and the decision live in `lodestone_server::shield`; the call site is the `take_player_hits` loop in `play_loop`.
 
 ## Configuration
 

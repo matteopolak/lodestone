@@ -740,6 +740,12 @@ impl WorldStateHandle {
         self.with(|state| state.rules.mob_griefing())
     }
 
+    /// `entity_drops` — whether a broken vehicle drops its item.
+    #[must_use]
+    pub fn entity_drops(&self) -> bool {
+        self.with(|state| state.rules.entity_drops())
+    }
+
     /// `universal_anger` — whether a hurt neutral mob turns on every player.
     #[must_use]
     pub fn universal_anger(&self) -> bool {

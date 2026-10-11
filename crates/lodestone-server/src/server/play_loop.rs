@@ -381,6 +381,8 @@ where
     // This connection's in-progress eat or drink — see `item_in_use` on
     // `dispatch_play_packet`. Finished by the per-tick arm below, not by a packet.
     let mut item_in_use: Option<ItemInUse> = None;
+    // This connection's raised shield and disable cooldown.
+    let mut shield = crate::shield::ShieldState::default();
     // Window identifiers start at `0`; each open increments before use and
     // wraps with [`open_container_screen`]'s `% 100 + 1` rule.
     let mut next_window_id: i32 = 0;
@@ -1014,6 +1016,7 @@ where
                         Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
                         &mut bow_draw,
                         &mut item_in_use,
+                        &mut shield,
                         &mut dimension_reset,
                         &mut end_exit,
                         packet_id,
@@ -1898,14 +1901,60 @@ where
                             }
                             let flags = lodestone_entity::DamageFlags::for_damage_type_name(hit.damage_type)
                                 .expect("a player hit names a real damage type");
-                            if vitals
+                            // A raised shield takes the hit before armour sees it.
+                            let now = u64::try_from(world.time().game_time).unwrap_or(0);
+                            let feet = Vec3::new(x, y, z);
+                            let blocked = shield.block(
+                                |slot| inventory.native(slot).cloned(),
+                                now,
+                                &crate::shield::IncomingHit {
+                                    damage: hit.raw_damage,
+                                    damage_type: hit.damage_type,
+                                    source: hit.attacker_pos,
+                                    disable_seconds: hit.shield_disable_seconds,
+                                },
+                                feet,
+                                player_rot.unwrap_or_default().yaw,
+                            );
+                            if let Some(blocked) = blocked {
+                                wear_blocking_shield(conn, &mut state, proto, &mut inventory, blocked.native, blocked.item_damage)
+                                    .await?;
+                                if blocked.disable_ticks > 0 {
+                                    shield.disable_until(now + blocked.disable_ticks);
+                                    apply(
+                                        conn,
+                                        &mut state,
+                                        proto.encode_item_cooldown(
+                                            crate::shield::COOLDOWN_GROUP,
+                                            i32::try_from(blocked.disable_ticks).unwrap_or(i32::MAX),
+                                        ),
+                                    )
+                                    .await?;
+                                    let seed = i64::from(drops_rng.next_int(i32::MAX));
+                                    if let Some(effect) =
+                                        crate::effects::shield_sound(true, feet, drops_rng.next_f32(), seed)
+                                    {
+                                        block_ticks.publish_effect(effect);
+                                    }
+                                }
+                            }
+                            let remaining = hit.raw_damage - blocked.map_or(0.0, |b| b.damage);
+                            let landed = vitals
                                 .apply_damage(
-                                    hit.raw_damage,
+                                    remaining,
                                     &effects.overlay_defenses(inventory.combat_stats().defenses),
                                     flags,
                                 )
-                                .is_some()
-                            {
+                                .is_some();
+                            if blocked.is_some() && landed {
+                                let seed = i64::from(drops_rng.next_int(i32::MAX));
+                                if let Some(effect) = crate::effects::shield_sound(false, feet, drops_rng.next_f32(), seed) {
+                                    block_ticks.publish_effect(effect);
+                                }
+                            }
+                            // A fully blocked hit starts the invulnerability window and
+                            // nothing else: no health change, hurt animation or knockback.
+                            if landed && remaining > 0.0 {
                                 if hit.poison_ticks > 0 {
                                     effects.apply("minecraft:poison", hit.poison_ticks, 0);
                                     apply(
@@ -3391,6 +3440,7 @@ where
     // `wasm_vitals_tick` applies item-use completion rules from its browser
     // timer, so a bite started here reaches its completion result.
     let mut item_in_use: Option<ItemInUse> = None;
+    let mut shield = crate::shield::ShieldState::default();
     // `player_pos` feeds movement and vital checks. The browser timer applies
     // drowning, border damage, burning, status effects, and hunger; fall damage
     // remains driven by inbound `PlayerMoved` packets.
@@ -3938,6 +3988,7 @@ where
                     None,
                     &mut bow_draw,
                     &mut item_in_use,
+                    &mut shield,
                     &mut dimension_reset,
                     &mut end_exit,
                     packet_id,
@@ -4107,4 +4158,37 @@ where
         }
 
     }
+}
+
+/// Wears the shield in `native` by `amount`, resending the slot and, when it
+/// breaks, removing it and sending the break event first so the client plays the
+/// break sound and particles from the stack that is still there.
+async fn wear_blocking_shield<T, P>(
+    conn: &mut lodestone_net::Connection<T>,
+    state: &mut State,
+    proto: &P,
+    inventory: &mut PlayerInventory,
+    native: usize,
+    amount: u32,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    if amount == 0 {
+        return Ok(());
+    }
+    let Some(mut stack) = inventory.native(native).cloned() else { return Ok(()) };
+    let broke = crate::shield::wear(&mut stack, amount);
+    if broke {
+        // 47 breaks the main-hand item and 48 the off-hand one.
+        let event = if native == OFFHAND_NATIVE { 48 } else { 47 };
+        apply(conn, state, proto.encode_entity_event(LOCAL_PLAYER_ENTITY_ID, event)).await?;
+    }
+    let remaining = (!broke).then_some(stack);
+    inventory.set_native(native, remaining.clone());
+    if let Some(menu_slot) = window_zero_menu_slot(native) {
+        apply(conn, state, proto.encode_container_slot(0, 0, menu_slot, remaining.as_ref())).await?;
+    }
+    Ok(())
 }

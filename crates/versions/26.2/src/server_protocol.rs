@@ -4372,6 +4372,16 @@ impl ServerProtocol for V770ServerProtocol {
     /// every value this server sends (3, 6, 7, 18) is inside `i8`'s positive
     /// range, but the cast is `as i8` rather than a bounds check because vanilla
     /// itself has negative-valued events and a future one must round-trip.
+    fn encode_item_cooldown(&self, group: &str, ticks: i32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.string(group);
+        w.var_i32(ticks);
+        ServerDirective::Send {
+            packet_id: play::clientbound::COOLDOWN,
+            payload: w.into_vec(),
+        }
+    }
+
     fn encode_entity_event(&self, entity_id: i32, event: u8) -> ServerDirective {
         let mut w = Writer::default();
         w.i32(entity_id);

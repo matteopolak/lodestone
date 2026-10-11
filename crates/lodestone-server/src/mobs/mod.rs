@@ -481,6 +481,8 @@ pub(crate) use falling_blocks::merge_falling_block_tick_effect_batches;
 // `VehicleCollision` stays private, used only within this file's own
 // `tick_vehicles`.
 mod vehicles;
+mod vehicle_damage;
+pub use vehicle_damage::VehicleSource;
 mod cushion;
 mod item_frame;
 pub use item_frame::{
@@ -2547,6 +2549,8 @@ pub struct MobSim<'w> {
     trample_rng: SpawnRng,
     /// The `mob_griefing` game rule.
     mob_griefing: bool,
+    /// The `entity_drops` game rule: whether a broken vehicle drops its item.
+    entity_drops: bool,
     /// Players struck by a hostile mob's melee attack this tick, awaiting the
     /// driver's `PlayerVitals::apply_damage` call — the same
     /// handoff shape as [`pending_detonations`](Self::pending_detonations)
@@ -2917,17 +2921,8 @@ struct TrackedVehicle {
     /// for the wire-index collision this stands clear of.
     paddle_left: bool,
     paddle_right: bool,
-    /// Vanilla's own shared vehicle "hurt" metadata field — ticks remaining on the rocking animation,
-    /// set to `10` by a hit and counted down one per tick.
-    hurt_time: i32,
-    /// Vanilla's own shared vehicle "hurt direction" metadata field — which way the hull tips. Negated on
-    /// every hit, so consecutive punches rock it alternately, and its registered
-    /// default is **`1`**, not `0`: the client multiplies the whole rock angle by
-    /// it, so a zero here draws a perfectly still boat.
-    hurt_dir: i32,
-    /// Vanilla's own shared vehicle "damage" metadata field — accumulated damage x 10, decayed by
-    /// `1.0` per tick. It is the amplitude of the rock.
-    damage: f32,
+    /// The rock state streamed as entity data 8/9/10.
+    hurt: vehicle_damage::VehicleHurt,
 }
 
 /// One live cushion: a stationary, block-attached seat with a dye colour.
@@ -3104,6 +3099,8 @@ struct TrackedMinecart {
     /// Saved fields the sim does not model (display block, a command or
     /// spawner cart's data, a loot table), kept verbatim across a save.
     carried: Vec<(String, lodestone_core::Nbt)>,
+    /// The rock state streamed as entity data 8/9/10.
+    hurt: vehicle_damage::VehicleHurt,
 }
 
 /// One per-entity animation cue a hit produced, for
@@ -3189,6 +3186,8 @@ pub struct PlayerHit {
     /// The damage type's registry name, which decides whether armour,
     /// enchantments and effects reduce the hit.
     pub damage_type: &'static str,
+    /// Seconds the attacker's weapon disables a shield it strikes, `0` for none.
+    pub shield_disable_seconds: f32,
 }
 
 /// One vanilla zombie hurt-handler reinforcement roll that passed — the *decision*

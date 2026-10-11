@@ -363,6 +363,16 @@ impl MinecartKind {
         matches!(self, Self::Furnace)
     }
 
+    /// The item a broken cart drops: the cart's own item, or a plain minecart
+    /// for the command-block and spawner kinds.
+    #[must_use]
+    pub fn drop_item(self) -> ResourceKey {
+        match self {
+            Self::CommandBlock | Self::Spawner => Self::Plain.entity_type(),
+            other => other.entity_type(),
+        }
+    }
+
     /// Inventory slot count: `0` for a kind with
     /// no inventory at all (see this module's own doc comment for why that
     /// storage is currently unreachable through any menu).
@@ -605,28 +615,23 @@ impl<'w> MobSim<'w> {
                 push: Vec3d::ZERO,
                 fuse: -1,
                 carried: Vec::new(),
+                hurt: super::vehicle_damage::VehicleHurt::REST,
             },
         );
         id
     }
 
-    /// Removes cart `id`, spilling its slots and, with `drop_item`, dropping
-    /// the cart's own item. `false` when `id` is not a minecart. Riders lose
-    /// their seat on the next `sync_riders`.
-    pub fn break_minecart(&mut self, id: i32, drop_item: bool) -> bool {
-        self.spill_minecart_contents(id);
+    /// Removes cart `id`; with `drops` it spills its slots and drops its item.
+    /// `false` when `id` is not a minecart. Its riders lose their seat.
+    pub fn break_minecart(&mut self, id: i32, drops: bool) -> bool {
+        if drops {
+            self.spill_minecart_contents(id);
+        }
         let Some(cart) = self.minecarts.remove(&id) else { return false };
-        if drop_item && cart.kind != MinecartKind::Spawner {
+        self.eject_riders(id);
+        if drops {
             let at = Vec3::new(cart.motion.position.x, cart.motion.position.y, cart.motion.position.z);
-            self.spawn_item(
-                &ItemStack::new(cart.kind.entity_type(), 1),
-                at,
-                Vec3::new(0.0, 0.2, 0.0),
-                lodestone_entity::item_entity::ItemLifecycle::newly_dropped(
-                    1,
-                    lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
-                ),
-            );
+            self.drop_vehicle_item(ItemStack::new(cart.kind.drop_item(), 1), at);
         }
         true
     }
@@ -948,6 +953,7 @@ fn tick_one_minecart(
     ridden: bool,
     block_state: &dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId,
 ) -> (Option<(Vec3, f32)>, bool) {
+    cart.hurt.tick();
     let view = MinecartCollision { block_state };
     let profile = PhysicsProfile::default();
     let prev_position = cart.motion.position;
@@ -1683,7 +1689,13 @@ mod tests {
         assert!(sim.add_minecart_fuel(id, "minecraft:coal", Vec3::new(8.5, 61.0625, 9.5)));
         assert_eq!(sim.minecart_fuel(id), FURNACE_FUEL_TICKS_PER_ITEM);
         let snap = snapshot_of(&sim, id);
-        assert_eq!(snap.metadata, vec![crate::protocol::MetadataField::MinecartFuel(true)]);
+        assert_eq!(
+            snap.metadata,
+            vec![
+                crate::protocol::MetadataField::VehicleHurt { time: 0, dir: 1, damage: 0.0 },
+                crate::protocol::MetadataField::MinecartFuel(true),
+            ]
+        );
         assert!(!sim.add_minecart_fuel(id, "minecraft:stone", Vec3::new(8.5, 61.0625, 9.5)), "non-fuel must be refused");
     }
 

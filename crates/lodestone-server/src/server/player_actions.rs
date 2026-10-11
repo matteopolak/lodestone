@@ -37,6 +37,7 @@ use super::*;
 /// every other self-facing identity built in this file.
 pub(super) fn apply_attack(
     mobs: &MobHandle,
+    creative: bool,
     player_pos: Option<(f64, f64, f64)>,
     sprinting: bool,
     inventory: &PlayerInventory,
@@ -60,6 +61,11 @@ pub(super) fn apply_attack(
     // modifiers.
     let raw_damage = effects.melee_damage(inventory.combat_stats().attack_damage);
     mobs.with(|sim| {
+        // Boats and minecarts take the vehicle damage model, not the mob pipeline.
+        if sim.is_vehicle(entity_id) {
+            sim.hurt_vehicle(entity_id, raw_damage, crate::mobs::VehicleSource::Player { creative });
+            return;
+        }
         sim.attack_from_player(
             entity_id,
             Some(PlayerIdentity {
@@ -70,7 +76,7 @@ pub(super) fn apply_attack(
             raw_damage,
             DamageFlags::default(),
             knockback_power,
-        )
+        );
     });
 }
 

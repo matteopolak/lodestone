@@ -199,7 +199,7 @@ fn equipment_for_slot(slot: EquipmentSlot, armor_type: i32) -> Option<Item> {
 
 /// Mob's populate default equipment slots — the generic armour-upgrade roll every
 /// species takes unless its own override skips calling `super` (`Drowned`,
-/// `WitherSkeleton`, `Pillager`, all transcribed as *not* calling this).
+/// `WitherSkeleton`, `Pillager`, `Vindicator`, all transcribed as *not* calling this).
 ///
 /// Never overwrites a slot [`EquipmentSlots::get`] already reports occupied,
 /// matching `itemStack.isEmpty()`'s guard — so calling this before a
@@ -298,6 +298,11 @@ pub fn populate_default_equipment_slots(
         // unconditional crossbow.
         EntityType::Pillager => {
             slots.set(EquipmentSlot::MainHand, Item::Crossbow);
+        }
+        // Vindicator's populate default equipment slots: no `super`, just an
+        // unconditional iron axe (raid buffs enchant it later).
+        EntityType::Vindicator => {
+            slots.set(EquipmentSlot::MainHand, Item::IronAxe);
         }
         // Every other species: the generic roll alone, the honest default for
         // a class that declares no override at all.
@@ -533,6 +538,15 @@ mod tests {
         let mut rng = Script::new(Vec::new(), Vec::new());
         let slots = populate_default_equipment_slots(EntityType::Pillager, &mut rng, 1.0, false);
         assert_eq!(slots.main_hand, Some(item("crossbow")));
+    }
+
+    /// A vindicator always holds an iron axe and no armour.
+    #[test]
+    fn a_vindicator_always_holds_an_iron_axe() {
+        let mut rng = Script::new(Vec::new(), Vec::new());
+        let slots = populate_default_equipment_slots(EntityType::Vindicator, &mut rng, 1.0, true);
+        assert_eq!(slots.main_hand, Some(item("iron_axe")));
+        assert_eq!(slots.head, None);
     }
 
     /// The zombie weapon roll's three-way split, each branch driven

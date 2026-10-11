@@ -200,6 +200,8 @@ pub(super) async fn dispatch_play_packet<T, P, S>(
     // counts the remaining duration and completes the action; the client sends
     // nothing when a steak finishes.
     item_in_use: &mut Option<ItemInUse>,
+    // This connection's raised shield and disable cooldown; see [`crate::shield`].
+    shield: &mut crate::shield::ShieldState,
     // Set when a `ClientCommand`'s `PERFORM_RESPAWN` just fired *and* `source`
     // above was a portal-travelled dimension — see `apply_client_command`'s own
     // parameter comment. Both connection loops rebuild the home view before
@@ -617,6 +619,7 @@ where
             // re-checks the item because a container click can change the same
             // slot without this packet.
             *item_in_use = None;
+            shield.lower();
             apply_carried_item_changed(inventory, slot);
             // The selected slot is the main hand other players see.
             republish_inventory(players, player_uuid, inventory);
@@ -1108,8 +1111,13 @@ where
                 }
                 return Ok(());
             }
+            // A spectator cannot hurt anything.
+            if *game_mode == GameMode::Spectator {
+                return Ok(());
+            }
             apply_attack(
                 mobs,
+                *game_mode == GameMode::Creative,
                 *player_pos,
                 *sprinting,
                 inventory,
@@ -1522,7 +1530,13 @@ where
             *bow_draw = None;
             *item_in_use = None;
             match outcome {
-                UseItemOutcome::Nothing => {}
+                UseItemOutcome::Nothing => {
+                    // A shield is raised by a use that nothing else consumed.
+                    if *game_mode != GameMode::Spectator {
+                        let now = u64::try_from(world.time().game_time).unwrap_or(0);
+                        shield.raise(inventory.native(boat_native), boat_native, now);
+                    }
+                }
                 UseItemOutcome::Draw(draw) => *bow_draw = Some(draw),
                 UseItemOutcome::Consuming(started) => *item_in_use = Some(started),
                 UseItemOutcome::Equipped(swap) => {
@@ -1570,6 +1584,7 @@ where
             // A release before the consume clock expires cancels the use with
             // no food applied.
             *item_in_use = None;
+            shield.lower();
             if let Some(draw) = bow_draw.take() {
                 let fired = apply_release_use_item(
                     mobs,
@@ -1591,6 +1606,7 @@ where
         // client prediction to correct, unlike `RenameItem`/`EditBook`'s
         // resends just above.
         ServerBound::SwapItemInHand => {
+            shield.lower();
             let main_native = usize::from(inventory.selected_hotbar_slot());
             let main_item = inventory.native(main_native).cloned();
             let off_item = inventory.native(OFFHAND_NATIVE).cloned();

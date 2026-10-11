@@ -675,6 +675,27 @@ impl<'w> MobSim<'w> {
                 }
             }
 
+            // Boats and minecarts are targets, except for the one their shooter rides.
+            let vehicle_boxes = self
+                .vehicles
+                .iter()
+                .map(|(&id, v)| {
+                    (id, lodestone_physics::EntityDimensions::new(crate::boat::BOAT_WIDTH as f32, crate::boat::BOAT_HEIGHT as f32, 0.0).bounding_box(v.motion.position))
+                })
+                .chain(self.minecarts.iter().map(|(&id, c)| (id, super::minecart::MINECART_DIMENSIONS.bounding_box(c.motion.position))));
+            for (id, bb) in vehicle_boxes {
+                if Some(id) == owner || owner.is_some_and(|o| self.vehicle_of(o) == Some(id)) {
+                    continue;
+                }
+                let min = Vec3::new(bb.min_x - margin, bb.min_y - margin, bb.min_z - margin);
+                let max = Vec3::new(bb.max_x + margin, bb.max_y + margin, bb.max_z + margin);
+                if let Some(t) = lodestone_entity::projectile::clip_aabb(from, delta, min, max)
+                    && nearest.is_none_or(|(best, _)| t < best)
+                {
+                    nearest = Some((t, id));
+                }
+            }
+
             let block_t = first_solid_along(self.world, from, delta);
             match (nearest, block_t) {
                 (Some((entity_t, target)), block) if block.is_none_or(|b| entity_t <= b) => {
@@ -827,6 +848,17 @@ impl<'w> MobSim<'w> {
                 .is_some_and(|m| m.entity_type().path() == "blaze")
         {
             effect.damage = lodestone_entity::projectile::SNOWBALL_BLAZE_DAMAGE;
+        }
+        // A vehicle rocks even from a hit that deals nothing, like a snowball.
+        if self.is_vehicle(hit.target) {
+            if hurts_on_direct_hit(&hit.entity_type) {
+                self.hurt_vehicle(
+                    hit.target,
+                    effect.damage,
+                    super::VehicleSource::Projectile { creative_shooter: hit.shooter_creative },
+                );
+            }
+            return;
         }
         if effect.damage <= 0.0 {
             return;
@@ -1023,6 +1055,7 @@ impl<'w> MobSim<'w> {
                         attacker_pos: impact.location,
                         poison_ticks: 0,
                         damage_type: "indirect_magic",
+                        shield_disable_seconds: 0.0,
                     }),
                     mob_effects::SplashEffect::Timed { effect_id, duration, amplifier } => {
                         self.pending_player_effects.push((identity.uuid, effect_id, duration, amplifier));

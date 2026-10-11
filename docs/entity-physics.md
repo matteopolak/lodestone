@@ -68,6 +68,10 @@ Step height is 1.0 while player-ridden; a mount with no movement-speed attribute
 
 Placement and neighbour update only schedule a tick at the block's own position; the fall runs from the scheduled-tick drain (inline settling would teleport). `v_n = 0.98 * v_(n-1) - 0.04` with displacement before drag; landing height is resolved once at spawn; falls cap at 600 ticks; a placed block waits 2 ticks. The imitated state travels only in the add-entity Object Data field (a client ignoring it draws state 0 silently). Spawn (clear origin, then spawn) and landing (place, then discard) are ordered pairs.
 
+### Vehicle damage
+
+`mobs::vehicle_damage` is the single entry for hurting a boat or minecart (`MobSim::hurt_vehicle`); player melee, projectile impact and `blast_vehicles` all call it. A hit flips the hurt direction, sets hurt time 10 and adds `damage * 10` to the accumulated damage; both decay 1 per tick. The vehicle breaks when the total exceeds 40 (a wooden sword's 4 only rocks it, a diamond sword's 7 breaks it). A creative source discards it with no drop or spill; a mob-caused blast is ignored when `mob_griefing` is off. A break dismounts riders, spills a container cart's slots, then drops the item (command-block and spawner carts drop a plain minecart); drops are gated by `entity_drops`. A TNT cart hit by a blast or fire, or moving at horizontal speed squared >= 0.01, primes its fuse instead of dropping. Hurt time, direction and damage go on the wire as entity data 8, 9 and 10 (`MetadataField::VehicleHurt`).
+
 ## How to change it
 
 - New name-keyed block constant: a match arm in the shared `block_physics` lookup, never a private table; a per-version change needs a `VersionAdapter` override. A data bump regenerates the collision census and solidity bitsets and updates the dump comparisons.

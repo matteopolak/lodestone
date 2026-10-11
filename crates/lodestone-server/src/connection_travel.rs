@@ -170,6 +170,10 @@ impl<'a> TravelController<'a> {
         world: &crate::world_state::WorldStateHandle,
     ) {
         self.gateway_cooldown = self.gateway_cooldown.saturating_sub(1);
+        // A spectator has no physics and so touches no portal, gateway or exit
+        // portal: it counts as standing nowhere, which also abandons a trip it
+        // had already started.
+        let position = position.filter(|_| game_mode != GameMode::Spectator);
         let feet = position.map(|(x, y, z)| BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32));
         self.cancel_if_left(position);
         if self.is_preparing() { return; }
@@ -1034,6 +1038,31 @@ mod tests {
             decaying.tick(source, source, &registry, &mobs, 1, inside, GameMode::Creative, &world);
             assert!(!decaying.is_preparing());
         }
+    }
+
+    #[test]
+    fn a_spectator_inside_a_portal_never_prepares_and_loses_a_started_trip() {
+        let home = TravelWorld::new(Dimension::Overworld);
+        home.portal(BlockPos::new(0, 70, -1));
+        let source = SourceRef::Borrowed(&home);
+        let world = crate::world_state::WorldStateHandle::new();
+        let registry = BlockEntityHandle::new();
+        let mobs = MobHandle::default();
+        let inside = Some((0.5, 70.0, -0.5));
+        // The control: a creative player at the same spot prepares on the first tick,
+        // so a spectator that does not is not merely failing to reach the portal.
+        let mut creative = TravelController::new(source);
+        creative.tick(source, source, &registry, &mobs, 1, inside, GameMode::Creative, &world);
+        assert!(creative.is_preparing());
+        let mut spectator = TravelController::new(source);
+        for _ in 0..200 {
+            spectator.tick(source, source, &registry, &mobs, 1, inside, GameMode::Spectator, &world);
+            assert!(!spectator.is_preparing());
+        }
+        assert_eq!(spectator.portal.ticks(), 0);
+        // Switching to spectator mid-trip abandons it.
+        creative.tick(source, source, &registry, &mobs, 1, inside, GameMode::Spectator, &world);
+        assert!(!creative.is_preparing());
     }
 
     #[test]

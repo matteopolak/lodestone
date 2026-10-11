@@ -299,6 +299,7 @@ impl<'w> MobSim<'w> {
         destroys_blocks: bool,
     ) -> Vec<(i32, f32)> {
         self.blast_frames(centre, radius, by_mob, destroys_blocks);
+        self.blast_vehicles(centre, radius, by_mob);
         let mut dealt = Vec::new();
         for m in &mut self.mobs {
             let shape = m.shape();

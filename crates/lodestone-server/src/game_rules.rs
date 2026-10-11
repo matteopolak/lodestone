@@ -299,6 +299,8 @@ pub const GAME_RULES: &[GameRuleSpec] = &[
 pub const ADVANCE_TIME: &str = "advance_time";
 /// `GameRules.MOB_GRIEFING`.
 pub const MOB_GRIEFING: &str = "mob_griefing";
+/// The `entity_drops` rule name.
+pub const ENTITY_DROPS: &str = "entity_drops";
 /// `universal_anger` game rule.
 pub const UNIVERSAL_ANGER: &str = "universal_anger";
 /// `GameRules.RANDOM_TICK_SPEED`.
@@ -462,6 +464,12 @@ impl GameRules {
     #[must_use]
     pub fn mob_griefing(&self) -> bool {
         self.boolean(MOB_GRIEFING)
+    }
+
+    /// `entity_drops` — whether a broken non-mob entity drops its item.
+    #[must_use]
+    pub fn entity_drops(&self) -> bool {
+        self.boolean(ENTITY_DROPS)
     }
 
     /// `universal_anger` — whether a hurt neutral mob turns on every player.
@@ -633,6 +641,12 @@ impl GameRulesHandle {
     #[must_use]
     pub fn mob_griefing(&self) -> bool {
         self.with(|r| r.mob_griefing())
+    }
+
+    /// [`GameRules::entity_drops`] through the shared store.
+    #[must_use]
+    pub fn entity_drops(&self) -> bool {
+        self.with(|r| r.entity_drops())
     }
 
     /// [`GameRules::universal_anger`] through the shared store.

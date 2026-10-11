@@ -260,9 +260,9 @@ impl<'w> MobSim<'w> {
                     // consumer as a real zero rather than as an absent field, or
                     // the hull stays tipped over for as long as the boat exists.
                     crate::protocol::MetadataField::VehicleHurt {
-                        time: vehicle.hurt_time,
-                        dir: vehicle.hurt_dir,
-                        damage: vehicle.damage,
+                        time: vehicle.hurt.time,
+                        dir: vehicle.hurt.dir,
+                        damage: vehicle.hurt.damage,
                     },
                 ],
                 // The boat supplies no additional spawn data.
@@ -352,11 +352,14 @@ impl<'w> MobSim<'w> {
             // `MinecartFuel` field and it only ever fires from the furnace
             // loop, so the two can never collide the way `MetadataField::Item`'s
             // own doc describes for index 8.
-            let metadata = if cart.kind.is_furnace() {
-                vec![MetadataField::MinecartFuel(cart.fuel > 0)]
-            } else {
-                Vec::new()
-            };
+            let mut metadata = vec![MetadataField::VehicleHurt {
+                time: cart.hurt.time,
+                dir: cart.hurt.dir,
+                damage: cart.hurt.damage,
+            }];
+            if cart.kind.is_furnace() {
+                metadata.push(MetadataField::MinecartFuel(cart.fuel > 0));
+            }
             out.push(EntitySnapshot {
                 id,
                 uuid: cart.uuid,

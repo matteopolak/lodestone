@@ -808,6 +808,13 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes an item cooldown (the cooldown packet): items in `group` cannot
+    /// be used for `ticks` ticks. The default emits nothing.
+    fn encode_item_cooldown(&self, group: &str, ticks: i32) -> ServerDirective {
+        let _ = (group, ticks);
+        ServerDirective::None
+    }
+
     /// Encodes vanilla's entity-event packet — one raw per-entity-type
     /// status byte, vanilla's own level broadcast-entity-event routine's whole payload.
     ///
@@ -2222,6 +2229,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_hurt_animation(&self, entity_id: i32, yaw: f32) -> ServerDirective {
         (**self).encode_hurt_animation(entity_id, yaw)
+    }
+
+    fn encode_item_cooldown(&self, group: &str, ticks: i32) -> ServerDirective {
+        (**self).encode_item_cooldown(group, ticks)
     }
 
     fn encode_entity_event(&self, entity_id: i32, event: u8) -> ServerDirective {

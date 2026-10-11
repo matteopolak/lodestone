@@ -561,8 +561,8 @@ pub enum MetadataField {
     /// and index 9's has two. None of them is a living entity, so no census
     /// column separates them and the guard is the same one
     /// [`BoatPaddles`](Self::BoatPaddles) states: the *producer*'s own species
-    /// knowledge. Only [`crate::mobs::MobSim::snapshots`]'s vehicle loop ever
-    /// builds this variant, and every entry in that loop is a boat.
+    /// knowledge. Only [`crate::mobs::MobSim::snapshots`]'s boat and minecart
+    /// loops ever build this variant.
     ///
     /// `dir`'s resting value is **`1`**, not `0` — vanilla's own
     /// vehicle-entity synced-data-definition registered default — and it multiplies the whole

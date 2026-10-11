@@ -346,7 +346,7 @@ impl<'w> MobSim<'w> {
 
         // Retain the attacked position from each record so the resolution pass
         // can identify which player, if any, receives the hit.
-        let mut hits: Vec<(Option<i32>, Vec3, f32, Vec3, bool)> = Vec::new();
+        let mut hits: Vec<(Option<i32>, Vec3, f32, Vec3, bool, f32)> = Vec::new();
         let velocities: Vec<(i32, Vec3)> = self.mobs.iter().map(|m| (m.id, m.mob.velocity())).collect();
         let mut detonations: Vec<(i32, Vec3)> = Vec::new();
         let mut bred: Vec<(i32, Vec3, ResourceKey)> = Vec::new();
@@ -534,6 +534,7 @@ impl<'w> MobSim<'w> {
                                 attacker_pos: here,
                                 poison_ticks: m.puff.sting_poison_ticks(),
                                 damage_type: "mob_attack",
+                                shield_disable_seconds: 0.0,
                             });
                         }
                     }
@@ -608,7 +609,7 @@ impl<'w> MobSim<'w> {
                     let relative = (speed - target_speed).max(0.0);
                     if spear.damage.test(ticks - spear.delay_ticks, speed, relative, 0.2) {
                         let damage = m.attack_damage + (relative * f64::from(spear.damage_multiplier)).floor() as f32;
-                        hits.push((m.attack_target_id, target_pos, damage, at, false));
+                        hits.push((m.attack_target_id, target_pos, damage, at, false, crate::shield::disable_seconds_for_weapon(m.equipment.main_hand.map(|item| item.name()))));
                         m.last_stab_tick = Some(tick_count);
                     }
                 }
@@ -620,7 +621,14 @@ impl<'w> MobSim<'w> {
                     m.entity_type.path(),
                     "zombie" | "husk" | "zombie_villager" | "drowned"
                 );
-                hits.push((m.attack_target_id, target_pos, m.attack_damage, m.position(), infects));
+                hits.push((
+                    m.attack_target_id,
+                    target_pos,
+                    m.attack_damage,
+                    m.position(),
+                    infects,
+                    crate::shield::disable_seconds_for_weapon(m.equipment.main_hand.map(|item| item.name())),
+                ));
             }
             // A stung bee's self-destruct roll — see
             // `bee_sting_death_roll` for the exact formula
@@ -885,7 +893,7 @@ impl<'w> MobSim<'w> {
             self.spawn_potion_projectile_from(key, projectile, Some(shooter), potion);
         }
         let mut infected: Vec<i32> = Vec::new();
-        for (target_id, target_pos, raw_damage, attacker_pos, infects) in hits {
+        for (target_id, target_pos, raw_damage, attacker_pos, infects, shield_disable_seconds) in hits {
             if let Some(target_id) = target_id
                 && let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id)
             {
@@ -914,6 +922,7 @@ impl<'w> MobSim<'w> {
                     attacker_pos,
                     poison_ticks: 0,
                     damage_type: "mob_attack",
+                    shield_disable_seconds,
                 });
                 // A tamed pet retaliates against the source that hurt its
                 // owner. The event carries the attacker's position rather than

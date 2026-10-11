@@ -59,6 +59,7 @@ impl<'w> MobSim<'w> {
             dismount_placements: Vec::new(),
             trample_rng: SpawnRng::new(TRAMPLE_SEED),
             mob_griefing: true,
+            entity_drops: true,
             pending_player_hits: Vec::new(),
             pending_mining_fatigue: Vec::new(),
             pending_vocalisations: Vec::new(),
@@ -144,6 +145,12 @@ impl<'w> MobSim<'w> {
     /// Sets the `mob_griefing` game rule: whether mobs may change blocks.
     pub fn set_mob_griefing(&mut self, allowed: bool) -> &mut Self {
         self.mob_griefing = allowed;
+        self
+    }
+
+    /// Sets the `entity_drops` game rule: whether broken vehicles drop items.
+    pub fn set_entity_drops(&mut self, allowed: bool) -> &mut Self {
+        self.entity_drops = allowed;
         self
     }
 

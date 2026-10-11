@@ -241,6 +241,26 @@ pub fn cushion_sound(kind: CushionSound, pos: Vec3, seed: i64) -> Option<WorldEf
     })
 }
 
+/// A shield sound at the player's `pos`: the block sound at full volume, the
+/// disable sound at 0.8, both in the player category with a pitch of
+/// `0.8 + 0.4 * pitch_roll`.
+#[must_use]
+pub fn shield_sound(disabled: bool, pos: Vec3, pitch_roll: f32, seed: i64) -> Option<WorldEffect> {
+    let (sound, volume) = if disabled {
+        ("minecraft:item.shield.break", 0.8)
+    } else {
+        ("minecraft:item.shield.block", 1.0)
+    };
+    sound_exists(sound).then(|| WorldEffect::Sound {
+        sound: sound.to_owned(),
+        category: SoundCategory::Player,
+        pos,
+        volume,
+        pitch: 0.8 + pitch_roll * 0.4,
+        seed,
+    })
+}
+
 /// An item-frame sound at `pos`: full volume and pitch in the neutral category,
 /// named for the plain or glowing frame.
 #[must_use]

@@ -510,6 +510,7 @@ pub mod eula;
 pub mod properties;
 mod scheduled_tick;
 mod server;
+mod shield;
 mod sleep;
 mod spawn;
 /// Spawn eggs: which entity a `*_spawn_egg` names, and where a right-click puts
@@ -664,6 +665,7 @@ pub use mob_spawn::{
     SpawnState, allowed_in_peaceful, check_despawn, resolve_mob_shape,
 };
 pub use natural_spawn::NaturalSpawner;
+pub use mobs::minecart::MinecartKind;
 pub use mobs::{
     AttackOutcome, ChunkWorld, CommandEntity, DamageOutcome, Detonation, EntityDataError, EntityKill, MountOutcome, Rider, InteractOutcome, LiveMobSource, MobHandle, MobOwner,
     MobSim, PerceivedPlayer, PlayerHit, PlayerIdentity, PlayerPerception, SimMob, TeleportOutcome,
