@@ -1084,6 +1084,7 @@ fn clear_narrows_by_item_and_by_count_independently() {
 /// it.
 #[test]
 fn setblock_resolves_position_and_fill_enumerates_the_box_and_caps_it() {
+    use lodestone_server::commands::BlockEditMode;
     use lodestone_server::{DirectedEffect, Effect};
     let commands = ServerCommands::new();
     let state = lodestone_server::world_state::WorldStateHandle::new();
@@ -1097,9 +1098,23 @@ fn setblock_resolves_position_and_fill_enumerates_the_box_and_caps_it() {
         outcome.effects,
         [DirectedEffect::new(
             uuid(1),
-            Effect::SetBlock { pos: (11, 65, 4), block: fixture_state("minecraft:stone") }
+            Effect::SetBlock { pos: (11, 65, 4), block: fixture_state("minecraft:stone"), mode: BlockEditMode::Replace }
         )]
     );
+
+    // The trailing mode word picks what happens to the block being replaced.
+    for (word, mode) in [("replace", BlockEditMode::Replace), ("destroy", BlockEditMode::Destroy), ("keep", BlockEditMode::Keep)] {
+        let out = run_stateful(&commands, &state, &players, &alice, &format!("setblock ~11 ~1 ~4 minecraft:stone {word}"))
+            .expect("root matched");
+        let [directed] = out.effects.as_slice() else { panic!("{out:?}") };
+        let Effect::SetBlock { mode: got, .. } = &directed.effect else { panic!("{directed:?}") };
+        assert_eq!(*got, mode, "setblock ... {word}");
+        let out = run_stateful(&commands, &state, &players, &alice, &format!("fill 1 1 1 2 2 2 minecraft:dirt {word}"))
+            .expect("root matched");
+        let [directed] = out.effects.as_slice() else { panic!("{out:?}") };
+        let Effect::Fill { mode: got, .. } = &directed.effect else { panic!("{directed:?}") };
+        assert_eq!(*got, mode, "fill ... {word}");
+    }
 
     // A 2x2x2 box, corners given in the "wrong" order — `to` before `from` on
     // every axis — still enumerates all eight distinct cells.
@@ -1112,7 +1127,7 @@ fn setblock_resolves_position_and_fill_enumerates_the_box_and_caps_it() {
     )
     .expect("root matched");
     let [directed] = fill.effects.as_slice() else { panic!("{fill:?}") };
-    let Effect::Fill { positions, block } = &directed.effect else { panic!("{directed:?}") };
+    let Effect::Fill { positions, block, mode: _ } = &directed.effect else { panic!("{directed:?}") };
     assert_eq!(*block, fixture_state("minecraft:dirt"));
     let mut sorted = positions.clone();
     sorted.sort();

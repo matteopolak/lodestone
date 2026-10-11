@@ -28,7 +28,7 @@
 //! damage/knockback) and [`MobSim::pending_detonations`] (the block half),
 //! **exactly the two calls `MobSim::tick` already makes for a creeper's own
 //! fuse**. `crate::explosion_blocks::destroy_blocks` and
-//! `crate::block_drops::drop_explosion_loot_in_blast` — wired to
+//! `crate::block_drops::blast_blocks` — wired to
 //! [`MobSim::take_detonations`]'s drain in `tick::run_tick_loop` — need no
 //! TNT-specific call site at all: this module is a second *producer* for a
 //! block-destruction pipeline that already exists and is already wired, not a
@@ -272,8 +272,8 @@ impl<'w> MobSim<'w> {
     /// destroyed, at [`random_short_fuse`]'s shortened fuse rather than
     /// [`DEFAULT_FUSE_TIME`]. Draws from [`Self`]'s own isolated `tnt_rng`, so
     /// a chain reaction cannot shift which roll a mob spawn or a block drop
-    /// sees. See `crate::block_drops::drop_explosion_loot_in_blast`'s own doc
-    /// for the caller that reports *where*.
+    /// sees. See `crate::block_drops::blast_blocks` for the caller that
+    /// reports *where*.
     pub fn spawn_tnt_short_fuse(&mut self, position: Vec3) -> i32 {
         let fuse = random_short_fuse(DEFAULT_FUSE_TIME, &mut self.tnt_rng);
         self.spawn_tnt(position, fuse)

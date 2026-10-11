@@ -204,3 +204,83 @@ fn a_shulker_items_contents_round_trip_through_nbt() {
         [(0, "minecraft:cobblestone".to_owned(), 64), (13, "minecraft:diamond".to_owned(), 3), (26, "minecraft:stick".to_owned(), 7)]
     );
 }
+
+fn playing_jukebox(disc: &str, ticks: i64) -> Nbt {
+    let mut nbt = base(JUKEBOX_ID, BlockPos::new(0, 64, 0));
+    set_jukebox_disc(&mut nbt, Some(&stack(disc, 1)));
+    set_field(&mut nbt, "ticks_since_song_started", Nbt::Long(ticks));
+    nbt
+}
+
+/// Every disc's song length comes from the reference song file: the length in
+/// seconds rounded up to ticks, plus one second of padding.
+#[test]
+fn song_lengths_are_the_reference_ones() {
+    let Some(root) = reference_root() else {
+        eprintln!("reference cache absent; skipping");
+        return;
+    };
+    let mut checked = 0;
+    for (index, (name, _)) in crate::container_signal::DISC_SIGNALS.iter().enumerate() {
+        let text = std::fs::read_to_string(root.join(format!("jukebox_song/{name}.json"))).expect("song file");
+        let json: serde_json::Value = serde_json::from_str(&text).expect("song json");
+        let seconds = json["length_in_seconds"].as_f64().expect("length");
+        let expected = (seconds * 20.0).ceil() as u64 + 20;
+        assert_eq!(song_ticks(&stack(&format!("minecraft:music_disc_{name}"), 1)), Some(expected), "{name}");
+        assert_eq!(song_of(&stack(&format!("minecraft:music_disc_{name}"), 1)).map(|(id, _)| id as usize), Some(index));
+        checked += 1;
+    }
+    assert_eq!(checked, 22);
+}
+
+/// "11" is 71 seconds: 1420 ticks plus 20 of padding. It plays for exactly
+/// 1440 ticks and ends on the next, leaving the disc and clearing the clock.
+#[test]
+fn a_song_ends_on_the_tick_after_its_length() {
+    let mut nbt = playing_jukebox("minecraft:music_disc_11", 0);
+    for tick in 0..1440 {
+        assert!(!tick_jukebox(&mut nbt), "still playing at tick {tick}");
+        assert!(jukebox_is_playing(&nbt));
+    }
+    assert!(tick_jukebox(&mut nbt), "the song ends after 1440 ticks");
+    assert!(!jukebox_is_playing(&nbt));
+    assert!(jukebox_disc(&nbt).is_some(), "the disc stays in the jukebox");
+    assert!(!tick_jukebox(&mut nbt), "an idle jukebox reports nothing");
+}
+
+/// Control: a jukebox that was never started does not tick, and one holding a
+/// disc with no song ends at once rather than playing forever.
+#[test]
+fn an_idle_jukebox_stays_idle() {
+    let mut idle = base(JUKEBOX_ID, BlockPos::new(0, 64, 0));
+    set_jukebox_disc(&mut idle, Some(&stack("minecraft:music_disc_11", 1)));
+    set_field(&mut idle, "ticks_since_song_started", Nbt::Long(5));
+    remove_field(&mut idle, "ticks_since_song_started");
+    assert!(!tick_jukebox(&mut idle));
+    let mut stray = playing_jukebox("minecraft:stone", 0);
+    assert!(tick_jukebox(&mut stray));
+}
+
+/// A dropped shulker box carries its slots up to the last occupied one:
+/// trailing empty slots are trimmed, and an empty box carries nothing. Other
+/// containers spill every stack and drop only their own item.
+#[test]
+fn a_dropped_box_trims_trailing_empty_slots_and_chests_spill() {
+    let shulker = StateId::from_state_str("minecraft:shulker_box[facing=up]").expect("state");
+    let mut slots = vec![None; 27];
+    slots[1] = Some(stack("minecraft:diamond", 5));
+    let boxed = BlockEntity::Container { id: crate::block_entities::SHULKER_BOX_ID.to_owned().into(), slots };
+    let drops = broken_drops(shulker, Some(&boxed), true);
+    assert_eq!(drops[0].components.container.len(), 2, "slots 0 and 1 travel, the 25 empty ones after do not");
+    let empty = BlockEntity::container(crate::block_entities::SHULKER_BOX_ID);
+    assert!(broken_drops(shulker, Some(&empty), true)[0].components.container.is_empty());
+
+    let chest = StateId::from_state_str("minecraft:chest[facing=north,type=single,waterlogged=false]").expect("state");
+    let mut held = BlockEntity::container("minecraft:chest");
+    if let BlockEntity::Container { slots, .. } = &mut held {
+        slots[3] = Some(stack("minecraft:apple", 2));
+        slots[20] = Some(stack("minecraft:stick", 9));
+    }
+    let spilled: Vec<(String, u32)> = broken_drops(chest, Some(&held), false).iter().map(|s| (s.item.to_string(), s.count)).collect();
+    assert_eq!(spilled, [("minecraft:apple".to_owned(), 2), ("minecraft:stick".to_owned(), 9)], "a chest spills every stack, even with drops off");
+}

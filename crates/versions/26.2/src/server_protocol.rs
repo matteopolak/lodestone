@@ -1627,6 +1627,27 @@ fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemCompo
             }
         });
     }
+    if !components.container.is_empty() {
+        entry("minecraft:container", &|w| {
+            w.var_i32(components.container.len().min(256) as i32);
+            for slot in components.container.iter().take(256) {
+                // A slot whose item the connection's registry lacks reads as empty.
+                let template = slot
+                    .as_ref()
+                    .filter(|stack| stack.count > 0)
+                    .and_then(|stack| Some((stack, item_registry_id_by_name(wire, &stack.item.to_string())?)));
+                match template {
+                    Some((stack, id)) => {
+                        w.bool(true);
+                        w.var_i32(id);
+                        w.var_i32(i32::try_from(stack.count).unwrap_or(i32::MAX));
+                        write_item_component_patch(wire, w, &stack.components, &stack.item.to_string());
+                    }
+                    None => w.bool(false),
+                }
+            }
+        });
+    }
     if let Some(map_id) = components.map_id {
         entry("minecraft:map_id", &|w| w.var_i32(map_id));
     }

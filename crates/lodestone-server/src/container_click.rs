@@ -339,7 +339,7 @@ impl MenuLayout {
                 // The beacon payment slot accepts only registered payment items.
                 MenuKind::Beacon => idx == 0 && crate::beacon::is_beacon_payment_item(&item.item.to_string()),
                 MenuKind::Lectern => false,
-                MenuKind::ShulkerBox => !crate::block_entities::is_shulker_box_item(&item.item.to_string()),
+                MenuKind::ShulkerBox => crate::block_entities::shulker_box_may_hold(item),
                 _ => true,
             },
         }

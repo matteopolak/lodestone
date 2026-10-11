@@ -35,6 +35,18 @@ use lodestone_model::{GameMode, ItemStack};
 use lodestone_data::block_states::StateId;
 use uuid::Uuid;
 
+/// How `/setblock` and `/fill` treat the block already in a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlockEditMode {
+    /// Overwrite. A block entity there is cleared with nothing dropped.
+    #[default]
+    Replace,
+    /// Break the old block first, so it drops its loot and spills what it held.
+    Destroy,
+    /// Write only into air.
+    Keep,
+}
+
 /// One thing a command wants done to one player.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
@@ -110,12 +122,14 @@ pub enum Effect {
     SetBlock {
         pos: (i32, i32, i32),
         block: StateId,
+        mode: BlockEditMode,
     },
     /// `/fill` — same self-targeted delivery constraint as [`Self::SetBlock`], one
     /// block id over every position in the (already volume-capped) region.
     Fill {
         positions: Vec<(i32, i32, i32)>,
         block: StateId,
+        mode: BlockEditMode,
     },
     /// `/say`, `/me` — a line every connected player should see. Self-targeted for
     /// delivery, like `SetBlock`: it needs the player registry's broadcast, which

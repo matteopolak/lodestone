@@ -59,6 +59,9 @@ use crate::composter::Composter;
 use crate::furnace::{Furnace, FurnaceKind};
 use crate::hopper::Hopper;
 
+mod removal;
+pub(crate) use removal::Removal;
+
 /// The runtime key for a block-entity record.
 ///
 /// Built-in keys get distinct variants so gameplay code can match them without
@@ -515,6 +518,34 @@ pub fn is_shulker_box_item(item: &str) -> bool {
     lodestone_data::block::Block::from_name(item).is_some_and(is_shulker_box)
 }
 
+/// Whether a shulker box's own slots take `item`: they refuse another shulker
+/// box, so boxes never nest. The one rule behind the menu, a hopper and a
+/// dropper.
+#[must_use]
+pub fn shulker_box_may_hold(item: &ItemStack) -> bool {
+    !is_shulker_box_item(&item.item.to_string())
+}
+
+/// What a container's slots refuse on insertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restriction {
+    /// Anything goes.
+    None,
+    /// Shulker boxes are refused.
+    NoShulkerBoxes,
+}
+
+impl Restriction {
+    /// Whether the slots take `item`.
+    #[must_use]
+    pub fn accepts(self, item: &ItemStack) -> bool {
+        match self {
+            Self::None => true,
+            Self::NoShulkerBoxes => shulker_box_may_hold(item),
+        }
+    }
+}
+
 /// Whether `block` is a shulker box of any colour.
 #[must_use]
 pub fn is_shulker_box(block: lodestone_data::block::Block) -> bool {
@@ -522,6 +553,23 @@ pub fn is_shulker_box(block: lodestone_data::block::Block) -> bool {
 }
 
 impl BlockEntity {
+    /// Whether an automated insertion (hopper, dropper) may put `item` into
+    /// this entity's slots. Only the shulker box restricts anything.
+    #[must_use]
+    pub fn accepts_item(&self, item: &ItemStack) -> bool {
+        self.restriction().accepts(item)
+    }
+
+    /// The may-place rule on this entity's slots, copyable so a caller can hold
+    /// it while the entity's slots are borrowed.
+    #[must_use]
+    pub fn restriction(&self) -> Restriction {
+        match self {
+            BlockEntity::Container { id, .. } if id.name() == SHULKER_BOX_ID => Restriction::NoShulkerBoxes,
+            _ => Restriction::None,
+        }
+    }
+
     /// Return the configured destination for an End gateway.
     ///
     /// This is deliberately a data access point, not a teleport operation: the
@@ -1498,6 +1546,9 @@ pub struct BlockEntityRegistry {
     analog_dirty: std::collections::HashSet<BlockPos>,
     /// Players looking into a shulker box, which drives its lid.
     pub(crate) lid_viewers: crate::lid_viewers::LidViewers,
+    /// Removals whose drops wait for the tick loop; see
+    /// [`destroy_deferred`](Self::destroy_deferred).
+    deferred: Vec<Removal>,
 }
 
 impl BlockEntityRegistry {
@@ -1540,10 +1591,9 @@ impl BlockEntityRegistry {
         self.entities.insert(pos, entity);
     }
 
-    /// Removes and returns the entity at `pos`, if any — e.g. once block
-    /// breaking learns to consult this registry (not done by this landing;
-    /// `crate::server`'s `apply_block_action` does not call this yet).
-    pub fn remove(&mut self, pos: BlockPos) -> Option<BlockEntity> {
+    /// Removes and returns the entity at `pos`, if any. Private on purpose:
+    /// [`destroy_at`](Self::destroy_at) is the route a block's removal takes.
+    fn remove(&mut self, pos: BlockPos) -> Option<BlockEntity> {
         let removed = self.entities.remove(&pos);
         if removed.as_ref().is_some_and(crate::container_signal::carries_analog) {
             self.analog_dirty.insert(pos);
@@ -1625,6 +1675,25 @@ impl BlockEntityRegistry {
             }
         }
         out
+    }
+
+    /// Advances every jukebox for which `ticking` holds one tick (the reference
+    /// ticks a jukebox only while its block has a record) and returns those
+    /// whose song just ended.
+    pub(crate) fn tick_jukeboxes(&mut self, ticking: &dyn Fn(BlockPos) -> bool) -> Vec<BlockPos> {
+        let mut ended = Vec::new();
+        for (&pos, entity) in &mut self.entities {
+            let BlockEntity::Opaque { id, nbt } = entity else { continue };
+            if id.name() == crate::stored_items::JUKEBOX_ID
+                && crate::stored_items::jukebox_is_playing(nbt)
+                && ticking(pos)
+                && crate::stored_items::tick_jukebox(nbt)
+            {
+                ended.push(pos);
+            }
+        }
+        ended.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z));
+        ended
     }
 
     /// The analog output of the entity-backed source a comparator facing
@@ -1978,9 +2047,11 @@ impl BlockEntityRegistry {
         // `ENABLED` on every neighbour change and on placement, and
         // the hopper block entity then simply obeys it. This registry has no world
         // access to compute `hasNeighborSignal` itself, and needs none.
+        let below_rule = below.as_ref().map_or(Restriction::None, BlockEntity::restriction);
         let moved = hopper.tick(
             enabled,
             below.as_mut().and_then(BlockEntity::hopper_slots_mut),
+            &|item| below_rule.accepts(item),
             above.as_mut().and_then(BlockEntity::hopper_slots_mut),
         );
 

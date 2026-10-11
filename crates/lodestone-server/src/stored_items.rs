@@ -195,6 +195,62 @@ pub(crate) fn set_jukebox_disc(nbt: &mut Nbt, disc: Option<&ItemStack>) {
     }
 }
 
+/// Each song's length in seconds, in registry order like
+/// [`crate::container_signal::DISC_SIGNALS`].
+const SONG_SECONDS: &[(&str, f32)] = &[
+    ("11", 71.0),
+    ("13", 178.0),
+    ("5", 178.0),
+    ("blocks", 345.0),
+    ("bounce", 234.0),
+    ("cat", 185.0),
+    ("chirp", 185.0),
+    ("creator", 176.0),
+    ("creator_music_box", 73.0),
+    ("far", 174.0),
+    ("lava_chicken", 134.0),
+    ("mall", 197.0),
+    ("mellohi", 96.0),
+    ("otherside", 195.0),
+    ("pigstep", 149.0),
+    ("precipice", 299.0),
+    ("relic", 218.0),
+    ("stal", 150.0),
+    ("strad", 188.0),
+    ("tears", 175.0),
+    ("wait", 238.0),
+    ("ward", 251.0),
+];
+
+/// Ticks a song lasts after it starts: its length plus a second of padding.
+#[must_use]
+pub(crate) fn song_ticks(stack: &ItemStack) -> Option<u64> {
+    let item = stack.item.to_string();
+    let song = item.strip_prefix("minecraft:music_disc_")?;
+    let (_, seconds) = SONG_SECONDS.iter().find(|(name, _)| *name == song)?;
+    Some((seconds * 20.0).ceil() as u64 + 20)
+}
+
+/// Whether the jukebox compound is mid-song.
+#[must_use]
+pub(crate) fn jukebox_is_playing(nbt: &Nbt) -> bool {
+    field(nbt, "ticks_since_song_started").is_some()
+}
+
+/// Advances a jukebox compound's song one tick. Returns true on the tick the
+/// song ends, which clears the clock; the disc stays.
+pub(crate) fn tick_jukebox(nbt: &mut Nbt) -> bool {
+    let Some(Nbt::Long(elapsed)) = field(nbt, "ticks_since_song_started") else { return false };
+    let elapsed = u64::try_from(*elapsed).unwrap_or(0);
+    let length = jukebox_disc(nbt).as_ref().and_then(song_ticks);
+    if length.is_none_or(|length| elapsed >= length) {
+        remove_field(nbt, "ticks_since_song_started");
+        return true;
+    }
+    set_field(nbt, "ticks_since_song_started", Nbt::Long(elapsed as i64 + 1));
+    false
+}
+
 // ---- chiseled bookshelf ---------------------------------------------------
 
 /// Whether `item` may be shelved.
@@ -328,15 +384,16 @@ pub(crate) fn tool_shatters_pot(tool: Option<&ItemStack>) -> bool {
 
 // ---- drops ----------------------------------------------------------------
 
-/// The stacks a stored-item block gives up when it is broken, besides what its
-/// loot table already rolls.
+/// The stacks a block gives up when it is removed, besides what its loot table
+/// already rolls.
 ///
-/// A shulker box keeps its contents on the item it drops; a pot drops its
-/// sherds (bricks for the plain faces) when cracked, otherwise a pot item
-/// carrying them, and its contents either way; a jukebox gives back its
-/// disc; a bookshelf spills its books. `item_drops` is `false` when the
-/// world's block-drop rule is off, which keeps only the contents that spill on
-/// their own.
+/// Contents spill whatever removed the block: every slot of a chest, hopper,
+/// furnace and the like, a pot's item, a jukebox's disc, a bookshelf's books. A
+/// shulker box is the exception, because its contents travel on the item it
+/// drops (trailing empty slots trimmed, as the item's component holds them); a
+/// pot drops its sherds (bricks for the plain faces) when cracked, otherwise a
+/// pot item carrying them. `item_drops` is `false` when the world's block-drop
+/// rule is off, which keeps only the contents that spill on their own.
 #[must_use]
 pub(crate) fn broken_drops(broken: StateId, entity: Option<&BlockEntity>, item_drops: bool) -> Vec<ItemStack> {
     let block = broken.block();
@@ -345,7 +402,8 @@ pub(crate) fn broken_drops(broken: StateId, entity: Option<&BlockEntity>, item_d
         (block, Some(BlockEntity::Container { slots, .. })) if crate::block_entities::is_shulker_box(block) => {
             if item_drops && let Ok(key) = block.name().parse() {
                 let mut stack = ItemStack::new(key, 1);
-                stack.components.container = slots.clone();
+                let kept = slots.iter().rposition(Option::is_some).map_or(0, |last| last + 1);
+                stack.components.container = slots[..kept].to_vec();
                 out.push(stack);
             }
         }
@@ -366,6 +424,7 @@ pub(crate) fn broken_drops(broken: StateId, entity: Option<&BlockEntity>, item_d
         }
         (Block::Jukebox, Some(BlockEntity::Opaque { nbt, .. })) => out.extend(jukebox_disc(nbt)),
         (Block::ChiseledBookshelf, Some(BlockEntity::Opaque { nbt, .. })) => out.extend(bookshelf_items(nbt).into_iter().flatten()),
+        (_, Some(entity)) => out.extend(entity.spilled_contents()),
         _ => {}
     }
     out

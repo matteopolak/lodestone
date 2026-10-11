@@ -1502,23 +1502,14 @@ fn read_component_patch(
                 }
             }
 
-            // Up to 256 optional item-first templates.
+            // Up to 256 optional item-first templates, one per box slot.
             Some("minecraft:container") => {
-                let count = read_count(reader, "container item")?;
-                if count > 256 {
-                    return Err(AdapterError::Decode(format!(
-                        "container declares {count} items; vanilla's list codec's max is 256"
-                    )));
-                }
-                for _ in 0..count {
-                    if reader.bool().map_err(dec_err)? {
-                        let complete = read_item_stack_template_tolerant(reader, depth, context)?;
-                        if !complete {
-                            components.has_unmodeled = true;
-                            let _ = reader.bytes(reader.remaining());
-                            return Ok((components, false));
-                        }
-                    }
+                let (slots, complete) = read_container_contents(reader, depth, context)?;
+                components.container = slots;
+                if !complete {
+                    components.has_unmodeled = true;
+                    let _ = reader.bytes(reader.remaining());
+                    return Ok((components, false));
                 }
             }
 
@@ -1799,15 +1790,15 @@ fn read_typed_entity_data(
 /// completion, instead of [`read_item_stack_template`]'s hard failure on an
 /// unmodeled nested component.
 ///
-/// Shared by `minecraft:use_remainder`, `minecraft:container` and
+/// Shared by `minecraft:use_remainder` and
 /// `minecraft:sulfur_cube_content`: an unmodeled component inside one of
 /// these nested stacks is exactly as unrecoverable as one at the top level
 /// (no length prefix either), so the caller applies the same
 /// has-unmodeled-component treatment rather than failing the whole packet —
-/// a shulker box with an unusual item in one slot is not a case this decoder
+/// an unusual item in one slot is not a case this decoder
 /// can afford to treat as fatal.
 ///
-/// The stack itself is consumed and not returned: no caller of these three
+/// The stack itself is consumed and not returned: no caller of these two
 /// components reads one, and assembling it cost an [`ItemStack`] — over 1.7 KB
 /// — in this function's frame at every level of a nesting the sender chooses,
 /// which is stack the recursion's depth budget then has to be small enough to
@@ -3057,6 +3048,44 @@ fn read_item_stack_template(reader: &mut Reader<'_>, depth: Depth, context: &Sta
         count,
         components: *components,
     })
+}
+
+/// Reads `minecraft:container`: a VarInt count (at most 256) of optionally
+/// present item-first templates. An incomplete legacy patch stops the whole
+/// list because entries are not length-delimited.
+fn read_container_contents(
+    reader: &mut Reader<'_>,
+    depth: Depth,
+    context: &StackCodecContext<'_>,
+) -> Result<(Vec<Option<ItemStack>>, bool), AdapterError> {
+    let count = read_count(reader, "container item")?;
+    if count > 256 {
+        return Err(AdapterError::Decode(format!(
+            "container declares {count} items; vanilla's list codec's max is 256"
+        )));
+    }
+    let mut slots = Vec::with_capacity(count.min(reader.remaining()));
+    for _ in 0..count {
+        if !reader.bool().map_err(dec_err)? {
+            slots.push(None);
+            continue;
+        }
+        let item_id = reader.var_i32().map_err(dec_err)?;
+        let item = context.item(item_id)?;
+        let item_count = reader.var_i32().map_err(dec_err)?;
+        let item_count = u32::try_from(item_count)
+            .map_err(|_| AdapterError::Decode(format!("invalid item count {item_count}")))?;
+        let (components, complete) = read_component_patch(reader, item.name(), depth, context)?;
+        slots.push(Some(ItemStack {
+            item: parse_key(item.name(), "item")?,
+            count: item_count,
+            components: *components,
+        }));
+        if !complete {
+            return Ok((slots, false));
+        }
+    }
+    Ok((slots, true))
 }
 
 /// Reads up to 64 recursively nested item-first bundle templates. An incomplete

@@ -2044,14 +2044,20 @@ where
                         // genuine per-player effect and goes through
                         // `apply_own_effect`.
                         match directed.effect {
-                            crate::commands::Effect::SetBlock { pos: (x, y, z), block } => {
-                                chunk_source.get().set_block(x, y, z, block);
-                                block_ticks.publish(x, y, z, block);
-                            }
-                            crate::commands::Effect::Fill { positions, block } => {
-                                for (x, y, z) in positions {
-                                    chunk_source.get().set_block(x, y, z, block);
+                            crate::commands::Effect::SetBlock { pos: (x, y, z), block, mode } => {
+                                let target = chunk_source.get();
+                                let env = crate::block_removal::Env { block_entities, mobs, feed: block_ticks, stored: &|p| target.block_entity(p.x, p.y, p.z) };
+                                if crate::block_removal::apply_edit(env, target, BlockPos::new(x, y, z), block, mode, world.block_drops(), drops_rng) {
                                     block_ticks.publish(x, y, z, block);
+                                }
+                            }
+                            crate::commands::Effect::Fill { positions, block, mode } => {
+                                let target = chunk_source.get();
+                                let env = crate::block_removal::Env { block_entities, mobs, feed: block_ticks, stored: &|p| target.block_entity(p.x, p.y, p.z) };
+                                for (x, y, z) in positions {
+                                    if crate::block_removal::apply_edit(env, target, BlockPos::new(x, y, z), block, mode, world.block_drops(), drops_rng) {
+                                        block_ticks.publish(x, y, z, block);
+                                    }
                                 }
                             }
                             crate::commands::Effect::Broadcast { sender, message } => {

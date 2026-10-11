@@ -325,6 +325,7 @@ fn production_trace(scenario: &Scenario) -> Vec<Observation> {
             HopperOp::Tick { enabled } => Some(hopper.tick(
                 enabled,
                 Some(&mut below[..]),
+                &|_| true,
                 Some(&mut above[..]),
             )),
         };

@@ -380,7 +380,7 @@ static PUSH_ONLY: &[Block] = &[
 #[must_use]
 pub fn push_reaction(state: StateId) -> PushReaction {
     let base = state.block();
-    if DESTROY.binary_search(&base).is_ok() {
+    if DESTROY.binary_search(&base).is_ok() || crate::block_entities::is_shulker_box(base) {
         PushReaction::Destroy
     } else if BLOCKED.binary_search(&base).is_ok() {
         PushReaction::Block
@@ -1405,6 +1405,10 @@ mod tests {
             PushReaction::PushOnly
         );
         assert_eq!(push_reaction(state("minecraft:stone")), PushReaction::Normal);
+        // Every shulker box is popped by a piston, whatever its colour.
+        for name in ["minecraft:shulker_box[facing=up]", "minecraft:lime_shulker_box[facing=north]"] {
+            assert_eq!(push_reaction(state(name)), PushReaction::Destroy, "{name}");
+        }
         // The four `isPushable` exceptions are *not* table rows — asserting that
         // keeps the distinction the doc comment claims.
         assert_eq!(push_reaction(state("minecraft:obsidian")), PushReaction::Normal);

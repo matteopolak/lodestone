@@ -111,11 +111,12 @@
 //!   removed rather than left as dead weight — reimplement against
 //!   `crate::random_tick::is_air_variant` and `block_solidity::legacy_solid`
 //!   (one in three, air-over-solid) the day a fire-flagged blast exists.
-//! * **Block entities.** A destroyed chest's contents are not spilled.
+//! * **Block entities.** `destroy_blocks` spills nothing; the tick loop hands
+//!   each destroyed cell to `crate::block_removal`, which does.
 //! * ~~**`wasExploded` (TNT chain reaction).**~~ Landed, but not in this
 //!   module: [`destroy_blocks`] here has no loot/drop knowledge at all (see
 //!   the **Drops** bullet above) and is not `tick::run_tick_loop`'s
-//!   production path — `crate::block_drops::drop_explosion_loot_in_blast` is,
+//!   production path — `crate::block_drops::blast_blocks` is,
 //!   and that is where a destroyed `minecraft:tnt` block is now chain-primed
 //!   instead of looted. A caller using [`destroy_blocks`] directly still gets
 //!   no chain reaction; that is this function's existing "no drops at all"

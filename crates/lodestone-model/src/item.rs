@@ -400,9 +400,8 @@ pub struct ItemComponents {
     /// per box slot (`None` for an empty one), in slot order. Empty for every
     /// other item and for an empty box.
     ///
-    /// Written to the save form from here, not to the wire; the clientbound
-    /// decoder only skips the component, so a stack that came *from* a client
-    /// never carries it.
+    /// Written to both the save form and the clientbound wire; the decoder
+    /// reads it back.
     pub container: Vec<Option<ItemStack>>,
     /// `minecraft:banner_patterns`: a banner or shield stack's loom-applied
     /// pattern layers, in the stack's own stored order — vanilla's banner

@@ -167,6 +167,9 @@ pub struct RconConfig {
     /// own doc states for the reason a throwaway `MobHandle::default()` would
     /// be worse than refusing.
     pub(crate) mobs: Option<crate::mobs::MobHandle>,
+    /// The live block-entity registry, so a `/setblock destroy` over a
+    /// container spills it and a replace clears its entity.
+    pub(crate) block_entities: Option<crate::block_entities::BlockEntityHandle>,
     /// The world border — `/worldborder`'s read/write surface. See this
     /// module's own doc for the scope this closes (RCON reads/mutates the
     /// real, tick-loop-shared state) and the scope it does not (no accepted
@@ -205,6 +208,7 @@ impl RconConfig {
             world_source: None,
             block_ticks: None,
             mobs: None,
+            block_entities: None,
             border: None,
             access: None,
         }
@@ -521,23 +525,11 @@ pub(crate) fn run_command_as(
                     // (`crate::server::dispatch_play_packet`), just against
                     // this config's stored `world_source`/`block_ticks`
                     // instead of a per-connection `SourceRef`.
-                    crate::commands::Effect::SetBlock { pos: (x, y, z), block } => {
-                        if let (Some(source), Some(block_ticks)) =
-                            (config.world_source.as_ref(), config.block_ticks.as_ref())
-                        {
-                            source.set_block(x, y, z, block);
-                            block_ticks.publish(x, y, z, block);
-                        }
+                    crate::commands::Effect::SetBlock { pos: (x, y, z), block, mode } => {
+                        edit_cells(config, std::iter::once((x, y, z)), block, mode);
                     }
-                    crate::commands::Effect::Fill { positions, block } => {
-                        if let (Some(source), Some(block_ticks)) =
-                            (config.world_source.as_ref(), config.block_ticks.as_ref())
-                        {
-                            for (x, y, z) in positions {
-                                source.set_block(x, y, z, block);
-                                block_ticks.publish(x, y, z, block);
-                            }
-                        }
+                    crate::commands::Effect::Fill { positions, block, mode } => {
+                        edit_cells(config, positions, block, mode);
                     }
                     // `SetRespawnPoint` is dropped here by construction: it is
                     // always targeted at the console's own (nonexistent) uuid
@@ -559,6 +551,48 @@ pub(crate) fn run_command_as(
             .run(&CommandCaller::new(Uuid::nil(), caller_name), command),
     }
 }
+
+/// Applies a `/setblock` or `/fill` over this config's world: each cell is
+/// written per `mode`, what it replaced goes through the shared destroy path,
+/// and the change is published. Nothing happens without a world behind the
+/// config.
+#[cfg(not(target_arch = "wasm32"))]
+fn edit_cells(
+    config: &RconConfig,
+    cells: impl IntoIterator<Item = (i32, i32, i32)>,
+    block: lodestone_data::block_states::StateId,
+    mode: crate::commands::BlockEditMode,
+) {
+    let (Some(source), Some(block_ticks)) = (config.world_source.as_ref(), config.block_ticks.as_ref()) else {
+        return;
+    };
+    let mut rng = crate::mob_spawn::SpawnRng::new(RCON_EDIT_SEED);
+    let drops = config.world.block_drops();
+    for (x, y, z) in cells {
+        let applied = match (config.block_entities.as_ref(), config.mobs.as_ref()) {
+            (Some(block_entities), Some(mobs)) => {
+                let env = crate::block_removal::Env { block_entities, mobs, feed: block_ticks, stored: &|p| source.block_entity(p.x, p.y, p.z) };
+                crate::block_removal::apply_edit(env, &**source, lodestone_model::BlockPos::new(x, y, z), block, mode, drops, &mut rng)
+            }
+            // No registry or mob sim to drop into: a plain write.
+            _ => {
+                let old = source.block_state_id(x, y, z);
+                let write = crate::block_removal::edit_writes(old, mode);
+                if write {
+                    source.set_block(x, y, z, block);
+                }
+                write
+            }
+        };
+        if applied {
+            block_ticks.publish(x, y, z, block);
+        }
+    }
+}
+
+/// Seeds the item scatter of drops a console edit causes.
+#[cfg(not(target_arch = "wasm32"))]
+const RCON_EDIT_SEED: u64 = 0x5243_4F4E_4544_4954;
 
 #[cfg(test)]
 mod tests {

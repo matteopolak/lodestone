@@ -1,4 +1,4 @@
-//! `/setblock` and `/fill`.
+//! `/setblock` and `/fill`, with their `replace`, `destroy` and `keep` modes (the removal half is `crate::block_removal`).
 //!
 //! # Always self-targeted, and why
 //!
@@ -38,6 +38,7 @@ use lodestone_command_mc::{BlockArg, BlockPosArg, Coordinates};
 use lodestone_data::block::Block;
 
 use super::registrar::{Ctx, Registrar};
+use crate::commands::BlockEditMode;
 
 /// The game-masters permission level.
 const BLOCK_LEVEL: u8 = 2;
@@ -52,33 +53,42 @@ fn resolve_block_pos(ctx: &Ctx<'_>, coords: Coordinates) -> (i32, i32, i32) {
     (x.floor() as i32, y.floor() as i32, z.floor() as i32)
 }
 
+/// The three edit modes a `/setblock` or `/fill` can name, as literals.
+const MODES: [(&str, BlockEditMode); 3] =
+    [("replace", BlockEditMode::Replace), ("destroy", BlockEditMode::Destroy), ("keep", BlockEditMode::Keep)];
+
 pub(super) fn register(registrar: &mut Registrar) {
     let root = registrar.root();
 
-    // ---- /setblock ------------------------------------------------------------
+    // ---- /setblock <pos> <block> [replace|destroy|keep] -----------------------
     let setblock = registrar.literal(root, "setblock");
     registrar.require_level(setblock, BLOCK_LEVEL);
     let (pos_node, pos_key) = registrar.arg(setblock, "pos", BlockPosArg);
     let (block_node, block_key) = registrar.arg(pos_node, "block", BlockArg);
-    registrar.exec(block_node, move |ctx| {
+    let run_setblock = move |ctx: &mut Ctx<'_>, mode: BlockEditMode| {
         // See this module's own doc for why `None` (the console) falls back
         // to `Uuid::nil()` rather than refusing outright.
         let uuid = ctx.source.uuid().unwrap_or(uuid::Uuid::nil());
         let pos = resolve_block_pos(ctx, *ctx.get(pos_key));
         let block = ctx.get(block_key).block.to_string();
         let state = Block::from_name(&block).expect("BlockArg validates the block id").default_state();
-        ctx.effect(uuid, crate::commands::Effect::SetBlock { pos, block: state });
+        ctx.effect(uuid, crate::commands::Effect::SetBlock { pos, block: state, mode });
         ctx.send_success(format!("Changed the block at {}, {}, {} to {block}", pos.0, pos.1, pos.2));
         Ok(1)
-    });
+    };
+    registrar.exec(block_node, move |ctx| run_setblock(ctx, BlockEditMode::Replace));
+    for (name, mode) in MODES {
+        let node = registrar.literal(block_node, name);
+        registrar.exec(node, move |ctx| run_setblock(ctx, mode));
+    }
 
-    // ---- /fill ------------------------------------------------------------------
+    // ---- /fill <from> <to> <block> [replace|destroy|keep] ---------------------
     let fill = registrar.literal(root, "fill");
     registrar.require_level(fill, BLOCK_LEVEL);
     let (from_node, from_key) = registrar.arg(fill, "from", BlockPosArg);
     let (to_node, to_key) = registrar.arg(from_node, "to", BlockPosArg);
     let (fill_block_node, fill_block_key) = registrar.arg(to_node, "block", BlockArg);
-    registrar.exec(fill_block_node, move |ctx| {
+    let run_fill = move |ctx: &mut Ctx<'_>, mode: BlockEditMode| {
         // See this module's own doc for why `None` (the console) falls back
         // to `Uuid::nil()` rather than refusing outright.
         let uuid = ctx.source.uuid().unwrap_or(uuid::Uuid::nil());
@@ -109,8 +119,13 @@ pub(super) fn register(registrar: &mut Registrar) {
         }
         let count = positions.len();
         let state = Block::from_name(&block).expect("BlockArg validates the block id").default_state();
-        ctx.effect(uuid, crate::commands::Effect::Fill { positions, block: state });
+        ctx.effect(uuid, crate::commands::Effect::Fill { positions, block: state, mode });
         ctx.send_success(format!("Successfully filled {count} block(s) with {block}"));
         Ok(i32::try_from(count).unwrap_or(i32::MAX))
-    });
+    };
+    registrar.exec(fill_block_node, move |ctx| run_fill(ctx, BlockEditMode::Replace));
+    for (name, mode) in MODES {
+        let node = registrar.literal(fill_block_node, name);
+        registrar.exec(node, move |ctx| run_fill(ctx, mode));
+    }
 }

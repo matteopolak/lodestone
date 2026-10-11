@@ -201,6 +201,7 @@ impl Hopper {
         &mut self,
         enabled: bool,
         mut below: Option<&mut [Option<ItemStack>]>,
+        below_accepts: &dyn Fn(&ItemStack) -> bool,
         mut above: Option<&mut [Option<ItemStack>]>,
     ) -> HopperTick {
         // `pushItemsTick`: the decrement is unconditional, every tick.
@@ -220,12 +221,12 @@ impl Hopper {
 
         if !self.is_empty() {
             if let Some(below) = below.as_deref_mut() {
-                out.ejected = try_move_one_item(&mut self.items, below);
+                out.ejected = try_move_one_item(&mut self.items, below, below_accepts);
             }
         }
         if !self.is_full() {
             if let Some(above) = above.as_deref_mut() {
-                out.sucked = try_move_one_item(above, &mut self.items);
+                out.sucked = try_move_one_item(above, &mut self.items, &|_| true);
             }
         }
 
@@ -252,9 +253,16 @@ fn same_item_same_components(a: &ItemStack, b: &ItemStack) -> bool {
 /// with room under [`MAX_STACK_SIZE`]. Returns `true` the moment one item
 /// actually moves (matching vanilla's "stop at the first successful slot"
 /// behaviour — this is not a bulk transfer).
-pub fn try_move_one_item(from: &mut [Option<ItemStack>], to: &mut [Option<ItemStack>]) -> bool {
+///
+/// `accepts` is the destination's may-place rule
+/// ([`BlockEntity::accepts_item`](crate::block_entities::BlockEntity::accepts_item)):
+/// a source slot it refuses is skipped, not retried.
+pub fn try_move_one_item(from: &mut [Option<ItemStack>], to: &mut [Option<ItemStack>], accepts: &dyn Fn(&ItemStack) -> bool) -> bool {
     for from_slot in from.iter_mut() {
         let Some(source) = from_slot else { continue };
+        if !accepts(source) {
+            continue;
+        }
 
         for dest in to.iter_mut() {
             match dest {
@@ -303,7 +311,10 @@ pub fn try_move_one_item(from: &mut [Option<ItemStack>], to: &mut [Option<ItemSt
 /// as a cue to fall back to a toss (see this module's own doc comment on the
 /// face-restriction gap this shares with [`try_move_one_item`]).
 #[must_use]
-pub fn try_move_item_into(mut item: ItemStack, to: &mut [Option<ItemStack>]) -> Option<ItemStack> {
+pub fn try_move_item_into(mut item: ItemStack, to: &mut [Option<ItemStack>], accepts: &dyn Fn(&ItemStack) -> bool) -> Option<ItemStack> {
+    if !accepts(&item) {
+        return Some(item);
+    }
     for dest in to.iter_mut() {
         match dest {
             None => {
@@ -347,7 +358,7 @@ mod tests {
     fn try_move_one_item_lands_in_the_first_empty_slot() {
         let mut from = [Some(stack("minecraft:coal", 5)), None];
         let mut to = [None, None, None];
-        assert!(try_move_one_item(&mut from, &mut to));
+        assert!(try_move_one_item(&mut from, &mut to, &|_| true));
         assert_eq!(to[0], Some(stack("minecraft:coal", 1)));
         assert_eq!(from[0], Some(stack("minecraft:coal", 4)), "exactly one item moved, not the whole stack");
     }
@@ -356,7 +367,7 @@ mod tests {
     fn try_move_one_item_merges_into_a_matching_partial_stack() {
         let mut from = [Some(stack("minecraft:coal", 5))];
         let mut to = [Some(stack("minecraft:coal", 10))];
-        assert!(try_move_one_item(&mut from, &mut to));
+        assert!(try_move_one_item(&mut from, &mut to, &|_| true));
         assert_eq!(to[0], Some(stack("minecraft:coal", 11)));
         assert_eq!(from[0], Some(stack("minecraft:coal", 4)));
     }
@@ -372,7 +383,7 @@ mod tests {
             Some(stack("minecraft:coal", MAX_STACK_SIZE)),
             Some(stack("minecraft:charcoal", 1)),
         ];
-        assert!(!try_move_one_item(&mut from, &mut to), "no eligible destination slot exists");
+        assert!(!try_move_one_item(&mut from, &mut to, &|_| true), "no eligible destination slot exists");
         assert_eq!(from[0], Some(stack("minecraft:coal", 1)), "nothing must be taken on failure");
         assert_eq!(to[0], Some(stack("minecraft:coal", MAX_STACK_SIZE)));
         assert_eq!(to[1], Some(stack("minecraft:charcoal", 1)));
@@ -382,7 +393,7 @@ mod tests {
     fn try_move_one_item_from_an_empty_source_does_nothing() {
         let mut from = [None, None];
         let mut to = [None];
-        assert!(!try_move_one_item(&mut from, &mut to));
+        assert!(!try_move_one_item(&mut from, &mut to, &|_| true));
         assert_eq!(to[0], None);
     }
 
@@ -391,7 +402,7 @@ mod tests {
     #[test]
     fn try_move_item_into_lands_in_the_first_empty_slot() {
         let mut to = [Some(stack("minecraft:charcoal", 1)), None, None];
-        let leftover = try_move_item_into(stack("minecraft:coal", 1), &mut to);
+        let leftover = try_move_item_into(stack("minecraft:coal", 1), &mut to, &|_| true);
         assert_eq!(leftover, None);
         assert_eq!(to[1], Some(stack("minecraft:coal", 1)), "skips the mismatched first slot");
         assert_eq!(to[0], Some(stack("minecraft:charcoal", 1)), "untouched");
@@ -402,7 +413,7 @@ mod tests {
     #[test]
     fn try_move_item_into_merges_into_a_matching_partial_stack() {
         let mut to = [Some(stack("minecraft:coal", 10)), None];
-        let leftover = try_move_item_into(stack("minecraft:coal", 1), &mut to);
+        let leftover = try_move_item_into(stack("minecraft:coal", 1), &mut to, &|_| true);
         assert_eq!(leftover, None);
         assert_eq!(to[0], Some(stack("minecraft:coal", 11)));
         assert_eq!(to[1], None, "the empty slot must not be used when a merge succeeds first");
@@ -418,7 +429,7 @@ mod tests {
             Some(stack("minecraft:coal", MAX_STACK_SIZE)),
             Some(stack("minecraft:charcoal", 3)),
         ];
-        let leftover = try_move_item_into(stack("minecraft:coal", 1), &mut to);
+        let leftover = try_move_item_into(stack("minecraft:coal", 1), &mut to, &|_| true);
         assert_eq!(leftover, Some(stack("minecraft:coal", 1)), "nothing accepted it");
         assert_eq!(to[0], Some(stack("minecraft:coal", MAX_STACK_SIZE)), "untouched");
         assert_eq!(to[1], Some(stack("minecraft:charcoal", 3)), "untouched");
@@ -431,7 +442,7 @@ mod tests {
     #[test]
     fn try_move_item_into_an_empty_slice_returns_the_item() {
         let mut to: [Option<ItemStack>; 0] = [];
-        assert_eq!(try_move_item_into(stack("minecraft:coal", 1), &mut to), Some(stack("minecraft:coal", 1)));
+        assert_eq!(try_move_item_into(stack("minecraft:coal", 1), &mut to, &|_| true), Some(stack("minecraft:coal", 1)));
     }
 
     /// A hopper above an empty chest, with one item, sucks it down on the
@@ -440,7 +451,7 @@ mod tests {
     fn sucks_one_item_from_above_on_first_ready_tick() {
         let mut h = Hopper::new();
         let mut above = [Some(stack("minecraft:diamond", 3)), None, None];
-        let tick = h.tick(true, None, Some(&mut above));
+        let tick = h.tick(true, None, &|_| true, Some(&mut above));
         assert!(tick.sucked);
         assert!(!tick.ejected);
         assert_eq!(h.slots()[0], Some(stack("minecraft:diamond", 1)));
@@ -455,18 +466,18 @@ mod tests {
         let mut h = Hopper::new();
         let mut above = [Some(stack("minecraft:diamond", 10))];
 
-        let first = h.tick(true, None, Some(&mut above));
+        let first = h.tick(true, None, &|_| true, Some(&mut above));
         assert!(first.sucked, "expected the fresh hopper's first tick to succeed");
 
         // Ticks 2..=8 (7 ticks) must all be on cooldown and move nothing.
         for t in 2..=8 {
-            let tick = h.tick(true, None, Some(&mut above));
+            let tick = h.tick(true, None, &|_| true, Some(&mut above));
             assert!(!tick.changed(), "unexpected transfer at tick {t}");
         }
         assert_eq!(above[0], Some(stack("minecraft:diamond", 9)), "still only 1 item moved total");
 
         // Tick 9 is exactly 8 ticks after tick 1 — ready again.
-        let tick = h.tick(true, None, Some(&mut above));
+        let tick = h.tick(true, None, &|_| true, Some(&mut above));
         assert!(tick.sucked, "expected the next attempt at exactly tick 9");
         assert_eq!(above[0], Some(stack("minecraft:diamond", 8)));
     }
@@ -480,7 +491,7 @@ mod tests {
         let mut h = Hopper::new();
         for t in 0..20 {
             assert!(!h.is_on_cooldown(), "unexpectedly on cooldown at tick {t}");
-            let tick = h.tick(true, None, None);
+            let tick = h.tick(true, None, &|_| true, None);
             assert!(!tick.changed());
         }
     }
@@ -491,7 +502,7 @@ mod tests {
         h.set_slot(0, Some(stack("minecraft:redstone", 4)));
         let mut below = [None, None];
 
-        let tick = h.tick(true, Some(&mut below), None);
+        let tick = h.tick(true, Some(&mut below), &|_| true, None);
         assert!(tick.ejected);
         assert_eq!(below[0], Some(stack("minecraft:redstone", 1)));
         assert_eq!(h.slots()[0], Some(stack("minecraft:redstone", 3)));
@@ -507,7 +518,7 @@ mod tests {
         let mut below = [None];
         let mut above = [Some(stack("minecraft:diamond", 1))];
 
-        let tick = h.tick(true, Some(&mut below), Some(&mut above));
+        let tick = h.tick(true, Some(&mut below), &|_| true, Some(&mut above));
         assert!(tick.ejected);
         assert!(tick.sucked);
         assert_eq!(below[0], Some(stack("minecraft:redstone", 1)));
@@ -524,7 +535,7 @@ mod tests {
         let mut h = Hopper::new();
         let mut above = [Some(stack("minecraft:diamond", 1))];
         for t in 0..20 {
-            let tick = h.tick(false, None, Some(&mut above));
+            let tick = h.tick(false, None, &|_| true, Some(&mut above));
             assert!(!tick.changed(), "disabled hopper transferred at tick {t}");
         }
         assert_eq!(above[0], Some(stack("minecraft:diamond", 1)));
@@ -538,16 +549,16 @@ mod tests {
     fn cooldown_still_decrements_while_disabled() {
         let mut h = Hopper::new();
         let mut above = [Some(stack("minecraft:diamond", 5))];
-        assert!(h.tick(true, None, Some(&mut above)).sucked);
+        assert!(h.tick(true, None, &|_| true, Some(&mut above)).sucked);
         assert!(h.is_on_cooldown());
 
         // Disabled for the next several ticks — cooldown must still be
         // draining underneath, not frozen at 8.
         for _ in 0..7 {
-            h.tick(false, None, Some(&mut above));
+            h.tick(false, None, &|_| true, Some(&mut above));
         }
         // Re-enable on what would have been the 8th tick since the success.
-        let tick = h.tick(true, None, Some(&mut above));
+        let tick = h.tick(true, None, &|_| true, Some(&mut above));
         assert!(tick.sucked, "cooldown must have fully drained despite being disabled meanwhile");
     }
 
@@ -563,7 +574,7 @@ mod tests {
         let mut below = [None];
         let mut above = [Some(stack("minecraft:diamond", 1))];
 
-        let tick = h.tick(true, Some(&mut below), Some(&mut above));
+        let tick = h.tick(true, Some(&mut below), &|_| true, Some(&mut above));
         assert!(tick.ejected, "a full hopper must still be able to eject");
         assert_eq!(below[0], Some(stack("minecraft:cobblestone", 1)));
         assert!(!tick.sucked, "a full hopper must not suck in more items");
@@ -583,7 +594,7 @@ mod tests {
         let mut below = [Some(stack("minecraft:cobblestone", MAX_STACK_SIZE))];
         let mut above = [Some(stack("minecraft:diamond", 1))];
 
-        let tick = h.tick(true, Some(&mut below), Some(&mut above));
+        let tick = h.tick(true, Some(&mut below), &|_| true, Some(&mut above));
         assert!(!tick.ejected);
         assert!(!tick.sucked);
     }

@@ -401,54 +401,12 @@ where
     // then rides into the roll as the tool loot-context parameter, which is
     // what makes `match_tool`, `apply_bonus` and `table_bonus`
     // evaluate against a real item instead of an absent one.
-    let popped = if drop_loot && crate::block_drops::drops_are_allowed(broken, held) {
-        crate::block_drops::drop_block_loot(
-            crate::block_drops::bundled_tables(),
-            broken,
-            pos,
-            held,
-            drops_rng,
-        )
-    } else {
-        Vec::new()
-    };
-    // What a stored-item block gives up beyond its loot table: a shulker box
-    // with its contents, a pot's sherds and contents, a jukebox's disc, a
-    // bookshelf's books.
-    let (extra_stacks, record_stopped) = block_entities.with(|reg| {
-        let entity = reg.get(pos);
-        let playing = matches!(entity, Some(BlockEntity::Opaque { nbt, .. }) if broken.block() == Block::Jukebox
-            && crate::stored_items::jukebox_disc(nbt).is_some());
-        (crate::stored_items::broken_drops(broken, entity, drop_loot), playing)
-    });
-    if record_stopped {
-        block_ticks.publish_effect(crate::effects::WorldEffect::LevelEvent {
-            event: crate::stored_items::JUKEBOX_STOP_EVENT,
-            pos,
-            data: 0,
-            global: false,
-        });
-    }
-    let popped = popped.into_iter().chain(extra_stacks.into_iter().map(|stack| {
-        let (position, velocity) = crate::block_drops::pop_resource_placement(pos, drops_rng);
-        crate::block_drops::PoppedItem { stack, position, velocity }
-    })).collect::<Vec<_>>();
-    if !popped.is_empty() {
-        mobs.with(|sim| {
-            for drop in popped {
-                // `ItemLifecycle::newly_dropped` already sets the
-                // 10-tick delay used for freshly spawned drops, so the breaker
-                // cannot re-absorb the drop on the spawning tick.
-                let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
-                sim.spawn_item(
-                    &drop.stack,
-                    drop.position,
-                    drop.velocity,
-                    ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),
-                );
-            }
-        });
-    }
+    let env = crate::block_removal::Env { block_entities, mobs, feed: block_ticks, stored: &|p| source.block_entity(p.x, p.y, p.z) };
+    let cause = crate::block_removal::Cause::Mined { held, drops: drop_loot };
+    let loot = crate::block_removal::loot(cause, broken, pos, drops_rng);
+    // The block's entity goes through the shared destroy path, which also
+    // spills what it held, stops a jukebox's song and lets a hive's bees out.
+    crate::block_removal::settle(env, pos, broken, cause, loot, drops_rng);
     // The break path awards experience orbs at the **centre** of the broken
     // cell, not at the jittered positions its item drops use.
     //
@@ -477,21 +435,6 @@ where
         }
     }
     let drops_elapsed = started.elapsed();
-    let removed = block_entities.with(|reg| {
-        reg.lid_viewers.forget(pos);
-        reg.remove(pos)
-    });
-    // A broken hive lets every bee out at once, at the hive's own cell.
-    if let Some(crate::block_entities::BlockEntity::Beehive(mut hive)) = removed {
-        let flower = hive.flower();
-        let facing = crate::mobs::bees::hive_facing(broken);
-        let released = hive.release_all();
-        mobs.with(|sim| {
-            for bee in &released {
-                sim.release_bee(pos, facing, true, bee, flower, false);
-            }
-        });
-    }
     if open_container.as_ref().is_some_and(|open| open.pos == pos) {
         *open_container = None;
         *container_sync = ContainerSync::default();
@@ -559,30 +502,8 @@ where
     // three-argument drop-resources call, which carries no
     // tool loot-context parameter — hence `None` rather than `held`, and no
     // `drops_are_allowed` call.
-    if cascade_drops {
-        for (cell, was) in &collapsed {
-            let popped = crate::block_drops::drop_block_loot(
-                crate::block_drops::bundled_tables(),
-                *was,
-                *cell,
-                None,
-                drops_rng,
-            );
-            if popped.is_empty() {
-                continue;
-            }
-            mobs.with(|sim| {
-                for drop in popped {
-                    let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
-                    sim.spawn_item(
-                        &drop.stack,
-                        drop.position,
-                        drop.velocity,
-                        ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),
-                    );
-                }
-            });
-        }
+    for (cell, was) in &collapsed {
+        crate::block_removal::destroy(env, *cell, *was, crate::block_removal::Cause::Natural { drops: cascade_drops }, drops_rng);
     }
     let mut fanned: Vec<(BlockPos, StateId)> = Vec::new();
     // Vanilla's own tripwire-block affect-neighbors-after-removal routine — the "the string just broke"

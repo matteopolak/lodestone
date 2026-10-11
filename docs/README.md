@@ -138,6 +138,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   block_properties module represents built-in block-state keys and values as generated
   enums and exposes complete states through the Properties domain type. Its storage is
   private, so callers do not depend on the current fixed-capacity representation.
+- [Block removal](./block-removal.md) — The one path every block removal shares.
+  Mining, explosions, pistons, fluids, lost support and `/setblock` or `/fill` all end
+  in `block_removal`, so a chest blown up by TNT spills as surely as one mined.
 - [Block survival capabilities](./block-survival-capabilities.md) —
   `lodestone-data::block_survival` supplies the exact state facts used to decide
   whether a simple world-generation block can remain placed. The server converts its

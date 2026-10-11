@@ -1233,6 +1233,32 @@ impl ChunkSource for ResidentTickSource<'_> {
     }
 }
 
+/// One command-block `/setblock` or `/fill` cell against the resident world:
+/// `Some(true)` when it wrote, `Some(false)` when `keep` left it alone, `None`
+/// when the cell is not resident and the whole command must wait.
+fn resident_tick_edit(
+    env: &crate::block_removal::Env<'_>,
+    world: &dyn ChunkSource,
+    pos: BlockPos,
+    new: StateId,
+    mode: crate::commands::BlockEditMode,
+    drops: bool,
+    rng: &mut crate::mob_spawn::SpawnRng,
+) -> Option<bool> {
+    if !resident_tick_footprint(world, pos.x, pos.z, 0) {
+        return None;
+    }
+    let old = resident_tick_state_id(world, pos.x, pos.y, pos.z)?;
+    if !crate::block_removal::edit_writes(old, mode) {
+        return Some(false);
+    }
+    if !resident_tick_set_block(world, pos.x, pos.y, pos.z, new) {
+        return None;
+    }
+    crate::block_removal::finish_edit(*env, pos, old, new, mode, drops, rng);
+    Some(true)
+}
+
 /// Runs one command block's `command` as its own synthetic
 /// [`crate::commands::CommandSource`] (`crate::command_block
 /// ::COMMAND_BLOCK_SOURCE_UUID`, permission level 2 — `Commands
@@ -1256,6 +1282,8 @@ fn run_command_block_command(
     commands: &crate::commands::ServerCommands,
     world_state: &crate::world_state::WorldStateHandle,
     mobs: &MobHandle,
+    block_entities: &BlockEntityHandle,
+    removal_rng: &mut crate::mob_spawn::SpawnRng,
     world: &dyn ChunkSource,
     block_tick_out: &BlockTickFeed,
     pos: BlockPos,
@@ -1324,26 +1352,24 @@ fn run_command_block_command(
             _ => {}
         }
     }
+    let env = crate::block_removal::Env { block_entities, mobs, feed: block_tick_out, stored: &|p| world.block_entity(p.x, p.y, p.z) };
+    let drops = world_state.block_drops();
     for directed in outcome.effects {
         if directed.target != source_uuid {
             continue;
         }
         match directed.effect {
-            crate::commands::Effect::SetBlock { pos: (x, y, z), block } => {
-                if !resident_tick_footprint(world, x, z, 0) {
-                    return None;
-                }
-                if !resident_tick_set_block(world, x, y, z, block) {
-                    return None;
+            crate::commands::Effect::SetBlock { pos: (x, y, z), block, mode } => {
+                if !resident_tick_edit(&env, world, BlockPos::new(x, y, z), block, mode, drops, removal_rng)? {
+                    continue;
                 }
                 block_tick_out.publish(x, y, z, block);
             }
-            crate::commands::Effect::Fill { positions, block } => {
+            crate::commands::Effect::Fill { positions, block, mode } => {
                 for (x, y, z) in positions {
-                    if !resident_tick_set_block(world, x, y, z, block) {
-                        return None;
+                    if resident_tick_edit(&env, world, BlockPos::new(x, y, z), block, mode, drops, removal_rng)? {
+                        block_tick_out.publish(x, y, z, block);
                     }
-                    block_tick_out.publish(x, y, z, block.clone());
                 }
             }
             _ => {}
@@ -1910,6 +1936,9 @@ async fn run_tick_loop_with_weather_impl<W>(
     // behaviour seed for the same reason.
     let mut blast_rng =
         crate::mob_spawn::SpawnRng::new(crate::explosion_blocks::EXPLOSION_BEHAVIOR_SEED);
+    // The stream the non-blast removals (a fluid washing a block away, a
+    // piston destroying one) roll their drops from.
+    let mut removal_rng = crate::mob_spawn::SpawnRng::new(crate::explosion_blocks::EXPLOSION_BEHAVIOR_SEED ^ 0x2E40_DA70);
     // The blast's *loot* stream, deliberately separate from `blast_rng`: that one
     // feeds the ray march, whose per-ray draw count `explosion_blocks` gates
     // exactly. Sharing one stream would make the crater shape depend on how many
@@ -2454,17 +2483,14 @@ async fn run_tick_loop_with_weather_impl<W>(
             // partial crater.
             let resident_world = ResidentTickSource::new(&*world);
             let mut candidate_blast_rng = blast_rng.clone();
-            let mut candidate_blast_drops_rng = blast_drops_rng.clone();
-            let (changes, popped, primed_tnt) = if detonation.destroys_blocks {
-                crate::block_drops::drop_explosion_loot_in_blast(
+            let outcome = if detonation.destroys_blocks {
+                crate::block_drops::blast_blocks(
                     &resident_world,
                     env,
                     detonation.centre,
                     detonation.radius,
-                    crate::block_drops::bundled_tables(),
                     detonation.fire,
                     &mut candidate_blast_rng,
-                    &mut candidate_blast_drops_rng,
                 )
             } else {
                 Default::default()
@@ -2475,25 +2501,23 @@ async fn run_tick_loop_with_weather_impl<W>(
                 break;
             }
             blast_rng = candidate_blast_rng;
-            blast_drops_rng = candidate_blast_drops_rng;
+            let crate::block_drops::BlastOutcome { changes, destroyed, primed_tnt } = outcome;
             for (at, new_state) in changes {
                 block_tick_out.publish(at.x, at.y, at.z, new_state);
             }
-            if world_state.block_drops() {
-                mobs.with(|sim| {
-                    for drop in popped {
-                        let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
-                        sim.spawn_item(
-                            &drop.stack,
-                            drop.position,
-                            drop.velocity,
-                            lodestone_entity::ItemLifecycle::newly_dropped(
-                                count,
-                                lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
-                            ),
-                        );
-                    }
-                });
+            // Every destroyed block goes through the shared destroy path: its
+            // table rolls with the blast radius (so most blocks thin out), and
+            // what it stored spills whatever the drop rule says.
+            let drops = world_state.block_drops();
+            let removal_env = crate::block_removal::Env { block_entities: &block_entities, mobs: &mobs, feed: &block_tick_out, stored: &|p| world.block_entity(p.x, p.y, p.z) };
+            for (at, was) in destroyed {
+                crate::block_removal::destroy(
+                    removal_env,
+                    at,
+                    was,
+                    crate::block_removal::Cause::Blast { radius: detonation.radius, drops },
+                    &mut blast_drops_rng,
+                );
             }
             // The tnt block's was exploded — chain reaction. Gated on `TNT_EXPLODES`
             // the same way `crate::fire`'s TNT arm below is, matching vanilla's
@@ -2685,6 +2709,21 @@ async fn run_tick_loop_with_weather_impl<W>(
                     block_tick_out.publish_change(pos.x, pos.y, pos.z, old, grown);
                 }
             }
+        }
+        // Jukebox songs run out. The disc stays and the comparator keeps
+        // reading it; only the sound stops.
+        for pos in block_entities.with(|registry| {
+            registry.tick_jukeboxes(&|pos| {
+                resident_tick_state_id(&*world, pos.x, pos.y, pos.z)
+                    .is_some_and(|state| crate::redstone::property_bool(state, lodestone_data::block_properties::PropertyKey::HasRecord) == Some(true))
+            })
+        }) {
+            block_tick_out.publish_effect(crate::effects::WorldEffect::LevelEvent {
+                event: crate::stored_items::JUKEBOX_STOP_EVENT,
+                pos,
+                data: 0,
+                global: false,
+            });
         }
         // Mob hurt and death sounds. `MobSim::apply_damage` already
         // damaged and killed mobs with no audible result at all — the sim records
@@ -3704,9 +3743,11 @@ async fn run_tick_loop_with_weather_impl<W>(
                                 let mut dest = block_entities
                                     .with(|reg| reg.get(front).map(crate::block_entities::BlockEntity::container_slots))
                                     .unwrap_or_default();
+                                let rule = block_entities.with(|reg| reg.get(front).map_or(crate::block_entities::Restriction::None, crate::block_entities::BlockEntity::restriction));
+                                let accepts = |item: &lodestone_model::ItemStack| rule.accepts(item);
                                 let mut single = stack.clone();
                                 single.count = 1;
-                                if crate::hopper::try_move_item_into(single, &mut dest).is_none() {
+                                if crate::hopper::try_move_item_into(single, &mut dest, &accepts).is_none() {
                                     block_entities.with(|reg| {
                                         if let Some(entity) = reg.get_mut(front) {
                                             for (i, s) in dest.into_iter().enumerate() {
@@ -4161,7 +4202,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                                 data.success_count = 0;
                             } else {
                                 let Some(ran) = run_command_block_command(
-                                    &command_tree, &world_state, &mobs, &*world, &block_tick_out, origin, facing,
+                                    &command_tree, &world_state, &mobs, &block_entities, &mut removal_rng, &*world, &block_tick_out, origin, facing,
                                     &data.command,
                                 ) else {
                                     requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
@@ -4236,7 +4277,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                                                 link.success_count = 0;
                                             } else {
                                                 let Some(ran) = run_command_block_command(
-                                                    &command_tree, &world_state, &mobs, &*world, &block_tick_out,
+                                                    &command_tree, &world_state, &mobs, &block_entities, &mut removal_rng, &*world, &block_tick_out,
                                                     next_pos, walk_facing, &link.command,
                                                 ) else {
                                                     requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
@@ -4400,6 +4441,19 @@ async fn run_tick_loop_with_weather_impl<W>(
                     change.old_state,
                     change.new_state,
                 );
+                // A fluid spreading into a block washes it away: water drops
+                // its loot, lava burns it, and what it stored spills either way.
+                if !crate::chunk::is_air_or_fluid_id(change.old_state) && change.old_state.block() != change.new_state.block() {
+                    let water = crate::fluid::fluid_state_of_id(change.new_state)
+                        .is_some_and(|fluid| fluid.kind == crate::fluid::FluidKind::Water);
+                    crate::block_removal::destroy(
+                        crate::block_removal::Env { block_entities: &block_entities, mobs: &mobs, feed: &block_tick_out, stored: &|p| world.block_entity(p.x, p.y, p.z) },
+                        change.pos,
+                        change.old_state,
+                        crate::block_removal::Cause::Natural { drops: water && world_state.block_drops() },
+                        &mut removal_rng,
+                    );
+                }
             }
         }
 
@@ -4911,6 +4965,13 @@ async fn run_tick_loop_with_weather_impl<W>(
         });
 
         // Publish the completed entity lifecycle, not the tick-start view.
+        // Blocks a reaction destroyed with no way to spawn items (a piston head
+        // pushing into a torch): their drops land here.
+        crate::block_removal::drain_deferred(
+            crate::block_removal::Env { block_entities: &block_entities, mobs: &mobs, feed: &block_tick_out, stored: &|p| world.block_entity(p.x, p.y, p.z) },
+            world_state.block_drops(),
+            &mut removal_rng,
+        );
         // Lightning bolts (and every other short-lived sidecar) can be removed
         // during the scheduled/physics phase above; publishing before that
         // phase leaves the live source carrying one extra snapshot and delays

@@ -5063,6 +5063,7 @@ impl IntegratedServer {
             world_source: self.world_source.clone(),
             block_ticks: self.block_ticks.clone(),
             mobs: self.mobs.clone(),
+            block_entities: self.block_entities().cloned(),
             border: self.border.clone(),
             ..config
         };

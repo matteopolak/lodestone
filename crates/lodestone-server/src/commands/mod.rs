@@ -170,7 +170,7 @@ use lodestone_model::command_tree::{
     CommandSuggestionsResponse as WireCommandSuggestionsResponse, CommandTree as WireCommandTree,
 };
 
-pub use effect::{DirectedEffect, Effect};
+pub use effect::{BlockEditMode, DirectedEffect, Effect};
 pub use registrar::{
     ArgKey, CommandOutcome, CommandResult, CommandWorld, Ctx, Registrar, WireDescriptor,
     level_filter, level_permission,

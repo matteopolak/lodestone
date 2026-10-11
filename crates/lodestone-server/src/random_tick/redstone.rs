@@ -1155,6 +1155,19 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                 } else {
                     crate::piston::Resolution { to_push: Vec::new(), ..resolution }
                 };
+                // A block the head pushes into and breaks (a torch, a flower, a
+                // shulker box, a decorated pot) drops its loot and spills what it
+                // held. This code runs over borrowed columns with no mobs to
+                // spawn into, so the removal waits in the registry for the tick
+                // loop to drop it.
+                if let Some(block_entities) = block_entities {
+                    for &broken in &resolution.to_destroy {
+                        if columns.reachable(broken) {
+                            let was = columns.raw_state(broken);
+                            block_entities.with(|registry| registry.destroy_deferred(broken, was));
+                        }
+                    }
+                }
                 let writes = crate::piston::apply_move(
                     &redstone::make_columns_lookup(columns),
                     &resolution,

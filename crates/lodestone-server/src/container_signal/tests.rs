@@ -258,7 +258,7 @@ fn dirty_tracking_notices_a_change_and_only_a_change() {
     assert!(registry.take_analog_dirty().is_empty());
     let _ = registry.get_mut(at);
     assert_eq!(registry.take_analog_dirty(), vec![at]);
-    registry.remove(at);
+    registry.destroy_at(at, StateId::AIR);
     assert_eq!(registry.take_analog_dirty(), vec![at], "a removed container still wakes its comparators");
     // Ticking an idle container never marks it.
     registry.insert(at, BlockEntity::container("minecraft:chest"));

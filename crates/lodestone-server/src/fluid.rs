@@ -82,10 +82,9 @@
 //!   affects lava's timing while deepening and never the final pattern, so the
 //!   consequence is lava that settles slightly faster than the real engine, not lava
 //!   that settles somewhere else.
-//! * **The real pre-destroy hook** is a plain overwrite here. The real engine
-//!   drops the destroyed block's loot for water and plays a
-//!   fizz level-event for lava. We destroy the
-//!   block correctly and emit neither the drop nor the sound.
+//! * **The pre-destroy hook** is a plain overwrite here; the tick loop sends
+//!   each washed-away block through `crate::block_removal`, so its loot and
+//!   contents drop. The lava fizz level event is not emitted.
 //! * **The real should-spread-liquid check runs at tick time, not at edit time.**
 //!   The real engine calls
 //!   it from the liquid block's place/neighbor-changed hooks; [`run_scheduled_tick`]

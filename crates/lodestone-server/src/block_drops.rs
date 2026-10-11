@@ -418,81 +418,77 @@ pub fn drop_explosion_loot(
     drop_block_loot_in(tables, state, pos, None, Some(radius), rng)
 }
 
-/// Runs a blast's block half **with drops**: computes the exploded set, rolls
-/// each destroyed block's table with the radius in the loot context, writes air,
-/// and returns the block changes alongside the items to spawn.
+/// What a blast's block half did: the writes to publish, the blocks it
+/// destroyed (with the state each had, which the loot and the stored contents
+/// are keyed on) and the TNT it set off.
+#[derive(Debug, Default)]
+pub struct BlastOutcome {
+    /// Every cell the blast wrote, with the state now there (air for a
+    /// destroyed block, fire where a fiery blast ignited).
+    pub changes: Vec<(BlockPos, StateId)>,
+    /// Each destroyed non-TNT block and the state it had.
+    pub destroyed: Vec<(BlockPos, StateId)>,
+    /// Where a destroyed `minecraft:tnt` block was, to chain-prime.
+    pub primed_tnt: Vec<BlockPos>,
+}
+
+/// Runs a blast's block half: computes the exploded set and writes air.
+///
+/// Loot is not rolled here. `destroyed` carries the old states to
+/// [`crate::block_removal`], which rolls each table with the radius in the
+/// loot context (the parameter that makes `survives_explosion` keep `1/radius`
+/// of a crater instead of everything) and spills what the blocks held.
 ///
 /// # Chain reaction
 ///
-/// A destroyed `minecraft:tnt` block is chain-primed rather than looted —
-/// The tnt block's was exploded — because the tnt block's drop from explosion is `false`:
-/// vanilla replaces the loot roll for that cell with a fresh the primed tnt
-/// entirely, it does not also drop a TNT item. Its positions are the third
-/// return value; the caller (`tick::run_tick_loop`) is what owns a
-/// [`crate::mobs::MobSim`] to spawn into, so this function only reports where,
-/// not the entity itself. Each one gets the primed tnt's get random short fuse's
-/// shortened fuse, not [`crate::mobs::tnt::DEFAULT_FUSE_TIME`] — see
-/// [`crate::mobs::MobSim::spawn_tnt_short_fuse`].
+/// A destroyed `minecraft:tnt` block is chain-primed rather than looted: the
+/// reference replaces the loot roll for that cell with a primed TNT entity, it
+/// does not also drop an item. Its positions are `primed_tnt`; the caller
+/// (`tick::run_tick_loop`) owns the [`crate::mobs::MobSim`] to spawn into. Each
+/// gets the shortened fuse of [`crate::mobs::MobSim::spawn_tnt_short_fuse`].
 ///
 /// # Why this lives here and not in `crate::explosion_blocks`
 ///
-/// [`crate::explosion_blocks::destroy_blocks`] writes air *before* it returns, so
-/// its caller can no longer see what was there — and the loot roll needs the old
-/// state. Rather than change that function's contract, this walks
+/// [`crate::explosion_blocks::destroy_blocks`] writes air *before* it returns,
+/// so its caller can no longer see what was there. Rather than change that
+/// function's contract, this walks
 /// [`crate::explosion_blocks::exploded_positions`] itself and repeats its
-/// three-line air-skip guard. The blast physics stay in one place; the loot
-/// knowledge stays in this module, next to the table set it needs.
-///
-/// # Two RNG streams, on purpose
-///
-/// `blast_rng` feeds the ray march — one draw per ray, 1,352 of them — and its
-/// draw count is the specification `explosion_blocks` gates against. `drops_rng`
-/// feeds the loot tables and the `popResource` placement jitter. Sharing one
-/// stream would make the crater shape depend on how many items happened to drop,
-/// which is both wrong and untestable.
+/// three-line air-skip guard. The blast physics stay in one place.
 ///
 /// # The parity ceiling, stated rather than discovered later
 ///
-/// Vanilla opens `interactWithBlocks` with `Util.shuffle(targetBlocks, random)` —
-/// Fisher–Yates over a list built from a `HashSet<BlockPos>`, so its input order
-/// is JVM hash-iteration order. That order is **not reproducible outside the
-/// JVM** at any level of care. `exploded_positions` returns a sorted set instead,
-/// so the *sequence* of drops here will not match a real server's. The **count**
-/// and the **multiset** do, and those are what a gate should assert.
-pub fn drop_explosion_loot_in_blast<S: crate::chunk::ChunkSource>(
+/// The reference shuffles a list built from a hash set, so its input order is
+/// JVM hash-iteration order and cannot be reproduced outside the JVM.
+/// `exploded_positions` returns a sorted set instead, so the *sequence* of
+/// drops will not match a real server's. The **count** and the **multiset** do,
+/// and those are what a gate should assert.
+pub fn blast_blocks<S: crate::chunk::ChunkSource>(
     world: &S,
     env: crate::explosion_blocks::BlastEnv,
     centre: Vec3,
     radius: f32,
-    tables: &LootTableSet,
     fire: bool,
     blast_rng: &mut SpawnRng,
-    drops_rng: &mut SpawnRng,
-) -> (Vec<(BlockPos, StateId)>, Vec<PoppedItem>, Vec<BlockPos>) {
-    let mut changes = Vec::new();
-    let mut popped = Vec::new();
-    let mut primed_tnt = Vec::new();
+) -> BlastOutcome {
+    let mut outcome = BlastOutcome::default();
+    let air = lodestone_data::block_states::air_state();
     for pos in crate::explosion_blocks::exploded_positions(world, env, centre, radius, blast_rng) {
         let state = world.block_state_id(pos.x, pos.y, pos.z);
         if crate::random_tick::is_air_variant_id(state) {
             continue;
         }
         if state.block() == lodestone_data::block::Block::Tnt {
-            primed_tnt.push(pos);
-            world.set_block(pos.x, pos.y, pos.z, lodestone_data::block_states::air_state());
-            changes.push((pos, lodestone_data::block_states::air_state()));
-            continue;
+            outcome.primed_tnt.push(pos);
+        } else {
+            outcome.destroyed.push((pos, state));
         }
-        // Rolled **before** the write, because the table is keyed off the state
-        // that is about to be destroyed.
-        popped.extend(drop_explosion_loot(tables, state, pos, radius, drops_rng));
-        world.set_block(pos.x, pos.y, pos.z, lodestone_data::block_states::air_state());
-        changes.push((pos, lodestone_data::block_states::air_state()));
+        world.set_block(pos.x, pos.y, pos.z, air);
+        outcome.changes.push((pos, air));
     }
     if fire {
-        ignite_blast_cells(world, &mut changes, blast_rng);
+        ignite_blast_cells(world, &mut outcome.changes, blast_rng);
     }
-    (changes, popped, primed_tnt)
+    outcome
 }
 
 /// The fire half of a fiery blast: each cell the blast emptied has a one in

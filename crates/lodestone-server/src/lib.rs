@@ -110,6 +110,7 @@ mod advancements;
 pub mod beacon;
 mod block_breaking;
 mod block_entities;
+mod block_removal;
 pub(crate) mod container_signal;
 pub(crate) mod stored_items;
 pub(crate) mod lid_viewers;
@@ -673,7 +674,7 @@ pub use players::{
     PlayerTicket, PlayerView,
 };
 pub use commands::{
-    CommandOutcome, CommandSource, DirectedEffect, Effect, PlayerCandidate, ServerCommands,
+    BlockEditMode, CommandOutcome, CommandSource, DirectedEffect, Effect, PlayerCandidate, ServerCommands,
 };
 pub use plugin_channels::{
     ClientChannels, PluginChannelHandler, PluginChannelRegistry, REGISTER_CHANNEL,

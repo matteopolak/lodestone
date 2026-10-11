@@ -312,6 +312,23 @@ impl Harness {
         self.server.block_entities().expect("block entities").with(|reg| reg.get(pos).map(clone_entity))
     }
 
+    /// The entity at `pos`, whatever its kind, taken out of the registry by
+    /// pointer-free means: only the kinds a case reads are copied.
+    fn entity_any(&self, pos: BlockPos) -> Option<BlockEntity> {
+        self.server.block_entities().expect("block entities").with(|reg| {
+            reg.get(pos).map(|entity| match entity {
+                BlockEntity::Hopper(hopper) => {
+                    let mut copy = lodestone_server::Hopper::new();
+                    for (i, slot) in hopper.slots().iter().enumerate() {
+                        copy.set_slot(i, slot.clone());
+                    }
+                    BlockEntity::Hopper(copy)
+                }
+                other => clone_entity(other),
+            })
+        })
+    }
+
     fn comparator_output(&self, pos: BlockPos) -> Option<u8> {
         match self.entity(pos)? {
             BlockEntity::Comparator { output } => Some(output),
@@ -695,5 +712,177 @@ async fn a_decorated_pot_stacks_one_item_and_the_comparator_reads_it() {
     h.session.select(sticks - 36).await;
     h.session.click(pot, FACE_UP, (0.5, 1.0, 0.5)).await;
     assert_eq!(pot_count(&h), Some(("minecraft:ender_pearl".to_owned(), 16)));
+    h.shutdown().await;
+}
+
+/// A shulker box item on the 776 wire carries `minecraft:container`: component
+/// 75 and item 609 in the 26.2 reports, stone 1 and cobblestone 62, laid out as
+/// the codec does (a list of optional item-first templates).
+#[test]
+fn the_container_component_is_on_the_776_wire() {
+    use lodestone_server::ServerProtocol;
+    let mut shulker = ItemStack::new(ResourceKey::from_str("minecraft:shulker_box").unwrap(), 1);
+    shulker.components.container = vec![
+        Some(ItemStack::new(ResourceKey::from_str("minecraft:stone").unwrap(), 5)),
+        None,
+        Some(ItemStack::new(ResourceKey::from_str("minecraft:cobblestone").unwrap(), 2)),
+    ];
+    let lodestone_server::ServerDirective::Send { payload, .. } = V770ServerProtocol.encode_container_slot(0, 0, 36, Some(&shulker)) else {
+        panic!("one packet");
+    };
+    assert_eq!(
+        payload,
+        [0, 0, 0, 36, 1, 0xe1, 0x04, 1, 0, 0x4b, 3, 1, 1, 5, 0, 0, 0, 1, 62, 2, 0, 0]
+    );
+}
+
+fn playing_jukebox(disc: &str, ticks: i64) -> BlockEntity {
+    let record = Nbt::Compound(vec![("id".into(), Nbt::String(disc.into())), ("count".into(), Nbt::Int(1))]);
+    BlockEntity::Opaque {
+        id: "minecraft:jukebox".to_owned().into(),
+        nbt: Nbt::Compound(vec![
+            ("id".into(), Nbt::String("minecraft:jukebox".into())),
+            ("RecordItem".into(), record),
+            ("ticks_since_song_started".into(), Nbt::Long(ticks)),
+        ]),
+    }
+}
+
+/// A song that is 1440 ticks long (the "11" disc, 71 seconds plus the padding
+/// second) sent to the client as a stop event when its clock runs out, and only
+/// then. The comparator keeps reading the disc, which is still inside.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_song_ends_when_the_registry_length_runs_out() {
+    let ending = BlockPos::new(2, FLOOR + 1, 2);
+    let playing = BlockPos::new(2, FLOOR + 1, 6);
+    let mut h = Harness::start_with(|world| {
+        for pos in [ending, playing] {
+            world.set_block(pos.x, pos.y, pos.z, state("minecraft:jukebox[has_record=true]"));
+        }
+    })
+    .await;
+    // Ten ticks short of the end for one, a fresh start for the other.
+    h.server.block_entities().expect("block entities").with(|reg| {
+        reg.insert(ending, playing_jukebox("minecraft:music_disc_11", 1430));
+        reg.insert(playing, playing_jukebox("minecraft:music_disc_11", 0));
+    });
+    let from = h.session.log.len();
+    h.session.until("the stop event", from, |log| level_events(log).iter().any(|e| e.0 == 1011)).await;
+    h.session.settle(Duration::from_millis(400)).await;
+    assert_eq!(level_events(&h.session.log[from..]), [(1011, ending, 0)], "only the jukebox at the end of its song stops");
+    let Some(BlockEntity::Opaque { nbt, .. }) = h.entity(ending) else { panic!("jukebox entity") };
+    assert!(field(&nbt, "RecordItem").is_some(), "the disc stays");
+    assert!(field(&nbt, "ticks_since_song_started").is_none(), "the clock is cleared");
+    let Some(BlockEntity::Opaque { nbt, .. }) = h.entity(playing) else { panic!("jukebox entity") };
+    assert!(matches!(field(&nbt, "ticks_since_song_started"), Some(Nbt::Long(ticks)) if *ticks > 0 && *ticks < 200));
+    h.shutdown().await;
+}
+
+fn stacked(name: &str, count: u32) -> ItemStack {
+    ItemStack::new(ResourceKey::from_str(name).unwrap(), count)
+}
+
+/// A chest with `contents` in its first slots.
+fn chest_holding(contents: &[(&str, u32)]) -> BlockEntity {
+    let mut chest = BlockEntity::container("minecraft:chest");
+    if let BlockEntity::Container { slots, .. } = &mut chest {
+        for (slot, (name, count)) in slots.iter_mut().zip(contents) {
+            *slot = Some(stacked(name, *count));
+        }
+    }
+    chest
+}
+
+fn held(entity: Option<BlockEntity>) -> Vec<(String, u32)> {
+    match entity {
+        Some(BlockEntity::Container { slots, .. }) => slots.iter().flat_map(stack_summary).collect(),
+        other => panic!("expected a container, got {other:?}"),
+    }
+}
+
+/// A primed TNT next to a chest destroys it and the chest's contents spill as
+/// item entities. A chest out of the blast's reach keeps its contents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tnt_blast_spills_the_chest_beside_it() {
+    let near = BlockPos::new(4, FLOOR + 1, 2);
+    let far = BlockPos::new(30, FLOOR + 1, 2);
+    let chest = state("minecraft:chest[facing=north,type=single,waterlogged=false]");
+    let mut h = Harness::start_with(|world| {
+        world.set_block(near.x, near.y, near.z, chest);
+        world.set_block(far.x, far.y, far.z, chest);
+    })
+    .await;
+    h.server.block_entities().expect("block entities").with(|reg| {
+        reg.insert(near, chest_holding(&[("minecraft:diamond", 5), ("minecraft:apple", 3)]));
+        reg.insert(far, chest_holding(&[("minecraft:diamond", 5)]));
+    });
+    let mobs = h.server.mobs().expect("mob sim").clone();
+    mobs.with(|sim| sim.spawn_tnt(Vec3::new(3.5, f64::from(FLOOR) + 1.0, 2.5), 5));
+
+    let started = tokio::time::Instant::now();
+    while h.world.at(near) != StateId::AIR {
+        assert!(started.elapsed() < DEADLINE, "the blast never broke the chest");
+        h.session.read(Duration::from_millis(50)).await;
+    }
+    assert!(h.entity(near).is_none(), "the entity goes with the block");
+    let started = tokio::time::Instant::now();
+    let spilled = loop {
+        let found: Vec<(String, u32)> = mobs.with(|sim| {
+            sim.items_within_pickup_range(Vec3::new(4.5, f64::from(FLOOR) + 1.0, 2.5))
+                .into_iter()
+                .map(|(_, stack)| (stack.item.to_string(), stack.count))
+                .collect()
+        });
+        if found.iter().any(|(name, _)| name == "minecraft:diamond") && found.iter().any(|(name, _)| name == "minecraft:apple") {
+            break found;
+        }
+        assert!(started.elapsed() < DEADLINE, "the chest's contents never spilled: {found:?}");
+        h.session.read(Duration::from_millis(50)).await;
+    };
+    assert!(spilled.contains(&("minecraft:diamond".to_owned(), 5)) && spilled.contains(&("minecraft:apple".to_owned(), 3)));
+    // Control: the chest the blast never reached still stands, full.
+    assert_eq!(h.world.at(far), chest);
+    assert_eq!(held(h.entity(far)), [("minecraft:diamond".to_owned(), 5)]);
+    h.shutdown().await;
+}
+
+/// A hopper above a shulker box moves the diamond and leaves the shulker box
+/// item behind; the same hopper above a chest moves both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hopper_refuses_a_shulker_box_into_a_shulker_box() {
+    use lodestone_server::Hopper;
+    let box_below = BlockPos::new(2, FLOOR + 1, 2);
+    let chest_below = BlockPos::new(6, FLOOR + 1, 2);
+    let hoppers = [BlockPos::new(2, FLOOR + 2, 2), BlockPos::new(6, FLOOR + 2, 2)];
+    let hopper = state("minecraft:hopper[enabled=true,facing=down]");
+    let mut h = Harness::start_with(|world| {
+        world.set_block(box_below.x, box_below.y, box_below.z, state("minecraft:shulker_box[facing=up]"));
+        world.set_block(chest_below.x, chest_below.y, chest_below.z, state("minecraft:chest[facing=north,type=single,waterlogged=false]"));
+        for pos in hoppers {
+            world.set_block(pos.x, pos.y, pos.z, hopper);
+        }
+    })
+    .await;
+    h.server.block_entities().expect("block entities").with(|reg| {
+        reg.insert(box_below, BlockEntity::container("minecraft:shulker_box"));
+        reg.insert(chest_below, BlockEntity::container("minecraft:chest"));
+        for pos in hoppers {
+            let mut hopper = Hopper::new();
+            hopper.set_slot(0, Some(stacked("minecraft:shulker_box", 1)));
+            hopper.set_slot(1, Some(stacked("minecraft:diamond", 1)));
+            reg.insert(pos, BlockEntity::Hopper(hopper));
+        }
+    });
+    let started = tokio::time::Instant::now();
+    while held(h.entity(chest_below)).len() < 2 {
+        assert!(started.elapsed() < DEADLINE, "the control hopper never emptied into the chest");
+        h.session.read(Duration::from_millis(50)).await;
+    }
+    let mut moved = held(h.entity(chest_below));
+    moved.sort();
+    assert_eq!(moved, [("minecraft:diamond".to_owned(), 1), ("minecraft:shulker_box".to_owned(), 1)], "a chest takes both");
+    assert_eq!(held(h.entity(box_below)), [("minecraft:diamond".to_owned(), 1)], "a shulker box takes the diamond only");
+    let Some(BlockEntity::Hopper(left)) = h.entity_any(hoppers[0]) else { panic!("hopper entity") };
+    assert_eq!(left.slots().iter().flatten().map(|s| s.item.to_string()).collect::<Vec<_>>(), ["minecraft:shulker_box"]);
     h.shutdown().await;
 }
