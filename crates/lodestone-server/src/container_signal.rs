@@ -65,7 +65,7 @@ const OPAQUE_ANALOG_IDS: &[&str] = &[
 
 /// Each music disc's comparator value, from the real song definitions; the
 /// disc item is `music_disc_<song>`.
-const DISC_SIGNALS: &[(&str, u8)] = &[
+pub(crate) const DISC_SIGNALS: &[(&str, u8)] = &[
     ("11", 11),
     ("13", 1),
     ("5", 15),

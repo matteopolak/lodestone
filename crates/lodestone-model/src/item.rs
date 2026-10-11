@@ -396,6 +396,14 @@ pub struct ItemComponents {
     /// field here to carry, and there should not be one — a field for it
     /// would always read as unset from a real server.
     pub bundle_contents: Vec<ItemStack>,
+    /// `minecraft:container`: the stacks a shulker box item carries, one entry
+    /// per box slot (`None` for an empty one), in slot order. Empty for every
+    /// other item and for an empty box.
+    ///
+    /// Written to the save form from here, not to the wire; the clientbound
+    /// decoder only skips the component, so a stack that came *from* a client
+    /// never carries it.
+    pub container: Vec<Option<ItemStack>>,
     /// `minecraft:banner_patterns`: a banner or shield stack's loom-applied
     /// pattern layers, in the stack's own stored order — vanilla's banner
     /// renderer draws them in exactly that order and no other. Empty for every non-banner,

@@ -370,6 +370,16 @@ where
                 crate::cushion::color_for_stack(stack).is_some()
                     || crate::item_frame::glow_of_item(stack).is_some()
             });
+    // Shulker boxes, jukeboxes, chiseled bookshelves and decorated pots take the
+    // click before the generic container open.
+    if apply_stored_item_use(
+        conn, proto, source, state, pos, face, cursor, sneaking, placer, inventory, block_entities, mobs,
+        block_ticks, hand, game_mode, bone_meal_rng, next_window_id, open_container, container_sync,
+    )
+    .await?
+    {
+        return Ok(());
+    }
     let existing_menu = block_entities.with(|reg| reg.get(pos).and_then(BlockEntity::menu_name));
     if let Some(menu) = existing_menu.filter(|_| !sneaking || !holding_block_item) {
         return open_container_screen(
@@ -1266,10 +1276,35 @@ where
                 if let crate::block_entities::BlockEntity::Sign(sign) = &mut entity {
                     sign.editor = Some(placer);
                 }
+                // A shulker box keeps the contents its item carried.
+                if let crate::block_entities::BlockEntity::Container { id, slots } = &mut entity
+                    && id.name() == crate::block_entities::SHULKER_BOX_ID
+                    && let Some(held) = inventory.native(hand_native)
+                {
+                    for (slot, stack) in slots.iter_mut().zip(&held.components.container) {
+                        *slot = stack.clone();
+                    }
+                }
                 block_entities.with(|registry| registry.insert(target, entity));
             } else if let Some(type_name) = lodestone_data::block_entity_types::block_entity_type(state_id)
                 .map(lodestone_data::block_entity_types::block_entity_type_name)
             {
+                let held = inventory.native(hand_native);
+                let sherds_placed = type_name == crate::stored_items::POT_ID
+                    && held.is_some_and(|stack| stack.components.pot_decorations.is_some());
+                if let Some(entity) = crate::stored_items::fresh(type_name, target, held) {
+                    if sherds_placed
+                        && let crate::block_entities::BlockEntity::Opaque { nbt, .. } = &entity
+                    {
+                        // The client draws the sherds from the entity's update tag.
+                        block_ticks.publish_effect(crate::effects::WorldEffect::BlockEntityData {
+                            pos: target,
+                            block_entity_type: crate::block_entities::BlockEntityKind::from_name(type_name),
+                            nbt: crate::stored_items::update_tag(nbt),
+                        });
+                    }
+                    block_entities.with(|registry| registry.insert(target, entity));
+                } else {
                 // State-defined block entities need a registry record even when
                 // the item has no specialized constructor. The client renders
                 // these positions from the record, so an opaque empty payload
@@ -1283,6 +1318,7 @@ where
                         },
                     );
                 });
+                }
             }
             source.set_block(target.x, target.y, target.z, state_id);
             // Publish the placement sound to every viewer except the placer.

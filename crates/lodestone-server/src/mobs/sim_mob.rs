@@ -752,13 +752,47 @@ impl<'w> SimMob<'w> {
     /// — see that type's own doc for the "remembered, not ignored or replaced"
     /// table). Returns whether the active instance changed, matching
     /// [`crate::mob_effects::ActiveEffects::apply`]'s own return.
+    ///
+    /// An undead mob refuses poison and regeneration outright (the
+    /// `ignores_poison_and_regen` entity tag), so they are never stored.
     pub fn apply_effect<K: crate::mob_effects::EffectKey>(
         &mut self,
         effect_id: K,
         duration: i32,
         amplifier: u32,
     ) -> bool {
+        use lodestone_data::mob_effects::MobEffectId;
+        let Some(effect_id) = crate::mob_effects::EffectKey::resolve_effect(effect_id) else {
+            return false;
+        };
+        if matches!(effect_id, MobEffectId::POISON | MobEffectId::REGENERATION)
+            && lodestone_data::entity_type_tags::entity_type_tag_members("minecraft:ignores_poison_and_regen")
+                .is_some_and(|members| members.contains(&self.entity_type.to_string().as_str()))
+        {
+            return false;
+        }
         self.effects.apply(effect_id, duration, amplifier)
+    }
+
+    /// Advances this mob's effects one tick and applies what they decided:
+    /// regeneration heals (capped at max health), poison hurts as magic damage
+    /// (never below one health, the guard being inside the effect tick), wither
+    /// hurts as wither damage. Returns the health damage that landed.
+    pub(super) fn tick_effects(&mut self, world_tick: i32) -> f32 {
+        if self.effects.is_empty() || self.health <= 0.0 {
+            return 0.0;
+        }
+        let out = self.effects.tick(world_tick, self.health, self.max_health);
+        if out.heal > 0.0 {
+            self.health = (self.health + out.heal).min(self.max_health);
+        }
+        let mut landed = 0.0;
+        for (damage, kind) in [(out.poison_damage, "minecraft:magic"), (out.wither_damage, "minecraft:wither")] {
+            if damage > 0.0 {
+                landed += self.apply_damage(damage, DamageFlags::for_damage_type_name(kind).unwrap_or_default());
+            }
+        }
+        landed
     }
 
     /// Whether this mob is visibly on fire — vanilla's own "is on fire" check's
@@ -1302,6 +1336,15 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn snapshot(&self) -> EntitySnapshot {
         let mut metadata = Vec::new();
+        // The base entity's silent and no-gravity booleans (indices 4 and 5).
+        // Only a set flag is sent: the client's default is unset, and the flags
+        // are written once, when a summon or world load applies them.
+        if self.silent {
+            metadata.push(MetadataField::Silent(true));
+        }
+        if self.mob.gravity_disabled() {
+            metadata.push(MetadataField::NoGravity(true));
+        }
         if self.entity_type.path() == "creeper" {
             metadata.push(MetadataField::CreeperSwellDir(self.swell_dir()));
             if self.is_ignited() {

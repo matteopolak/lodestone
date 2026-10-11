@@ -862,6 +862,7 @@ where
                     }
                 }
                 *open_container = None;
+                crate::lid_viewers::release_and_publish(block_entities, block_ticks, player_uuid);
                 *container_sync = ContainerSync::default();
             }
             // Any window close ends the active menu, including a merchant menu.

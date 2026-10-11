@@ -79,6 +79,8 @@ mod resource_pack;
 pub use self::resource_pack::*;
 mod source_ref;
 pub(crate) use self::source_ref::*;
+mod stored_items_use;
+use self::stored_items_use::*;
 mod use_item;
 pub use self::use_item::*;
 mod use_item_on;

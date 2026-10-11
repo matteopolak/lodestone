@@ -111,6 +111,8 @@ pub mod beacon;
 mod block_breaking;
 mod block_entities;
 pub(crate) mod container_signal;
+pub(crate) mod stored_items;
+pub(crate) mod lid_viewers;
 pub(crate) mod entity_analog;
 /// Rolling a broken block's loot table and popping the result as item entities
 /// — the join between [`loot`],

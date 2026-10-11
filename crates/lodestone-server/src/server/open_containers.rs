@@ -175,6 +175,7 @@ pub(super) fn container_title(menu: &str) -> &'static str {
         "minecraft:blast_furnace" => "Blast Furnace",
         "minecraft:hopper" => "Hopper",
         "minecraft:generic_9x3" => "Chest",
+        "minecraft:shulker_box" => "Shulker Box",
         "minecraft:anvil" => "Repair & Name",
         "minecraft:grindstone" => "Grindstone",
         "minecraft:smithing" => "Smithing Table",
@@ -383,6 +384,7 @@ where
         shape: match menu {
             "minecraft:beacon" => MenuKind::Beacon,
             "minecraft:lectern" => MenuKind::Lectern,
+            "minecraft:shulker_box" => MenuKind::ShulkerBox,
             _ => MenuKind::Container { size: own_slots.len() },
         },
         container_size: own_slots.len(),

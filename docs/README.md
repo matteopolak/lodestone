@@ -1027,6 +1027,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   integrated server stores and ticks, protocol adapters transport, and the shell uses
   for movement, HUD state and effect-driven rendering. The 26.2 built-in registry has
   40 ids; recognising an id on the wire is separate from implementing its game rule.
+- [Stored-item blocks](./stored-item-blocks.md) — Placement and use of shulker
+  boxes, jukeboxes, chiseled bookshelves and decorated pots, plus the stored contents
+  of each. The pure rules live in `lodestone_server::stored_items`; the player-facing
+  producer is `server::stored_items_use`.
 - [String-dispatch census](./string-dispatch-census.md) — `cargo xtask
   check-string-dispatch` inventories Rust `match` expressions whose patterns are
   string literals. The report identifies closed registries and closed configuration

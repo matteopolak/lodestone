@@ -1142,6 +1142,14 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes a block event (wire id `block_event`): `kind` and `value` are
+    /// the block's own event parameters and `block` its registry name. The
+    /// default emits nothing.
+    fn encode_block_event(&self, pos: BlockPos, block: &str, kind: u8, value: u8) -> ServerDirective {
+        let _ = (pos, block, kind, value);
+        ServerDirective::None
+    }
+
     /// Encodes a burst of block-state particles (level-particles packet whose
     /// particle is the block one, carrying `state` as its option). The default
     /// emits nothing.
@@ -1201,6 +1209,9 @@ pub trait ServerProtocol: Send + Sync {
                 block_entity_type,
                 nbt,
             } => self.encode_block_entity_data(*pos, block_entity_type.name(), nbt),
+            crate::effects::WorldEffect::BlockEvent { pos, block, kind, value } => {
+                self.encode_block_event(*pos, block, *kind, *value)
+            }
             // This variant is not a packet — see its own doc
             // for why. `crate::server`'s world-effect drain intercepts it
             // before ever reaching this dispatcher in the one real consumer
@@ -2497,6 +2508,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         count: i32,
     ) -> ServerDirective {
         (**self).encode_block_particles(state, pos, offset, max_speed, count)
+    }
+
+    fn encode_block_event(&self, pos: BlockPos, block: &str, kind: u8, value: u8) -> ServerDirective {
+        (**self).encode_block_event(pos, block, kind, value)
     }
 
     // Forwarded even though the trait's own body is pure dispatch and would

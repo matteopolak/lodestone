@@ -1344,6 +1344,7 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
                 .iter()
                 .map(lodestone_model::ItemStack::from)
                 .collect(),
+            container: Vec::new(),
             banner_patterns: stack.banner_patterns().to_vec(),
             tool: stack.tool(),
             max_stack_size: stack
@@ -1905,6 +1906,7 @@ mod tests {
             item: id("minecraft:diamond_pickaxe"),
             count: 3,
             components: ModelItemComponents {
+                container: Vec::new(),
                 attack_animation: None,
                 interact_animation: None,
                 block_transformer: None,

@@ -217,6 +217,20 @@ fn components_to_nbt(item: &ResourceKey, components: &ItemComponents) -> (Vec<(S
     if let Some(book) = rest.written_book_content.take() {
         put("written_book_content", written_book_to_nbt(&book));
     }
+    let container = std::mem::take(&mut rest.container);
+    if container.iter().any(Option::is_some) {
+        let mut entries = Vec::new();
+        for (slot, held) in container.iter().enumerate() {
+            let Some(held) = held else { continue };
+            let persisted = stack_to_nbt(held);
+            complete &= persisted.complete;
+            entries.push(Nbt::Compound(vec![
+                ("slot".to_owned(), Nbt::Int(slot as i32)),
+                ("item".to_owned(), Nbt::Compound(persisted.fields)),
+            ]));
+        }
+        put("container", compound_list(entries));
+    }
     // Prototype-derived fields: the item's own defaults, restored from the
     // prototype census, never saved.
     rest.max_stack_size = None;
@@ -277,6 +291,22 @@ fn read_component(components: &mut ItemComponents, name: &str, value: &Nbt) -> b
                 Some(_) => None,
             };
             pages.map(|pages| components.writable_book_content = Some(pages)).is_some()
+        }
+        ("container", Nbt::List { elements, .. }) => {
+            let mut slots: Vec<Option<ItemStack>> = Vec::new();
+            for entry in elements {
+                let (Some(Nbt::Int(slot)), Some(item)) = (field(entry, "slot"), field(entry, "item")) else { return false };
+                let (Ok(slot), Some(stack)) = (usize::try_from(*slot), stack_from_nbt(item)) else { return false };
+                if slot >= 256 {
+                    return false;
+                }
+                if slots.len() <= slot {
+                    slots.resize(slot + 1, None);
+                }
+                slots[slot] = Some(stack);
+            }
+            components.container = slots;
+            true
         }
         ("written_book_content", value) => written_book_from_nbt(value).map(|book| components.written_book_content = Some(book)).is_some(),
         _ => false,

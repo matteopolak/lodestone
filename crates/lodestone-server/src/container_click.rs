@@ -156,6 +156,9 @@ pub enum MenuKind {
     /// A lectern's single displayed-book slot. The visible reader uses a
     /// dedicated button action; ordinary placement is never permitted.
     Lectern,
+    /// A shulker box: 27 own slots like a chest, but a shulker box item is
+    /// refused in every one of them, so boxes never nest.
+    ShulkerBox,
 }
 
 /// Which workstation an [`MenuKind::ItemCombiner`] is — the anvil and
@@ -210,6 +213,12 @@ impl MenuLayout {
             kind: MenuKind::Container { size },
             slots,
         }
+    }
+
+    /// A shulker box menu: the chest layout with the nesting rule.
+    #[must_use]
+    pub fn shulker_box() -> Self {
+        Self { kind: MenuKind::ShulkerBox, ..Self::container(crate::block_entities::CONTAINER_9X3_SIZE) }
     }
 
     /// The crafting-table layout has 46 slots: result `0`, the 3×3 grid `1..=9`, main storage
@@ -330,6 +339,7 @@ impl MenuLayout {
                 // The beacon payment slot accepts only registered payment items.
                 MenuKind::Beacon => idx == 0 && crate::beacon::is_beacon_payment_item(&item.item.to_string()),
                 MenuKind::Lectern => false,
+                MenuKind::ShulkerBox => !crate::block_entities::is_shulker_box_item(&item.item.to_string()),
                 _ => true,
             },
         }
@@ -394,6 +404,14 @@ impl MenuLayout {
             }
             // Container menus: own slots one way,
             // the player tail the other.
+            MenuKind::ShulkerBox => {
+                let size = crate::block_entities::CONTAINER_9X3_SIZE;
+                if index < size {
+                    vec![(size, self.slots.len(), true)]
+                } else {
+                    vec![(0, size, false)]
+                }
+            }
             MenuKind::Container { size } => {
                 if index < size {
                     vec![(size, self.slots.len(), true)]

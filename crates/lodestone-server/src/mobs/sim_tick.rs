@@ -1053,6 +1053,7 @@ impl<'w> MobSim<'w> {
         // is the consumption half, run every tick regardless of whether a
         // fireball landed this one.
         self.tick_burning();
+        self.tick_mob_effects();
         self.tick_leashes();
         self.tick_villager_professions();
         // villager bed claiming — see `tick_villager_beds`'s own
@@ -1463,6 +1464,30 @@ impl<'w> MobSim<'w> {
         }
         self.reap_dead();
         self.applied_burn_owner_plan = plan;
+    }
+
+    /// Advances every mob's status effects one tick: durations count down,
+    /// expired effects drop out, and the periodic ones (regeneration, poison,
+    /// wither) heal or hurt through the same funnel as any other damage, so a
+    /// killing wither tick reaps the mob with its loot.
+    ///
+    /// Serial and per-mob: an effect tick reads only that mob's own health.
+    fn tick_mob_effects(&mut self) {
+        let world_tick = i32::try_from(self.tick_count).unwrap_or(i32::MAX);
+        let mut landed: Vec<(i32, f32)> = Vec::new();
+        for m in &mut self.mobs {
+            let applied = m.tick_effects(world_tick);
+            if applied > 0.0 {
+                landed.push((m.id, applied));
+            }
+        }
+        if landed.is_empty() {
+            return;
+        }
+        for (id, applied) in landed {
+            self.note_vocalisation(id, applied);
+        }
+        self.reap_dead();
     }
 
     /// Per-tick leash physics: pull leashed mobs toward their holder, and

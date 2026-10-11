@@ -129,6 +129,7 @@ pub(super) fn apply_container_clicked<P: ServerProtocol>(
         match tracked.shape {
             MenuKind::CraftingTable => (MenuLayout::crafting_table(), Some(tracked.pos), true),
             MenuKind::Lectern => (MenuLayout::lectern(), Some(tracked.pos), false),
+            MenuKind::ShulkerBox => (MenuLayout::shulker_box(), Some(tracked.pos), false),
             _ => (
                 MenuLayout::container(tracked.container_size),
                 Some(tracked.pos),
@@ -1210,6 +1211,7 @@ pub(super) fn apply_item_dropped<P: ServerProtocol>(
         Some(tracked) => {
             let layout = match tracked.shape {
                 MenuKind::CraftingTable => MenuLayout::crafting_table(),
+                MenuKind::ShulkerBox => MenuLayout::shulker_box(),
                 _ => MenuLayout::container(tracked.container_size),
             };
             let window_id = tracked.window_id;

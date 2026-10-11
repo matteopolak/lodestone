@@ -38,6 +38,8 @@ Effect to consumer (every effect is retained, timed, shown when its icon flag pe
 | Wind Charged | player-death small-gust particle via the ordinary world-effect wire path; no wind knockback, and mobs hold no status effects yet |
 | Trial Omen, Weaving, Oozing, Infested | none (transport and HUD only) |
 
+Mobs tick too: `SimMob::tick_effects`, called each sim tick after burning, applies regeneration healing and poison/wither damage through the normal damage path (poison cannot take a mob below 1 health). Undead (the `ignores_poison_and_regen` entity tag) refuse poison and regeneration at `SimMob::apply_effect`. Silent and NoGravity mobs stream them as entity data.
+
 ## How to change it
 
 - Add a server rule to `lodestone_server::mob_effects` only if its consumer runs from the shared `ActiveEffects` store; never a second timer. A new protocol family validates its wire id at the `MobEffectId` boundary and preserves every presentation flag.

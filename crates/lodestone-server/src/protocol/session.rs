@@ -340,6 +340,13 @@ pub struct ResourcePackPush {
 /// implementor. See DESIGN.md §12.116.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataField {
+    /// The base entity's silent flag (index 4, `BOOLEAN`): the client mutes the
+    /// entity's own sounds. Valid for any entity type.
+    Silent(bool),
+    /// The base entity's no-gravity flag (index 5, `BOOLEAN`): the client does
+    /// not apply gravity when it predicts the entity's motion. Valid for any
+    /// entity type.
+    NoGravity(bool),
     /// The base-entity shared-flags byte. The producer owns its bits: this
     /// generic wire field is valid for any entity type, so an unrelated
     /// feature must not reuse it without preserving every bit it does not

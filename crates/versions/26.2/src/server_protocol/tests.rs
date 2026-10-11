@@ -4958,3 +4958,64 @@ mod cosmetic_metadata_tests {
         assert_eq!(crossed.collar_color, None);
     }
 }
+
+/// The base entity's silent and no-gravity booleans against the jar dump, and
+/// the block event a lid or wobble rides on.
+#[cfg(test)]
+mod stored_item_wire_tests {
+    use lodestone_core::Reader;
+    use lodestone_model::BlockPos;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{METADATA_IDX_NO_GRAVITY, METADATA_IDX_SILENT, METADATA_SER_BOOLEAN, V770ServerProtocol};
+    use crate::packet_ids::play;
+
+    const DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm.txt");
+
+    fn row(owner: &str) -> (u8, i32) {
+        let line = DUMP.lines().find(|line| line.split_whitespace().nth(1) == Some(owner)).expect("dump row");
+        let mut tok = line.split_whitespace();
+        (tok.next().unwrap().parse().unwrap(), tok.next().map(|_| tok.next().unwrap().parse().unwrap()).unwrap())
+    }
+
+    #[test]
+    fn silent_and_no_gravity_are_the_dumps_indices() {
+        assert_eq!(row("Entity.DATA_SILENT"), (METADATA_IDX_SILENT, METADATA_SER_BOOLEAN));
+        assert_eq!(row("Entity.DATA_NO_GRAVITY"), (METADATA_IDX_NO_GRAVITY, METADATA_SER_BOOLEAN));
+        for (field, index) in [(MetadataField::Silent(true), 4u8), (MetadataField::NoGravity(true), 5u8)] {
+            let ServerDirective::Send { payload, .. } = V770ServerProtocol.encode_set_entity_data(12, &[field]) else {
+                panic!("metadata must emit a Send");
+            };
+            let mut r = Reader::new(&payload);
+            assert_eq!(r.var_i32().unwrap(), 12);
+            assert_eq!(r.u8().unwrap(), index);
+            assert_eq!(r.var_i32().unwrap(), 8, "the BOOLEAN serializer");
+            assert!(r.bool().unwrap());
+            assert_eq!(r.u8().unwrap(), 0xFF);
+            assert!(r.ensure_empty().is_ok());
+        }
+    }
+
+    /// Packed position, the two parameters, then the block's registry id: laid
+    /// out by hand from the field order, with the block id read from the same
+    /// table the statistics screen resolves blocks through.
+    #[test]
+    fn a_block_event_is_position_parameters_then_block() {
+        let pos = BlockPos::new(-3, 70, 12);
+        let ServerDirective::Send { packet_id, payload } = V770ServerProtocol.encode_block_event(pos, "minecraft:decorated_pot", 1, 1) else {
+            panic!("a block event must emit a Send");
+        };
+        assert_eq!(packet_id, play::clientbound::BLOCK_EVENT);
+        let packed = ((i64::from(pos.x) & 0x3FF_FFFF) << 38) | ((i64::from(pos.z) & 0x3FF_FFFF) << 12) | (i64::from(pos.y) & 0xFFF);
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.i64().unwrap(), packed);
+        assert_eq!((r.u8().unwrap(), r.u8().unwrap()), (1, 1));
+        let block = lodestone_data::block::Block::from_name("minecraft:decorated_pot").unwrap();
+        assert_eq!(r.var_i32().unwrap(), i32::from(block.registry_id()));
+        assert!(r.ensure_empty().is_ok());
+        assert!(matches!(
+            V770ServerProtocol.encode_block_event(pos, "minecraft:not_a_block", 1, 1),
+            ServerDirective::None
+        ), "an unknown block emits nothing");
+    }
+}

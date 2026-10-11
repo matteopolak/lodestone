@@ -371,6 +371,8 @@ where
     )
     .await?;
     let mut open_container: Option<OpenContainer> = None;
+    // Closes this player's shulker lid however the task ends.
+    let _lid_guard = crate::lid_viewers::LidGuard::new(block_entities.clone(), block_ticks.clone(), player_uuid);
     let mut open_merchant: Option<OpenMerchant> = None;
     let mut container_sync = ContainerSync::default();
     // This connection's last-known `ServerBound::PlayerInput` sprint flag —
@@ -675,6 +677,7 @@ where
                         bow_draw = None;
                         item_in_use = None;
                         open_container = None;
+                        crate::lid_viewers::release_and_publish(block_entities, block_ticks, player_uuid);
                         open_merchant = None;
                     }
                     live_publish_player(
@@ -1092,6 +1095,7 @@ where
                     bow_draw = None;
                     item_in_use = None;
                     open_container = None;
+                    crate::lid_viewers::release_and_publish(block_entities, block_ticks, player_uuid);
                     open_merchant = None;
                     live_publish_player(
                         live_save, player_store.as_ref(), player_uuid, player_pos, player_rot,
@@ -3435,6 +3439,8 @@ where
     // container synchronization requires the native container-sync timer and
     // is not run by the browser loop.
     let mut open_container: Option<OpenContainer> = None;
+    // Closes this player's shulker lid however the task ends.
+    let _lid_guard = crate::lid_viewers::LidGuard::new(block_entities.clone(), block_ticks.clone(), player_uuid);
     let mut open_merchant: Option<OpenMerchant> = None;
     let mut container_sync = ContainerSync::default();
     let mut next_window_id: i32 = 0;
@@ -3586,6 +3592,7 @@ where
                     bow_draw = None;
                     item_in_use = None;
                     open_container = None;
+                    crate::lid_viewers::release_and_publish(block_entities, block_ticks, player_uuid);
                     open_merchant = None;
                 }
                 continue;
@@ -4010,6 +4017,7 @@ where
                 bow_draw = None;
                 item_in_use = None;
                 open_container = None;
+                crate::lid_viewers::release_and_publish(block_entities, block_ticks, player_uuid);
                 open_merchant = None;
                 continue;
             }

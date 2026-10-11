@@ -1217,13 +1217,9 @@ fn saved_tick_from_nbt(nbt: &Nbt) -> Option<SavedTick> {
 /// `Byte` named `Count` before the component rewrite); read off real 26.2
 /// dispenser and hopper entries rather than from any table.
 ///
-/// **Item components are not persisted.** A stack's
-/// [`lodestone_model::ItemComponents`] is the wire's decoded patch and has no
-/// encoder in this crate; writing a partial one would be worse than writing
-/// none, on the same argument this module's doc comment makes about
-/// heightmaps. A saved iron sword comes back as an undamaged, unnamed iron
-/// sword.
-fn items_to_nbt(slots: &[Option<ItemStack>]) -> Nbt {
+/// Each stack's components are written by `item_nbt`, so damage, names and a
+/// shulker box's contents round-trip.
+pub(crate) fn items_to_nbt(slots: &[Option<ItemStack>]) -> Nbt {
     let elements: Vec<Nbt> = slots
         .iter()
         .enumerate()
@@ -2095,7 +2091,7 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
                 locked,
             ))
         }
-        "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => {
+        "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" | "minecraft:shulker_box" => {
             BlockEntity::Container {
                 id: crate::block_entities::BlockEntityKind::from_name(id),
                 slots: items_from_nbt(

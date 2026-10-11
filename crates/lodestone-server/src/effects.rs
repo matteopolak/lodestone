@@ -145,6 +145,18 @@ pub enum WorldEffect {
         /// The `getUpdateTag` payload, as a nameless compound.
         nbt: lodestone_core::Nbt,
     },
+    /// Block-event packet: a numbered animation a block plays on every client
+    /// that has it loaded (a shulker box lid, a decorated pot wobble).
+    BlockEvent {
+        /// The cell the event happens at.
+        pos: BlockPos,
+        /// The `minecraft:block` registry name the event is addressed to.
+        block: String,
+        /// First event parameter (the event kind).
+        kind: u8,
+        /// Second event parameter (the event payload).
+        value: u8,
+    },
     /// A **server-side-only** correction signal, not a
     /// wire-mirrored packet like every other variant above (that is why it is
     /// named a "push" rather than after a real clientbound packet, and why
@@ -248,6 +260,20 @@ pub fn item_frame_sound(kind: crate::item_frame::FrameSound, glow: bool, pos: Ve
         pos,
         volume: 1.0,
         pitch: 1.0,
+        seed,
+    })
+}
+
+/// A sound in the block category at the centre of `pos`, or `None` when the
+/// registry has no such sound.
+#[must_use]
+pub fn block_sound(name: &str, pos: BlockPos, volume: f32, pitch: f32, seed: i64) -> Option<WorldEffect> {
+    sound_exists(name).then(|| WorldEffect::Sound {
+        sound: name.to_owned(),
+        category: SoundCategory::Block,
+        pos: block_centre(pos),
+        volume,
+        pitch,
         seed,
     })
 }

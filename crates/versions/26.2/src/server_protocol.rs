@@ -321,6 +321,11 @@ const METADATA_SER_DIRECTION: i32 = 12;
 const METADATA_IDX_FRAME_ITEM: u8 = 9;
 const METADATA_IDX_FRAME_ROTATION: u8 = 10;
 const METADATA_IDX_SHARED_FLAGS: u8 = 0;
+/// The base entity's silent and no-gravity booleans, indices 4 and 5 in
+/// `tests/support/entity_data_index_jvm.txt` (`4 ... DATA_SILENT 8 BOOLEAN`,
+/// `5 ... DATA_NO_GRAVITY 8 BOOLEAN`); the only claimants at those indices.
+const METADATA_IDX_SILENT: u8 = 4;
+const METADATA_IDX_NO_GRAVITY: u8 = 5;
 
 /// the abstract-horse class's own flags accessor's metadata index — **also 18**, also `BYTE`.
 ///
@@ -4570,6 +4575,16 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_BYTE);
                     w.i8(*flags as i8);
                 }
+                MetadataField::Silent(silent) => {
+                    w.u8(METADATA_IDX_SILENT);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*silent);
+                }
+                MetadataField::NoGravity(no_gravity) => {
+                    w.u8(METADATA_IDX_NO_GRAVITY);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*no_gravity);
+                }
                 MetadataField::CreeperSwellDir(v) => {
                     w.u8(METADATA_IDX_CREEPER_SWELL_DIR);
                     w.var_i32(METADATA_SER_INT);
@@ -5309,6 +5324,23 @@ impl ServerProtocol for V770ServerProtocol {
         w.bool(global);
         ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_EVENT,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// The block-event packet: packed position, the two event parameters,
+    /// then the block's registry id.
+    fn encode_block_event(&self, pos: BlockPos, block: &str, kind: u8, value: u8) -> ServerDirective {
+        let Some(block_id) = block_registry_id_by_name(self.wire, block) else {
+            return ServerDirective::None;
+        };
+        let mut w = Writer::default();
+        w.i64(pack_block_pos(pos.x, pos.y, pos.z));
+        w.u8(kind);
+        w.u8(value);
+        w.var_i32(block_id);
+        ServerDirective::Send {
+            packet_id: play::clientbound::BLOCK_EVENT,
             payload: w.into_vec(),
         }
     }

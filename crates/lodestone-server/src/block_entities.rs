@@ -501,8 +501,24 @@ pub fn container_type_for_block(block: lodestone_data::block::Block) -> Option<&
         lodestone_data::block::Block::Barrel => Some("minecraft:barrel"),
         lodestone_data::block::Block::Dispenser => Some("minecraft:dispenser"),
         lodestone_data::block::Block::Dropper => Some("minecraft:dropper"),
+        block if is_shulker_box(block) => Some(SHULKER_BOX_ID),
         _ => None,
     }
+}
+
+/// The block-entity type shared by the plain shulker box and all sixteen dyed ones.
+pub const SHULKER_BOX_ID: &str = "minecraft:shulker_box";
+
+/// Whether the item named `item` is a shulker box of any colour.
+#[must_use]
+pub fn is_shulker_box_item(item: &str) -> bool {
+    lodestone_data::block::Block::from_name(item).is_some_and(is_shulker_box)
+}
+
+/// Whether `block` is a shulker box of any colour.
+#[must_use]
+pub fn is_shulker_box(block: lodestone_data::block::Block) -> bool {
+    block.path().ends_with("shulker_box")
 }
 
 impl BlockEntity {
@@ -679,6 +695,7 @@ impl BlockEntity {
             // narrower than a chest/trapped-chest/barrel's `generic_9x3` (27) —
             // the two `Container` shapes share one Rust variant but not one
             // vanilla menu, so this reads the id rather than assuming.
+            BlockEntity::Container { id, .. } if id.name() == SHULKER_BOX_ID => Some("minecraft:shulker_box"),
             BlockEntity::Container { id, slots } => Some(if slots.len() == CONTAINER_3X3_SIZE {
                 debug_assert!(
                     id.name() == "minecraft:dispenser" || id.name() == "minecraft:dropper",
@@ -1055,7 +1072,11 @@ impl PlacedBlockEntity {
             PlacedBlockEntity::Furnace(kind) => BlockEntity::Furnace(Furnace::new(kind)),
             PlacedBlockEntity::Hopper => BlockEntity::Hopper(Hopper::new()),
             PlacedBlockEntity::BrewingStand => BlockEntity::BrewingStand(BrewingStand::new()),
-            PlacedBlockEntity::Container { size } => BlockEntity::container_of_size(block, size),
+            PlacedBlockEntity::Container { size } => {
+                // Every shulker box colour is one block-entity type.
+                let id = if block.ends_with("shulker_box") { SHULKER_BOX_ID } else { block };
+                BlockEntity::container_of_size(id, size)
+            }
             PlacedBlockEntity::CommandBlock => {
                 BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new())
             }
@@ -1203,7 +1224,11 @@ fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlock
             "minecraft:warped_hanging_sign",
             PlacedBlockEntity::Sign { hanging: true },
         ),
-        _ => return None,
+        // All seventeen shulker boxes share one block-entity type and a 27-slot grid.
+        item => {
+            let block = lodestone_data::block::Block::from_name(item).filter(|block| is_shulker_box(*block))?;
+            (block.name(), PlacedBlockEntity::Container { size: CONTAINER_9X3_SIZE })
+        }
     };
     Some(placed)
 }
@@ -1471,6 +1496,8 @@ pub struct BlockEntityRegistry {
     /// route of the private map funnels through this registry's methods, so
     /// this is the one place a container change is noticed.
     analog_dirty: std::collections::HashSet<BlockPos>,
+    /// Players looking into a shulker box, which drives its lid.
+    pub(crate) lid_viewers: crate::lid_viewers::LidViewers,
 }
 
 impl BlockEntityRegistry {

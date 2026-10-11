@@ -840,7 +840,7 @@ fn nearest_look(ctx: &PlaceContext) -> Option<Direction> {
 }
 
 /// The clicked face as a [`Direction`].
-fn face_direction(face: BlockFace) -> Direction {
+pub(crate) fn face_direction(face: BlockFace) -> Direction {
     match face {
         BlockFace::Down => Direction::Down,
         BlockFace::Up => Direction::Up,

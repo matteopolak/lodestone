@@ -344,6 +344,13 @@ where
     // replacement so a waterlogged block leaves its water source rather than
     // unconditional air (see `new_state` below).
     let broken = source.block_state_id(pos.x, pos.y, pos.z);
+    // A pot hit with a bladed or heavy tool shatters: it breaks as its cracked
+    // state, which both its drops and its sound read.
+    let broken = if broken.block() == Block::DecoratedPot && crate::stored_items::tool_shatters_pot(held) {
+        crate::stored_items::with_property(broken, "cracked", "true").unwrap_or(broken)
+    } else {
+        broken
+    };
     // The removal write preserves a cell's *fluid* state. For a dry block
     // `fluid_state_of` is `None` and this is plain air, which is why every
     // existing break gate — all of them dry blocks — could not see the
@@ -405,6 +412,27 @@ where
     } else {
         Vec::new()
     };
+    // What a stored-item block gives up beyond its loot table: a shulker box
+    // with its contents, a pot's sherds and contents, a jukebox's disc, a
+    // bookshelf's books.
+    let (extra_stacks, record_stopped) = block_entities.with(|reg| {
+        let entity = reg.get(pos);
+        let playing = matches!(entity, Some(BlockEntity::Opaque { nbt, .. }) if broken.block() == Block::Jukebox
+            && crate::stored_items::jukebox_disc(nbt).is_some());
+        (crate::stored_items::broken_drops(broken, entity, drop_loot), playing)
+    });
+    if record_stopped {
+        block_ticks.publish_effect(crate::effects::WorldEffect::LevelEvent {
+            event: crate::stored_items::JUKEBOX_STOP_EVENT,
+            pos,
+            data: 0,
+            global: false,
+        });
+    }
+    let popped = popped.into_iter().chain(extra_stacks.into_iter().map(|stack| {
+        let (position, velocity) = crate::block_drops::pop_resource_placement(pos, drops_rng);
+        crate::block_drops::PoppedItem { stack, position, velocity }
+    })).collect::<Vec<_>>();
     if !popped.is_empty() {
         mobs.with(|sim| {
             for drop in popped {
@@ -449,7 +477,10 @@ where
         }
     }
     let drops_elapsed = started.elapsed();
-    let removed = block_entities.with(|reg| reg.remove(pos));
+    let removed = block_entities.with(|reg| {
+        reg.lid_viewers.forget(pos);
+        reg.remove(pos)
+    });
     // A broken hive lets every bee out at once, at the hive's own cell.
     if let Some(crate::block_entities::BlockEntity::Beehive(mut hive)) = removed {
         let flower = hive.flower();
