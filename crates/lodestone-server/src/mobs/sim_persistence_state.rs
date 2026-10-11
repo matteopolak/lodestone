@@ -22,6 +22,12 @@ use crate::entity_record::{field, read_uuid, uuid_to_ints};
 /// each (profession and level; three of the memories), so the whole compound is
 /// carried and the owned parts are overwritten on save.
 pub(super) const OWNED_FIELDS: &[&str] = &[
+    "NoAI",
+    "NoGravity",
+    "Silent",
+    "Invulnerable",
+    "active_effects",
+    "equipment",
     "anger_end_time",
     "angry_at",
     "Age",
@@ -149,6 +155,34 @@ impl<'w> MobSim<'w> {
         // despawnable by a `0` it was saved with.
         if mob.persistence_required {
             fields.push(("PersistenceRequired".to_owned(), byte(true)));
+        }
+        for (name, set) in [
+            ("NoAI", mob.mob.ai_disabled()),
+            ("NoGravity", mob.mob.gravity_disabled()),
+            ("Silent", mob.silent),
+            ("Invulnerable", mob.invulnerable),
+        ] {
+            if set {
+                fields.push((name.to_owned(), byte(true)));
+            }
+        }
+        if !mob.effects.is_empty() {
+            let effects = mob
+                .effects
+                .entries()
+                .into_iter()
+                .map(|(id, duration, amplifier)| {
+                    compound(vec![
+                        ("id", Nbt::String(id.to_owned())),
+                        ("amplifier", Nbt::Byte(amplifier.min(255) as u8 as i8)),
+                        ("duration", Nbt::Int(duration)),
+                    ])
+                })
+                .collect();
+            fields.push(("active_effects".to_owned(), list_of_compounds(effects)));
+        }
+        if let Some(equipment) = equipment_to_nbt(&mob.equipment) {
+            fields.push(("equipment".to_owned(), equipment));
         }
 
         let owner_uuid = match mob.owner {
@@ -435,6 +469,23 @@ impl<'w> MobSim<'w> {
             if flag_of(get("PersistenceRequired")) || named {
                 mob.set_persistence_required(true);
             }
+            mob.mob.set_ai_disabled(flag_of(get("NoAI")));
+            mob.mob.set_gravity_disabled(flag_of(get("NoGravity")));
+            mob.silent = flag_of(get("Silent"));
+            mob.invulnerable = flag_of(get("Invulnerable"));
+            if let Some(Nbt::List { elements, .. }) = get("active_effects") {
+                for entry in elements {
+                    let Some(Nbt::String(id)) = field(entry, "id") else { continue };
+                    let amplifier = int_of(field(entry, "amplifier")).unwrap_or(0).clamp(0, 255) as u32;
+                    let duration = int_of(field(entry, "duration")).unwrap_or(0);
+                    if duration == crate::mob_effects::INFINITE_DURATION || duration > 0 {
+                        mob.apply_effect(id.as_str(), duration, amplifier);
+                    }
+                }
+            }
+            if let Some(worn @ Nbt::Compound(_)) = get("equipment") {
+                mob.set_equipment(equipment_from_nbt(worn));
+            }
             // A saved deadline is absolute game time; this sim's clock is its
             // own tick count, so a deadline beyond the longest grudge a hit can
             // start is clamped rather than outliving a clock that restarted.
@@ -682,6 +733,41 @@ pub(super) struct PendingReferences {
     id: i32,
     owner: Option<Uuid>,
     leash: Option<Uuid>,
+}
+
+/// The `equipment` compound: one stack per worn slot, keyed by slot name.
+/// `None` when nothing is worn, so an unequipped mob writes no field.
+fn equipment_to_nbt(worn: &lodestone_entity::spawn_equipment::EquipmentSlots) -> Option<Nbt> {
+    let slots = [
+        ("mainhand", worn.main_hand),
+        ("offhand", worn.off_hand),
+        ("head", worn.head),
+        ("chest", worn.chest),
+        ("legs", worn.legs),
+        ("feet", worn.feet),
+    ];
+    let fields: Vec<(&str, Nbt)> = slots
+        .into_iter()
+        .filter_map(|(name, item)| item.map(|item| (name, stack(item.name(), 1))))
+        .collect();
+    (!fields.is_empty()).then(|| compound(fields))
+}
+
+/// The inverse of [`equipment_to_nbt`]. A slot naming an item this build does
+/// not know stays empty, and unknown slot names are ignored.
+fn equipment_from_nbt(nbt: &Nbt) -> lodestone_entity::spawn_equipment::EquipmentSlots {
+    let item_in = |slot: &str| match field(nbt, slot).and_then(|stack| field(stack, "id")) {
+        Some(Nbt::String(id)) => lodestone_data::item::Item::from_name(id),
+        _ => None,
+    };
+    lodestone_entity::spawn_equipment::EquipmentSlots {
+        main_hand: item_in("mainhand"),
+        off_hand: item_in("offhand"),
+        head: item_in("head"),
+        chest: item_in("chest"),
+        legs: item_in("legs"),
+        feet: item_in("feet"),
+    }
 }
 
 fn field_of<'a>(fields: &'a [(String, Nbt)], key: &str) -> Option<&'a Nbt> {

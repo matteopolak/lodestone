@@ -616,6 +616,20 @@ impl crate::redstone::RedstoneLookup for RedstoneColumns<'_, '_> {
     fn entity_analog_output(&self, cell: BlockPos, facing: Direction) -> Option<u8> {
         self.block_entities?.with(|registry| registry.entity_analog_output(cell, facing))
     }
+
+    fn block_analog_output(&self, pos: BlockPos, side: Direction) -> Option<u8> {
+        let state = self.raw_state(pos);
+        if let Some(output) = crate::redstone::state_analog_output(state) {
+            return Some(output);
+        }
+        if !crate::container_signal::has_analog_output(crate::redstone::base_name(state)) {
+            return None;
+        }
+        let Some(entities) = self.block_entities else { return Some(0) };
+        entities.with(|registry| {
+            crate::container_signal::signal(registry, &|cell| self.raw_state(cell), pos, state, side)
+        })
+    }
 }
 
 /// A [`ChunkSource`] that reports every chunk not resident, so a

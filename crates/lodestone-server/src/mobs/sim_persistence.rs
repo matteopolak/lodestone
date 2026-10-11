@@ -159,6 +159,21 @@ impl<'w> MobSim<'w> {
     /// uuid identity: a fresh uuid on load would make the next save unable to
     /// recognise its own entity, and the mob would be duplicated on every
     /// restart.
+    /// Restores one record through [`Self::restore_saved`] (so a command-built
+    /// record and a loaded one cannot differ) and returns its `(uuid, network
+    /// id)`, or `None` when the record was refused (a dead `Health`, an
+    /// `Item`-less item).
+    pub fn summon_saved(&mut self, saved: &crate::entity_record::SavedEntity) -> Option<(Uuid, i32)> {
+        if self.restore_saved(std::slice::from_ref(saved)) == 0 {
+            return None;
+        }
+        let id = self.entity_id_of(saved.uuid)?;
+        if let Some(mob) = self.mobs.iter_mut().find(|m| m.uuid == saved.uuid) {
+            mob.persistent = true;
+        }
+        Some((saved.uuid, id))
+    }
+
     pub fn restore_saved(&mut self, entities: &[crate::entity_record::SavedEntity]) -> usize {
         let mut restored = 0usize;
         let mut pending = Vec::new();
@@ -218,6 +233,9 @@ impl<'w> MobSim<'w> {
             let mob = self.spawn_species(saved.id.clone(), saved.pos);
             mob.uuid = saved.uuid;
             mob.mob.set_body_yaw(saved.rotation.yaw);
+            if saved.motion != Vec3::new(0.0, 0.0, 0.0) {
+                mob.apply_knockback(saved.motion);
+            }
             if let Some(health) = saved.health {
                 mob.set_health(health);
             }

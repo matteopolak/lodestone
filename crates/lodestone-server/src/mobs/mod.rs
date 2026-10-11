@@ -1596,6 +1596,9 @@ fn roll_ambient_sound(m: &mut SimMob<'_>, tick_count: u64) -> Option<crate::effe
     let phase = (tick_count.wrapping_mul(31).wrapping_add(id)) % 21;
     let centre = if m.is_baby() { 1.5 } else { 1.0 };
     let pitch = centre - 0.1 + phase as f32 * 0.01;
+    if m.silent {
+        return None;
+    }
     crate::effects::mob_ambient_sound(
         m.entity_type.to_string().as_str(),
         m.position(),
@@ -1853,6 +1856,11 @@ pub struct SimMob<'w> {
     /// `0` — see
     /// [`MobSim::roll_ambient_sound`] for the roll this drives.
     ambient_sound_time: i32,
+    /// The mob makes no sound of its own: no idle, hurt or death vocalisation.
+    silent: bool,
+    /// The mob takes no damage from any source routed through
+    /// [`SimMob::apply_damage`].
+    invulnerable: bool,
     /// The id of another live [`SimMob`] this mob's melee attacks should
     /// damage, set alongside [`set_attack_target`](SimMob::set_attack_target)'s
     /// `Vec3` (which only drives movement — the goal/navigation seam has no

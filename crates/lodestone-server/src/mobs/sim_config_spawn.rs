@@ -551,6 +551,8 @@ impl<'w> MobSim<'w> {
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
             ambient_sound_time: 0,
+            silent: false,
+            invulnerable: false,
             attack_target_id: None,
             target_classes: lodestone_entity::ai::TargetClassSet::EMPTY,
             class_target_ids: Vec::new(),
@@ -765,16 +767,7 @@ impl<'w> MobSim<'w> {
         // folded above overriding `spawn_with_type`'s bare-species combat
         // numbers with the equipped versions — armour, weapon damage,
         // netherite's knockback resistance.
-        mob.mob.set_main_hand_item(equipped.main_hand.clone());
-        mob.equipment = equipped;
-        mob.defenses = defenses_from_attributes(&attrs);
-        mob.attack_damage = if mob.entity_type().path() == "phantom" {
-            // A phantom's damage is 6 plus its size, and every spawn has size 0.
-            6.0
-        } else {
-            attack_damage_from_attributes(&attrs)
-        };
-        mob.knockback_resistance = knockback_resistance_from_attributes(&attrs);
+        mob.set_equipment(equipped);
         if mob.entity_type().path() == "bee" {
             let first_search = 20 + lodestone_entity::ai::MobController::next_i32(&mut mob.mob, 41);
             mob.mob.enable_bee(first_search);

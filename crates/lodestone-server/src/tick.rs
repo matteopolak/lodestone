@@ -4875,6 +4875,20 @@ async fn run_tick_loop_with_weather_impl<W>(
             }
         }
 
+        // A container's contents are a comparator input: every position whose
+        // entity changed since the last tick wakes the comparators that read
+        // it. A double chest's other half reads the same inventory, so it wakes
+        // too. Nothing is scanned: the set holds only what was touched.
+        let analog_dirty = block_entities.with(crate::block_entities::BlockEntityRegistry::take_analog_dirty);
+        for pos in analog_dirty {
+            recheck_comparators_around(&*world, block_ticks, game_tick, &block_entities, pos);
+            let partner = resident_tick_state_id(&*world, pos.x, pos.y, pos.z)
+                .and_then(|state| crate::container_signal::chest_partner(pos, state));
+            if let Some(partner) = partner {
+                recheck_comparators_around(&*world, block_ticks, game_tick, &block_entities, partner);
+            }
+        }
+
         // The ender dragon's phase machine and its crystals' healing proc.
         // Unlike its neighbours above this needs no block reads: every input
         // the phase machine consumes — the live crystal count and the nearest

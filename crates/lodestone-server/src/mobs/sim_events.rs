@@ -88,6 +88,7 @@ impl<'w> MobSim<'w> {
         let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id) else {
             return;
         };
+        let silent = mob.silent;
         // Vanilla's own "play hurt sound" step calls its own ambient-sound-time
         // reset before
         // playing the hurt sound itself, so a mob that just yelped in pain
@@ -116,7 +117,9 @@ impl<'w> MobSim<'w> {
             pitch,
             self.tick_count as i64,
         );
-        if let Some(effect) = effect {
+        if let Some(effect) = effect
+            && !silent
+        {
             self.pending_vocalisations.push(effect);
         }
     }

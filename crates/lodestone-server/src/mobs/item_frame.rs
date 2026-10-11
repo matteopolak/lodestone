@@ -511,17 +511,6 @@ impl<'w> MobSim<'w> {
         id
     }
 
-    /// Creates a frame from a `/summon` record and returns its uuid and
-    /// network id. The record reads exactly as a saved one does: `Facing`,
-    /// `Item`, `ItemRotation`, `ItemDropChance`, `Invisible`, `Fixed`,
-    /// `Invulnerable` and `block_pos`, with a missing `Facing` hanging down.
-    /// Nothing checks the spot; the periodic support check breaks a frame
-    /// with no wall.
-    pub fn summon_item_frame(&mut self, saved: &SavedEntity) -> (Uuid, i32) {
-        let id = self.restore_frame(saved);
-        (saved.uuid, id)
-    }
-
     pub(super) fn push_frame_snapshots(&self, out: &mut Vec<EntitySnapshot>) {
         let mut ids: Vec<i32> = self.frames.keys().copied().collect();
         ids.sort_unstable();

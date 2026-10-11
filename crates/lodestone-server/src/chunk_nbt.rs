@@ -1244,7 +1244,7 @@ fn items_to_nbt(slots: &[Option<ItemStack>]) -> Nbt {
 /// Decodes an `Items` list into a `len`-slot array. Entries whose `Slot` is
 /// out of range, or whose `id` is not a parseable resource key, are dropped —
 /// one unreadable stack must not cost the whole container.
-fn items_from_nbt(nbt: Option<&Nbt>, len: usize) -> Vec<Option<ItemStack>> {
+pub(crate) fn items_from_nbt(nbt: Option<&Nbt>, len: usize) -> Vec<Option<ItemStack>> {
     let mut out = vec![None; len];
     let Some(Nbt::List { elements, .. }) = nbt else {
         return out;
@@ -2104,6 +2104,14 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
                 ),
             }
         }
+        // The 3x3 containers load as the same simulated kind they are saved
+        // from; read back as opaque data they would stop dispensing and stop
+        // reading to comparators after a restart. One still holding an unrolled
+        // loot table stays opaque so the table is not dropped.
+        "minecraft:dispenser" | "minecraft:dropper" if field(nbt, "LootTable").is_none() => BlockEntity::Container {
+            id: crate::block_entities::BlockEntityKind::from_name(id),
+            slots: items_from_nbt(field(nbt, "Items"), crate::block_entities::CONTAINER_3X3_SIZE),
+        },
         // `minecraft:mob_spawner` is the 26.2 registry/save key. The shorter
         // key was emitted by older Lodestone versions, so retain it as a
         // read-only compatibility alias for worlds written before the fix.
@@ -2577,6 +2585,27 @@ mod typed_container_nbt_tests {
     use crate::block_entities::{BlockEntity, BlockEntityKind};
     use lodestone_core::Nbt;
     use lodestone_model::BlockPos;
+
+    #[test]
+    fn a_dispenser_and_a_dropper_load_back_as_their_simulated_kind() {
+        let position = BlockPos::new(5, 70, -3);
+        for id in ["minecraft:dispenser", "minecraft:dropper"] {
+            let mut container = BlockEntity::container_of_size(id, crate::block_entities::CONTAINER_3X3_SIZE);
+            container.set_container_slot(4, Some(lodestone_model::ItemStack::new("minecraft:arrow".parse().unwrap(), 7)));
+            let (_, decoded) = block_entity_from_nbt(&block_entity_to_nbt(position, &container)).expect("decodes");
+            assert_eq!(decoded, container, "{id}");
+        }
+        // One still holding an unrolled loot table is kept as written.
+        let looted = Nbt::Compound(vec![
+            ("id".to_owned(), Nbt::String("minecraft:dispenser".to_owned())),
+            ("x".to_owned(), Nbt::Int(0)),
+            ("y".to_owned(), Nbt::Int(0)),
+            ("z".to_owned(), Nbt::Int(0)),
+            ("LootTable".to_owned(), Nbt::String("minecraft:chests/trial_chambers/supply".to_owned())),
+        ]);
+        let (_, decoded) = block_entity_from_nbt(&looted).expect("decodes");
+        assert!(matches!(decoded, BlockEntity::Opaque { .. }));
+    }
 
     #[test]
     fn container_and_opaque_keys_survive_the_text_nbt_boundary() {

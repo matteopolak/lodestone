@@ -55,7 +55,7 @@ fn set_flag(sim: &mut MobSim<'_>, id: i32, name: &str) {
     sim.kill_frame(id, false);
     saved.extra.retain(|(k, _)| k != name);
     saved.extra.push((name.to_owned(), Nbt::Byte(1)));
-    sim.summon_item_frame(&saved);
+    sim.summon_saved(&saved).expect("the frame restores");
 }
 
 fn only_frame(sim: &MobSim<'_>) -> i32 {

@@ -16,21 +16,20 @@
 //! A mob this command pushes into the sim is therefore picked up by the very
 //! next tick-loop publish with no second wire to build.
 //!
-//! # NBT is read for item frames only, and there is no position-validity check
+//! # Entity data
 //!
-//! The `<nbt>` argument is parsed for every entity but applied only to item
-//! and glow item frames, whose record (`Facing`, `Item`, `ItemRotation`,
-//! `ItemDropChance`, `Invisible`, `Fixed`, `Invulnerable`, `block_pos`) is read
-//! exactly as a saved one is; any other type refuses it rather than dropping it
-//! silently. The real build-height range check is not reproduced — this crate
-//! has no command-reachable build-height constant plumbed here, and an
-//! out-of-range spawn simply produces a mob at an out-of-range position
-//! rather than a refusal, a smaller gap than a command that silently fails
-//! on a well-formed position.
+//! The `<nbt>` argument becomes a [`crate::entity_record::SavedEntity`] (`id`
+//! and `Pos` forced, a fresh `UUID`) and goes through
+//! [`crate::mobs::MobSim::summon_saved`], the world-load restore path. Every
+//! field the save path owns therefore applies to a summon: `CustomName`,
+//! `CustomNameVisible`, `Tags`, `NoAI`, `NoGravity`, `Silent`, `Invulnerable`,
+//! `PersistenceRequired`, `Health`, `Motion`, `Rotation`, `active_effects`,
+//! `equipment`, an item entity's `Item`, a frame's record. Unknown keys are
+//! ignored. The build-height range check is not reproduced.
 
 use lodestone_command_mc::{Coordinates, EntityTypeArg, EntityTypeInput, NbtCompoundArg, SnbtValue, Vec3Arg};
 use lodestone_core::{Nbt, NbtTag};
-use lodestone_model::{Difficulty, Rotation, Vec3};
+use lodestone_model::{Difficulty, Vec3};
 use uuid::Uuid;
 
 use super::registrar::{Ctx, Registrar};
@@ -121,26 +120,10 @@ pub(super) fn spawn_entity(
         return Err("This command needs a live connection and is not available here".to_string());
     };
 
-    let entity_type = entity.entity_type.clone();
-    if matches!(entity_type.path(), "item_frame" | "glow_item_frame") {
-        let record = frame_record(&entity_type, pos, nbt.unwrap_or_default());
-        let (uuid, entity_id) = mobs.with(|sim| sim.summon_item_frame(&record));
-        return Ok(SourceEntity { uuid, entity_id, username: entity_type.to_string() });
-    }
-    if nbt.is_some() {
-        return Err("Only item frames take entity data here".to_string());
-    }
-    let (uuid, entity_id) = mobs.with(|sim| {
-        // Spawn-time attribute/equipment randomisation (the finalize-spawn
-        // step run on natural/command spawns) has no port here yet — see
-        // `crate::mobs`' own scope notes on `spawn_species`. Marked persistent
-        // so the command-spawn exemption from natural despawn is at least
-        // honoured, the one finalize-spawn-adjacent property this crate can
-        // cheaply keep.
-        let mob = sim.spawn_species(entity_type, pos);
-        mob.set_persistent(true);
-        (mob.uuid(), mob.id())
-    });
+    let record = summon_record(&entity.entity_type, pos, nbt.unwrap_or_default());
+    let Some((uuid, entity_id)) = mobs.with(|sim| sim.summon_saved(&record)) else {
+        return Err("Unable to summon entity".to_string());
+    };
 
     Ok(SourceEntity {
         uuid,
@@ -155,27 +138,28 @@ pub(super) fn spawn_entity(
     })
 }
 
-/// The saved-entity record `/summon` hands the mob simulation for a frame: the
-/// command position stands in for the box centre, so the frame hangs in the
-/// cell containing it unless the data names `block_pos`.
-fn frame_record(entity_type: &lodestone_model::ResourceKey, pos: Vec3, nbt: &[(String, SnbtValue)]) -> crate::entity_record::SavedEntity {
-    let extra = nbt
+/// The saved-entity record `/summon` hands the mob simulation: the command's
+/// data with `id` and `Pos` forced and a fresh `UUID`, read by the same
+/// [`crate::entity_record::SavedEntity::from_nbt`] and restored by the same
+/// path as a saved world, so a summoned entity and a loaded one cannot differ.
+/// Keys no reader owns are ignored. A frame with no `block_pos` hangs in the
+/// cell containing the command position.
+fn summon_record(entity_type: &lodestone_model::ResourceKey, pos: Vec3, nbt: &[(String, SnbtValue)]) -> crate::entity_record::SavedEntity {
+    let double = |v: f64| Nbt::Double(v);
+    let mut fields: Vec<(String, Nbt)> = nbt
         .iter()
-        .filter(|(name, _)| !matches!(name.as_str(), "id" | "UUID" | "Pos" | "Motion" | "Rotation"))
+        .filter(|(name, _)| !matches!(name.as_str(), "id" | "UUID" | "Pos"))
         .map(|(name, value)| (name.clone(), snbt_to_nbt(value)))
         .collect();
-    crate::entity_record::SavedEntity {
-        id: entity_type.clone(),
-        uuid: Uuid::new_v4(),
-        pos,
-        motion: Vec3::new(0.0, 0.0, 0.0),
-        rotation: Rotation::new(0.0, 0.0),
-        health: None,
-        item: None,
-        age: None,
-        pickup_delay: None,
-        extra,
-    }
+    fields.push(("id".to_owned(), Nbt::String(entity_type.to_string())));
+    fields.push((
+        "Pos".to_owned(),
+        Nbt::List { element_type: NbtTag::Double, elements: vec![double(pos.x), double(pos.y), double(pos.z)] },
+    ));
+    let mut record = crate::entity_record::SavedEntity::from_nbt(&Nbt::Compound(fields))
+        .expect("id and Pos are always present");
+    record.uuid = Uuid::new_v4();
+    record
 }
 
 fn snbt_to_nbt(value: &SnbtValue) -> Nbt {

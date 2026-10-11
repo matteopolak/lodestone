@@ -402,3 +402,112 @@ fn tags_survive_a_save_and_restore() {
     assert_eq!(reloaded.tagged("keep"), ["cow"]);
     assert_eq!(reloaded.entities("pig")[0].tags, Vec::<String>::new());
 }
+
+/// A custom name is a text component, and a string component is literal text, so
+/// `CustomName:"Bob"` is named Bob while `CustomName:'"Bob"'` would carry the quotes.
+///
+/// `/summon` data goes through the load path's record reader: a named, tagged
+/// `NoAI` zombie is found by `@e[name=Bob,tag=a]` and holds its horizontal
+/// position while an identical zombie without `NoAI` closes on the player.
+///
+/// The floor top is y = 0; both zombies start 6 blocks east of a perceived
+/// player at (0.5, 0, 0.5), the unmodified one at z = 10.5 and the `NoAI` one
+/// at z = 0.5. 300 ticks is the same order the melee gate allots for an 8 block
+/// approach.
+#[test]
+fn summon_nbt_names_tags_and_freezes_a_zombie() {
+    use lodestone_server::{ChunkWorld, PerceivedPlayer, PlayerIdentity, PlayerPerception, StoneFloorSource};
+
+    let mut server = Server::new();
+    server.mobs = MobHandle::new(ChunkWorld::from_source(&StoneFloorSource::new(-64, 128, 0), -1..=1, -1..=1));
+    server
+        .run("summon minecraft:zombie 6.5 0 0.5 {CustomName:\"Bob\",Tags:[\"a\"],NoAI:1b}")
+        .expect("summon ran");
+    server.run("summon minecraft:zombie 6.5 0 10.5").expect("control summon ran");
+
+    let found = server.run("tag @e[name=Bob,tag=a] add found").expect("selector ran");
+    assert_eq!(found, ["Added tag 'found' to Bob"], "the named, tagged zombie is the one selected: {found:?}");
+    assert_eq!(server.tagged("found"), ["zombie"]);
+
+    server.mobs.with(|sim| {
+        sim.set_players(vec![PerceivedPlayer {
+            identity: Some(PlayerIdentity { uuid: Uuid::from_u128(7), entity_id: 77 }),
+            perception: PlayerPerception {
+                position: Vec3::new(0.5, 0.0, 0.5),
+                held_item: None,
+                view_direction: Vec3::new(0.0, 0.0, -1.0),
+            },
+        }]);
+        for _ in 0..300 {
+            sim.tick();
+        }
+    });
+
+    let zombies = server.entities("zombie");
+    let bob = zombies.iter().find(|z| z.name == "Bob").expect("Bob is still there");
+    assert_eq!((bob.position.x, bob.position.z), (6.5, 0.5), "NoAI holds position");
+    let control = zombies.iter().find(|z| z.name.is_empty()).expect("control is still there");
+    assert!(control.position.x < 5.5, "the unfrozen control walked at least a block: x = {}", control.position.x);
+}
+
+/// Every common and mob field `/summon` accepts survives a save and a restore
+/// into a fresh sim, because both go through one record reader. Expected values
+/// are the literals typed in the command.
+#[test]
+fn summon_nbt_fields_apply_and_survive_a_save_and_restore() {
+    let server = Server::new();
+    server
+        .run(
+            "summon minecraft:zombie 3.5 64 3.5 {NoGravity:1b,Silent:1b,Invulnerable:1b,\
+             active_effects:[{id:\"minecraft:speed\",amplifier:1b,duration:600}],\
+             equipment:{mainhand:{id:\"minecraft:iron_sword\",count:1},head:{id:\"minecraft:iron_helmet\",count:1}},\
+             Bogus:5b}",
+        )
+        .expect("unknown keys are ignored");
+
+    let check = |server: &Server| {
+        server.mobs.with(|sim| {
+            let mob = sim
+                .command_entities()
+                .into_iter()
+                .find(|e| e.entity_type.path() == "zombie")
+                .and_then(|e| sim.get(e.entity_id).map(|_| e.entity_id))
+                .expect("the zombie exists");
+            let mob = sim.get(mob).expect("mob");
+            assert!(mob.is_silent() && mob.is_invulnerable());
+            assert!(mob.is_gravity_disabled() && !mob.is_ai_disabled());
+            assert_eq!(mob.effects().active(), [("minecraft:speed", 1)]);
+            let worn: Vec<(String, String)> = mob
+                .equipment_snapshot()
+                .into_iter()
+                .filter_map(|e| e.item.map(|item| (format!("{:?}", e.slot), item.item.to_string())))
+                .collect();
+            assert_eq!(
+                worn,
+                [
+                    ("MainHand".to_owned(), "minecraft:iron_sword".to_owned()),
+                    ("Head".to_owned(), "minecraft:iron_helmet".to_owned()),
+                ]
+            );
+        });
+    };
+    check(&server);
+
+    let saved = server.mobs.with(|sim| sim.saved_entities());
+    let reloaded = Server::new();
+    reloaded.mobs.with(|sim| sim.restore_saved(&saved));
+    check(&reloaded);
+
+    // Gravity off holds the mob in mid-air; an Invulnerable mob takes no hit.
+    reloaded.mobs.with(|sim| {
+        for _ in 0..40 {
+            sim.tick();
+        }
+        let id = sim.command_entities()[0].entity_id;
+        assert_eq!(sim.command_entities()[0].position.y, 64.0, "NoGravity holds the mob in the air");
+        assert_eq!(sim.get_mut(id).expect("mob").apply_damage(5.0, Default::default()), 0.0);
+    });
+
+    // A dead-on-arrival record is refused instead of leaving a corpse.
+    assert!(server.run("summon minecraft:zombie ~ ~ ~ {Health:0f}").is_err());
+}

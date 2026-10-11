@@ -128,8 +128,8 @@ fn summon_creates_frames_from_reference_data() {
     assert_eq!(glow.object_data, 0, "a missing Facing hangs down");
     assert!(glow.metadata.contains(&MetadataField::FrameRotation(0)));
 
-    // Only frames take entity data here; anything else is refused loudly.
-    assert!(server.run("summon minecraft:cow ~ ~ ~ {NoAI:1b}").is_err());
+    // Entity data is not frame-only: a cow takes it too.
+    server.run("summon minecraft:cow ~ ~ ~ {NoAI:1b}").expect("a cow takes entity data");
 }
 
 #[test]

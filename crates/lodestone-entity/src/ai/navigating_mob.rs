@@ -512,6 +512,11 @@ pub struct MobBody {
     heal_cooldown: i32,
     johnny: bool,
     ridden: bool,
+    /// The mob thinks and walks no more: no goal runs and no path is held. Its
+    /// body still ages, falls and is pushed.
+    ai_disabled: bool,
+    /// The mob no longer falls toward the ground when it has no path to follow.
+    gravity_disabled: bool,
     buck_intent: bool,
     item_use_ticks: Option<i32>,
     carried_block: Option<lodestone_data::block_states::StateId>,
@@ -946,6 +951,8 @@ impl<'w> NavigatingMob<'w> {
             heal_cooldown: 0,
             johnny: false,
             ridden: false,
+            ai_disabled: false,
+            gravity_disabled: false,
             buck_intent: false,
             item_use_ticks: None,
             carried_block: None,
@@ -1271,7 +1278,7 @@ impl<'w> NavigatingMob<'w> {
     /// the same gravity and drag sequence instead of inventing a server-side
     /// teleport-down correction.
     pub fn begin_live_fall_from_unsupported_surface(&mut self) {
-        if self.fall_speed < 0.0 || self.climbed || self.shape.nav_mode == NavMode::Swim
+        if self.gravity_disabled || self.fall_speed < 0.0 || self.climbed || self.shape.nav_mode == NavMode::Swim
             || self.shape.nav_mode.is_airborne()
             || (self.shape.nav_mode == NavMode::Amphibious && self.in_water) {
             return;
@@ -1805,6 +1812,40 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
+    /// Switches the mob's AI off or on. Off drops any path it was following;
+    /// from then on no goal runs, but the body still ages, falls and is pushed.
+    pub fn set_ai_disabled(&mut self, disabled: bool) -> &mut Self {
+        self.ai_disabled = disabled;
+        if disabled {
+            self.navigator.stop();
+            self.active_target_block = None;
+            self.climb_goal = None;
+            self.hop_wanted = false;
+        }
+        self
+    }
+
+    /// Whether the AI is switched off.
+    #[must_use]
+    pub fn ai_disabled(&self) -> bool {
+        self.ai_disabled
+    }
+
+    /// Switches gravity off or on for a walking mob that has no path to follow.
+    pub fn set_gravity_disabled(&mut self, disabled: bool) -> &mut Self {
+        self.gravity_disabled = disabled;
+        if disabled {
+            self.fall_speed = 0.0;
+        }
+        self
+    }
+
+    /// Whether gravity is switched off.
+    #[must_use]
+    pub fn gravity_disabled(&self) -> bool {
+        self.gravity_disabled
+    }
+
     /// Host injection point: whether a rider is aboard.
     pub fn set_ridden(&mut self, ridden: bool) -> &mut Self {
         self.ridden = ridden;
@@ -2093,7 +2134,9 @@ impl<'w> NavigatingMob<'w> {
         // does not think in lockstep; the off ticks run only the goals that
         // need every tick.
         let off_phase = (self.tick_count + 1 + self.ai_phase) % 2 != 0 && self.tick_count + 1 > 1;
-        if off_phase {
+        if self.ai_disabled {
+            // No goal runs, so nothing sets a new path.
+        } else if off_phase {
             ai.tick_every_tick_goals(self);
         } else {
             ai.tick(self);
@@ -2390,6 +2433,9 @@ impl<'w> NavigatingMob<'w> {
                         &mut self.fall_speed,
                     );
                 }
+            }
+            _ if self.gravity_disabled => {
+                self.fall_speed = 0.0;
             }
             _ => {
                 // Most of a mob's life is between paths; gravity still applies.

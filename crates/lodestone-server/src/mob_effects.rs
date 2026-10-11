@@ -929,6 +929,16 @@ impl ActiveEffects {
             .collect()
     }
 
+    /// Every active effect as `(canonical name, duration, amplifier)`, in stable
+    /// order, for saving. A duration of [`INFINITE_DURATION`] is infinite.
+    #[must_use]
+    pub fn entries(&self) -> Vec<(&'static str, i32, u32)> {
+        self.0
+            .iter()
+            .map(|(id, instance)| (lodestone_data::mob_effects::mob_effect_name_for(*id), instance.duration, instance.amplifier))
+            .collect()
+    }
+
     /// Every active validated id, for runtime consumers that do not need a
     /// canonical string at a packet or presentation boundary.
     #[must_use]

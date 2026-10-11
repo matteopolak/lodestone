@@ -146,6 +146,12 @@ impl SavedEntity {
                 consumed.push("Health");
                 Some(*h)
             }
+            // A hand-typed `Health:10` or `10d`; an item entity's `Short` is
+            // not health and stays in `extra`.
+            Some(tag @ (Nbt::Byte(_) | Nbt::Short(_) | Nbt::Int(_) | Nbt::Double(_))) if id.path() != "item" => {
+                consumed.push("Health");
+                number(tag).map(|h| h as f32)
+            }
             // Anything else — notably an item entity's `Short` — is left for
             // `extra` to carry verbatim.
             _ => None,
@@ -220,6 +226,20 @@ pub(crate) fn doubles(v: Vec3) -> Nbt {
     }
 }
 
+/// Any numeric tag as a double, so a hand-typed `Pos`/`Motion`/`Rotation`
+/// (`[0,1,0]`, `[90f,0f]`) reads like the typed ones the writer emits.
+fn number(tag: &Nbt) -> Option<f64> {
+    match tag {
+        Nbt::Byte(v) => Some(f64::from(*v)),
+        Nbt::Short(v) => Some(f64::from(*v)),
+        Nbt::Int(v) => Some(f64::from(*v)),
+        Nbt::Long(v) => Some(*v as f64),
+        Nbt::Float(v) => Some(f64::from(*v)),
+        Nbt::Double(v) => Some(*v),
+        _ => None,
+    }
+}
+
 pub(crate) fn read_doubles(nbt: Option<&Nbt>) -> Option<Vec3> {
     let Some(Nbt::List { elements, .. }) = nbt else {
         return None;
@@ -227,10 +247,7 @@ pub(crate) fn read_doubles(nbt: Option<&Nbt>) -> Option<Vec3> {
     if elements.len() < 3 {
         return None;
     }
-    let get = |i: usize| match elements[i] {
-        Nbt::Double(d) => Some(d),
-        _ => None,
-    };
+    let get = |i: usize| number(&elements[i]);
     Some(Vec3::new(get(0)?, get(1)?, get(2)?))
 }
 
@@ -241,10 +258,7 @@ pub(crate) fn read_rotation(nbt: Option<&Nbt>) -> Option<Rotation> {
     if elements.len() < 2 {
         return None;
     }
-    let get = |i: usize| match elements[i] {
-        Nbt::Float(f) => Some(f),
-        _ => None,
-    };
+    let get = |i: usize| number(&elements[i]).map(|d| d as f32);
     Some(Rotation::new(get(0)?, get(1)?))
 }
 

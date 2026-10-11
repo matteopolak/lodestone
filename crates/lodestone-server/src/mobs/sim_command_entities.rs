@@ -290,6 +290,19 @@ impl<'w> MobSim<'w> {
         }
     }
 
+    /// The network id of the entity with `uuid`, whatever store holds it.
+    pub(super) fn entity_id_of(&self, uuid: Uuid) -> Option<i32> {
+        use Located::{
+            Bobber, Bolt, Crystal, Cushion, Dragon, Eye, Falling, Frame, Item, Minecart, Mob, Orb,
+            Projectile, Tnt, Vehicle, Wither,
+        };
+        match self.locate(uuid)? {
+            Mob(id) | Projectile(id) | Item(id) | Orb(id) | Falling(id) | Vehicle(id) | Cushion(id)
+            | Frame(id) | Tnt(id) | Eye(id) | Minecart(id) | Bolt(id) | Dragon(id) | Crystal(id)
+            | Wither(id) | Bobber(id) => Some(id),
+        }
+    }
+
     fn locate(&self, uuid: Uuid) -> Option<Located> {
         fn find<T>(map: &HashMap<i32, T>, uuid: Uuid, uuid_of: impl Fn(&T) -> Uuid) -> Option<i32> {
             map.iter().find(|(_, v)| uuid_of(v) == uuid).map(|(&id, _)| id)

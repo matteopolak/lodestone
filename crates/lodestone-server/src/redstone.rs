@@ -132,6 +132,17 @@ pub trait RedstoneLookup {
     fn entity_analog_output(&self, _cell: BlockPos, _facing: Direction) -> Option<u8> {
         None
     }
+
+    /// The analog output the block at `pos` reports to a comparator reading it
+    /// from `side`: a state-derived one, or a block entity's (a container's
+    /// fill level). `None` for a block with no output, which leaves the plain
+    /// diode input in force; a lookup with no block-entity registry reads a
+    /// container block as `Some(0)`.
+    fn block_analog_output(&self, pos: BlockPos, _side: Direction) -> Option<u8> {
+        let block = base_name(self.state_at(pos));
+        state_analog_output(self.state_at(pos))
+            .or_else(|| crate::container_signal::has_analog_output(block).then_some(0))
+    }
 }
 
 impl<F> RedstoneLookup for F
@@ -1062,8 +1073,7 @@ where
 
 /// Vanilla's own diode-block input-signal getter, reduced: the comparator's
 /// extra reads (a block's analog output, an item frame's rotation) are
-/// [`comparator_input_signal`]'s, and a container's fill level is not read at
-/// all (see `crate::redstone_diode`). What this implements is the base case
+/// [`comparator_input_signal`]'s. What this implements is the base case
 /// every circuit needs: the direct signal facing into the
 /// diode, maxed with an immediately-adjacent wire's own power (vanilla's own
 /// belt-and-suspenders read, since `getSignal` for a wire in a
@@ -1085,9 +1095,10 @@ where
 /// The analog output signal a block reports to a comparator facing it, for the
 /// blocks whose signal is a function of their own state. A respawn anchor
 /// reports its charge level scaled to the 0..=15 range: 0, 3, 7, 11 or 15 for
-/// 0..=4 charges. A container's signal needs a block-entity read and is not
-/// modelled (see `crate::redstone_diode`); an item frame's is an entity read,
-/// through [`RedstoneLookup::entity_analog_output`].
+/// 0..=4 charges. A container's signal is a block-entity read
+/// ([`RedstoneLookup::block_analog_output`], `crate::container_signal`); an
+/// item frame's is an entity read, through
+/// [`RedstoneLookup::entity_analog_output`].
 #[must_use]
 pub fn state_analog_output(state: StateId) -> Option<u8> {
     crate::respawn_anchor::is_anchor(state).then(|| {
@@ -1097,11 +1108,12 @@ pub fn state_analog_output(state: StateId) -> Option<u8> {
 }
 
 /// A comparator's input signal: the diode input, replaced by the analog output
-/// of the block it faces when that block has one. When it faces a redstone
-/// conductor that is not strongly powered, the comparator looks one block
-/// further for an entity-backed source in that cell pointing away from it (an
-/// item frame hung on the conductor's far face) or a block with an analog
-/// output, and the larger of the two replaces the input, even at zero.
+/// of the block it faces when that block has one (a container reads its fill
+/// level). When it faces a redstone conductor that is not strongly powered, the
+/// comparator looks one block further for an entity-backed source in that cell
+/// pointing away from it (an item frame hung on the conductor's far face) or a
+/// block with an analog output (a container behind the conductor), and the
+/// larger of the two replaces the input, even at zero.
 #[must_use]
 pub fn comparator_input_signal<L>(lookup: &L, pos: BlockPos, facing: Direction) -> u8
 where
@@ -1109,16 +1121,16 @@ where
 {
     let target_pos = facing.relative(pos);
     let target = lookup.state_at(target_pos);
-    if let Some(output) = state_analog_output(target) {
+    if let Some(output) = lookup.block_analog_output(target_pos, facing.opposite()) {
         return output;
     }
     let input = input_signal(lookup, pos, facing);
-    if input >= 15 || !is_redstone_conductor(target) {
+    if input >= 15 || !lodestone_data::redstone_conductor::conducts(target) {
         return input;
     }
     let far = facing.relative(target_pos);
     let entity = lookup.entity_analog_output(far, facing);
-    let block = state_analog_output(lookup.state_at(far));
+    let block = lookup.block_analog_output(far, facing.opposite());
     match (entity, block) {
         (None, None) => input,
         (a, b) => a.unwrap_or(0).max(b.unwrap_or(0)),

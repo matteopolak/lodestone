@@ -678,6 +678,12 @@ impl<'w> SimMob<'w> {
         if self.entity_type.path() == "warden" && self.warden_emerge_ticks > 0 {
             return 0.0;
         }
+        // An invulnerable mob shrugs off every hit that reaches the funnel. The
+        // sources that ignore invulnerability (the void, `/kill`) do not come
+        // through here: `/kill` writes health directly.
+        if self.invulnerable {
+            return 0.0;
+        }
         // Vanilla's own armadillo hurt-handler override, which runs *before* the
         // invulnerability-frame check below (it wraps the generic hurt
         // handler, not the "actually hurt" one) — a curled-up armadillo halves the raw hit before
@@ -819,6 +825,62 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn is_persistent(&self) -> bool {
         self.persistent
+    }
+
+    /// Silences or un-silences the mob's own sounds: idle, hurt and death.
+    pub fn set_silent(&mut self, silent: bool) -> &mut Self {
+        self.silent = silent;
+        self
+    }
+
+    /// Whether the mob is silent.
+    #[must_use]
+    pub fn is_silent(&self) -> bool {
+        self.silent
+    }
+
+    /// Makes the mob immune to, or vulnerable to, damage again.
+    pub fn set_invulnerable(&mut self, invulnerable: bool) -> &mut Self {
+        self.invulnerable = invulnerable;
+        self
+    }
+
+    /// Whether the mob is invulnerable.
+    #[must_use]
+    pub fn is_invulnerable(&self) -> bool {
+        self.invulnerable
+    }
+
+    /// Whether the mob's goals are switched off (`NoAI`).
+    #[must_use]
+    pub fn is_ai_disabled(&self) -> bool {
+        self.mob.ai_disabled()
+    }
+
+    /// Whether the mob floats instead of falling (`NoGravity`).
+    #[must_use]
+    pub fn is_gravity_disabled(&self) -> bool {
+        self.mob.gravity_disabled()
+    }
+
+    /// Dresses the mob in exactly `equipped` and re-derives every combat stat
+    /// the gear feeds: armour, toughness and knockback resistance, and the
+    /// weapon's attack damage. Both a fresh spawn and a restored or summoned
+    /// record come through here, so a worn item can never disagree with the
+    /// stats it should give.
+    pub(super) fn set_equipment(&mut self, equipped: spawn_equipment::EquipmentSlots) {
+        let mut attrs = default_attributes(&self.entity_type).unwrap_or_else(AttributeMap::new);
+        equipment::apply_equipment(&mut attrs, equipped.iter());
+        self.mob.set_main_hand_item(equipped.main_hand.clone());
+        self.equipment = equipped;
+        self.defenses = defenses_from_attributes(&attrs);
+        self.attack_damage = if self.entity_type.path() == "phantom" {
+            // A phantom's damage is 6 plus its size, and every spawn has size 0.
+            6.0
+        } else {
+            attack_damage_from_attributes(&attrs)
+        };
+        self.knockback_resistance = knockback_resistance_from_attributes(&attrs);
     }
 
     /// Marks the mob persistent (named / persistence-required) so it never

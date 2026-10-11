@@ -76,17 +76,14 @@
 //! [`run_scheduled_comparator_tick`]'s own `!subtract` disjunct is this
 //! clause, verbatim.
 //!
-//! # The named gap: container/analog-output reading
+//! # Analog-output reading
 //!
-//! The real comparator's input-signal query additionally reads a
-//! two-away block's analog output signal (a hopper/chest's fill level)
-//! or an item frame's rotation, when the immediate target is itself a
-//! redstone conductor. The item-frame half is implemented:
-//! [`crate::redstone::comparator_input_signal`] reads it through
-//! [`crate::redstone::RedstoneLookup::entity_analog_output`]. The container
-//! half is **not**: a hopper or chest's fill level needs a block-entity read
-//! of whatever sits at `target_pos.relative(facing)`, which no comparator
-//! query here does yet, so container-facing comparators remain a named gap.
+//! The input-signal query reads the block behind the comparator, and through
+//! one conductor the block (or item frame) beyond it:
+//! [`crate::redstone::comparator_input_signal`] asks
+//! [`crate::redstone::RedstoneLookup::block_analog_output`] (containers, via
+//! [`crate::container_signal`]) and
+//! [`crate::redstone::RedstoneLookup::entity_analog_output`] (frames).
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{

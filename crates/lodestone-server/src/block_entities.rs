@@ -1465,6 +1465,12 @@ pub struct BlockEntityRegistry {
     /// Analog outputs of entities, read by comparators; never saved, as the
     /// entities republish theirs on load.
     entity_outputs: crate::entity_analog::EntityAnalogOutputs,
+    /// Positions of entities with a comparator output that were inserted,
+    /// removed, handed out mutably or ticked into a different output since the
+    /// last [`take_analog_dirty`](Self::take_analog_dirty). Every mutation
+    /// route of the private map funnels through this registry's methods, so
+    /// this is the one place a container change is noticed.
+    analog_dirty: std::collections::HashSet<BlockPos>,
 }
 
 impl BlockEntityRegistry {
@@ -1501,6 +1507,9 @@ impl BlockEntityRegistry {
 
     /// Inserts (or overwrites) the entity at `pos`.
     pub fn insert(&mut self, pos: BlockPos, entity: BlockEntity) {
+        if crate::container_signal::carries_analog(&entity) {
+            self.analog_dirty.insert(pos);
+        }
         self.entities.insert(pos, entity);
     }
 
@@ -1508,7 +1517,11 @@ impl BlockEntityRegistry {
     /// breaking learns to consult this registry (not done by this landing;
     /// `crate::server`'s `apply_block_action` does not call this yet).
     pub fn remove(&mut self, pos: BlockPos) -> Option<BlockEntity> {
-        self.entities.remove(&pos)
+        let removed = self.entities.remove(&pos);
+        if removed.as_ref().is_some_and(crate::container_signal::carries_analog) {
+            self.analog_dirty.insert(pos);
+        }
+        removed
     }
 
     /// A read-only view of the entity at `pos`, if any.
@@ -1519,7 +1532,27 @@ impl BlockEntityRegistry {
 
     /// A mutable view of the entity at `pos`, if any.
     pub fn get_mut(&mut self, pos: BlockPos) -> Option<&mut BlockEntity> {
-        self.entities.get_mut(&pos)
+        let entity = self.entities.get_mut(&pos)?;
+        if crate::container_signal::carries_analog(entity) {
+            self.analog_dirty.insert(pos);
+        }
+        Some(entity)
+    }
+
+    /// The positions whose comparator output may have changed since the last
+    /// call, in a fixed order, clearing the set. The tick loop wakes the
+    /// comparators around each; nothing is scanned when nothing changed.
+    pub fn take_analog_dirty(&mut self) -> Vec<BlockPos> {
+        let mut dirty: Vec<BlockPos> = self.analog_dirty.drain().collect();
+        dirty.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z));
+        dirty
+    }
+
+    /// Marks `pos` dirty when it now holds an entity with an output.
+    fn note_analog(&mut self, pos: BlockPos) {
+        if self.entities.get(&pos).is_some_and(crate::container_signal::carries_analog) {
+            self.analog_dirty.insert(pos);
+        }
     }
 
     /// Every hive's bee count, keyed by block cell.
@@ -1719,12 +1752,16 @@ impl BlockEntityRegistry {
                     if matches!(live, BlockEntity::Hopper(_)) {
                         continue;
                     }
+                    let before_signal = crate::container_signal::ticking_signal(live);
                     let lit = if *live == update.before {
                         *live = update.after;
                         update.lit
                     } else {
                         live.tick_non_hopper()
                     };
+                    if crate::container_signal::ticking_signal(live) != before_signal {
+                        self.analog_dirty.insert(update.pos);
+                    }
                     if let Some(lit) = lit {
                         effects.push(BlockEntityTickEffect {
                             owner: completion.owner,
@@ -1858,14 +1895,19 @@ impl BlockEntityRegistry {
                 let is_hopper = matches!(self.entities.get(&pos), Some(BlockEntity::Hopper(_)));
                 if is_hopper {
                     self.tick_hopper(pos, enabled(pos));
-                } else if let Some(entity) = self.entities.get_mut(&pos)
-                    && let Some(now_lit) = entity.tick_non_hopper()
-                {
-                    effects.push(BlockEntityTickEffect {
-                        owner: owner_batch.owner,
-                        pos,
-                        lit: now_lit,
-                    });
+                } else if let Some(entity) = self.entities.get_mut(&pos) {
+                    let before_signal = crate::container_signal::ticking_signal(entity);
+                    let ticked = entity.tick_non_hopper();
+                    if crate::container_signal::ticking_signal(entity) != before_signal {
+                        self.analog_dirty.insert(pos);
+                    }
+                    if let Some(now_lit) = ticked {
+                        effects.push(BlockEntityTickEffect {
+                            owner: owner_batch.owner,
+                            pos,
+                            lit: now_lit,
+                        });
+                    }
                 }
             }
             batches.push(BlockEntityTickEffectBatch {
@@ -1909,7 +1951,7 @@ impl BlockEntityRegistry {
         // `ENABLED` on every neighbour change and on placement, and
         // the hopper block entity then simply obeys it. This registry has no world
         // access to compute `hasNeighborSignal` itself, and needs none.
-        hopper.tick(
+        let moved = hopper.tick(
             enabled,
             below.as_mut().and_then(BlockEntity::hopper_slots_mut),
             above.as_mut().and_then(BlockEntity::hopper_slots_mut),
@@ -1921,6 +1963,16 @@ impl BlockEntityRegistry {
         }
         if let Some(entity) = above {
             self.entities.insert(above_pos, entity);
+        }
+        // Only a transfer changes anyone's contents; an idle hopper wakes nothing.
+        if moved.changed() {
+            self.note_analog(pos);
+            if moved.ejected {
+                self.note_analog(below_pos);
+            }
+            if moved.sucked {
+                self.note_analog(above_pos);
+            }
         }
     }
 }
