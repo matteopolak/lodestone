@@ -145,14 +145,38 @@ pub(super) fn sync_open_container<P: ServerProtocol>(
     directives
 }
 
+/// Whether the block entity under `open` is still there. A menu over a block
+/// entity (chest, furnace, shulker box, beacon, lectern) outlives neither the
+/// entity nor the block: every removal takes the entity out of the registry
+/// (`crate::block_removal`), so its absence is the removal. The positional
+/// menus (crafting table and the other workstations) hold no entity and stay
+/// open.
+fn menu_still_valid(block_entities: &BlockEntityHandle, open: &OpenContainer) -> bool {
+    match open.shape {
+        MenuKind::Container { .. } | MenuKind::ShulkerBox | MenuKind::Beacon | MenuKind::Lectern => {
+            block_entities.with(|reg| reg.get(open.pos).is_some())
+        }
+        MenuKind::Player | MenuKind::CraftingTable | MenuKind::ItemCombiner { .. } | MenuKind::Enchanting => true,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn publish_open_container<T: Transport, P: ServerProtocol>(
     conn: &mut Connection<T>,
     proto: &P,
     state: &mut State,
     block_entities: &BlockEntityHandle,
+    block_ticks: &BlockTickFeed,
+    player_uuid: uuid::Uuid,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
 ) -> Result<(), ServerError> {
+    if let Some(open) = open_container.take_if(|open| !menu_still_valid(block_entities, open)) {
+        apply(conn, state, proto.encode_close_container(open.window_id)).await?;
+        *container_sync = ContainerSync::default();
+        crate::lid_viewers::release_and_publish(block_entities, block_ticks, player_uuid);
+        return Ok(());
+    }
     if let Some(open) = open_container.as_mut() {
         let (slots, data) = container_state(block_entities, open.pos);
         for directive in sync_open_container(proto, open, container_sync, slots, data) {

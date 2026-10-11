@@ -1619,6 +1619,14 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Closes the open window `window_id` on the client (the clientbound
+    /// `container_close`), sent when the block under a menu goes. The default
+    /// emits nothing, so a protocol without container support never closes one.
+    fn encode_close_container(&self, window_id: i32) -> ServerDirective {
+        let _ = window_id;
+        ServerDirective::None
+    }
+
     /// Encodes the clientbound `merchant_offers` packet (vanilla
     /// Merchant-offers packet) that a villager or wandering trader
     /// interaction sends right after [`encode_open_screen`](Self::encode_open_screen).
@@ -2327,6 +2335,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
         (**self).encode_open_screen(window_id, menu, title)
+    }
+
+    fn encode_close_container(&self, window_id: i32) -> ServerDirective {
+        (**self).encode_close_container(window_id)
     }
 
     fn encode_merchant_offers(

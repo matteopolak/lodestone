@@ -5746,6 +5746,13 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    /// The clientbound `container_close`: the window id as a VarInt.
+    fn encode_close_container(&self, window_id: i32) -> ServerDirective {
+        let mut writer = Writer::default();
+        writer.var_i32(window_id);
+        ServerDirective::Send { packet_id: play::clientbound::CONTAINER_CLOSE, payload: writer.as_slice().to_vec() }
+    }
+
     /// See [`ServerProtocol::encode_merchant_offers`]'s trait doc comment and
     /// [`encode_merchant_offers_body`] for the wire layout.
     fn encode_merchant_offers(

@@ -977,6 +977,7 @@ impl<'w> MobSim<'w> {
                 radius: CREEPER_EXPLOSION_RADIUS,
                 fire: false,
                 destroys_blocks: true,
+                empties_hives: true,
             });
         }
 

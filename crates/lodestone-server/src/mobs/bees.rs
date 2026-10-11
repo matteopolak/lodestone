@@ -65,6 +65,52 @@ impl<'w> MobSim<'w> {
         }
     }
 
+    /// Turns the bees around a hive that was just destroyed against the
+    /// players there. `released` are the bees that came out of it and `breaker`
+    /// the player who dug it, if one did: a released bee within four blocks of
+    /// the breaker goes for them. Then every bee in the 17 x 13 x 17 box about
+    /// the hive that holds no grudge yet takes a random player in the box as
+    /// its target; with no player in the box nothing is angered.
+    pub(crate) fn anger_bees_after_hive_break(
+        &mut self,
+        hive: BlockPos,
+        released: &[Uuid],
+        breaker: Option<Uuid>,
+        rng: &mut crate::mob_spawn::SpawnRng,
+    ) {
+        let now = self.tick_count;
+        let breaker_at = breaker.and_then(|who| {
+            self.players.iter().find(|p| p.identity.as_ref().is_some_and(|i| i.uuid == who)).map(|p| (who, p.perception.position))
+        });
+        if let Some((who, at)) = breaker_at {
+            for mob in self.mobs.iter_mut().filter(|m| released.contains(&m.uuid)) {
+                let here = mob.position();
+                let (dx, dy, dz) = (here.x - at.x, here.y - at.y, here.z - at.z);
+                if dx * dx + dy * dy + dz * dz <= 16.0 {
+                    mob.anger = Some(Anger { end_time: now + grudge_ticks(&mut mob.mob), target: Some(at), attacker: Some(who) });
+                }
+            }
+        }
+        let (cx, cy, cz) = (f64::from(hive.x), f64::from(hive.y), f64::from(hive.z));
+        let within = |p: Vec3| p.x >= cx - 8.0 && p.x <= cx + 9.0 && p.y >= cy - 6.0 && p.y <= cy + 7.0 && p.z >= cz - 8.0 && p.z <= cz + 9.0;
+        let players: Vec<(Option<Uuid>, Vec3)> = self
+            .players
+            .iter()
+            .filter(|p| within(p.perception.position))
+            .map(|p| (p.identity.as_ref().map(|i| i.uuid), p.perception.position))
+            .collect();
+        if players.is_empty() {
+            return;
+        }
+        for mob in &mut self.mobs {
+            if mob.entity_type().path() != "bee" || mob.anger.is_some() || !within(mob.position()) {
+                continue;
+            }
+            let (who, at) = players[usize::try_from(rng.next_int(players.len() as i32)).unwrap_or(0)];
+            mob.anger = Some(Anger { end_time: now + grudge_ticks(&mut mob.mob), target: Some(at), attacker: who });
+        }
+    }
+
     /// Puts a bee back into the world beside `hive`, which faces `facing`.
     ///
     /// The bee leaves the hive centre, offset past the hive's face unless that

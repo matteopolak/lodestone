@@ -159,6 +159,7 @@ where
                     pos,
                     advancements,
                     (!creative).then_some(vitals),
+                    creative,
                 )
                 .await?;
             } else {
@@ -222,6 +223,7 @@ where
                 pos,
                 advancements,
                 (!creative).then_some(vitals),
+                creative,
             )
             .await?;
         }
@@ -332,6 +334,8 @@ pub(super) async fn destroy_block<T, P, S>(
     // `Option` rather than a bool beside the vitals keeps the guard
     // cannot be forgotten at a new call site.
     exhaust: Option<&mut PlayerVitals>,
+    // Whether `breaker` is in creative, which keeps a hive's bees in.
+    creative: bool,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -402,7 +406,7 @@ where
     // what makes `match_tool`, `apply_bonus` and `table_bonus`
     // evaluate against a real item instead of an absent one.
     let env = crate::block_removal::Env { block_entities, mobs, feed: block_ticks, stored: &|p| source.block_entity(p.x, p.y, p.z) };
-    let cause = crate::block_removal::Cause::Mined { held, drops: drop_loot };
+    let cause = crate::block_removal::Cause::Mined { held, drops: drop_loot, creative, breaker };
     let loot = crate::block_removal::loot(cause, broken, pos, drops_rng);
     // The block's entity goes through the shared destroy path, which also
     // spills what it held, stops a jukebox's song and lets a hive's bees out.
@@ -435,8 +439,8 @@ where
         }
     }
     let drops_elapsed = started.elapsed();
-    if open_container.as_ref().is_some_and(|open| open.pos == pos) {
-        *open_container = None;
+    if let Some(open) = open_container.take_if(|open| open.pos == pos) {
+        apply(conn, state, proto.encode_close_container(open.window_id)).await?;
         *container_sync = ContainerSync::default();
     }
     // Fluid spread's seeding hook (`crate::fluid`). Breaking a block is the

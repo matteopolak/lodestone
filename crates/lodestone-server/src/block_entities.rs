@@ -1629,6 +1629,12 @@ impl BlockEntityRegistry {
         dirty
     }
 
+    /// Marks `pos` for the next tick's output pass again, for a pass that
+    /// could not finish over a cold column.
+    pub(crate) fn mark_analog_dirty(&mut self, pos: BlockPos) {
+        self.analog_dirty.insert(pos);
+    }
+
     /// Marks `pos` dirty when it now holds an entity with an output.
     fn note_analog(&mut self, pos: BlockPos) {
         if self.entities.get(&pos).is_some_and(crate::container_signal::carries_analog) {
@@ -1697,7 +1703,19 @@ impl BlockEntityRegistry {
             }
         }
         ended.sort_unstable_by_key(|pos| (pos.x, pos.y, pos.z));
+        // A song that ran out stops being a power source.
+        self.analog_dirty.extend(ended.iter().copied());
         ended
+    }
+
+    /// Whether the jukebox at `pos` is mid-song, which is when it powers its
+    /// neighbours.
+    #[must_use]
+    pub(crate) fn jukebox_playing(&self, pos: BlockPos) -> bool {
+        matches!(
+            self.entities.get(&pos),
+            Some(BlockEntity::Opaque { id, nbt }) if id.name() == crate::stored_items::JUKEBOX_ID && crate::stored_items::jukebox_is_playing(nbt)
+        )
     }
 
     /// The analog output of the entity-backed source a comparator facing

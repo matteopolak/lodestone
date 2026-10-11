@@ -26,7 +26,7 @@ use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
 use crate::packets::settings::Settings;
-use crate::packets::window::{OpenWindow, ServerboundHeldItemSlot, SetSlot, WindowClick, WindowItems};
+use crate::packets::window::{CloseWindow, OpenWindow, ServerboundHeldItemSlot, SetSlot, WindowClick, WindowItems};
 
 const CTX: Ctx = Ctx { version: PROTOCOL };
 const COMPRESSION_THRESHOLD: i32 = 256;
@@ -667,6 +667,13 @@ impl ServerProtocol for V47ServerProtocol {
 
     fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
         encode_open_window(window_id, menu, title)
+    }
+
+    fn encode_close_container(&self, window_id: i32) -> ServerDirective {
+        match u8::try_from(window_id) {
+            Ok(window_id) => send(play::clientbound::CLOSE_WINDOW, &CloseWindow { window_id }),
+            Err(_) => ServerDirective::None,
+        }
     }
 
     fn encode_container_content(

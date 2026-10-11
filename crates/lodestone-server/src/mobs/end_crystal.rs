@@ -108,6 +108,7 @@ impl<'w> MobSim<'w> {
             radius: EXPLOSION_POWER,
             fire: false,
             destroys_blocks: true,
+            empties_hives: false,
         });
         Some(crystal.position)
     }

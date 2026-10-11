@@ -173,6 +173,7 @@ mod command_block;
 /// its projection have to be nameable from outside the crate.
 pub mod commands;
 mod beehive;
+pub use beehive::{Beehive, Occupant};
 mod composter;
 /// The ender dragon fight — phase state machine, crystal healing and the
 /// `EndDragonFight` controller (`docs/dragon-fight.md`). Public so a future

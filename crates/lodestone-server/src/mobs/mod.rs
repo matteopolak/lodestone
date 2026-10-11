@@ -3145,6 +3145,9 @@ pub struct Detonation {
     /// Whether the blast destroys blocks. A blast that does not still hurts
     /// entities and is still announced to clients.
     pub destroys_blocks: bool,
+    /// Whether the source lets a destroyed hive's bees out: primed TNT, a
+    /// creeper and a TNT minecart do, an end crystal or a bed does not.
+    pub empties_hives: bool,
 }
 
 /// One player struck by a hostile mob's melee attack this tick, for

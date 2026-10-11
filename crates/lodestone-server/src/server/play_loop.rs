@@ -1501,6 +1501,7 @@ where
                                 dig.pos,
                                 &mut advancements,
                                 (!matches!(game_mode, GameMode::Creative)).then_some(&mut vitals),
+                                matches!(game_mode, GameMode::Creative),
                                 )
                                 .await?;
                             }
@@ -2501,7 +2502,7 @@ where
                 // connection, so this connection needs its own timer to notice — see
                 // `sync_open_container`'s own doc comment.
                 publish_open_container(
-                    conn, proto, &mut state, block_entities,
+                    conn, proto, &mut state, block_entities, block_ticks, player_uuid,
                     &mut open_container, &mut container_sync,
                 )
                 .await?;
@@ -3712,7 +3713,7 @@ where
                 republish_inventory(entities.players(), player_uuid, &inventory);
                 // The world tick can publish changes without inbound packets.
                 publish_open_container(
-                    conn, proto, &mut state, block_entities,
+                    conn, proto, &mut state, block_entities, block_ticks, player_uuid,
                     &mut open_container, &mut container_sync,
                 )
                 .await?;

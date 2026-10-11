@@ -9,11 +9,15 @@ The one path every block removal shares. Mining, explosions, pistons, fluids, lo
 `block_removal::destroy` (or `settle`, when the caller already rolled the loot) takes the cell's entity out of `BlockEntityRegistry` through `destroy_at`, the only function that can: the registry's plain `remove` is private to `block_entities`, and `block_removal/tests.rs` scans the sources for a second caller. What drops depends on the `Cause`:
 
 - `Mined`: the loot table rolls with the held tool.
-- `Blast`: the table rolls with the blast radius, which is what thins a crater. `block_drops::blast_blocks` only writes air and reports what it destroyed; the tick loop's detonation drain does the rest.
+- `Blast`: the table rolls with the blast radius, which is what thins a crater. `block_drops::blast_blocks` only writes air and reports what it destroyed; the tick loop's detonation drain does the rest. A blast that reaches a non-resident cell undoes its writes (`ResidentTickSource::roll_back`) before it retries, so the retry still sees every block and removes each entity.
 - `Natural`: a piston, fluid, lost support or `/setblock destroy`; no tool.
 - `Cleared`: a command replaced the block (`/setblock` without `destroy`); the entity goes and nothing drops.
 
-Contents spill whatever the cause (`BlockEntity::spilled_contents`), except that a shulker box and a decorated pot ride on the item they drop (`stored_items::broken_drops`). A generated container that nothing has opened still sits in the chunk column, so `Env::stored` falls back to the terrain's entity. Jukeboxes send the stop event and a broken hive releases its bees on a player's dig.
+Contents spill whatever the cause (`BlockEntity::spilled_contents`), except that a shulker box and a decorated pot ride on the item they drop (`stored_items::broken_drops`). A generated container that nothing has opened still sits in the chunk column, so `Env::stored` falls back to the terrain's entity. Jukeboxes send the stop event.
+
+A broken hive or nest releases its bees only when the cause calls for it: a player dig outside creative with a tool lacking silk touch, or a blast from primed TNT, a creeper, a wither or a TNT minecart (`Cause::Mined { creative, .. }`, `Cause::Blast { empties_hives, .. }`). Beds, anchors, crystals and every other cause just lose the bees. `MobSim::anger_bees_after_hive_break` then angers released bees within 4 blocks of the digger at them, and gives every other ungrudged bee within 8 blocks horizontally and 6 vertically a random nearby player as its target. A blast angers regardless of the player.
+
+Open windows close from the viewing connection: each connection's container sync tick asks `open_containers::menu_still_valid`, which is false once the registry no longer holds the entity under a chest-like, shulker, beacon or lectern menu, and sends `ServerProtocol::encode_close_container` (an encoder per hosted family) before releasing the lid. The registry entity's absence is the signal, so every cause is covered without a per-cause packet.
 
 Reaction code running over borrowed columns (the piston branch of `random_tick::redstone`) cannot spawn items, so it calls `destroy_deferred` and the tick loop drains the removals with `drain_deferred` once per tick.
 
@@ -23,7 +27,7 @@ Reaction code running over borrowed columns (the piston branch of `random_tick::
 
 A new removal site calls `destroy` with a `Cause`; never remove from the registry directly. A container kind that holds items teaches `spilled_contents` or `broken_drops` its slots. Shulker boxes are `Destroy` for pistons.
 
-Gaps: no loot tables exist for containers (they use item component copy in the reference, handled by `broken_drops`); a brewing stand spills its ingredient and fuel but not its bottles; `/fill` has no hollow, outline or replace filter; other players' open container windows are not closed when a block goes by a non-player cause; `keep` feedback counts every cell.
+Gaps: no loot tables exist for containers (they use item component copy in the reference, handled by `broken_drops`); silk-touch hive drops lose their bees (no bee-carrying item component); hive release ignores campfire sedation; positional menus (crafting table, anvil and other workstations) are not closed when their block goes; `/fill` has no hollow, outline or replace filter; `keep` feedback counts every cell.
 
 ## Configuration
 

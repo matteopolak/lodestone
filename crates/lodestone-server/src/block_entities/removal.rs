@@ -55,11 +55,7 @@ impl BlockEntity {
             BlockEntity::Furnace(_) | BlockEntity::Hopper(_) | BlockEntity::Lectern(_) | BlockEntity::Crafter { .. } => {
                 self.container_slots().into_iter().flatten().collect()
             }
-            BlockEntity::BrewingStand(stand) => [stand.ingredient(), stand.fuel_item()]
-                .into_iter()
-                .flatten()
-                .filter_map(|(item, count)| Some(ItemStack::new(item.parse().ok()?, count)))
-                .collect(),
+            BlockEntity::BrewingStand(stand) => crate::chunk_nbt::brewing_slot_stacks(stand).into_iter().flatten().collect(),
             _ => Vec::new(),
         }
     }

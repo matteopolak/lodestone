@@ -476,6 +476,7 @@ impl<'w> MobSim<'w> {
                 radius: EXPLOSION_POWER,
                 fire: false,
                 destroys_blocks: true,
+                empties_hives: true,
             });
         }
         self.applied_tnt_owner_plan = plan;

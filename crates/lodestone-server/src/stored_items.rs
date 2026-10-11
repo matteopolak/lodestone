@@ -378,8 +378,14 @@ pub(crate) fn tool_shatters_pot(tool: Option<&ItemStack>) -> bool {
     let name = item.strip_prefix("minecraft:").unwrap_or(&item);
     let breaks = ["_sword", "_axe", "_pickaxe", "_shovel", "_hoe"].iter().any(|suffix| name.ends_with(suffix))
         || matches!(name, "trident" | "mace");
+    breaks && !has_silk_touch(Some(tool))
+}
+
+/// Whether `tool` carries silk touch.
+#[must_use]
+pub(crate) fn has_silk_touch(tool: Option<&ItemStack>) -> bool {
     let silk = crate::enchantment_data::id_of("minecraft:silk_touch");
-    breaks && !tool.components.enchantments.iter().any(|enchantment| Some(enchantment.id) == silk)
+    tool.is_some_and(|tool| tool.components.enchantments.iter().any(|enchantment| Some(enchantment.id) == silk))
 }
 
 // ---- drops ----------------------------------------------------------------

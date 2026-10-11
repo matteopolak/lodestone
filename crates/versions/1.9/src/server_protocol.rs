@@ -35,7 +35,7 @@ use crate::packets::position::{Position, pack_position};
 use crate::packets::settings::Settings;
 use crate::packets::slot::Slot;
 use crate::packets::window::{
-    OpenWindow, ServerboundCloseWindow, ServerboundHeldItemSlot, SetSlot, WindowClick, WindowItems,
+    CloseWindow, OpenWindow, ServerboundCloseWindow, ServerboundHeldItemSlot, SetSlot, WindowClick, WindowItems,
 };
 
 const CTX_340: Ctx = Ctx { version: PROTOCOL };
@@ -103,6 +103,7 @@ struct ServerPacketIds {
     set_slot: i32,
     window_click: i32,
     close_window: i32,
+    close_window_clientbound: i32,
 }
 
 const IDS_340: ServerPacketIds = ServerPacketIds {
@@ -135,6 +136,7 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     set_slot: play::clientbound::SET_SLOT,
     window_click: play::serverbound::WINDOW_CLICK,
     close_window: play::serverbound::CLOSE_WINDOW,
+    close_window_clientbound: play::clientbound::CLOSE_WINDOW,
 };
 
 const IDS_316: ServerPacketIds = ServerPacketIds {
@@ -167,6 +169,7 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     set_slot: crate::packet_ids_316::play::clientbound::SET_SLOT,
     window_click: crate::packet_ids_316::play::serverbound::WINDOW_CLICK,
     close_window: crate::packet_ids_316::play::serverbound::CLOSE_WINDOW,
+    close_window_clientbound: crate::packet_ids_316::play::clientbound::CLOSE_WINDOW,
 };
 
 const IDS_210: ServerPacketIds = ServerPacketIds {
@@ -199,6 +202,7 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     set_slot: crate::packet_ids_210::play::clientbound::SET_SLOT,
     window_click: crate::packet_ids_210::play::serverbound::WINDOW_CLICK,
     close_window: crate::packet_ids_210::play::serverbound::CLOSE_WINDOW,
+    close_window_clientbound: crate::packet_ids_210::play::clientbound::CLOSE_WINDOW,
 };
 
 const IDS_110: ServerPacketIds = ServerPacketIds {
@@ -231,6 +235,7 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     set_slot: crate::packet_ids_110::play::clientbound::SET_SLOT,
     window_click: crate::packet_ids_110::play::serverbound::WINDOW_CLICK,
     close_window: crate::packet_ids_110::play::serverbound::CLOSE_WINDOW,
+    close_window_clientbound: crate::packet_ids_110::play::clientbound::CLOSE_WINDOW,
 };
 
 fn send<T: Encode>(packet_id: i32, packet: &T, ctx: Ctx, protocol: i32) -> ServerDirective {
@@ -1193,6 +1198,13 @@ macro_rules! impl_server_protocol {
 
             fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
                 encode_open_window($ids, $ctx, $protocol, window_id, menu, title)
+            }
+
+            fn encode_close_container(&self, window_id: i32) -> ServerDirective {
+                match u8::try_from(window_id) {
+                    Ok(window_id) => send($ids.close_window_clientbound, &CloseWindow { window_id }, $ctx, $protocol),
+                    Err(_) => ServerDirective::None,
+                }
             }
 
             fn encode_container_content(

@@ -4,7 +4,8 @@
 //!
 //! The one destroy path every block removal shares: the cell's loot, the
 //! contents of whatever it stored, the block entity itself and its side
-//! effects (a jukebox's song stopping, a hive's bees leaving). A player's dig,
+//! effects (a jukebox's song stopping, a hive's bees leaving when the cause
+//! releases them). A player's dig,
 //! an explosion, a piston, a fluid, a lost support and `/setblock destroy` all
 //! end here, so a chest blown up by TNT spills as surely as one mined.
 //!
@@ -40,6 +41,7 @@
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ItemStack};
+use uuid::Uuid;
 
 use crate::block_drops::PoppedItem;
 use crate::block_entities::{BlockEntity, BlockEntityHandle, Removal};
@@ -51,11 +53,13 @@ use crate::tick::BlockTickFeed;
 /// Why a block is going, which decides what its loot table is rolled with.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Cause<'a> {
-    /// A player dug it with `held`. `drops` is false in creative or with the
-    /// block-drop rule off.
-    Mined { held: Option<&'a ItemStack>, drops: bool },
-    /// An explosion of this radius destroyed it.
-    Blast { radius: f32, drops: bool },
+    /// `breaker` dug it with `held`. `drops` is false in creative or with the
+    /// block-drop rule off; `creative` is whether `breaker` was in creative.
+    Mined { held: Option<&'a ItemStack>, drops: bool, creative: bool, breaker: Uuid },
+    /// An explosion of this radius destroyed it. `empties_hives` is whether
+    /// its source (primed TNT, a creeper, a TNT minecart) lets a destroyed
+    /// hive's bees out.
+    Blast { radius: f32, drops: bool, empties_hives: bool },
     /// A piston, a fluid, a lost support or `/setblock destroy`.
     Natural { drops: bool },
     /// A command replaced it: the entity goes and nothing drops.
@@ -121,19 +125,33 @@ fn dispose(env: Env<'_>, removal: Removal, cause: Cause<'_>, loot: Vec<PoppedIte
         }))
         .collect();
     spawn(env.mobs, popped);
-    // A broken hive lets every bee out at once, at the hive's own cell. Only a
-    // player's dig does; the other causes leave the bees to find the gap.
-    if matches!(cause, Cause::Mined { .. })
-        && let Some(BlockEntity::Beehive(mut hive)) = entity
-    {
-        let flower = hive.flower();
-        let facing = crate::mobs::bees::hive_facing(was);
-        let released = hive.release_all();
-        env.mobs.with(|sim| {
-            for bee in &released {
-                sim.release_bee(pos, facing, true, bee, flower, false);
-            }
-        });
+    // A destroyed hive lets its bees out at its own cell and turns the bees
+    // about it on the players there. A player's dig does it unless the tool
+    // keeps bees in (silk touch) or the player is in creative; the blasts of
+    // primed TNT, a creeper and a TNT minecart do it; every other cause just
+    // loses the bees. Any blast angers the bees nearby.
+    if matches!(was.block(), Block::Beehive | Block::BeeNest) {
+        let (release, breaker) = match cause {
+            Cause::Mined { held, creative, breaker, .. } => (!creative && !crate::stored_items::has_silk_touch(held), Some(breaker)),
+            Cause::Blast { empties_hives, .. } => (empties_hives, None),
+            Cause::Natural { .. } | Cause::Cleared => (false, None),
+        };
+        let anger = (release && breaker.is_some()) || matches!(cause, Cause::Blast { .. });
+        let mut released = Vec::new();
+        if release && let Some(BlockEntity::Beehive(mut hive)) = entity {
+            let flower = hive.flower();
+            let facing = crate::mobs::bees::hive_facing(was);
+            let bees = hive.release_all();
+            released = bees.iter().filter_map(|bee| crate::entity_record::SavedEntity::from_nbt(&bee.occupant.entity_data)).map(|saved| saved.uuid).collect();
+            env.mobs.with(|sim| {
+                for bee in &bees {
+                    sim.release_bee(pos, facing, true, bee, flower, false);
+                }
+            });
+        }
+        if anger {
+            env.mobs.with(|sim| sim.anger_bees_after_hive_break(pos, &released, breaker, rng));
+        }
     }
 }
 
@@ -205,10 +223,10 @@ pub(crate) fn drain_deferred(env: Env<'_>, drops: bool, rng: &mut SpawnRng) {
 pub(crate) fn loot(cause: Cause<'_>, was: StateId, pos: BlockPos, rng: &mut SpawnRng) -> Vec<PoppedItem> {
     let tables = crate::block_drops::bundled_tables();
     match cause {
-        Cause::Mined { held, drops: true } if crate::block_drops::drops_are_allowed(was, held) => {
+        Cause::Mined { held, drops: true, .. } if crate::block_drops::drops_are_allowed(was, held) => {
             crate::block_drops::drop_block_loot(tables, was, pos, held, rng)
         }
-        Cause::Blast { radius, drops: true } => crate::block_drops::drop_explosion_loot(tables, was, pos, radius, rng),
+        Cause::Blast { radius, drops: true, .. } => crate::block_drops::drop_explosion_loot(tables, was, pos, radius, rng),
         Cause::Natural { drops: true } => crate::block_drops::drop_block_loot(tables, was, pos, None, rng),
         _ => Vec::new(),
     }

@@ -1549,34 +1549,7 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             ],
         ),
         BlockEntity::BrewingStand(b) => {
-            // The five slots are ordered as three bottles, ingredient, and
-            // fuel. Bottles become real potion items, which is what makes this
-            // entry readable by the standard client rather than namespaced
-            // like the composter above.
-            let mut slots: Vec<Option<ItemStack>> = Vec::with_capacity(5);
-            for raw in 0..lodestone_model::BrewingBottleSlot::COUNT {
-                let index = lodestone_model::BrewingBottleSlot::new(raw)
-                    .expect("bounded bottle loop");
-                slots.push(b.bottle_at(index).map(|bottle| {
-                    let mut stack = ItemStack::new(
-                        bottle_item_id(bottle.kind)
-                            .parse()
-                            .expect("bottle item ids are literal, valid resource keys"),
-                        1,
-                    );
-                    stack.components.potion = lodestone_data::potion::PotionId::from_name(potion_name(bottle.potion))
-                        .map(lodestone_data::potion::PotionId::registry_id);
-                    stack
-                }));
-            }
-            slots.push(
-                b.ingredient()
-                    .and_then(|(id, count)| Some(ItemStack::new(id.parse().ok()?, count))),
-            );
-            slots.push(
-                b.fuel_item()
-                    .and_then(|(id, count)| Some(ItemStack::new(id.parse().ok()?, count))),
-            );
+            let slots = brewing_slot_stacks(b);
             (
                 "minecraft:brewing_stand",
                 vec![
@@ -1924,6 +1897,30 @@ fn strip_block_entity_metadata_preserving_components(nbt: Nbt) -> Nbt {
             .filter(|(name, _)| !matches!(name.as_str(), "id" | "x" | "y" | "z" | "keepPacked"))
             .collect(),
     )
+}
+
+/// A brewing stand's five slots as items, in save order: three bottles, the
+/// ingredient and the fuel. Bottles become real potion items, which is what
+/// makes the save readable by the standard client and what a broken stand
+/// spills.
+#[must_use]
+pub(crate) fn brewing_slot_stacks(stand: &BrewingStand) -> Vec<Option<ItemStack>> {
+    let mut slots: Vec<Option<ItemStack>> = Vec::with_capacity(5);
+    for raw in 0..lodestone_model::BrewingBottleSlot::COUNT {
+        let index = lodestone_model::BrewingBottleSlot::new(raw).expect("bounded bottle loop");
+        slots.push(stand.bottle_at(index).map(|bottle| {
+            let mut stack = ItemStack::new(
+                bottle_item_id(bottle.kind).parse().expect("bottle item ids are literal, valid resource keys"),
+                1,
+            );
+            stack.components.potion = lodestone_data::potion::PotionId::from_name(potion_name(bottle.potion))
+                .map(lodestone_data::potion::PotionId::registry_id);
+            stack
+        }));
+    }
+    slots.push(stand.ingredient().and_then(|(id, count)| Some(ItemStack::new(id.parse().ok()?, count))));
+    slots.push(stand.fuel_item().and_then(|(id, count)| Some(ItemStack::new(id.parse().ok()?, count))));
+    slots
 }
 
 /// The vanilla item id a [`BottleKind`] is stored as.

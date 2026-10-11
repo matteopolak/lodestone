@@ -125,6 +125,12 @@ pub trait RedstoneLookup {
     fn state_at(&self, pos: BlockPos) -> WorldState;
     fn comparator_output(&self, pos: BlockPos) -> u8;
 
+    /// Whether the jukebox at `pos` is mid-song, which makes it a power source.
+    /// A lookup with no block-entity table has none playing.
+    fn jukebox_playing(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
     /// The analog output of an entity-backed source (an item frame) sitting in
     /// `cell` and pointing `facing`, for a comparator facing the same way.
     /// `None` when there is no single such source. A lookup with no entity
@@ -286,6 +292,7 @@ pub const DETECTOR_RAIL: Block = Block::DetectorRail;
 pub const TARGET: Block = Block::Target;
 pub const DAYLIGHT_DETECTOR: Block = Block::DaylightDetector;
 pub const REDSTONE_BLOCK: Block = Block::RedstoneBlock;
+pub const JUKEBOX: Block = Block::Jukebox;
 
 /// Scheduled-tick `kind` strings (`ScheduledTickQueue<T>` is
 /// keyed by `T = String` in this crate — see `scheduled_tick.rs`'s own doc
@@ -457,6 +464,28 @@ pub fn is_daylight_detector(state: StateId) -> bool {
 #[must_use]
 pub fn is_redstone_block(state: StateId) -> bool {
     base_name(state) == REDSTONE_BLOCK
+}
+/// A jukebox powers its surroundings while a song plays, which only its block
+/// entity knows ([`RedstoneLookup::jukebox_playing`]).
+#[must_use]
+pub fn is_jukebox(state: StateId) -> bool {
+    base_name(state) == JUKEBOX
+}
+
+/// What the block entity at `pos` contributes to the signal functions below
+/// when `state` is a kind whose signal lives in its entity: a comparator's
+/// stored output, or 15 from a jukebox mid-song. Zero for every other block.
+fn block_entity_output<L>(lookup: &L, state: StateId, pos: BlockPos) -> u8
+where
+    L: RedstoneLookup + ?Sized,
+{
+    if is_comparator(state) {
+        lookup.comparator_output(pos)
+    } else if is_jukebox(state) && lookup.jukebox_playing(pos) {
+        15
+    } else {
+        0
+    }
 }
 
 /// The `POWERED` property shared by lever, button, boolean pressure plate,
@@ -700,10 +729,10 @@ fn diode_output_signal(state: StateId, comparator_output: u8) -> u8 {
 #[must_use]
 #[cfg(test)]
 pub fn own_signal(state: StateId) -> u8 {
-    own_signal_with_comparator_output(state, 0)
+    own_signal_with_entity_output(state, 0)
 }
 
-fn own_signal_with_comparator_output(state: StateId, comparator_output: u8) -> u8 {
+fn own_signal_with_entity_output(state: StateId, entity_output: u8) -> u8 {
     crate::redstone_counters::bump_state_parse();
     if is_wire(state) {
         wire_power(state)
@@ -715,7 +744,7 @@ fn own_signal_with_comparator_output(state: StateId, comparator_output: u8) -> u
         }
     } else if is_diode(state) {
         if diode_powered(state) {
-            diode_output_signal(state, comparator_output)
+            diode_output_signal(state, entity_output)
         } else {
             0
         }
@@ -747,6 +776,9 @@ fn own_signal_with_comparator_output(state: StateId, comparator_output: u8) -> u
     } else if is_redstone_block(state) {
         // Vanilla's own powered-block own-signal override — the unconditional constant source.
         15
+    } else if is_jukebox(state) {
+        // 15 while a song plays, else 0: the caller reads that off the entity.
+        entity_output
     } else {
         0
     }
@@ -767,7 +799,7 @@ fn own_signal_with_comparator_output(state: StateId, comparator_output: u8) -> u
 /// before ever reaching this check, so wire never needs this predicate.
 #[must_use]
 pub fn is_signal_source(state: StateId) -> bool {
-    is_torch(state) || is_diode(state) || is_observer(state) || is_input_source(state)
+    is_torch(state) || is_diode(state) || is_observer(state) || is_input_source(state) || is_jukebox(state)
 }
 
 /// Vanilla's own `getSignal`'s per-block override — the *weak* signal a `state`
@@ -787,14 +819,14 @@ pub fn is_signal_source(state: StateId) -> bool {
 #[must_use]
 #[cfg(test)]
 pub fn weak_signal(state: StateId, direction: Direction, ignore_wire: bool) -> u8 {
-    weak_signal_with_comparator_output(state, direction, ignore_wire, 0)
+    weak_signal_with_entity_output(state, direction, ignore_wire, 0)
 }
 
-fn weak_signal_with_comparator_output(
+fn weak_signal_with_entity_output(
     state: StateId,
     direction: Direction,
     ignore_wire: bool,
-    comparator_output: u8,
+    entity_output: u8,
 ) -> u8 {
     if is_wire(state) {
         if ignore_wire || direction == Direction::Down {
@@ -824,19 +856,20 @@ fn weak_signal_with_comparator_output(
     } else if is_diode(state) {
         // The diode block's get signal (`:152-154`): only in its own FACING direction.
         if diode_facing(state) == direction {
-            own_signal_with_comparator_output(state, comparator_output)
+            own_signal_with_entity_output(state, entity_output)
         } else {
             0
         }
     } else if is_observer(state) {
         // The observer block's get signal (`:110-112`): only in its own FACING direction.
         if observer_facing(state) == direction {
-            own_signal_with_comparator_output(state, comparator_output)
+            own_signal_with_entity_output(state, entity_output)
         } else {
             0
         }
-    } else if is_input_source(state) {
-        // **None of the nine input families overrides `getSignal`.** They stop
+    } else if is_input_source(state) || is_jukebox(state) {
+        // **None of the nine input families overrides `getSignal`**, nor does a
+        // jukebox, which only overrides its own signal and no direct one. They stop
         // at `ownSignal`, so vanilla's base block-behaviour get-signal's body —
         // `return this.own_signal(state, level, pos)` — applies, and the value is
         // the same in all six directions.
@@ -846,7 +879,7 @@ fn weak_signal_with_comparator_output(
         // that these do too. A lever really does weakly power a wire directly
         // above it, and the direction-restricted half of a lever lives entirely
         // in [`direct_signal`].
-        own_signal_with_comparator_output(state, comparator_output)
+        own_signal_with_entity_output(state, entity_output)
     } else {
         0
     }
@@ -872,14 +905,14 @@ fn weak_signal_with_comparator_output(
 #[must_use]
 #[cfg(test)]
 pub fn direct_signal(state: StateId, direction: Direction, ignore_wire: bool) -> u8 {
-    direct_signal_with_comparator_output(state, direction, ignore_wire, 0)
+    direct_signal_with_entity_output(state, direction, ignore_wire, 0)
 }
 
-fn direct_signal_with_comparator_output(
+fn direct_signal_with_entity_output(
     state: StateId,
     direction: Direction,
     ignore_wire: bool,
-    comparator_output: u8,
+    entity_output: u8,
 ) -> u8 {
     if is_torch(state) {
         // The redstone torch block's get direct signal (`:99-101`): only straight DOWN
@@ -887,7 +920,7 @@ fn direct_signal_with_comparator_output(
         // ABOVE a torch receives strong power from it. Wall torches inherit
         // this unmodified (no override in vanilla's own wall-torch block).
         if direction == Direction::Down {
-            own_signal_with_comparator_output(state, comparator_output)
+            own_signal_with_entity_output(state, entity_output)
         } else {
             0
         }
@@ -895,12 +928,12 @@ fn direct_signal_with_comparator_output(
         if ignore_wire {
             0
         } else {
-            weak_signal_with_comparator_output(state, direction, false, comparator_output)
+            weak_signal_with_entity_output(state, direction, false, entity_output)
         }
     } else if is_diode(state) || is_observer(state) {
         // Vanilla's own diode-block/observer-block direct-signal getters:
         // both delegate straight to `getSignal`.
-        weak_signal_with_comparator_output(state, direction, false, comparator_output)
+        weak_signal_with_entity_output(state, direction, false, entity_output)
     } else if is_lever(state) || is_button(state) {
         // Vanilla's own lever-block/button-block direct-signal getters:
         // `POWERED && get_connected_direction(state) == direction ? 15 : 0`.
@@ -963,12 +996,8 @@ where
     for direction in ALL_DIRECTIONS {
         let neighbor_pos = direction.relative(pos);
         let neighbor_state = lookup.state_at(neighbor_pos);
-        let output = if is_comparator(neighbor_state) {
-            lookup.comparator_output(neighbor_pos)
-        } else {
-            0
-        };
-        let signal = direct_signal_with_comparator_output(neighbor_state, direction, ignore_wire, output);
+        let output = block_entity_output(lookup, neighbor_state, neighbor_pos);
+        let signal = direct_signal_with_entity_output(neighbor_state, direction, ignore_wire, output);
         if signal > best {
             best = signal;
         }
@@ -990,8 +1019,8 @@ where
     L: RedstoneLookup + ?Sized,
 {
     let state = lookup.state_at(pos);
-    let output = if is_comparator(state) { lookup.comparator_output(pos) } else { 0 };
-    let weak = weak_signal_with_comparator_output(state, direction, ignore_wire, output);
+    let output = block_entity_output(lookup, state, pos);
+    let weak = weak_signal_with_entity_output(state, direction, ignore_wire, output);
     if is_redstone_conductor(state) {
         weak.max(direct_signal_to(lookup, pos, ignore_wire))
     } else {
@@ -1036,10 +1065,10 @@ where
     L: RedstoneLookup + ?Sized,
 {
     let state = lookup.state_at(pos);
-    let output = if is_comparator(state) { lookup.comparator_output(pos) } else { 0 };
+    let output = block_entity_output(lookup, state, pos);
     if only_diodes {
         if is_diode(state) {
-            direct_signal_with_comparator_output(state, direction, false, output)
+            direct_signal_with_entity_output(state, direction, false, output)
         } else {
             0
         }
@@ -1048,7 +1077,7 @@ where
     } else if is_wire(state) {
         wire_power(state)
     } else if is_signal_source(state) {
-        direct_signal_with_comparator_output(state, direction, false, output)
+        direct_signal_with_entity_output(state, direction, false, output)
     } else {
         0
     }

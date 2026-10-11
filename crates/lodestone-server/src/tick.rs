@@ -1179,6 +1179,9 @@ fn recheck_comparators_around<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?
 struct ResidentTickSource<'a> {
     source: &'a dyn ChunkSource,
     cold_read: std::sync::atomic::AtomicBool,
+    /// Every write with the state it replaced, so a deferred caller can put the
+    /// world back before it retries.
+    journal: std::sync::Mutex<Vec<(i32, i32, i32, StateId)>>,
 }
 
 impl<'a> ResidentTickSource<'a> {
@@ -1186,6 +1189,15 @@ impl<'a> ResidentTickSource<'a> {
         Self {
             source,
             cold_read: std::sync::atomic::AtomicBool::new(false),
+            journal: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Undoes every write made through this wrapper, newest first.
+    fn roll_back(&self) {
+        let journal = std::mem::take(&mut *self.journal.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        for (x, y, z, old) in journal.into_iter().rev() {
+            resident_tick_set_block(self.source, x, y, z, old);
         }
     }
 
@@ -1227,8 +1239,11 @@ impl ChunkSource for ResidentTickSource<'_> {
     }
 
     fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+        let old = resident_tick_state_id(self.source, x, y, z);
         if !resident_tick_set_block(self.source, x, y, z, state) {
             self.mark_cold();
+        } else if let Some(old) = old {
+            self.journal.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((x, y, z, old));
         }
     }
 }
@@ -2497,6 +2512,10 @@ async fn run_tick_loop_with_weather_impl<W>(
                 Default::default()
             };
             if resident_world.had_cold_read() {
+                // The blast wrote some cells before reaching a cold one;
+                // restore them so the retry sees the original crater and
+                // destroys each entity.
+                resident_world.roll_back();
                 pending_detonations.push(detonation);
                 pending_detonations.extend(detonations);
                 break;
@@ -2516,7 +2535,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                     removal_env,
                     at,
                     was,
-                    crate::block_removal::Cause::Blast { radius: detonation.radius, drops },
+                    crate::block_removal::Cause::Blast { radius: detonation.radius, drops, empties_hives: detonation.empties_hives },
                     &mut blast_drops_rng,
                 );
             }
@@ -4943,6 +4962,48 @@ async fn run_tick_loop_with_weather_impl<W>(
         let analog_dirty = block_entities.with(crate::block_entities::BlockEntityRegistry::take_analog_dirty);
         for pos in analog_dirty {
             recheck_comparators_around(&*world, block_ticks, game_tick, &block_entities, pos);
+            // A jukebox starting or ending a song, or losing its disc, changes
+            // the power it gives every neighbour: the same fan-out a lever's
+            // flip runs.
+            if resident_tick_state_id(&*world, pos.x, pos.y, pos.z).is_some_and(crate::redstone::is_jukebox) {
+                let (cx, cz) = (pos.x.div_euclid(16), pos.z.div_euclid(16));
+                let resident_world = ResidentTickSource::new(&*world);
+                let events = resident_tick_column(&*world, cx, cz).map(|mut column| {
+                    crate::random_tick::propagate_and_react_with_entities_across_chunks(
+                        &mut column,
+                        cx * 16,
+                        cz * 16,
+                        &resident_world,
+                        pos.x,
+                        pos.y,
+                        pos.z,
+                        block_ticks,
+                        game_tick,
+                        Some(&block_entities),
+                        None,
+                    )
+                });
+                let mut finished = false;
+                if let Some(events) = events
+                    && !resident_world.had_cold_read()
+                {
+                    finished = true;
+                    for event in events {
+                        let (ex, ey, ez) = event.pos;
+                        if !resident_tick_set_block(&*world, ex, ey, ez, event.to) {
+                            finished = false;
+                            break;
+                        }
+                        publish_moving_piston(&block_tick_out, &*block_ticks, ex, ey, ez, event.to);
+                        shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, ex, ey, ez, event.to);
+                        post_note_block_vibration(&world, &mobs, (ex, ey, ez), event.from, event.to);
+                        block_tick_out.publish_change(ex, ey, ez, event.from, event.to);
+                    }
+                }
+                if !finished {
+                    block_entities.with(|registry| registry.mark_analog_dirty(pos));
+                }
+            }
             let partner = resident_tick_state_id(&*world, pos.x, pos.y, pos.z)
                 .and_then(|state| crate::container_signal::chest_partner(pos, state));
             if let Some(partner) = partner {

@@ -613,6 +613,10 @@ impl crate::redstone::RedstoneLookup for RedstoneColumns<'_, '_> {
         })
     }
 
+    fn jukebox_playing(&self, pos: BlockPos) -> bool {
+        self.block_entities.is_some_and(|entities| entities.with(|registry| registry.jukebox_playing(pos)))
+    }
+
     fn entity_analog_output(&self, cell: BlockPos, facing: Direction) -> Option<u8> {
         self.block_entities?.with(|registry| registry.entity_analog_output(cell, facing))
     }

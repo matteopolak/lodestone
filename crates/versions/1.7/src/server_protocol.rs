@@ -28,7 +28,7 @@ use crate::packets::entity::Animation;
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess};
 use crate::packets::settings::Settings;
-use crate::packets::window::{ServerboundHeldItemSlot, ServerboundCloseWindow, WindowClick};
+use crate::packets::window::{CloseWindow, ServerboundHeldItemSlot, ServerboundCloseWindow, WindowClick};
 use crate::packets::world::{BlockChange, BlockDig, BlockPlace};
 use crate::packets::position::PositionIbi;
 
@@ -690,6 +690,13 @@ impl ServerProtocol for V5ServerProtocol {
                 message: legacy_text_component(message),
             },
         )
+    }
+
+    fn encode_close_container(&self, window_id: i32) -> ServerDirective {
+        match u8::try_from(window_id) {
+            Ok(window_id) => send(play::clientbound::CLOSE_WINDOW, &CloseWindow { window_id }),
+            Err(_) => ServerDirective::None,
+        }
     }
 
     fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {

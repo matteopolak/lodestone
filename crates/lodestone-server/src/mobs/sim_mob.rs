@@ -1072,6 +1072,13 @@ impl<'w> SimMob<'w> {
         self.nearest_vibration
     }
 
+    /// The position this mob's grudge is chasing, if it holds one. Refreshed
+    /// once per simulation tick from the grudge itself.
+    #[must_use]
+    pub fn angry_target(&self) -> Option<Vec3> {
+        MobController::angry_target(&self.mob)
+    }
+
     /// This mob's own tracked anger level — see the `warden_anger` field's
     /// own doc for the single-suspect narrowing. `0` for a non-listener
     /// species.
