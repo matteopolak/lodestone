@@ -31,7 +31,7 @@ worldgen parser.
 
 ## How to change it
 
-Add a structure-piece family to `spawner_entity_type` when its generator emits a fixed spawner entity. Keep the mapping keyed by piece kind and let the receiving column's final block field provide positions; do not key payloads by world coordinates or replay a separate orientation transform. Extend the packet and source tests with independently expected field values and orientation controls when adding a new family.
+Stronghold spawners (`shpr`, the portal room) carry silverfish. Add a structure-piece family to `spawner_entity_type` when its generator emits a fixed spawner entity. Keep the mapping keyed by piece kind and let the receiving column's final block field provide positions; do not key payloads by world coordinates or replay a separate orientation transform. Extend the packet and source tests with independently expected field values and orientation controls when adding a new family.
 
 ## Configuration
 

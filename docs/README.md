@@ -1045,6 +1045,13 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   check-string-dispatch` inventories Rust `match` expressions whose patterns are
   string literals. The report identifies closed registries and closed configuration
   domains that should be parsed into types before production dispatch.
+- [Structure entities](./structure-entities.md) — Entities a structure spawns while
+  it generates: witch and black cat in swamp huts, chest minecarts in mineshafts,
+  elder guardians in monuments, illagers and allays in mansions, drowned in ocean
+  ruins, shulkers and elytra frames in end cities, and every entity embedded in a
+  template (village folk and animals, bastion piglins and hoglins, igloo basement
+  villagers, camp cushions, outpost allays). They spawn once, at generation, and are
+  saved with their chunk afterwards.
 - [Terrain loading readiness](./terrain-loading-readiness.md) — The labelled
   `Loading terrain...` overlay is reserved for the first creation of a survival
   singleplayer world. It releases when the initial spawn view (capped at radius six)
@@ -1210,8 +1217,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Woodland mansion assembly](./worldgen-mansion.md) — `structure::mansion` builds
   the complete template-piece list for a woodland mansion. The seeded plan, exterior
   shell, corridors, room dividers, doors, carpets, stairs, secret rooms, furnishings,
-  and roof layers all reach the normal template placement stage; entity data markers
-  remain a server-side consumer concern.
+  and roof layers all reach the normal template placement stage; its mage, warrior and
+  allay data markers spawn illagers and allays at placement
+  ([structure-entities](./structure-entities.md)).
 - [Generation animal population](./worldgen-mob-generation-spawn.md) — Initial
   animal population proposes creature packs when a column reaches full generation and
   materialises valid candidates through one shared per-world consumer. Native startup,

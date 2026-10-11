@@ -120,7 +120,7 @@ async fn generation_population_reaches_client_ecs_and_continues_ticking_after_re
     // natural spawn can land and the cow below is the only possible entity.
     server.world_state().set_rule("spawn_mobs", "true").expect("known game rule");
     let batch = GenerationSpawnBatch::new(vec![GenerationSpawn {
-        entity_type: EntityType::Cow.into(), x: 3, y: 64, z: 7,
+        entity_type: EntityType::Cow.into(), x: 3, y: 64, z: 7, structure: None,
     }]).expect("one generation creature");
     source.publication.publish(&batch);
 

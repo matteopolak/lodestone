@@ -1028,6 +1028,7 @@ fn finish(tree: Tree) -> Vec<StructurePiece> {
         blocks: Some(Arc::new(blocks)),
         loot: Vec::new(),
         beard: None,
+        entities: Vec::new(),
         refine: Some(super::PieceRefinement::FortressPlacement {
             kind: piece.kind,
             facing: piece.facing,

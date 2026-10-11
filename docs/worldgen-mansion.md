@@ -2,7 +2,7 @@
 
 ## What it is
 
-`structure::mansion` builds the complete template-piece list for a woodland mansion. The seeded plan, exterior shell, corridors, room dividers, doors, carpets, stairs, secret rooms, furnishings, and roof layers all reach the normal template placement stage; entity data markers remain a server-side consumer concern.
+`structure::mansion` builds the complete template-piece list for a woodland mansion. The seeded plan, exterior shell, corridors, room dividers, doors, carpets, stairs, secret rooms, furnishings, and roof layers all reach the normal template placement stage; its mage, warrior and allay data markers spawn illagers and allays at placement ([structure-entities](./structure-entities.md)).
 
 ## How it works
 

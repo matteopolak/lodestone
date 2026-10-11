@@ -2,8 +2,8 @@
 //!
 //! The generator builds the seeded three-floor grid, classifies its rooms, and
 //! emits the complete template piece list: entrance, exterior walls, corridors,
-//! carpets, room dividers, doors, room furnishings, and roofs.  Entity data
-//! markers remain the responsibility of the server-side structure consumer.
+//! carpets, room dividers, doors, room furnishings, and roofs.  Its entity data
+//! markers are resolved at placement by `structure::entity`.
 
 use lodestone_worldgen_core::rng::RandomSource;
 
@@ -110,8 +110,7 @@ pub fn template_ids() -> Vec<&'static str> {
     TEMPLATE_IDS.to_vec()
 }
 
-/// A generated mansion's piece list. Data-marker entity spawning is handled by
-/// the server-side consumer.
+/// A generated mansion's piece list. Data-marker entities spawn at placement.
 #[derive(Debug, Clone)]
 pub struct MansionAssembly {
     pieces: Vec<StructurePiece>,

@@ -93,12 +93,6 @@
 //!   both phases rather than inventing a second unseeded source, so the same
 //!   world seed always yields the same monument. Ledgered as
 //!   `monument:postprocess_random_unseeded`.
-//! * **Entity spawning is absent.** The penthouse and
-//!   the wing room's design-0 variant each call for an elder guardian spawn,
-//!   matching the `coded:worldgen_entities` gap [`super::stronghold`]'s
-//!   portal-room spawner and [`super::coded`]'s swamp hut witch/cat are
-//!   already ledgered under: this engine has no worldgen-time entity driver
-//!   yet.
 //! * **The "only overwrite non-air" flag is not honoured**, for the same reason
 //!   [`super::stronghold`] documents under `stronghold:skip_air_shell`: every
 //!   box-generation call here passes `skip_air = false` in a faithful
@@ -493,6 +487,7 @@ struct Canvas<'a> {
     ctx: &'a dyn StartContext,
     local: HashMap<(i32, i32, i32), BlockState>,
     blocks: Vec<CodedBlock>,
+    entities: Vec<super::StructureEntity>,
 }
 
 impl<'a> Canvas<'a> {
@@ -502,7 +497,19 @@ impl<'a> Canvas<'a> {
             ctx,
             local: HashMap::new(),
             blocks: Vec::new(),
+            entities: Vec::new(),
         }
+    }
+
+    /// An elder guardian standing in the cell at local `(x, y, z)`.
+    fn spawn_elder(&mut self, x: i32, y: i32, z: i32) {
+        let [wx, wy, wz] = self.piece.world_pos(x, y, z);
+        self.entities.push(super::StructureEntity::new(
+            "minecraft:elder_guardian",
+            [f64::from(wx) + 0.5, f64::from(wy), f64::from(wz) + 0.5],
+            0.0,
+            0.0,
+        ));
     }
 
     /// The implicit flood state for a cell this canvas has not written yet —
@@ -637,6 +644,7 @@ impl<'a> Canvas<'a> {
             // coded piece in this crate: `minecraft:ocean_monument`'s
             // `terrain_adaptation` is `none`.
             beard: None,
+            entities: self.entities,
             refine: None,
         }
     }
@@ -1703,9 +1711,8 @@ fn build_simple_top_room<R: RandomSource>(
 }
 
 /// The wing room's own block-writing walk. `main_design = randomValue & 1`,
-/// resolved by [`generate`] from the single `wing_random` draw. The design-0
-/// elder guardian spawn is skipped — see the
-/// module doc's entity-spawning deviation.
+/// resolved by [`generate`] from the single `wing_random` draw. Each design spawns one elder
+/// guardian.
 fn build_wing_room(piece: Piece, main_design: i32, ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(&piece, ctx);
     let light = BlockState::of(BASE_LIGHT);
@@ -1756,7 +1763,7 @@ fn build_wing_room(piece: Piece, main_design: i32, ctx: &dyn StartContext) -> St
         c.place(&light, 13, 7, 20);
         c.generate_box(6, 0, 21, 7, 4, 21, &light, &light);
         c.generate_box(15, 0, 21, 16, 4, 21, &light, &light);
-        // spawn elder — ledgered, see the module doc.
+        c.spawn_elder(11, 2, 16);
     } else if main_design == 1 {
         c.generate_box(9, 3, 18, 13, 3, 20, &light, &light);
         c.generate_box(9, 0, 18, 9, 2, 18, &light, &light);
@@ -1787,13 +1794,12 @@ fn build_wing_room(piece: Piece, main_design: i32, ctx: &dyn StartContext) -> St
         }
         c.generate_box(8, 3, 8, 8, 3, 13, &black, &black);
         c.generate_box(14, 3, 8, 14, 3, 13, &black, &black);
-        // spawn elder — ledgered, see the module doc.
+        c.spawn_elder(11, 5, 13);
     }
     c.finish("minecraft:omwr", 1)
 }
 
-/// The penthouse's own block-writing walk. The elder guardian spawn is skipped — see the
-/// module doc's entity-spawning deviation.
+/// The penthouse's own block-writing walk, with its elder guardian.
 fn build_penthouse(piece: Piece, ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(&piece, ctx);
     let light = BlockState::of(BASE_LIGHT);
@@ -1839,7 +1845,7 @@ fn build_penthouse(piece: Piece, ctx: &dyn StartContext) -> StructurePiece {
     c.generate_box(8, 0, 10, 8, 2, 10, &light, &light);
     c.generate_box(6, -1, 7, 7, -1, 8, &black, &black);
     c.generate_water_box(6, -1, 3, 7, -1, 4);
-    // The elder guardian spawn at (6, 1, 6) — ledgered, see the module doc.
+    c.spawn_elder(6, 1, 6);
     c.finish("minecraft:ompenthouse", 1)
 }
 

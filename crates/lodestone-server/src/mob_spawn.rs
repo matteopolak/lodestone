@@ -369,6 +369,9 @@ pub struct SpawnCandidate {
     pub pos: Vec3,
     /// Which species, represented by its registry key such as `minecraft:sheep`.
     pub entity_type: lodestone_model::ResourceKey,
+    /// The full entity tag of a structure's entity, which spawns as saved rather than as a
+    /// fresh species.
+    pub structure: Option<std::sync::Arc<lodestone_worldgen::structure::StructureEntity>>,
 }
 
 /// The seam supplying the registry/terrain half of natural spawning.

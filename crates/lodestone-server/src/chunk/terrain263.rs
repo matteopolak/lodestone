@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use lodestone_data::block_states::StateId;
 use lodestone_data::entity_type::{EntityType, EntityTypeRef};
 use lodestone_worldgen::block_entities::{BeeOccupant, GeneratedBlockEntity};
-use lodestone_worldgen::structure::CodedLoot;
+use lodestone_worldgen::structure::{CodedLoot, StructureEntity};
 use lodestone_worldgen::terrain263::{PlacedBlockEntity, Shaped, State, Terrain263};
 
 use super::{ChunkColumn, ChunkGenerationStage, ChunkSource, VersionedAdmissionColumn};
@@ -122,22 +122,26 @@ impl Terrain263ChunkSource {
     /// later feature may have replaced it), one per position.
     #[must_use]
     pub fn full_states_with_block_entities(&self, cx: i32, cz: i32) -> (Vec<State>, Vec<GeneratedBlockEntity>) {
-        let (states, entities, _) = self.decorated(cx, cz);
+        let (states, entities, _, _) = self.decorated(cx, cz);
         (states, entities)
     }
 
     /// [`Self::full_states_with_block_entities`] plus the loot containers structure placement
-    /// seeded inside the target chunk.
-    fn decorated(&self, cx: i32, cz: i32) -> (Vec<State>, Vec<GeneratedBlockEntity>, Vec<CodedLoot>) {
+    /// seeded inside the target chunk and the entities its structures spawn there.
+    fn decorated(&self, cx: i32, cz: i32) -> (Vec<State>, Vec<GeneratedBlockEntity>, Vec<CodedLoot>, Vec<StructureEntity>) {
         let (min_y, height) = (self.terrain.min_y(), self.terrain.height());
         let mut overlay: HashMap<(i32, i32), Vec<State>> = HashMap::new();
         let mut attached: Vec<PlacedBlockEntity> = Vec::new();
         let mut loot: Vec<CodedLoot> = Vec::new();
+        let mut spawns: Vec<StructureEntity> = Vec::new();
         for (dx, dz) in lodestone_worldgen::terrain263::DECORATION_SOURCE_OFFSETS {
             let decoration = self
                 .terrain
                 .decorate_source_full((cx + dx, cz + dz), &mut |x, z| overlay.get(&(x, z)).cloned());
             attached.extend(decoration.entities);
+            // A source chunk spawns the entities whose cell it contains, so only the target's
+            // own decoration contributes.
+            spawns.extend(decoration.spawns.into_iter().filter(|entity| entity.block()[0] >> 4 == cx && entity.block()[2] >> 4 == cz));
             loot.extend(decoration.loot.into_iter().filter(|chest| chest.pos[0] >> 4 == cx && chest.pos[2] >> 4 == cz));
             for (x, y, z, state) in decoration.writes {
                 let key = (x >> 4, z >> 4);
@@ -154,7 +158,7 @@ impl Terrain263ChunkSource {
             .remove(&(cx, cz))
             .unwrap_or_else(|| self.terrain.shaped(cx, cz).chunk.states.clone());
         let entities = self.surviving_block_entities(cx, cz, &states, attached);
-        (states, entities, loot)
+        (states, entities, loot, spawns)
     }
 
     /// Records the structure starts in `(cx, cz)` and the starts reaching it (the save format's
@@ -262,7 +266,7 @@ impl Terrain263ChunkSource {
     }
 
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
-        let (states, block_entities, loot) = self.decorated(cx, cz);
+        let (states, block_entities, loot, structure_spawns) = self.decorated(cx, cz);
         let mut column = self.column_from_states(&states, &self.terrain.shaped(cx, cz), ChunkGenerationStage::Full);
         column.add_generated_block_entities(&block_entities);
         let placement_chests = crate::structure_loot::chests_from_coded(&loot, crate::block_drops::bundled_tables(), &column);
@@ -277,7 +281,7 @@ impl Terrain263ChunkSource {
         column.populate_missing_block_entity_states(cx, cz);
         // The client heightmaps and the retained MOTION_BLOCKING map, from the final blocks.
         column.derive_heightmaps();
-        self.propose_generation_spawns(&mut column, cx, cz);
+        self.propose_generation_spawns(&mut column, cx, cz, structure_spawns);
         column
     }
 
@@ -290,18 +294,44 @@ impl Terrain263ChunkSource {
     /// re-checks each candidate's placement before spawning it. The Nether's packs (striders)
     /// are not proposed: their standing position needs the ceiling-aware downward scan, which
     /// the candidate stage does not model, and the End generates none.
-    fn propose_generation_spawns(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
-        if self.dimension != crate::dimension::Dimension::Overworld
-            || !self.populated.lock().expect("population ledger lock poisoned").insert((cx, cz))
-        {
+    fn propose_generation_spawns(&self, column: &mut ChunkColumn, cx: i32, cz: i32, structure_entities: Vec<StructureEntity>) {
+        if !self.populated.lock().expect("population ledger lock poisoned").insert((cx, cz)) {
             return;
         }
-        let Some(maps) = column.client_heightmaps_raw() else { return };
+        // The structures' entities come first, as structure placement precedes the creature
+        // packs; they spawn in every dimension, on the same once-per-world ledger.
+        let mut spawns: Vec<_> = structure_entities
+            .into_iter()
+            .filter_map(|entity| {
+                let entity_type = EntityType::from_name(entity.id().strip_prefix("minecraft:").unwrap_or(entity.id()))?;
+                let [x, y, z] = entity.block();
+                Some(lodestone_worldgen::spawn_stage::GenerationSpawn {
+                    entity_type: entity_type.into(),
+                    x,
+                    y,
+                    z,
+                    structure: Some(Arc::new(entity)),
+                })
+            })
+            .collect();
+        spawns.extend(self.creature_packs(column, cx, cz));
+        column.set_generation_spawns(spawns);
+        if let Some(batch) = column.generation_spawn_batch() {
+            self.pending_population.publish(batch);
+        }
+    }
+
+    /// The creature packs of a freshly generated Overworld chunk; none elsewhere.
+    fn creature_packs(&self, column: &ChunkColumn, cx: i32, cz: i32) -> Vec<lodestone_worldgen::spawn_stage::GenerationSpawn> {
+        if self.dimension != crate::dimension::Dimension::Overworld {
+            return Vec::new();
+        }
+        let Some(maps) = column.client_heightmaps_raw() else { return Vec::new() };
         let min_y = self.terrain.min_y();
         let top = min_y + self.terrain.height() - 1;
-        let Some(biome) = lodestone_data::biomes::BuiltinBiome::from_name(column.biome_state_at(0, top, 0)) else { return };
+        let Some(biome) = lodestone_data::biomes::BuiltinBiome::from_name(column.biome_state_at(0, top, 0)) else { return Vec::new() };
         let biome = lodestone_data::biomes::BiomeRef::builtin(biome);
-        let spawns = lodestone_worldgen::spawn_stage::spawn_candidates_for_chunk(
+        lodestone_worldgen::spawn_stage::spawn_candidates_for_chunk(
             |_, _| biome,
             |species, lx, lz| {
                 let perches = matches!(species.builtin_or_none(), Some(EntityType::Parrot | EntityType::Ocelot));
@@ -311,11 +341,7 @@ impl Terrain263ChunkSource {
             self.terrain.seed(),
             cx,
             cz,
-        );
-        column.set_generation_spawns(spawns);
-        if let Some(batch) = column.generation_spawn_batch() {
-            self.pending_population.publish(batch);
-        }
+        )
     }
 
     fn generate_shaped(&self, cx: i32, cz: i32) -> ChunkColumn {

@@ -333,6 +333,7 @@ pub(crate) fn generate_start<R: RandomSource>(
             blocks: Some(Arc::new(Vec::new())),
             loot: Vec::new(),
             beard: None,
+            entities: Vec::new(),
             refine: None,
         })
         .collect();
@@ -1538,6 +1539,7 @@ fn into_pieces<'a, R: RandomSource>(
                 blocks: Some(Arc::new(Vec::new())),
                 loot: Vec::new(),
                 beard: None,
+                entities: Vec::new(),
                 refine: None,
             });
             continue;
@@ -1554,6 +1556,12 @@ fn into_pieces<'a, R: RandomSource>(
             };
             post_process(&mut place, random, blocking_biomes, &mut loot);
         }
+        // The only container a corridor creates is a minecart: the rail is a block, the cart
+        // holding the table and seed is an entity.
+        let entities: Vec<super::StructureEntity> = loot
+            .iter()
+            .map(|cart| super::entity::chest_minecart(cart.pos, &cart.table, cart.seed))
+            .collect();
         out.push(StructurePiece {
             id: node.piece_id().to_string(),
             bounding_box: node.box_,
@@ -1563,10 +1571,11 @@ fn into_pieces<'a, R: RandomSource>(
             placement: None,
             extra_placements: Vec::new(),
             blocks: Some(Arc::new(view.take())),
-            loot,
+            loot: Vec::new(),
             // `terrain_adaptation` is `none` for both mineshaft structures, so the
             // rigid-box `else` branch of `Beardifier` is inert here.
             beard: None,
+            entities,
             refine: None,
         });
     }
@@ -1687,8 +1696,8 @@ fn corridor_post<R: RandomSource>(
 ///
 /// Two draws, in this order: a boolean draw for the rail shape, then
 /// a 64-bit draw for the loot seed, and both only when the position is air over a
-/// non-air block. The minecart itself is an entity, so the container is on the
-/// ledger (`coded:worldgen_entities`) while the rail is real.
+/// non-air block. The rail is a block; the minecart holding the table and seed is an entity,
+/// which [`into_pieces`] derives from the recorded loot.
 fn create_chest_minecart<R: RandomSource>(
     p: &mut Place<'_, '_>,
     random: &mut R,

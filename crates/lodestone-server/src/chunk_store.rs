@@ -3633,7 +3633,7 @@ mod tests {
                 if (cx, cz) == (-3, 2) {
                     column.set_generation_spawns(vec![lodestone_worldgen::spawn_stage::GenerationSpawn {
                         entity_type: lodestone_data::entity_type::EntityType::Cow.into(),
-                        x: -45, y: 1, z: 37,
+                        x: -45, y: 1, z: 37, structure: None,
                     }]);
                 }
                 column

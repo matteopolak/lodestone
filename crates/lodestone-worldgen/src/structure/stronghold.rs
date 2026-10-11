@@ -78,14 +78,6 @@
 //!   never duplicated in the table, so equality on the enum is equality on
 //!   the reference's own object identity.
 //!
-//! # Remaining deviation
-//!
-//! * **The portal room's spawner carries no spawn-entry payload.** `minecraft:spawner`
-//!   is placed as a bare block; assigning its entity type needs an
-//!   entity-spawning layer this crate does not have yet, the same gap
-//!   `mineshaft`'s cave-spider spawner is ledgered under
-//!   (`coded:worldgen_entities`).
-//!
 //! # Dependencies
 //!
 //! [`StartContext`] only for [`StartContext::sea_level`] and
@@ -924,6 +916,7 @@ fn into_pieces<R: RandomSource>(tree: Tree, random: &mut R) -> Vec<StructurePiec
             // beardifier's rigid-box path already handles with `beard: None`
             // — see [`super::beardifier`].
             beard: None,
+            entities: Vec::new(),
             refine: Some(PieceRefinement::StrongholdBlocks {
                 writes: std::sync::Arc::new(place.writes),
             }),
@@ -1635,9 +1628,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
                     p.place(&portal, x, 3, z);
                 }
             }
-            // The spawner block entity's set-entity-id — no entity-spawning layer
-            // exists in this crate yet, see the module doc's
-            // `coded:worldgen_entities` deviation.
+            // The spawner's silverfish payload is attached by the server from the piece id.
             p.place(&BlockState::from_block(Block::Spawner), 5, 3, 6);
         }
         Kind::FillerCorridor { steps } => {

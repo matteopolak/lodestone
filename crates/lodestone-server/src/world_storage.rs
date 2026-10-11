@@ -2093,6 +2093,7 @@ fn decode_structures(
                     blocks: None,
                     loot: Vec::new(),
                     beard: None,
+                    entities: Vec::new(),
                     refine: None,
                 })
             })
@@ -4563,6 +4564,7 @@ mod tests {
                 blocks: None,
                 loot: Vec::new(),
                 beard: None,
+                entities: Vec::new(),
                 refine: None,
             }
         };

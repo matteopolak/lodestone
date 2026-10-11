@@ -1420,6 +1420,7 @@ impl Placer<'_> {
                 blocks: None,
                 loot: Vec::new(),
                 beard,
+                entities: Vec::new(),
                 refine: (!feature_placements.is_empty()).then(|| PieceRefinement::FeaturePlacements {
                     placements: Arc::new(feature_placements),
                 }),
@@ -1971,6 +1972,7 @@ mod tests {
             blocks: None,
             loot: Vec::new(),
             beard: None,
+            entities: Vec::new(),
             refine: None,
         };
         let pieces = vec![

@@ -22,7 +22,7 @@ use crate::feature::vegetation::VegTags;
 use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
 use lodestone_data::block_states::StateId;
 use crate::structure::chunk::{BEARD_REACH, PORTAL_TERRAIN_REACH, REFS_RADIUS, StructureRefs};
-use crate::structure::{CodedLoot, HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart};
+use crate::structure::{CodedLoot, HeightmapKind, PieceRefinement, StartContext, StructureEntity, StructureRegistry, StructureStart};
 
 /// The structure registry for one seed plus the start and reference caches built on it.
 /// References kept before the cache restarts; one entry is a handful of `Arc`s.
@@ -250,9 +250,9 @@ impl Terrain263 {
     /// changed blocks and the loot tables the placement itself seeded: a fortress's chests, whose
     /// seeds are drawn while its pieces are placed, and the suspicious blocks a template's rule
     /// processors attached a table to.
-    pub fn place_structures(&self, cx: i32, cz: i32, step: i32, read: &mut dyn FnMut(i32, i32, i32) -> StateId) -> (Vec<Write>, Vec<CodedLoot>) {
+    pub fn place_structures(&self, cx: i32, cz: i32, step: i32, read: &mut dyn FnMut(i32, i32, i32) -> StateId) -> StructurePlacement {
         let Some(structures) = &self.structures else {
-            return (Vec::new(), Vec::new());
+            return StructurePlacement::default();
         };
         let registry = &structures.registry;
         let refs = self.structure_refs(cx, cz);
@@ -264,7 +264,7 @@ impl Terrain263 {
             })
             .collect();
         if entries.is_empty() {
-            return (Vec::new(), Vec::new());
+            return StructurePlacement::default();
         }
         entries.sort_by_key(|(_, _, start)| registry.feature_placement_key(&start.structure).unwrap_or((i32::MAX, usize::MAX)));
 
@@ -285,6 +285,8 @@ impl Terrain263 {
         let mut shared_streams: HashMap<&str, WorldgenRandom<XoroshiroRandomSource>> = HashMap::new();
         let mut portal_streams: HashMap<&str, WorldgenRandom<XoroshiroRandomSource>> = HashMap::new();
         let mut loot = Vec::new();
+        let mut spawned: Vec<StructureEntity> = Vec::new();
+        let in_chunk = |cell: [i32; 3]| cell[0] >> 4 == cx && cell[2] >> 4 == cz;
         for (_, _, start) in entries {
             let intersects = start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15);
             let is_mineshaft = registry
@@ -292,10 +294,11 @@ impl Terrain263 {
                 .is_some_and(|definition| matches!(definition.kind, crate::structure::StructureKind::Mineshaft { .. }));
             if is_mineshaft && intersects {
                 let random = shared_streams.entry(start.structure.as_str()).or_insert_with(|| stream(&start.structure));
-                if let Some(blocks) = registry.mineshaft_blocks_for_chunk(start, cx, cz, &sampler, &world, random) {
+                if let Some((blocks, carts)) = registry.mineshaft_blocks_for_chunk(start, cx, cz, &sampler, &world, random) {
                     for block in blocks {
                         world.set_id(block.pos[0], block.pos[1], block.pos[2], block.state);
                     }
+                    spawned.extend(carts);
                     continue;
                 }
             }
@@ -316,12 +319,24 @@ impl Terrain263 {
                 if let Some(blocks) = &piece.blocks {
                     crate::structure::chunk::place_coded_blocks(&mut world, blocks, &solid_render);
                 }
+                spawned.extend(piece.entities.iter().filter(|entity| in_chunk(entity.block())).cloned());
                 if let Some(placement) = &piece.placement {
-                    let origin = crate::structure::template::PlaceOrigin { position: placement.position, reference, seed };
-                    placement.template.place(origin, &placement.settings, &mut world);
-                    for extra in &piece.extra_placements {
-                        let origin = crate::structure::template::PlaceOrigin { position: extra.position, reference, seed };
-                        extra.template.place(origin, &extra.settings, &mut world);
+                    for placement in std::iter::once(placement).chain(piece.extra_placements.iter()) {
+                        let origin = crate::structure::template::PlaceOrigin { position: placement.position, reference, seed };
+                        placement.template.place(origin, &placement.settings, &mut world);
+                        spawned.extend(placement.template.placed_entities(placement.position, &placement.settings, in_chunk));
+                        for marker in placement.template.data_markers(placement.position, &placement.settings).iter().filter(|marker| in_chunk(marker.pos)) {
+                            let roll = crate::structure::entity::marker_roll(seed, marker.pos);
+                            let handled = crate::structure::entity::handle_marker(&start.structure, marker, placement.settings.rotation, self.generator.sea_level, roll);
+                            if let Some(block) = handled.block.filter(|_| !handled.entities.is_empty()) {
+                                let state = match block {
+                                    crate::structure::entity::MarkerBlock::Air => lodestone_data::block::Block::Air,
+                                    crate::structure::entity::MarkerBlock::Water => lodestone_data::block::Block::Water,
+                                };
+                                world.set_id(marker.pos[0], marker.pos[1], marker.pos[2], state.default_state());
+                            }
+                            spawned.extend(handled.entities);
+                        }
                     }
                 }
                 match piece.refine.as_ref() {
@@ -354,6 +369,18 @@ impl Terrain263 {
         }
         loot.append(&mut world.take_loot());
         let writes = world.finish_change_capture().into_iter().map(|change| (change.position.0, change.position.1, change.position.2, change.state)).collect();
-        (writes, loot)
+        StructurePlacement { writes, loot, entities: spawned }
     }
+}
+
+/// What placing a chunk's structures produced: the changed blocks, the loot tables placement
+/// seeded, and the entities the chunk spawns for its structures, in placement order.
+#[derive(Debug, Default)]
+pub struct StructurePlacement {
+    /// Changed blocks.
+    pub writes: Vec<Write>,
+    /// Loot tables attached to containers.
+    pub loot: Vec<CodedLoot>,
+    /// Entities spawned by pieces and data markers whose block cell is in the chunk.
+    pub entities: Vec<StructureEntity>,
 }

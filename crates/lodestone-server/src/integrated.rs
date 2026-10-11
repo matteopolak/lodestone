@@ -5597,6 +5597,7 @@ mod tests {
                         x: 4,
                         y: 5,
                         z: 4,
+                        structure: None,
                     },
                 ]);
             source

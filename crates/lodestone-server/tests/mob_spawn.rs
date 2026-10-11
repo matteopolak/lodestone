@@ -58,6 +58,7 @@ impl SpawnCandidateSource for AlwaysSpawns {
                 f64::from(cz) * 16.0,
             ),
             entity_type: ResourceKey::from_str(species).expect("static key"),
+            structure: None,
         }]
     }
 }

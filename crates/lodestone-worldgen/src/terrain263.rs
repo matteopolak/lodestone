@@ -403,8 +403,8 @@ impl Terrain263 {
     /// attached, in placement order.
     pub fn decorate_source_full(&self, source: (i32, i32), window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>) -> SourceDecoration {
         let mut writes = Vec::new();
-        let (entities, loot) = self.decorate_source_reports(source, window, &mut |_, _, changed| writes.extend_from_slice(changed));
-        SourceDecoration { writes, entities, loot }
+        let (entities, loot, spawns) = self.decorate_source_reports(source, window, &mut |_, _, changed| writes.extend_from_slice(changed));
+        SourceDecoration { writes, entities, loot, spawns }
     }
 
     /// Like [`Self::decorate_source_states`], but hands each placed feature's writes to `each` as
@@ -414,7 +414,7 @@ impl Terrain263 {
         source: (i32, i32),
         window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>,
         each: &mut dyn FnMut(usize, usize, &[(i32, i32, i32, State)]),
-    ) -> (Vec<PlacedBlockEntity>, Vec<CodedLoot>) {
+    ) -> (Vec<PlacedBlockEntity>, Vec<CodedLoot>, Vec<crate::structure::StructureEntity>) {
         let (sx, sz) = source;
         let mut shaped = Vec::with_capacity(9);
         let mut chunks = Vec::with_capacity(9);
@@ -458,19 +458,21 @@ impl Terrain263 {
         level.gen_depth = self.generator.height;
         level.sky_light = self.sky_light;
         let mut loot = Vec::new();
+        let mut spawns = Vec::new();
         let mut place = |level: &Level<'_>, step: usize| -> Vec<(i32, i32, i32, State)> {
             let step = step as i32;
             if !self.has_structures_in_step(sx, sz, step) {
                 return Vec::new();
             }
             let mut read = |x: i32, y: i32, z: i32| self.canonical(level.get(x, y, z));
-            let (writes, mut placed_loot) = self.place_structures(sx, sz, step, &mut read);
-            loot.append(&mut placed_loot);
-            writes.into_iter().map(|(x, y, z, state)| (x, y, z, self.feature_state(state))).collect()
+            let mut placed = self.place_structures(sx, sz, step, &mut read);
+            loot.append(&mut placed.loot);
+            spawns.append(&mut placed.entities);
+            placed.writes.into_iter().map(|(x, y, z, state)| (x, y, z, self.feature_state(state))).collect()
         };
         self.decorator.decorate_with_structures(&mut level, sx, sz, &present, None, &mut place, |report| each(report.step, report.index, &report.changed));
         debug_assert_eq!(level.out_of_window, 0, "decoration touched columns outside its window");
-        (level.take_block_entities(), loot)
+        (level.take_block_entities(), loot, spawns)
     }
 }
 
@@ -482,6 +484,8 @@ pub struct SourceDecoration {
     pub writes: Vec<(i32, i32, i32, State)>,
     pub entities: Vec<PlacedBlockEntity>,
     pub loot: Vec<CodedLoot>,
+    /// The entities the source chunk's structures spawn, in placement order.
+    pub spawns: Vec<crate::structure::StructureEntity>,
 }
 
 /// The climate list's biomes, distinct, in the list's own order.

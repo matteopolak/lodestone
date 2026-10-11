@@ -10,12 +10,15 @@ use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
 use crate::spawners::{BiomeSpawners, MobCategory};
 
 /// A proposed creature placement in absolute world coordinates.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GenerationSpawn {
     pub entity_type: EntityTypeRef,
     pub x: i32,
     pub y: i32,
     pub z: i32,
+    /// The entity a structure spawns at this cell, with its full tag. `None` for a creature
+    /// pack member, whose placement the server decides from the standing rules.
+    pub structure: Option<std::sync::Arc<crate::structure::StructureEntity>>,
 }
 
 /// Proposes creature packs until a fresh draw fails the biome probability gate.
@@ -98,6 +101,7 @@ fn spawn_candidates_with_random(
                 x: wx,
                 y: surface_y(chosen.entity_type, wlx, wlz),
                 z: wz,
+                structure: None,
             });
         }
     }

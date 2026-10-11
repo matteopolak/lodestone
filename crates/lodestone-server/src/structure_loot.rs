@@ -413,6 +413,11 @@ fn spawner_entity_type(structure_id: &str, piece_id: &str) -> Option<ResourceKey
                 .parse()
                 .expect("bundled mineshaft spawner entity key is valid"),
         ),
+        ("minecraft:stronghold", "minecraft:shpr") => Some(
+            "minecraft:silverfish"
+                .parse()
+                .expect("bundled stronghold spawner entity key is valid"),
+        ),
         ("minecraft:fortress", "minecraft:nemt") => Some(
             "minecraft:blaze"
                 .parse()
@@ -1022,6 +1027,7 @@ mod tests {
             blocks: None,
             loot: Vec::new(),
             beard: None,
+            entities: Vec::new(),
             refine: None,
         };
         let start = Arc::new(StructureStart {
@@ -1238,6 +1244,7 @@ mod tests {
                 }])),
                 loot: Vec::new(),
                 beard: None,
+                entities: Vec::new(),
                 refine: None,
             }],
             terrain_adaptation: TerrainAdjustment::None,
@@ -1324,6 +1331,7 @@ mod tests {
             }])),
             loot: Vec::new(),
             beard: None,
+            entities: Vec::new(),
             refine: None,
         });
         assert!(spawners_for_chunk(&column, &[std::sync::Arc::new(unknown)], 0, 1).is_empty());
@@ -1357,5 +1365,51 @@ mod tests {
                 "the exact placement seed must roll a nonempty external chest at {pos:?}",
             );
         }
+    }
+
+    /// A stronghold portal room's spawner carries a silverfish payload, selected by the piece
+    /// family; the same block in another stronghold piece, or in a piece of another structure
+    /// that places a spawner, selects nothing.
+    #[test]
+    fn stronghold_portal_room_spawner_carries_silverfish() {
+        use lodestone_worldgen::structure::{BoundingBox, StructurePiece, TerrainAdjustment};
+
+        let piece = |id: &str| StructurePiece {
+            id: id.to_owned(),
+            bounding_box: BoundingBox { min: [0, 8, 0], max: [10, 14, 15] },
+            orientation: Some(0),
+            gen_depth: 0,
+            template: None,
+            placement: None,
+            extra_placements: Vec::new(),
+            blocks: None,
+            loot: Vec::new(),
+            beard: None,
+            entities: Vec::new(),
+            refine: None,
+        };
+        let start = |structure: &str, piece_id: &str| std::sync::Arc::new(StructureStart {
+            structure: structure.to_owned(),
+            chunk_x: 0,
+            chunk_z: 0,
+            references: 0,
+            bounding_box: BoundingBox { min: [0, 8, 0], max: [10, 14, 15] },
+            pieces: vec![piece(piece_id)],
+            terrain_adaptation: TerrainAdjustment::None,
+            pieces_complete: true,
+            mineshaft_tree: None,
+        });
+        let mut column = ChunkColumn::new(-64, 384);
+        column.set_block_id(5, 10, 6, Block::Spawner.default_state());
+
+        let records = spawners_for_chunk(&column, &[start("minecraft:stronghold", "minecraft:shpr")], 0, 0);
+        assert_eq!(records.len(), 1);
+        let BlockEntity::Spawner(state) = &records[0].1 else { panic!("a spawner block gets a spawner record") };
+        let (.., next) = state.saved_fields();
+        assert_eq!(
+            next.and_then(|data| data.entity_type.as_ref()).map(ToString::to_string).as_deref(),
+            Some("minecraft:silverfish"),
+        );
+        assert!(spawners_for_chunk(&column, &[start("minecraft:stronghold", "minecraft:shcc")], 0, 0).is_empty());
     }
 }

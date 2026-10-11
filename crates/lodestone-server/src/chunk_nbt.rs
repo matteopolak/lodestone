@@ -769,6 +769,7 @@ fn structures_from_nbt(
                         blocks: None,
                         loot: Vec::new(),
                         beard: None,
+                        entities: Vec::new(),
                         refine: None,
                     });
                 }

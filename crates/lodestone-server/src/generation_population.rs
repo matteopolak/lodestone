@@ -128,6 +128,19 @@ impl Drop for ClaimedBatch {
     }
 }
 
+/// The saved-entity record a structure's entity spawns as, or `None` for a type the mob
+/// simulation does not host.
+///
+/// It goes through [`MobSim::restore_saved`](crate::mobs::MobSim::restore_saved), the same
+/// constructor a loaded world uses, so a structure's villager, cat, minecart or cushion carries
+/// its saved fields exactly as it would after a save and reload.
+#[must_use]
+pub fn structure_record(entity: &lodestone_worldgen::structure::StructureEntity) -> Option<crate::entity_record::SavedEntity> {
+    let record = crate::entity_record::SavedEntity::from_nbt(&lodestone_core::Nbt::Compound(entity.nbt.clone()))?;
+    // Armor stands have no body in the simulation: restoring one would make it a mob.
+    (record.id.path() != "armor_stand").then_some(record)
+}
+
 /// Unavailable terrain or light is distinct from a definitive placement failure.
 #[derive(Debug)]
 pub enum PlacementDecision {
@@ -251,6 +264,7 @@ mod tests {
             x,
             y: 64,
             z: 0,
+            structure: None,
         }).collect()).expect("nonempty batch")
     }
 
@@ -258,6 +272,7 @@ mod tests {
         PlacementDecision::Accepted(SpawnCandidate {
             entity_type: "minecraft:cow".parse().expect("cow resource key"),
             pos: Vec3::new(f64::from(raw.x) + 0.5, 64.0, 0.5),
+            structure: None,
         })
     }
 

@@ -1189,6 +1189,19 @@ impl NaturalSpawner {
         &mut self,
         candidate: &lodestone_worldgen::spawn_stage::GenerationSpawn,
     ) -> PlacementDecision {
+        // A structure's entity stands where its structure put it: no standing or light rule
+        // applies, and neither does the difficulty or the spawn-mobs rule.
+        if let Some(structure) = &candidate.structure {
+            let Ok(key) = ResourceKey::from_str(structure.id()) else {
+                return PlacementDecision::Rejected;
+            };
+            let [x, y, z] = structure.pos();
+            return PlacementDecision::Accepted(SpawnCandidate {
+                pos: Vec3::new(x, y, z),
+                entity_type: key,
+                structure: Some(std::sync::Arc::clone(structure)),
+            });
+        }
         let Some(entity_type) = candidate.entity_type.builtin_or_none() else {
             return PlacementDecision::Rejected;
         };
@@ -1213,6 +1226,7 @@ impl NaturalSpawner {
                     f64::from(candidate.z) + 0.5,
                 ),
                 entity_type: key,
+                structure: None,
             }),
         }
     }
@@ -1316,6 +1330,7 @@ impl SpawnCandidateSource for NaturalSpawner {
                 out.push(SpawnCandidate {
                     pos: Vec3::new(fx, f64::from(sy), fz),
                     entity_type: key,
+                    structure: None,
                 });
                 group_size += 1;
                 // `getMaxSpawnClusterSize` is 4 for every species that does not
@@ -1476,6 +1491,7 @@ mod tests {
             x: cx * 16 + 3,
             y: 64,
             z: 7,
+            structure: None,
         }
     }
 

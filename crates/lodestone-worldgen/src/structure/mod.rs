@@ -84,7 +84,7 @@
 //! own deviations list for exactly which and why.
 //!
 //! **What genuinely remains**: `mansion` places its seeded shell, corridors,
-//! rooms and roofs; entity data markers remain a server-side consumer concern.
+//! rooms and roofs; its illager and allay markers spawn through `entity`.
 //! `end_city` has a template-piece generator consumed by the End dimension's
 //! placement stage, and `fortress` has a coded recursive piece tree consumed
 //! by the Nether stage. Both portal variants have a complete setup parser,
@@ -145,6 +145,7 @@ pub mod beardifier;
 pub mod chunk;
 pub mod coded;
 pub mod end_city;
+pub mod entity;
 pub mod feature_placement;
 pub mod fortress;
 pub mod mansion;
@@ -158,6 +159,7 @@ pub mod stronghold;
 pub mod template;
 pub mod world;
 
+pub use entity::StructureEntity;
 pub use world::StructureWorld;
 
 /// The terrain material a structure probe sees at a position, before any
@@ -785,6 +787,10 @@ pub struct StructurePiece {
     /// are its users — see their own
     /// docs for why those material-sensitive passes cannot run at start time.
     pub refine: Option<PieceRefinement>,
+    /// The entities a **coded** piece spawns, each with its absolute position. The chunk
+    /// containing an entity's block cell spawns it when that chunk is generated; a template
+    /// piece's entities and data markers are read from its template instead.
+    pub entities: Vec<entity::StructureEntity>,
 }
 
 /// A piece kind whose blocks cannot be decided at start time and are instead
@@ -1257,7 +1263,7 @@ pub enum StructureKind {
     /// `minecraft:end_city` — a recursively assembled set of template pieces.
     EndCity,
     /// `minecraft:mansion` — a seeded shell, corridor, room and roof assembly.
-    /// Entity data markers remain a server-side consumer concern.
+    /// Its mage, warrior and allay markers spawn through `entity`.
     Mansion,
     /// `minecraft:stronghold` — the recursive piece tree. No
     /// fields: unlike every other kind here its start predicate reads no
@@ -1942,6 +1948,7 @@ impl StructureKind {
                     blocks: None,
                     loot: Vec::new(),
                     beard: None,
+                    entities: Vec::new(),
                     refine: Some(PieceRefinement::BuriedTreasureChest),
                 }])
             }
@@ -2764,6 +2771,7 @@ pub(crate) fn template_piece(
         // the field S4's pool pieces fill, and leaving it out of the constructor
         // would make that a wider change than it needs to be.
         beard: None,
+        entities: Vec::new(),
         refine: None,
     }
 }
@@ -3146,16 +3154,14 @@ impl StructureRegistry {
                     .into(),
             );
             unsupported.insert(
-                "coded:worldgen_entities".into(),
-                "`swamp_hut`'s witch and cat are not spawned, a mineshaft corridor's \
-                 chest **minecart** is not spawned (its rail is placed and its loot \
-                 table plus a per-container roll seed travel on \
-                 `StructurePiece::loot`, so only the entity is missing), a spider \
-                 corridor's `spawner` block is placed with no spawn-entry payload, the \
-                 stronghold portal room's silverfish `spawner` is the same gap, and \
-                 the ocean monument's penthouse and design-0 wing room each skip an \
-                 elder guardian spawn call — nothing in worldgen can spawn an \
-                 entity or build a spawner's payload yet"
+                "entities:armor_stand_body".into(),
+                "a template's armor stands (the taiga armorer house's two) are listed in the \
+                 chunk's structure entities with their equipment and pose, but the mob \
+                 simulation has no armor-stand body, so the server drops them instead of \
+                 spawning a mob in their place. Spawn-time randomisation of structure mobs \
+                 (random equipment, baby chance, attribute jitter) is not applied either, and a \
+                 mansion's group-of-allays count is drawn from a position-seeded roll because the \
+                 reference draws it from an unseeded generator"
                     .into(),
             );
             unsupported.insert(
@@ -3289,7 +3295,7 @@ impl StructureRegistry {
         ctx: &dyn StartContext,
         world: &crate::dense_grid::DenseBlockGrid,
         placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
-    ) -> Option<Vec<CodedBlock>> {
+    ) -> Option<(Vec<CodedBlock>, Vec<StructureEntity>)> {
         let StructureKind::Mineshaft { blocking, .. } = &self.blueprint.structures.get(&start.structure)?.kind else {
             return None;
         };
@@ -3303,12 +3309,14 @@ impl StructureRegistry {
             placement_random,
         );
         let mut blocks = Vec::new();
+        let mut entities = Vec::new();
         for piece in pieces {
             if let Some(piece_blocks) = piece.blocks {
                 blocks.extend(piece_blocks.iter().cloned());
             }
+            entities.extend(piece.entities);
         }
-        Some(blocks)
+        Some((blocks, entities))
     }
 
     pub(crate) fn place_fortress_for_chunk<W: StructureWorld>(

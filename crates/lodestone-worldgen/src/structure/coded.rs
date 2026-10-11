@@ -137,6 +137,7 @@ pub struct Builder {
     height_position: Option<i32>,
     blocks: Vec<CodedBlock>,
     loot: Vec<super::CodedLoot>,
+    entities: Vec<super::StructureEntity>,
 }
 
 impl Builder {
@@ -189,7 +190,13 @@ impl Builder {
             height_position: None,
             blocks: Vec::new(),
             loot: Vec::new(),
+            entities: Vec::new(),
         }
+    }
+
+    /// Records an entity the piece spawns; its position is already absolute.
+    pub fn spawn(&mut self, entity: super::StructureEntity) {
+        self.entities.push(entity);
     }
 
     /// update height position to lowest ground height.
@@ -536,6 +543,7 @@ impl Builder {
             // with a zero ground-level delta and no junctions. Inert for both structures
             // here, whose `terrain_adaptation` is `none`.
             beard: None,
+            entities: self.entities,
             refine: None,
         }
     }
@@ -548,9 +556,8 @@ fn s(spec: &str) -> BlockState {
 
 /// A swamp hut's piece generator.
 ///
-/// The whole piece, minus the witch and the cat: entity spawning at worldgen time
-/// has no driver in this engine, and the gap is on the ledger
-/// (`coded:worldgen_entities`) rather than silently absent.
+/// The whole piece, including the persistent witch and cat that share the cell at local
+/// `(2, 2, 5)`.
 #[must_use]
 pub fn swamp_hut_pieces<R: RandomSource>(
     cx: i32,
@@ -618,6 +625,10 @@ pub fn swamp_hut_pieces<R: RandomSource>(
         }
         z += 5;
     }
+    let cell = b.world_pos(2, 2, 5);
+    b.spawn(super::entity::mob_at_block("minecraft:witch", cell));
+    // A cat born in a swamp hut is black.
+    b.spawn(super::entity::mob_at_block("minecraft:cat", cell).with("variant", lodestone_core::Nbt::String("minecraft:black".into())));
     vec![b.finish("minecraft:tesw")]
 }
 

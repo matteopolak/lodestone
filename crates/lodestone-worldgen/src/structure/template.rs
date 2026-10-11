@@ -709,6 +709,40 @@ pub struct StructureTemplate {
     /// Block-list order for the fixed jigsaw state, once per palette.
     jigsaw_indices: Vec<Vec<usize>>,
     jigsaw_blocks: Vec<[OnceLock<Vec<JigsawBlockInfo>>; 4]>,
+    /// The entities the template file carries, spawned with the blocks.
+    entities: Vec<TemplateEntity>,
+}
+
+/// An entity a template file carries: its position relative to the template origin, the block
+/// cell that decides which chunk spawns it, and its entity tag.
+#[derive(Debug, Clone)]
+pub struct TemplateEntity {
+    pos: [f64; 3],
+    block_pos: [i32; 3],
+    nbt: BlockNbt,
+}
+
+impl TemplateEntity {
+    pub(super) fn pos(&self) -> [f64; 3] {
+        self.pos
+    }
+
+    pub(super) fn block_pos(&self) -> [i32; 3] {
+        self.block_pos
+    }
+
+    pub(super) fn nbt(&self) -> &BlockNbt {
+        &self.nbt
+    }
+}
+
+/// A `structure_block` in DATA mode: the world position it lands at and its `metadata` string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataMarker {
+    /// World position of the marker block.
+    pub pos: [i32; 3],
+    /// The marker's `metadata` text.
+    pub metadata: String,
 }
 
 impl StructureTemplate {
@@ -737,6 +771,7 @@ impl StructureTemplate {
             blocks,
             jigsaw_indices,
             jigsaw_blocks,
+            entities: Vec::new(),
         }
     }
 
@@ -812,7 +847,11 @@ impl StructureTemplate {
             return Err("template has no `blocks`".into());
         }
 
-        Ok(Self::new(size, palettes, blocks))
+        let mut template = Self::new(size, palettes, blocks);
+        if let Some(Nbt::List { elements, .. }) = field(root, "entities") {
+            template.entities = elements.iter().filter_map(parse_entity).collect();
+        }
+        Ok(template)
     }
 
     /// Returns an empty template for a missing or intentionally absent element.
@@ -852,6 +891,41 @@ impl StructureTemplate {
                 })
                 .collect(),
         )
+    }
+
+    /// The entities this template spawns when placed at `position` under `settings`, in file
+    /// order, keeping those whose block cell `keep` accepts.
+    #[must_use]
+    pub fn placed_entities(
+        &self,
+        position: [i32; 3],
+        settings: &PlaceSettings,
+        mut keep: impl FnMut([i32; 3]) -> bool,
+    ) -> Vec<super::entity::StructureEntity> {
+        self.entities
+            .iter()
+            .filter_map(|entity| super::entity::place_template_entity(entity, position, settings, &mut keep))
+            .collect()
+    }
+
+    /// The DATA-mode structure blocks of the palette this placement uses, at their world
+    /// positions, in block-list order.
+    #[must_use]
+    pub fn data_markers(&self, position: [i32; 3], settings: &PlaceSettings) -> Vec<DataMarker> {
+        let palette = &self.palettes[self.palette_for(position).min(self.palettes.len() - 1)];
+        self.blocks
+            .iter()
+            .filter(|block| palette.get(block.state as usize).is_some_and(|state| state.block() == Block::StructureBlock))
+            .filter_map(|block| {
+                let nbt = block.nbt.as_deref()?;
+                (nbt_string(nbt, "mode") == Some("DATA")).then_some(())?;
+                let rel = transform(block.pos, settings.mirror, settings.rotation, settings.pivot);
+                Some(DataMarker {
+                    pos: [rel[0] + position[0], rel[1] + position[1], rel[2] + position[2]],
+                    metadata: nbt_string(nbt, "metadata").unwrap_or_default().to_owned(),
+                })
+            })
+            .collect()
     }
 
     /// Returns the template dimensions.
@@ -1179,6 +1253,31 @@ fn int_triple(value: &Nbt) -> Option<[i32; 3]> {
         Nbt::IntArray(values) if values.len() >= 3 => Some([values[0], values[1], values[2]]),
         _ => None,
     }
+}
+
+fn double_triple(value: &Nbt) -> Option<[f64; 3]> {
+    let Nbt::List { elements, .. } = value else { return None };
+    if elements.len() < 3 {
+        return None;
+    }
+    let mut out = [0.0f64; 3];
+    for (slot, element) in out.iter_mut().zip(elements) {
+        *slot = match element {
+            Nbt::Double(v) => *v,
+            Nbt::Float(v) => f64::from(*v),
+            _ => return None,
+        };
+    }
+    Some(out)
+}
+
+fn parse_entity(value: &Nbt) -> Option<TemplateEntity> {
+    let entry = compound(value)?;
+    Some(TemplateEntity {
+        pos: field(entry, "pos").and_then(double_triple)?,
+        block_pos: field(entry, "blockPos").and_then(int_triple)?,
+        nbt: compound(field(entry, "nbt")?)?.clone(),
+    })
 }
 
 fn parse_palette(value: &Nbt) -> Vec<CanonicalStateId> {

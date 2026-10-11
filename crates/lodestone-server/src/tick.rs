@@ -260,12 +260,18 @@ fn populate_resident_generation<S: ChunkSource + ?Sized>(
         population.admit(&batch);
     }
     if !spawn_mobs {
-        // The spawn-mobs rule gates generation-time animals too. The pending
-        // candidates are still drained, so re-enabling the rule later does not
-        // release a backlog for chunks generated while it was off.
+        // The spawn-mobs rule gates generation-time animals too, but not a structure's own
+        // entities. The pending candidates are still drained, so re-enabling the rule later
+        // does not release a backlog for chunks generated while it was off.
         return population.process(
-            |_| crate::generation_population::PlacementDecision::Rejected,
-            |_| false,
+            |candidate| {
+                if candidate.structure.is_some() {
+                    spawner.classify_generation_spawn(candidate)
+                } else {
+                    crate::generation_population::PlacementDecision::Rejected
+                }
+            },
+            |candidate| materialize_generation(mobs, candidate),
         );
     }
     let mut coordinates = population.pending_chunks().collect::<Vec<_>>();
@@ -280,11 +286,26 @@ fn populate_resident_generation<S: ChunkSource + ?Sized>(
     spawner.use_world(Arc::new(crate::mobs::ChunkWorld::from_columns(columns)));
     population.process(
         |candidate| spawner.classify_generation_spawn(candidate),
-        |candidate| mobs.with(|sim| {
-            sim.spawn_species(candidate.entity_type, candidate.pos);
-            true
-        }),
+        |candidate| materialize_generation(mobs, candidate),
     )
+}
+
+/// Puts an accepted generation-time candidate into the mob simulation: a creature pack member
+/// as a fresh species, a structure's entity as the record its structure wrote.
+fn materialize_generation(mobs: &MobHandle, candidate: crate::mob_spawn::SpawnCandidate) -> bool {
+    mobs.with(|sim| {
+        match candidate.structure.as_deref().map(crate::generation_population::structure_record) {
+            Some(Some(record)) => {
+                sim.restore_saved(std::slice::from_ref(&record));
+            }
+            // A type the simulation does not host is dropped, not retried.
+            Some(None) => {}
+            None => {
+                sim.spawn_species(candidate.entity_type, candidate.pos);
+            }
+        }
+        true
+    })
 }
 
 /// Reads one block from the tick thread's resident snapshot boundary.
@@ -5268,6 +5289,7 @@ mod tests {
                 x: cx * 16 + 3,
                 y: 64,
                 z: 7,
+                structure: None,
             },
         ]).expect("one generation candidate");
         (column, batch)
@@ -5328,6 +5350,57 @@ mod tests {
         };
         assert_eq!(run(true), (1, 1, false), "control: the rule on spawns the cow");
         assert_eq!(run(false), (0, 0, false), "rule off: no cow, and nothing left pending");
+    }
+
+    /// A structure's own entities ignore the spawn-mobs rule (a witch in a hut is not a natural
+    /// spawn), keep the persistence flag they were generated with, and an armor stand, which the
+    /// simulation has no body for, is dropped rather than restored as a mob. Control: the cow
+    /// beside them is still gated by the rule.
+    #[test]
+    fn generation_population_spawns_structure_entities_regardless_of_the_spawn_mobs_rule() {
+        use lodestone_worldgen::structure::StructureEntity;
+        let spawn = |entity: StructureEntity| {
+            let [bx, by, bz] = entity.block();
+            lodestone_worldgen::spawn_stage::GenerationSpawn {
+                entity_type: lodestone_data::entity_type::EntityType::from_name(entity.id().trim_start_matches("minecraft:"))
+                    .expect("hosted type")
+                    .into(),
+                x: bx,
+                y: by,
+                z: bz,
+                structure: Some(Arc::new(entity)),
+            }
+        };
+        let witch = StructureEntity::new("minecraft:witch", [1609.5, 64.0, 7.5], 0.0, 0.0).persistent();
+        let stand = StructureEntity::new("minecraft:armor_stand", [1611.5, 64.0, 7.5], 0.0, 0.0);
+        let cow = lodestone_worldgen::spawn_stage::GenerationSpawn {
+            entity_type: lodestone_data::entity_type::EntityType::Cow.into(),
+            x: 1603,
+            y: 64,
+            z: 7,
+            structure: None,
+        };
+        let run = |spawn_mobs: bool| {
+            let (column, _) = population_column(100);
+            let batch = crate::generation_population::GenerationSpawnBatch::new(vec![
+                spawn(witch.clone()),
+                spawn(stand.clone()),
+                cow.clone(),
+            ])
+            .expect("nonempty batch");
+            let mut source = PopulationWorld { columns: HashMap::new(), batches: vec![Arc::clone(&batch)] };
+            source.columns.insert((100, 0), column);
+            let mobs = MobHandle::default();
+            let mut population = crate::generation_population::GenerationPopulation::default();
+            let mut spawner = crate::natural_spawn::NaturalSpawner::new(HashMap::new(), 0);
+            spawner.start_cycle(1, Vec::new());
+            populate_resident_generation(&mut population, &source, &mut spawner, &mobs, spawn_mobs);
+            let mut kinds: Vec<_> = mobs.with(|sim| sim.snapshots()).iter().map(|s| s.entity_type.to_string()).collect();
+            kinds.sort();
+            (kinds, batch.is_pending())
+        };
+        assert_eq!(run(true), (vec!["minecraft:cow".to_owned(), "minecraft:witch".to_owned()], false), "rule on: witch and cow, no armor stand");
+        assert_eq!(run(false), (vec!["minecraft:witch".to_owned()], false), "rule off: only the structure's witch");
     }
 
     #[test]
