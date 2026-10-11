@@ -506,8 +506,24 @@ impl Sim {
         self.body_pose.attack_anim_lerp(self.clock().interp_alpha)
     }
 
+    /// The item id in the hand the current use was started with, or `None`
+    /// when no use is in progress.
+    pub(crate) fn using_item_id(&self) -> Option<String> {
+        if !self.using_item() {
+            return None;
+        }
+        let slot = match self.read(|w| w.resource::<crate::interact::UsingHand>().0) {
+            lodestone_model::Hand::Main => self.selected_slot(),
+            lodestone_model::Hand::Off => crate::sim::OFFHAND_NATIVE_INDEX,
+        };
+        self.player_menu()
+            .player_native(slot)
+            .filter(|stack| !stack.is_empty())
+            .map(|stack| stack.item().to_string())
+    }
+
     /// Vanilla's own is-blocking check: using an item whose own use-animation
-    /// is the block animation.
+    /// is the block animation, in whichever hand it was raised.
     /// Approximated by item id, the same simplification `spyglass_scoping`
     /// (`sim/camera.rs`) makes for its own is-scoping check: a shield is the only item
     /// this client raises a block pose for, so an id check stands in for
@@ -517,11 +533,7 @@ impl Sim {
     /// blocking (the player's own override of the living-entity default).
     #[must_use]
     fn is_blocking(&self) -> bool {
-        self.using_item()
-            && self
-                .player_menu()
-                .player_native(self.selected_slot())
-                .is_some_and(|st| st.item().to_string() == "minecraft:shield")
+        self.using_item_id().is_some_and(|item| item == "minecraft:shield")
     }
 
     /// Advance the simulation by real elapsed time, running fixed 20 Hz `GameTick`

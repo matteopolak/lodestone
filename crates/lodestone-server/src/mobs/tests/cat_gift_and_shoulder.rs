@@ -191,8 +191,7 @@ fn relocated_cats(release: lodestone_data::GameDataVersion, floor: &str) -> usiz
             world.set_block(x, -1, z, floor);
         }
     }
-    let mut sim = MobSim::new(&world);
-    sim.set_release(release);
+    let mut sim = MobSim::for_release(&world, release);
     sim.day_time = 23_800;
     let mut cats = Vec::new();
     for i in 0..40 {
@@ -221,4 +220,87 @@ fn a_gift_cat_moves_in_26_2_over_magma_but_26_3_leaves_it_where_it_stands() {
     assert!(relocated_cats(V26_3, "minecraft:stone") >= 15, "control: cats relocate over stone");
     assert!(relocated_cats(V26_2, "minecraft:magma_block") >= 15, "26.2 relocates over magma");
     assert_eq!(relocated_cats(V26_3, "minecraft:magma_block"), 0, "26.3 refuses the dangerous landing block");
+}
+
+fn wide_world(floor: &str) -> ChunkWorld {
+    let mut world = ChunkWorld::new(-64, 384);
+    for x in -48..=24 {
+        for z in -8..=24 {
+            world.set_block(x, -1, z, floor);
+        }
+    }
+    world
+}
+
+/// The gift lands on the corner of the cat's block, one block behind its body
+/// yaw: `(x - sin(yaw), z + cos(yaw))`. The cats stand on magma in 26.3, where a
+/// gift cat never relocates, so each stays on its block and the spot depends only
+/// on the yaw. The expected spots are worked out by hand: yaw 0 puts the item one
+/// block south (+z), 90 one block west (-x), 180 one north, 270 one east.
+#[test]
+fn the_gift_lands_one_block_behind_the_cats_body_yaw() {
+    let world = wide_world("minecraft:magma_block");
+    let mut sim = MobSim::for_release(&world, lodestone_data::GameDataVersion::V26_3);
+    sim.day_time = 23_800;
+    let mut expected = Vec::new();
+    for i in 0..40 {
+        let yaw = [0.0f32, 90.0, 180.0, 270.0][i % 4];
+        let (x, z) = (-40.0 + i as f64 * 1.5 + 0.5, 3.5);
+        let id = sim.spawn_species(cat_key(), Vec3::new(x, 0.0, z)).id();
+        let cat = sim.get_mut(id).expect("just spawned");
+        cat.mob.set_body_yaw(yaw);
+        cat.mob.request_gift();
+        let (dx, dz) = match yaw as u32 {
+            0 => (0.0, 1.0),
+            90 => (-1.0, 0.0),
+            180 => (0.0, -1.0),
+            _ => (1.0, 0.0),
+        };
+        expected.push(Vec3::new(x.floor() + dx, 0.0, z.floor() + dz));
+    }
+    sim.tick();
+    let items: Vec<Vec3> = (0..2000).filter_map(|id| sim.item_position(id)).collect();
+    assert!(items.len() >= 15, "at a 0.7 chance over 40 cats most gift: {}", items.len());
+    let strays: Vec<&Vec3> = items
+        .iter()
+        .filter(|item| !expected.iter().any(|spot| (item.x - spot.x).abs() < 0.25 && (item.z - spot.z).abs() < 0.25))
+        .collect();
+    assert!(strays.is_empty(), "items off every expected spot: {strays:?}");
+}
+
+/// Where cats that moved from `start` ended up, when each is tied to `holder`
+/// (or to nothing) and gifts once over a stone floor in 26.3.
+fn gift_landings(holder: Option<LeashHolder>) -> Vec<Vec3> {
+    let world = wide_world("minecraft:stone");
+    let mut sim = MobSim::for_release(&world, lodestone_data::GameDataVersion::V26_3);
+    sim.day_time = 23_800;
+    let start = Vec3::new(0.5, 0.0, 0.5);
+    let mut cats = Vec::new();
+    for _ in 0..40 {
+        let id = sim.spawn_species(cat_key(), start).id();
+        let cat = sim.get_mut(id).expect("just spawned");
+        cat.set_leash_holder(holder);
+        cat.mob.request_gift();
+        cats.push(id);
+    }
+    sim.tick();
+    cats.iter()
+        .map(|id| sim.get(*id).expect("cat is still in the world").position())
+        .filter(|now| (now.x - start.x).hypot(now.z - start.z) > 1.0)
+        .collect()
+}
+
+/// A leashed cat moves to a random spot within five blocks of its holder's
+/// block, not its own. The fence at (11, 0, 11) puts that box at 6..=16 on each
+/// axis, disjoint from the box around the cat's own block (-5..=5), which is what
+/// the untethered control lands in.
+#[test]
+fn a_leashed_cat_relocates_around_its_holder() {
+    let control = gift_landings(None);
+    assert!(control.len() >= 10, "control: cats relocate: {}", control.len());
+    assert!(control.iter().all(|p| (-5.0..6.0).contains(&p.x) && (-5.0..6.0).contains(&p.z)), "{control:?}");
+
+    let tied = gift_landings(Some(LeashHolder::Fence(BlockPos::new(11, 0, 11))));
+    assert!(tied.len() >= 10, "tied cats relocate: {}", tied.len());
+    assert!(tied.iter().all(|p| (6.0..17.0).contains(&p.x) && (6.0..17.0).contains(&p.z)), "{tied:?}");
 }

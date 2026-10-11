@@ -812,6 +812,18 @@ impl ItemStack {
     /// `minecraft:decorated_pot` carrying at least one sherd.
     #[must_use]
     pub fn pot_decorations(&self) -> Option<PotDecorations> {
+        // 26.3 carries the four faces as full item templates; their
+        // `provides_pottery_pattern` overrides decide the drawn pattern, which
+        // the item-id list drops.
+        if let Some(faces) = self.release_components().and_then(|release| release.pot_decoration_stacks.as_ref()) {
+            return Some(PotDecorations::from_stack_faces(faces));
+        }
+        self.pot_decorations_component()
+    }
+
+    /// The `minecraft:pot_decorations` component as stored, without folding in
+    /// the 26.3 templates.
+    fn pot_decorations_component(&self) -> Option<PotDecorations> {
         match self.components.get_str(POT_DECORATIONS_COMPONENT) {
             Some(ComponentValue::PotDecorations(decorations)) => Some(decorations.clone()),
             _ => None,
@@ -1337,7 +1349,7 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             authored_enchantment: stack.authored_enchantment(),
             trim: stack.trim(),
             map_id: stack.map_id(),
-            pot_decorations: stack.pot_decorations(),
+            pot_decorations: stack.pot_decorations_component(),
             profile: stack.profile(),
             bundle_contents: stack
                 .bundle_contents()
@@ -2147,6 +2159,40 @@ mod tests {
         release.attack_animation.as_mut().unwrap().duration = 8;
         changed.set_release_components(release);
         assert!(!ItemStack::is_same_item_same_components(&game, &changed));
+    }
+
+    /// A 26.3 pot carries its faces as item templates only; a face's own
+    /// `provides_pottery_pattern` replaces the pattern its item would give, an
+    /// unmarked sherd keeps its own, and a brick or empty face is plain.
+    #[test]
+    fn a_pot_reads_its_faces_from_the_26_3_templates_with_pattern_overrides() {
+        let template = |item: &str, pattern: Option<&str>| {
+            Some(Box::new(lodestone_model::ItemStack {
+                item: id(item),
+                count: 1,
+                components: ModelItemComponents {
+                    provides_pottery_pattern: pattern.map(id),
+                    ..ModelItemComponents::default()
+                },
+            }))
+        };
+        let pot = lodestone_model::ItemStack {
+            item: id("minecraft:decorated_pot"),
+            count: 1,
+            components: ModelItemComponents {
+                pot_decoration_stacks: Some([
+                    template("minecraft:angler_pottery_sherd", Some("minecraft:skull")),
+                    template("minecraft:archer_pottery_sherd", None),
+                    template("minecraft:brick", None),
+                    None,
+                ]),
+                ..ModelItemComponents::default()
+            },
+        };
+        let faces = ItemStack::from(&pot).pot_decorations().expect("templates give faces");
+        assert_eq!(faces.back, Some(id("minecraft:skull_pottery_sherd")));
+        assert_eq!(faces.left, Some(id("minecraft:archer_pottery_sherd")));
+        assert_eq!((faces.right, faces.front), (None, None));
     }
 
     /// `is_bundle` matches every real bundle item and rejects a look-alike

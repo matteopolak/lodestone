@@ -2743,6 +2743,7 @@ fn decorated_pot_sherds(nbt: &lodestone_core::Nbt) -> [Option<String>; 4] {
     use lodestone_core::Nbt;
 
     fn sherd_path(value: &Nbt) -> Option<String> {
+        let mut provided: Option<lodestone_model::ResourceKey> = None;
         let id = match value {
             Nbt::String(id) => id,
             Nbt::Compound(fields) => {
@@ -2752,6 +2753,12 @@ fn decorated_pot_sherds(nbt: &lodestone_core::Nbt) -> [Option<String>; 4] {
                 }) {
                     return None;
                 }
+                if let Some((_, Nbt::Compound(components))) = fields.iter().find(|(name, _)| name == "components")
+                    && let Some((_, Nbt::String(pattern))) =
+                        components.iter().find(|(name, _)| name == "minecraft:provides_pottery_pattern")
+                {
+                    provided = pattern.parse().ok();
+                }
                 let (_, Nbt::String(id)) = fields.iter().find(|(name, _)| name == "id")? else {
                     return None;
                 };
@@ -2759,8 +2766,10 @@ fn decorated_pot_sherds(nbt: &lodestone_core::Nbt) -> [Option<String>; 4] {
             }
             _ => return None,
         };
-        let path = id.strip_prefix("minecraft:").unwrap_or(id);
-        (!path.is_empty() && path != "brick").then(|| path.to_string())
+        let item: lodestone_model::ResourceKey = id.parse().ok()?;
+        let sherd = lodestone_model::PotDecorations::face_sherd(&item, provided.as_ref())?;
+        let path = if sherd.namespace() == "minecraft" { sherd.path().to_string() } else { sherd.to_string() };
+        (!path.is_empty()).then_some(path)
     }
 
     let mut out: [Option<String>; 4] = [None, None, None, None];
@@ -2932,6 +2941,30 @@ mod decorated_pot_tests {
         })]);
         assert_eq!(decorated_pot_sherds(&named), decorated_pot_sherds(&legacy));
         assert_eq!(decorated_pot_sherds(&named)[1], None);
+    }
+
+    /// A stored sherd's `provides_pottery_pattern` decides the face, replacing
+    /// the pattern its item id would give; without one the item's own stands.
+    #[test]
+    fn a_stored_pattern_override_replaces_the_items_own() {
+        let with_pattern = |id: &str, pattern: &str| {
+            compound(vec![
+                ("id", Nbt::String(id.into())),
+                ("count", Nbt::Int(1)),
+                ("components", compound(vec![("minecraft:provides_pottery_pattern", Nbt::String(pattern.into()))])),
+            ])
+        };
+        let nbt = compound(vec![("sherds", compound(vec![
+            ("back", with_pattern("minecraft:angler_pottery_sherd", "minecraft:skull")),
+            ("left", with_pattern("minecraft:brick", "minecraft:howl")),
+            ("front", stack("minecraft:archer_pottery_sherd")),
+        ]))]);
+        assert_eq!(decorated_pot_sherds(&nbt), [
+            Some("skull_pottery_sherd".into()),
+            Some("howl_pottery_sherd".into()),
+            None,
+            Some("archer_pottery_sherd".into()),
+        ]);
     }
 
     #[test]

@@ -428,9 +428,9 @@ impl<'w> MobSim<'w> {
     /// horizontally and two vertically ([`Self::gift_relocation`]), and the item
     /// spawns where it ends up.
     ///
-    /// **Disclosed simplifications**: a leashed cat relocates around itself
-    /// rather than its holder, and the item spawns at the cat's position rather
-    /// than one block behind its body yaw.
+    /// A leashed cat relocates around its holder's block rather than its own.
+    /// The item spawns on the corner of the cat's final block, one block behind
+    /// its body yaw: `x - sin(yaw)`, `z + cos(yaw)`.
     pub(super) fn resolve_cat_gifts(&mut self, gift_requests: Vec<i32>) {
         if gift_requests.is_empty() {
             return;
@@ -452,7 +452,12 @@ impl<'w> MobSim<'w> {
             if rng.next_f32() >= chance {
                 continue;
             }
-            let pos = match self.gift_relocation(pos, &mut rng) {
+            let origin = self
+                .get(id)
+                .and_then(SimMob::leash_holder)
+                .and_then(|holder| self.leash_holder_position(holder))
+                .unwrap_or(pos);
+            let pos = match self.gift_relocation(origin, &mut rng) {
                 Some(moved) => {
                     if let Some(cat) = self.get_mut(id) {
                         cat.teleport_to(moved);
@@ -461,6 +466,12 @@ impl<'w> MobSim<'w> {
                 }
                 None => pos,
             };
+            let yaw = self.get(id).map_or(0.0, |cat| cat.rotation().yaw).to_radians();
+            let drop_at = Vec3::new(
+                pos.x.floor() - f64::from(yaw.sin()),
+                pos.y.floor(),
+                pos.z.floor() + f64::from(yaw.cos()),
+            );
             let rolled = tables.roll(&table, &crate::loot::LootContext::default(), &mut rng);
             for stack in rolled {
                 if stack.count == 0 {
@@ -470,7 +481,7 @@ impl<'w> MobSim<'w> {
                 let count = u8::try_from(stack.count).unwrap_or(u8::MAX);
                 self.spawn_item(
                     &stack,
-                    pos,
+                    drop_at,
                     velocity,
                     ItemLifecycle::newly_dropped(
                         count,
@@ -478,6 +489,15 @@ impl<'w> MobSim<'w> {
                     ),
                 );
             }
+        }
+    }
+
+    /// Where a lead's holder stands, or `None` when the holder is gone.
+    fn leash_holder_position(&self, holder: LeashHolder) -> Option<Vec3> {
+        match holder {
+            LeashHolder::Player(uuid) => self.player_position(uuid),
+            LeashHolder::Mob(id) => self.get(id).map(SimMob::position),
+            LeashHolder::Fence(pos) => Some(Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z))),
         }
     }
 

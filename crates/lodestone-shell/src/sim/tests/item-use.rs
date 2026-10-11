@@ -1245,3 +1245,35 @@ fn a_sword_click_never_defers_to_the_offhand_shield() {
     let (sent, _, _) = click_block_with_offhand_shield(777, "minecraft:iron_sword");
     assert!(!sent.iter().any(|a| matches!(a, ClientAction::UseItem { hand: Hand::Off, .. })), "{sent:?}");
 }
+
+/// Looks 40 degrees off the body for one tick after a hoe click on `protocol`
+/// with a shield in the off hand, and returns how far the body turned.
+fn body_turn_after_hoe_click(protocol: i32) -> (bool, f32) {
+    let (mut net, _actions, _feed) = NetClient::loopback_with_feed();
+    net.set_protocol(protocol);
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:iron_hoe");
+    give_offhand_item(&mut sim, "minecraft:shield");
+    sim.set_ray_target_for_test(Some(RayHit::face_center([4, 64, 4], [0, 1, 0])));
+    sim.use_item_live();
+    let using = sim.using_item();
+    let base = sim.body_pose.body_yaw;
+    sim.player_mut(|p| p.yaw = base + 40.0);
+    sim.step(lodestone_ecs::TICK_PERIOD);
+    (using, sim.body_pose.body_yaw - base)
+}
+
+/// A shield raised from the off hand clamps the head to 15 degrees of the body,
+/// so a 40 degree look drags the body 25 degrees round; without a raised shield
+/// the 50 degree allowance leaves the body still.
+#[test]
+fn an_offhand_shield_raise_clamps_the_head_to_fifteen_degrees() {
+    let (raised, turn) = body_turn_after_hoe_click(777);
+    assert!(raised, "26.3: the hoe click raised the off-hand shield");
+    assert!((turn - 25.0).abs() < 0.5, "blocking: body turned {turn}, want 25");
+    let (raised, turn) = body_turn_after_hoe_click(776);
+    assert!(!raised, "26.2: the hoe click used the block");
+    assert!(turn.abs() < 0.5, "not blocking: body turned {turn}, want 0");
+}

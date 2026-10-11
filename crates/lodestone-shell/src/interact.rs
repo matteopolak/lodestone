@@ -323,6 +323,19 @@ pub struct AttackPresses(pub VecDeque<AttackPress>);
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct UsingItem(pub bool);
 
+/// The hand the item being used is held in; meaningful only while
+/// [`UsingItem`] is true. Written wherever a use is armed, so a pose or camera
+/// effect that depends on the used item reads that hand's stack, not the
+/// main hand's.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct UsingHand(pub lodestone_model::Hand);
+
+impl Default for UsingHand {
+    fn default() -> Self {
+        Self(lodestone_model::Hand::Main)
+    }
+}
+
 /// The live block-mining predictor (`START`/`STOP`/`ABORT` + swing), owning its
 /// own prediction-sequence counter and post-break cooldown.
 #[derive(Resource, Debug, Default)]
@@ -1572,6 +1585,7 @@ impl Plugin for InteractPlugin {
         app.init_resource::<Attacking>();
         app.init_resource::<AttackPresses>();
         app.init_resource::<UsingItem>();
+        app.init_resource::<UsingHand>();
         app.init_resource::<MiningPredictor>();
         app.init_resource::<PlacementPredictor>();
         app.init_resource::<BreakPredictions>();

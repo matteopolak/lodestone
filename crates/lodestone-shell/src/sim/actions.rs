@@ -1269,7 +1269,10 @@ impl Sim {
             // button was actually pressed — see that resource's own docs for
             // why this is an input-state mirror rather than vanilla's real
             // is using item.
-            self.write(|w| w.resource_mut::<UsingItem>().0 = true);
+            self.write(|w| {
+                w.resource_mut::<UsingItem>().0 = true;
+                w.resource_mut::<crate::interact::UsingHand>().0 = Hand::Main;
+            });
             // Arm vanilla's `timeHeld`, which is what
             // The trident item's release using compares against its 10-tick threshold on
             // the release edge. Zero here and advanced by
@@ -1587,6 +1590,7 @@ impl Sim {
         let local = self.local;
         self.write(|w| {
             w.resource_mut::<UsingItem>().0 = true;
+            w.resource_mut::<crate::interact::UsingHand>().0 = Hand::Off;
             w.resource_mut::<ItemUseTicks>().0 = Some(0);
             if let Some(mut effects) = w.get_mut::<ItemUseEffects>(local) {
                 effects.0 = Some(UseEffects::DEFAULT);

@@ -91,8 +91,8 @@ Mob-on-player damage: `MobSim` matches an attack's target position against its p
 
 A main-hand click on a block with an axe does nothing, and the click falls through to raising an off-hand shield, unless the player is sneaking. 26.3 extends this to hoes and shovels; 26.2 keeps it to axes. The rule is `GameDataVersion::tool_yields_to_offhand_shield`, applied by `lodestone_server::tool_use::yields_to_offhand_shield`.
 
-- Server: `apply_use_item_on` returns early when the rule holds (hosted release from `ServerProtocol::game_data_version`), otherwise `tool_use::transform` tills or flattens the block (hoe: grass, path, dirt to farmland, coarse dirt to dirt, rooted dirt to dirt plus a hanging-roots item; shovel: six blocks to path; air above and not the bottom face), plays the sound and wears the tool outside creative.
-- Client: `Sim::use_item_live` withholds the block use and swing and sends an off-hand `UseItem` instead, using the release from `NetClient::game_data_version` (`lodestone_registry::game_data_version_for_protocol`). The first-person blocking pose (`Sim::is_blocking`) still reads the main hand only, so it is not shown for an off-hand raise.
+- Server: `apply_use_item_on` returns early when the rule holds (the world's release, read from the dimension's `MobHandle::release`), otherwise `tool_use::transform` tills or flattens the block (hoe: grass, path, dirt to farmland, coarse dirt to dirt, rooted dirt to dirt plus a hanging-roots item; shovel: six blocks to path; air above and not the bottom face), plays the sound and wears the tool outside creative.
+- Client: `Sim::use_item_live` withholds the block use and swing and sends an off-hand `UseItem` instead, using the release from `NetClient::game_data_version` (`lodestone_registry::game_data_version_for_protocol`). `UsingHand` records which hand started the use, so the blocking head clamp (`Sim::is_blocking`) and spyglass scoping read that hand's stack, including an off-hand shield.
 - Tests: `crates/lodestone-server/tests/tool_shield_priority.rs`, `sim/tests/item-use.rs`.
 
 ## How to change it

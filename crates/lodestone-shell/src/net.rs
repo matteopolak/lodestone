@@ -3879,7 +3879,7 @@ async fn open_lan_world(
     String,
 > {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    let world_state = lodestone_server::world_state::WorldStateHandle::new();
+    let world_state = lodestone_server::world_state::WorldStateHandle::for_release(lodestone_server::ServerProtocol::game_data_version(&*protocol));
     if let Some(dir) = world_dir {
         let level = lodestone_anvil::level_dat::read_from_file(&dir.join("level.dat"))
             .map_err(|error| format!("cannot load {} world settings: {error}", dir.display()))?;

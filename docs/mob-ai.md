@@ -165,7 +165,7 @@ Mobs tick against the live terrain (`tick_in`): an absent column is blocked for 
 
 ### Cat morning gift
 
-After the gift roll passes (`MobSim::resolve_cat_gifts`) the cat first moves to a random spot (`gift_relocation`): +-5 blocks on x and z and +-2 on y of its block, then down the column to the first block entities may stand on, at the whole-number coordinates drawn; it stays put if its box overlaps a collider or liquid. 26.3 also refuses a landing block or overlapped block tagged dangerous for teleportation; 26.2 has no filter. `MobSim::set_release` selects the rule (default 26.2; `integrated` sets it from the hosted protocol, and `MobHandle::replace_world` keeps it). A leashed cat relocates around itself, not its holder.
+After the gift roll passes (`MobSim::resolve_cat_gifts`) the cat first moves to a random spot (`gift_relocation`): +-5 blocks on x and z and +-2 on y of its block, then down the column to the first block entities may stand on, at the whole-number coordinates drawn; it stays put if its box overlaps a collider or liquid. 26.3 also refuses a landing block or overlapped block tagged dangerous for teleportation; 26.2 has no filter. The rule comes from the world's release (`MobSim::for_release`; see `docs/dimension-runtime.md`). A leashed cat draws its spot around its holder's block. The item spawns on the corner of the cat's final block, one block behind its body yaw (`x - sin(yaw)`, `z + cos(yaw)`).
 
 ## Configuration
 

@@ -147,8 +147,14 @@ impl MobHandle {
     /// deliberate choice here.
     #[must_use]
     pub fn new(world: ChunkWorld) -> Self {
+        Self::for_release(world, lodestone_data::GameDataVersion::V26_2)
+    }
+
+    /// [`Self::new`] following `release`'s rules.
+    #[must_use]
+    pub fn for_release(world: ChunkWorld, release: lodestone_data::GameDataVersion) -> Self {
         let world: &'static ChunkWorld = Box::leak(Box::new(world));
-        let mut sim = MobSim::new(world);
+        let mut sim = MobSim::for_release(world, release);
         sim.set_next_id(1000);
         Self(Arc::new(Mutex::new(sim)))
     }
@@ -188,12 +194,17 @@ impl MobHandle {
         let world: &'static ChunkWorld = Box::leak(Box::new(world));
         self.with(|sim| {
             let release = sim.release();
-            *sim = MobSim::new(world);
-            sim.set_release(release);
+            *sim = MobSim::for_release(world, release);
             // See `MobSim::set_next_id`'s own doc comment: id `1` collides
             // with `LOCAL_PLAYER_ENTITY_ID` on the wire.
             sim.set_next_id(1000);
         });
+    }
+
+    /// The release this handle's world plays under.
+    #[must_use]
+    pub fn release(&self) -> lodestone_data::GameDataVersion {
+        self.with(|sim| sim.release())
     }
 
     /// Runs `f` against the locked sim, returning its result — the same

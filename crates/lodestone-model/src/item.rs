@@ -623,6 +623,36 @@ pub struct PotDecorations {
     pub front: Option<ResourceKey>,
 }
 
+impl PotDecorations {
+    /// The sherd item whose pattern a pot face draws, given the face's item and
+    /// the `minecraft:provides_pottery_pattern` pattern key the stack carries.
+    ///
+    /// A provided pattern wins over the item's own: pattern `ns:name` draws as
+    /// the sherd `ns:name_pottery_sherd`, and the renderer's lookup falls back
+    /// to the plain side for a pattern it has no sheet for. With no provided
+    /// pattern the item stands for itself, except a brick, which is a plain face.
+    #[must_use]
+    pub fn face_sherd(item: &ResourceKey, provided_pattern: Option<&ResourceKey>) -> Option<ResourceKey> {
+        match provided_pattern {
+            Some(pattern) => format!("{}:{}_pottery_sherd", pattern.namespace(), pattern.path()).parse().ok(),
+            None => (!(item.namespace() == "minecraft" && item.path() == "brick")).then(|| item.clone()),
+        }
+    }
+
+    /// The faces drawn by four full item templates in back, left, right, front
+    /// order, each with its own pattern override applied.
+    #[must_use]
+    pub fn from_stack_faces(faces: &[Option<Box<ItemStack>>; 4]) -> Self {
+        let face = |stack: &Option<Box<ItemStack>>| {
+            stack
+                .as_deref()
+                .and_then(|stack| Self::face_sherd(&stack.item, stack.components.provides_pottery_pattern.as_ref()))
+        };
+        let [back, left, right, front] = faces;
+        Self { back: face(back), left: face(left), right: face(right), front: face(front) }
+    }
+}
+
 /// One stored layer of `minecraft:banner_patterns` — vanilla's own
 /// banner-pattern-layer record (a registry reference to a banner pattern
 /// plus a dye colour), carried the same way [`ArmorTrim`] carries its two

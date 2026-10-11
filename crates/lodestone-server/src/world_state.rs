@@ -306,6 +306,20 @@ pub struct WorldStateHandle {
 }
 
 impl WorldStateHandle {
+    /// A fresh world whose every dimension plays under `release`. Hosting entry
+    /// points build their handle with the hosted protocol's release;
+    /// [`Self::new`] is the 26.2 world for embeds that host no protocol.
+    #[must_use]
+    pub fn for_release(release: lodestone_data::GameDataVersion) -> Self {
+        Self { runtime: Arc::new(crate::dimension_runtime::WorldRuntime::new(release)), ..Self::default() }
+    }
+
+    /// The release every dimension of this world plays under.
+    #[must_use]
+    pub fn release(&self) -> lodestone_data::GameDataVersion {
+        self.runtime.release()
+    }
+
     /// The world's shared sleep vote.
     #[must_use]
     pub fn sleep_vote(&self) -> &crate::sleep::SleepVote {
@@ -563,20 +577,6 @@ impl WorldStateHandle {
         dimension: crate::dimension::Dimension,
     ) -> Arc<crate::dimension_runtime::DimensionRuntime> {
         self.runtime.ensure(dimension)
-    }
-
-    /// Installs constructor-owned handles before sibling factories can resolve them.
-    /// An existing runtime wins; installation never resets a live population.
-    #[must_use]
-    pub fn install_dimension_runtime(
-        &self,
-        dimension: crate::dimension::Dimension,
-        mobs: crate::mobs::MobHandle,
-        entities: crate::mobs::LiveMobSource,
-    ) -> Arc<crate::dimension_runtime::DimensionRuntime> {
-        self.runtime.install(crate::dimension_runtime::DimensionRuntime::new(
-            dimension, mobs, entities,
-        ))
     }
 
     /// This world's scoreboard — see [`Self`]'s own field doc for why a

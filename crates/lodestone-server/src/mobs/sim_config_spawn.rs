@@ -3,25 +3,24 @@
 use super::*;
 
 impl<'w> MobSim<'w> {
-    /// Selects the release whose behaviour rules the simulation follows; the
-    /// default is 26.2.
-    pub fn set_release(&mut self, release: lodestone_data::GameDataVersion) -> &mut Self {
-        self.release = release;
-        self
-    }
-
     /// The release whose behaviour rules the simulation follows.
     #[must_use]
     pub fn release(&self) -> lodestone_data::GameDataVersion {
         self.release
     }
 
-    /// Creates an empty simulation over `world`.
+    /// Creates an empty 26.2 simulation over `world`.
     #[must_use]
     pub fn new(world: &'w ChunkWorld) -> Self {
+        Self::for_release(world, lodestone_data::GameDataVersion::V26_2)
+    }
+
+    /// Creates an empty simulation over `world` following `release`'s rules.
+    #[must_use]
+    pub fn for_release(world: &'w ChunkWorld, release: lodestone_data::GameDataVersion) -> Self {
         Self {
             world,
-            release: lodestone_data::GameDataVersion::V26_2,
+            release,
             mobs: Vec::new(),
             projectiles: ProjectileRegistry::new(),
             projectile_meta: HashMap::new(),

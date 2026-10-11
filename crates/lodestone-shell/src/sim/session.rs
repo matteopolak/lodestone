@@ -317,6 +317,7 @@ impl Sim {
             w.insert_resource(Attacking(false));
             w.insert_resource(AttackPresses::default());
             w.insert_resource(UsingItem(false));
+            w.insert_resource(crate::interact::UsingHand::default());
             w.insert_resource(NetHandle(None));
         });
 

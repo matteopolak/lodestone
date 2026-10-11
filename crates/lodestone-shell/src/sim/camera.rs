@@ -680,11 +680,7 @@ impl Sim {
     /// from here.
     #[must_use]
     fn spyglass_scoping(&self) -> bool {
-        self.using_item()
-            && self
-                .player_menu()
-                .player_native(self.selected_slot())
-                .is_some_and(|st| st.item().to_string() == "minecraft:spyglass")
+        self.using_item_id().is_some_and(|item| item == "minecraft:spyglass")
     }
 
     /// The local player's own third-person body for this frame, or `None` in

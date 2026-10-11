@@ -1659,7 +1659,7 @@ impl IntegratedServer {
         let (client_end, server_end) = memory_pair();
         let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
-        let world_state = crate::world_state::WorldStateHandle::default();
+        let world_state = crate::world_state::WorldStateHandle::for_release(protocol.game_data_version());
         world_state.set_default_game_mode(game_mode);
         world_state.pause_initial_ticks();
         #[cfg(target_arch = "wasm32")]
@@ -1986,6 +1986,7 @@ impl IntegratedServer {
         let (client_end, server_end) = memory_pair();
         let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
+        let release = protocol.game_data_version();
         // shared rather than moved in by value, so chunk
         // generation can be handed to `spawn_blocking` instead of blocking
         // this runtime's core thread — see `crate::chunk::generate_columns_offloaded`
@@ -2119,7 +2120,7 @@ impl IntegratedServer {
                 #[cfg(not(target_arch = "wasm32"))]
                 border: None,
                 // No tick loop here, so there is nothing to share a store *with*.
-                world_state: crate::world_state::WorldStateHandle::default(),
+                world_state: crate::world_state::WorldStateHandle::for_release(release),
                 // This constructor's own connection goes through
                 // `serve_connection_shared`, not the singleplayer
                 // `_with_mob_events_shared` entry point that threads a real
@@ -2196,6 +2197,7 @@ impl IntegratedServer {
         // A private registry, because an in-memory world has nothing to
         // persist into. A *persistent* world must not take this path — see
         // [`Self::open_in_memory_with_mobs_using`].
+        let world_state = crate::world_state::WorldStateHandle::for_release(protocol.game_data_version());
         Self::open_in_memory_with_mobs_using(
             protocol,
             source,
@@ -2215,7 +2217,7 @@ impl IntegratedServer {
             None,
             CommandDispatch::none(),
             crate::ecs::ServerApp::bootstrap(),
-            crate::world_state::WorldStateHandle::new(),
+            world_state,
         )
     }
 
@@ -2241,6 +2243,7 @@ impl IntegratedServer {
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
     {
+        let world_state = crate::world_state::WorldStateHandle::for_release(protocol.game_data_version());
         Self::open_in_memory_with_mobs_using(
             protocol,
             source,
@@ -2255,7 +2258,7 @@ impl IntegratedServer {
             None,
             CommandDispatch::none(),
             server_app,
-            crate::world_state::WorldStateHandle::new(),
+            world_state,
         )
     }
 
@@ -2279,6 +2282,7 @@ impl IntegratedServer {
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
     {
+        let world_state = crate::world_state::WorldStateHandle::for_release(protocol.game_data_version());
         Self::open_in_memory_with_mobs_using(
             protocol,
             source,
@@ -2293,7 +2297,7 @@ impl IntegratedServer {
             None,
             commands,
             crate::ecs::ServerApp::bootstrap(),
-            crate::world_state::WorldStateHandle::new(),
+            world_state,
         )
     }
 
@@ -2376,14 +2380,14 @@ impl IntegratedServer {
     {
         let (client_end, server_end) = memory_pair();
         let shutdown = ShutdownSignal::new();
-        let primary_runtime = world_state.install_dimension_runtime(
-            Dimension::Overworld, MobHandle::default(), LiveMobSource::default(),
+        assert_eq!(
+            world_state.release(),
+            protocol.game_data_version(),
+            "the world's release must be the hosted protocol's"
         );
+        let primary_runtime = world_state.ensure_dimension_runtime(Dimension::Overworld);
         let live_mobs = primary_runtime.entities().clone();
         let mob_handle = primary_runtime.mobs().clone();
-        mob_handle.with(|sim| {
-            sim.set_release(protocol.game_data_version());
-        });
         let player_registry = world_state.player_registry().clone();
         // shared with the tick task the same way
         // `block_entities` is, above — see [`BlockTickFeed`]'s own doc
@@ -3054,7 +3058,7 @@ impl IntegratedServer {
         let level_dat = std::sync::Arc::new(crate::region_source::LevelDatHandle::open_or_create(
             world_dir, &spawn, 0,
         )?);
-        let world_state = crate::world_state::WorldStateHandle::new();
+        let world_state = crate::world_state::WorldStateHandle::for_release(protocol.game_data_version());
         if let Some(data) = level_dat.data() {
             world_state.load_level_data(&data);
         }
@@ -4183,9 +4187,12 @@ impl IntegratedServer {
         // `chunk_store::integrated_capacity_for_view_radius` carries the argument
         // and the price list for the other side of the fork.
         let shutdown = ShutdownSignal::new();
-        let primary_runtime = lan_world_state.install_dimension_runtime(
-            Dimension::Overworld, MobHandle::default(), LiveMobSource::default(),
+        assert_eq!(
+            lan_world_state.release(),
+            protocol.game_data_version(),
+            "the world's release must be the hosted protocol's"
         );
+        let primary_runtime = lan_world_state.ensure_dimension_runtime(Dimension::Overworld);
         let mobs = primary_runtime.mobs().clone();
         let live_mobs = primary_runtime.entities().clone();
         let source = Arc::new(with_nether(

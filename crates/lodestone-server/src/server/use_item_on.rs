@@ -1026,7 +1026,7 @@ where
         && let Some(tool) = crate::tool_use::Tool::of(&tool_item)
     {
         let offhand = inventory.native(crate::inventory::OFFHAND_NATIVE).map(|stack| stack.item.to_string());
-        if crate::tool_use::yields_to_offhand_shield(proto.game_data_version(), hand == 0, &tool_item, offhand.as_deref(), sneaking) {
+        if crate::tool_use::yields_to_offhand_shield(mobs.release(), hand == 0, &tool_item, offhand.as_deref(), sneaking) {
             return Ok(());
         }
         let air_above = crate::random_tick::is_air_variant_id(source.block_state_id(pos.x, pos.y + 1, pos.z));
