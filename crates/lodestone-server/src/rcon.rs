@@ -499,6 +499,7 @@ pub(crate) fn run_command_as(
         // `world_source` `/setblock`/`/fill` already write through when RCON
         // has one (see this module's own doc, "How to change it").
         blocks: config.world_source.as_ref().map(|s| &**s as &dyn crate::chunk::ChunkSource),
+        block_entities: config.block_entities.as_ref(),
     };
     let source = CommandSource::console(
         caller_name,

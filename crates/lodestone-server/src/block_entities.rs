@@ -59,6 +59,7 @@ use crate::composter::Composter;
 use crate::furnace::{Furnace, FurnaceKind};
 use crate::hopper::Hopper;
 
+mod data;
 mod removal;
 pub(crate) use removal::Removal;
 
@@ -1544,6 +1545,9 @@ pub struct BlockEntityRegistry {
     /// route of the private map funnels through this registry's methods, so
     /// this is the one place a container change is noticed.
     analog_dirty: std::collections::HashSet<BlockPos>,
+    /// Positions a command rewrote whose update tag a client must be sent;
+    /// drained by [`take_client_dirty`](Self::take_client_dirty).
+    client_dirty: std::collections::HashSet<BlockPos>,
     /// Players looking into a shulker box, which drives its lid.
     pub(crate) lid_viewers: crate::lid_viewers::LidViewers,
     /// Removals whose drops wait for the tick loop; see

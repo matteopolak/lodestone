@@ -448,6 +448,8 @@ mod sim_snapshots;
 mod sim_command_entities;
 mod sim_entity_data;
 pub use sim_entity_data::{DamageOutcome, EntityDataError, MountOutcome};
+mod mob_riders;
+pub use mob_riders::MobMountOutcome;
 pub use sim_command_entities::{CommandEntity, EntityKill, TeleportOutcome};
 
 // No re-export: `ProjectileHit`/`projectile_damage_type`/`first_solid_along`
@@ -2543,6 +2545,8 @@ pub struct MobSim<'w> {
     /// `(mount, player entity id)` pairs thrown off an untamed mount, awaiting the
     /// connection that owns the player.
     pending_ejections: Vec<(i32, i32)>,
+    /// `(rider mob id, vehicle id)` links in boarding order; see [`mob_riders`].
+    mob_riders: Vec<(i32, i32)>,
     /// Rolls whether a mob standing on a turtle egg crushes it.
     trample_rng: SpawnRng,
     /// The `mob_griefing` game rule.

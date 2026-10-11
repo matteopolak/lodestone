@@ -345,6 +345,7 @@ impl<'w> MobSim<'w> {
                 object_data: b.owner,
                 equipment: Vec::new(),
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
     }

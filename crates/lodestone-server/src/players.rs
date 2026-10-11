@@ -762,6 +762,7 @@ impl PlayerRegistry {
                         // (see `crates/lodestone-server/src/mobs/mod.rs`'s
                         // `LeashHolder::Player`).
                         leash_link: None,
+                        passengers: Vec::new(),
                     }
                 })
                 .collect(),

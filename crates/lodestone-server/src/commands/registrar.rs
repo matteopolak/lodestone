@@ -264,6 +264,9 @@ pub struct CommandWorld<'a> {
     /// definition, so unlike [`Self::rules`] this needs no extra `+ Sync`
     /// written here.
     pub blocks: Option<&'a dyn crate::chunk::ChunkSource>,
+    /// The live block-entity registry `/data ... block` reads and rewrites.
+    /// `None` where no registry is in reach, which refuses the block target.
+    pub block_entities: Option<&'a crate::block_entities::BlockEntityHandle>,
 }
 
 impl std::fmt::Debug for CommandWorld<'_> {

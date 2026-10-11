@@ -86,6 +86,7 @@ fn zombie_snapshot(id: i32, uuid: Uuid) -> EntitySnapshot {
         object_data: 0,
         equipment: Vec::new(),
         leash_link: None,
+        passengers: Vec::new(),
     }
 }
 

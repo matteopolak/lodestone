@@ -294,6 +294,7 @@ mod tests {
             border: None,
             access: Some(&access),
             blocks: None,
+            block_entities: None,
         };
         let commands = ServerCommands::new();
 
@@ -344,6 +345,7 @@ mod tests {
             border: None,
             access: None,
             blocks: None,
+            block_entities: None,
         };
         let commands = ServerCommands::new();
         let outcome = commands.run(&world, &console(), "whitelist on").expect("/whitelist is a built-in");

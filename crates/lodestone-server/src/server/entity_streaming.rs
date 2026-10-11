@@ -253,6 +253,9 @@ impl EntityStreamer {
         current: &[EntitySnapshot],
         directives: &mut Vec<ServerDirective>,
     ) {
+        // Passenger lists wait for the end of the pass: a client ignores a rider
+        // it has not been told to spawn yet.
+        let mut passenger_lists: Vec<ServerDirective> = Vec::new();
         // Spawns and updates, in the source's iteration order.
         for entity in current {
             match last_sent.get(&entity.id) {
@@ -277,6 +280,9 @@ impl EntityStreamer {
                     // `leash_link` renders the rope immediately.
                     if entity.leash_link.is_some() {
                         directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
+                    }
+                    if !entity.passengers.is_empty() {
+                        passenger_lists.push(proto.encode_set_passengers(entity.id, &entity.passengers));
                     }
                     last_sent.insert(entity.id, entity.clone());
                 }
@@ -309,11 +315,15 @@ impl EntityStreamer {
                     if prev.leash_link != entity.leash_link {
                         directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
                     }
+                    if prev.passengers != entity.passengers {
+                        passenger_lists.push(proto.encode_set_passengers(entity.id, &entity.passengers));
+                    }
                     last_sent.insert(entity.id, entity.clone());
                 }
                 Some(_) => {}
             }
         }
+        directives.extend(passenger_lists);
     }
 
     /// The `BOSS_EVENT` twin of [`sync`](Self::sync) — diffs `current` against

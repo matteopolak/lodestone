@@ -424,6 +424,7 @@ mod tests {
             object_data: 0,
             equipment: Vec::new(),
             leash_link: None,
+            passengers: Vec::new(),
         }
     }
 

@@ -107,6 +107,7 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
         object_data: 0,
         equipment: Vec::new(),
         leash_link: None,
+        passengers: Vec::new(),
     };
 
     let entities = Arc::new(Mutex::new(vec![snapshot(start_pos)]));
@@ -241,6 +242,7 @@ async fn a_real_client_sees_mob_equipment_on_spawn_and_after_a_change() {
         object_data: 0,
         equipment: equipment(hand),
         leash_link: None,
+        passengers: Vec::new(),
     };
     let mut first = snapshot("minecraft:crossbow");
     let uuid = first.uuid;

@@ -429,6 +429,7 @@ impl<'w> MobSim<'w> {
                 self.reconcile_player_riders(&connected);
             }
         }
+        let riding = self.sync_mob_riders();
         let sky = self.sky;
         let sea_level = sky.dimension.sea_level();
         let sky_darkening = sky.darkening(self.day_time);
@@ -449,7 +450,7 @@ impl<'w> MobSim<'w> {
                 terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some()
             };
             // An untamed mount is not steered by its rider, so its goals keep ticking.
-            if (m.rider.is_none() || (!m.tame && matches!(m.entity_type.path(), "horse" | "donkey" | "mule"))) && column_loaded {
+            if (m.rider.is_none() || (!m.tame && matches!(m.entity_type.path(), "horse" | "donkey" | "mule"))) && column_loaded && !riding.contains(&m.id) {
                 m.mob.set_ridden(m.rider.is_some());
                 let helmeted = m.equipment.head.is_some();
                 m.mob.set_sea_level(sea_level);

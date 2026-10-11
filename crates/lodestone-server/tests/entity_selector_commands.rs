@@ -68,6 +68,7 @@ impl Server {
             border: None,
             access: None,
             blocks: None,
+            block_entities: None,
         };
         let outcome = self.commands.run(&world, source, text).expect("the root matched");
         match outcome.response {

@@ -56,6 +56,7 @@ impl<'w> MobSim<'w> {
             pending_crop_growths: Vec::new(),
             pending_block_edits: Vec::new(),
             pending_ejections: Vec::new(),
+            mob_riders: Vec::new(),
             trample_rng: SpawnRng::new(TRAMPLE_SEED),
             mob_griefing: true,
             pending_player_hits: Vec::new(),

@@ -48,6 +48,7 @@ impl<'w> MobSim<'w> {
                     equipment: Vec::new(),
                     // A projectile is never leashable, vanilla's own interface for that.
                     leash_link: None,
+                    passengers: Vec::new(),
                 });
             }
         }
@@ -106,6 +107,7 @@ impl<'w> MobSim<'w> {
                 equipment: Vec::new(),
                 // A dropped item is never leashable.
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
         // `ExperienceOrb`. Iterated in **sorted** id order, like the falling blocks
@@ -145,6 +147,7 @@ impl<'w> MobSim<'w> {
                 equipment: Vec::new(),
                 // An experience orb is never leashable, vanilla's own interface for that.
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
         // The falling-block entity. The **only** producer of a non-zero
@@ -194,6 +197,7 @@ impl<'w> MobSim<'w> {
                 equipment: Vec::new(),
                 // A falling block is never leashable, vanilla's own interface for that.
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
         // Vehicles — the boats. Sorted ids, like the two loops above and for the
@@ -266,6 +270,7 @@ impl<'w> MobSim<'w> {
                 equipment: Vec::new(),
                 // A boat is never leashable.
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
         self.push_cushion_snapshots(&mut out);
@@ -300,6 +305,7 @@ impl<'w> MobSim<'w> {
                 equipment: Vec::new(),
                 // Never leashable.
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
         // Thrown eyes of ender. The stack metadata lives at the same index as an
@@ -329,6 +335,7 @@ impl<'w> MobSim<'w> {
                 object_data: 0,
                 equipment: Vec::new(),
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
         // Minecarts. Sorted ids, for the same reason every other sidecar loop
@@ -367,6 +374,7 @@ impl<'w> MobSim<'w> {
                 equipment: Vec::new(),
                 // Never leashable.
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
         // The lightning-bolt entity. Sorted ids for the same
@@ -400,6 +408,7 @@ impl<'w> MobSim<'w> {
                 equipment: Vec::new(),
                 // Never a `Leashable`.
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
         self.push_dragon_snapshots(&mut out);
@@ -411,6 +420,9 @@ impl<'w> MobSim<'w> {
         // the ordinary mob loop at the top of this function — `raid.rs`
         // spawns them with `spawn_species`, exactly as a patrol does — so
         // there is nothing to append here.
+        for snap in &mut out {
+            snap.passengers = self.mob_riders_of(snap.id);
+        }
         out
     }
 }

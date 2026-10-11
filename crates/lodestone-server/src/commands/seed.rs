@@ -60,6 +60,7 @@ mod tests {
             #[cfg(not(target_arch = "wasm32"))]
             access: None,
             blocks: None,
+            block_entities: None,
         };
 
         let outcome = commands.run(&world, &alice, "seed").expect("root matched");

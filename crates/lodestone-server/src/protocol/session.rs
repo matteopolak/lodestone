@@ -203,6 +203,14 @@ pub struct EntitySnapshot {
     /// already-leashed mob show its rope to a client that joins or re-enters view
     /// range late — not just to whoever witnessed the attach.
     pub leash_link: Option<i32>,
+    /// The wire ids of the entities riding this one, in boarding order.
+    ///
+    /// [`crate::server::EntityStreamer::sync`] sends the whole list through
+    /// [`ServerProtocol::encode_set_passengers`] after the spawns of a pass and
+    /// whenever it changes, an empty list being the dismount. Only passengers
+    /// that are themselves streamed entities appear; a player's own seat is
+    /// announced by that player's connection.
+    pub passengers: Vec<i32>,
     /// What the entity holds and wears, one entry per slot it can carry
     /// (an empty slot is an explicit `None` item).
     ///

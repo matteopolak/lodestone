@@ -2005,6 +2005,8 @@ where
                 // `chunk_source` captured above `Effect::SetBlock`/`Fill`
                 // already reach through this arm's own `apply_own_effect`.
                 blocks: Some(chunk_source.get()),
+                // The registry `/data ... block` reads and rewrites.
+                block_entities: Some(block_entities),
             };
             match commands.builtins.run_with_contextual_dispatch(
                 &command_world,

@@ -1,9 +1,9 @@
-//! `/data get|merge|remove|modify` on `storage` and `entity` targets, plus
+//! `/data get|merge|remove|modify` on `storage`, `entity` and `block` targets, plus
 //! `/execute if`/`unless data storage` (in `crate::commands::execute`).
 //!
 //! # What it is
 //!
-//! One tree for two targets. A [`Target`] reads and writes a whole compound;
+//! One tree for three targets. A [`Target`] reads and writes a whole compound;
 //! every verb works on that compound with [`lodestone_command_mc::NbtPath`], so
 //! the grammar, the "found no elements" and "nothing changed" refusals, and the
 //! result counts are the reference's for both. Feedback text is the reference
@@ -18,8 +18,13 @@
 //!   Players are readable and never writable ("Unable to modify player data").
 //!   A write that changes nothing is refused before the player check, as the
 //!   reference orders them.
+//! - `block` reads the registry's save-form record (`BlockEntityRegistry::entity_nbt`,
+//!   the chunk writer's own) and writes back through `apply_entity_nbt`, which
+//!   reads it with the chunk loader and wakes comparators; the tick loop then
+//!   sends the client the kind's data-update packet. A block entity that exists
+//!   only in generated chunk data enters the registry on its first write.
+//!   A position with none is refused "The target block is not a block entity".
 //! - `modify <path> (set|merge|insert <index>|prepend|append) value <nbt>`.
-//!   The `from`, `string` and `compute` sources are not built.
 //!
 //! # How to change it
 //!
@@ -29,13 +34,18 @@
 //!
 //! # Gaps
 //!
-//! No `block` target (see `crate::commands::entity_data`).
+//! The `modify` sources `from <target>`, `string` and `compute` are absent, so
+//! no target can feed another.
 
 use std::sync::Arc;
 
 use lodestone_command::{DoubleArgument, IntegerArgument, NodeId};
-use lodestone_command_mc::{EntityArg, NbtCompoundArg, NbtPath, NbtPathArg, NbtTagArg, SnbtValue, StorageIdArg};
+use lodestone_command_mc::{BlockPosArg, EntityArg, NbtCompoundArg, NbtPath, NbtPathArg, NbtTagArg, SnbtValue, StorageIdArg};
 
+use lodestone_core::Nbt;
+use lodestone_model::BlockPos;
+
+use super::block_commands::resolve_block_pos;
 use super::entity_data::{nbt_to_snbt, resolve_single, snbt_to_nbt, target_nbt};
 use super::registrar::{Ctx, Registrar};
 use super::source::CommandTarget;
@@ -50,6 +60,38 @@ const TOO_DEEP: &str = "Tag is too deeply nested";
 enum Target {
     Storage(String),
     Entity(CommandTarget),
+    Block(BlockPos),
+}
+
+const NOT_A_BLOCK_ENTITY: &str = "The target block is not a block entity";
+
+/// The record of the block entity at `pos`: the live registry's, else the one
+/// chunk data holds.
+fn block_nbt(ctx: &Ctx<'_>, pos: BlockPos) -> Result<Nbt, String> {
+    let Some(registry) = ctx.world.block_entities else {
+        return Err("This command needs a live connection and is not available here".to_owned());
+    };
+    registry
+        .with(|registry| registry.entity_nbt(pos))
+        .or_else(|| {
+            let stored = ctx.world.blocks?.block_entity(pos.x, pos.y, pos.z)?;
+            Some(crate::chunk_nbt::block_entity_to_nbt(pos, &stored))
+        })
+        .ok_or_else(|| NOT_A_BLOCK_ENTITY.to_owned())
+}
+
+/// Rewrites the block entity at `pos` from `nbt` through the registry.
+fn write_block(ctx: &Ctx<'_>, pos: BlockPos, nbt: &Nbt) -> Result<(), String> {
+    let Some(registry) = ctx.world.block_entities else {
+        return Err("This command needs a live connection and is not available here".to_owned());
+    };
+    let stored = ctx.world.blocks.and_then(|blocks| blocks.block_entity(pos.x, pos.y, pos.z));
+    registry.with(|registry| {
+        if let (None, Some(stored)) = (registry.get(pos), stored) {
+            registry.insert(pos, stored);
+        }
+        registry.apply_entity_nbt(pos, nbt).map_err(|_| NOT_A_BLOCK_ENTITY.to_owned())
+    })
 }
 
 type Resolver = Arc<dyn Fn(&Ctx<'_>) -> Result<Target, String> + Send + Sync>;
@@ -62,6 +104,7 @@ impl Target {
             Self::Entity(target) => target_nbt(ctx.world, target)
                 .map(|nbt| nbt_to_snbt(&nbt))
                 .ok_or_else(|| "No entity was found".to_owned()),
+            Self::Block(pos) => block_nbt(ctx, *pos).map(|nbt| nbt_to_snbt(&nbt)),
         }
     }
 
@@ -82,6 +125,7 @@ impl Target {
                 mobs.with(|sim| sim.apply_entity_nbt(entity.uuid, &nbt))
                     .map_err(|_| "Unable to modify entity data".to_owned())
             }
+            Self::Block(pos) => write_block(ctx, *pos, &snbt_to_nbt(&SnbtValue::Compound(entries))),
         }
     }
 
@@ -89,6 +133,7 @@ impl Target {
         match self {
             Self::Storage(id) => format!("Modified storage {id}"),
             Self::Entity(target) => format!("Modified entity data of {}", target.display_name()),
+            Self::Block(pos) => format!("Modified block data of {}, {}, {}", pos.x, pos.y, pos.z),
         }
     }
 
@@ -96,6 +141,7 @@ impl Target {
         match self {
             Self::Storage(id) => format!("Storage {id} has the following contents: {data}"),
             Self::Entity(target) => format!("{} has the following entity data: {data}", target.display_name()),
+            Self::Block(pos) => format!("{}, {}, {} has the following block data: {data}", pos.x, pos.y, pos.z),
         }
     }
 
@@ -104,6 +150,9 @@ impl Target {
             Self::Storage(id) => format!("{path} in storage {id} after scale factor of {scale:.2} is {value}"),
             Self::Entity(target) => {
                 format!("{path} on {} after scale factor of {scale:.2} is {value}", target.display_name())
+            }
+            Self::Block(pos) => {
+                format!("{path} on block {}, {}, {} after scale factor of {scale:.2} is {value}", pos.x, pos.y, pos.z)
             }
         }
     }
@@ -116,7 +165,7 @@ pub(super) fn register(registrar: &mut Registrar) {
 
     for verb in ["merge", "get", "remove"] {
         let verb_node = registrar.literal(data, verb);
-        for kind in ["entity", "storage"] {
+        for kind in ["block", "entity", "storage"] {
             let (node, resolver) = register_target(registrar, verb_node, kind);
             match verb {
                 "merge" => register_merge(registrar, node, &resolver),
@@ -126,7 +175,7 @@ pub(super) fn register(registrar: &mut Registrar) {
         }
     }
     let modify = registrar.literal(data, "modify");
-    for kind in ["entity", "storage"] {
+    for kind in ["block", "entity", "storage"] {
         let (node, resolver) = register_target(registrar, modify, kind);
         register_modify(registrar, node, &resolver);
     }
@@ -139,6 +188,14 @@ fn register_target(registrar: &mut Registrar, parent: NodeId, kind: &str) -> (No
     if kind == "storage" {
         let (node, key) = registrar.arg(literal, "target", StorageIdArg);
         let resolver: Resolver = Arc::new(move |ctx| Ok(Target::Storage(ctx.get(key).clone())));
+        (node, resolver)
+    } else if kind == "block" {
+        let (node, key) = registrar.arg(literal, "targetPos", BlockPosArg);
+        let resolver: Resolver = Arc::new(move |ctx| {
+            let (x, y, z) = resolve_block_pos(ctx, *ctx.get(key));
+            let pos = BlockPos::new(x, y, z);
+            block_nbt(ctx, pos).map(|_| Target::Block(pos))
+        });
         (node, resolver)
     } else {
         let (node, key) = registrar.arg(literal, "target", EntityArg::entity());

@@ -1523,6 +1523,7 @@ impl<'w> SimMob<'w> {
             // that into the wire entity id `EntitySnapshot::leash_link` carries.
             // `SimMob` alone has no player list to resolve against.
             leash_link: None,
+            passengers: Vec::new(),
         }
     }
 }

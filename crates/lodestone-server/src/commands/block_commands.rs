@@ -46,7 +46,7 @@ const BLOCK_LEVEL: u8 = 2;
 /// The real fill-size limit.
 const MAX_FILL_SIZE: i64 = 32_768;
 
-fn resolve_block_pos(ctx: &Ctx<'_>, coords: Coordinates) -> (i32, i32, i32) {
+pub(super) fn resolve_block_pos(ctx: &Ctx<'_>, coords: Coordinates) -> (i32, i32, i32) {
     let origin = (ctx.source.position.x, ctx.source.position.y, ctx.source.position.z);
     let rotation = (ctx.source.rotation.yaw, ctx.source.rotation.pitch);
     let (x, y, z) = coords.resolve(origin, rotation);

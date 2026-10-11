@@ -1324,6 +1324,7 @@ fn run_command_block_command(
         // command block gating on the block in front of it is a real,
         // common vanilla pattern.
         blocks: Some(&command_source),
+        block_entities: Some(block_entities),
     };
     let Some(outcome) = commands.run(&command_world, &source, command) else {
         return Some(false);
@@ -4933,6 +4934,12 @@ async fn run_tick_loop_with_weather_impl<W>(
         // entity changed since the last tick wakes the comparators that read
         // it. A double chest's other half reads the same inventory, so it wakes
         // too. Nothing is scanned: the set holds only what was touched.
+        // A command that rewrote a sign or spawner sends the clients its new tag.
+        for (pos, block_entity_type, nbt) in
+            block_entities.with(crate::block_entities::BlockEntityRegistry::take_client_dirty)
+        {
+            block_tick_out.publish_effect(crate::effects::WorldEffect::BlockEntityData { pos, block_entity_type, nbt });
+        }
         let analog_dirty = block_entities.with(crate::block_entities::BlockEntityRegistry::take_analog_dirty);
         for pos in analog_dirty {
             recheck_comparators_around(&*world, block_ticks, game_tick, &block_entities, pos);
@@ -5319,6 +5326,52 @@ mod tests {
 
         assert_eq!(clock.tick_count(), 10, "expected exactly 10 ticks for 10 periods");
         assert_eq!(clock.overrun_count(), 0, "healthy run must not record an overrun");
+    }
+
+    /// A sign a command rewrote reaches every client as a block-entity data
+    /// update on the loop's next tick, once; the tag is the sign's update form
+    /// (the flag a client reads to draw the wax), not the save record.
+    #[tokio::test(start_paused = true)]
+    async fn a_rewritten_sign_is_sent_to_clients_by_the_next_tick_once() {
+        let (mobs, out, block_entities) = handles();
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        let pos = BlockPos::new(3, 64, 3);
+        block_entities.with(|registry| {
+            let (_, sign) = crate::block_entities::block_entity_for_item("minecraft:oak_sign").expect("a sign item");
+            registry.insert(pos, sign);
+            let waxed = lodestone_core::Nbt::Compound(vec![("is_waxed".to_owned(), lodestone_core::Nbt::Byte(1))]);
+            registry.apply_entity_nbt(pos, &waxed).expect("the sign takes the record");
+        });
+        tokio::spawn(run_tick_loop(
+            mobs,
+            out,
+            block_entities,
+            Arc::new(TickClock::new()),
+            world,
+            block_tick_out.clone(),
+            tick_area,
+            ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+        for _ in 0..3 {
+            tokio::time::advance(TICK_PERIOD).await;
+        }
+        tokio::task::yield_now().await;
+
+        let updates: Vec<_> = block_tick_out
+            .drain_effects_for(uuid::Uuid::nil())
+            .into_iter()
+            .filter_map(|effect| match effect {
+                crate::effects::WorldEffect::BlockEntityData { pos, block_entity_type, nbt } => Some((pos, block_entity_type, nbt)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 1, "one update over three ticks: {updates:?}");
+        assert_eq!((updates[0].0, &updates[0].1), (pos, &crate::block_entities::BlockEntityKind::Sign));
+        let lodestone_core::Nbt::Compound(tag) = &updates[0].2 else { panic!("a compound update tag") };
+        assert!(tag.contains(&("is_waxed".to_owned(), lodestone_core::Nbt::Byte(1))), "{tag:?}");
     }
 
     /// Negative control for the assertion above: prove the counter would

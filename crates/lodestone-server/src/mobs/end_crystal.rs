@@ -149,6 +149,7 @@ impl<'w> MobSim<'w> {
                 object_data: 0,
                 equipment: Vec::new(),
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
     }

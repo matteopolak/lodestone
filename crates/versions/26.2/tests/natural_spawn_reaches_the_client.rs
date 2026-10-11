@@ -191,6 +191,7 @@ async fn injected_detector_control() {
         object_data: 0,
         equipment: Vec::new(),
         leash_link: None,
+        passengers: Vec::new(),
     };
     let (server, io) = IntegratedServer::open_in_memory_with_entities(
         V770ServerProtocol, Plains::new(), Injected(expected.clone()), 1,

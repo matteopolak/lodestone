@@ -18,11 +18,6 @@
 //! selector and `/data merge` pick it up with no change here. The conversion
 //! between [`Nbt`] and [`SnbtValue`] lives here because the command layer
 //! parses and prints SNBT while the sim stores binary NBT.
-//!
-//! # Gaps
-//!
-//! `/data` has no `block` target: reaching a block entity needs the chunk
-//! source's block-entity store on `CommandWorld`, which commands do not hold.
 
 use std::collections::HashMap;
 

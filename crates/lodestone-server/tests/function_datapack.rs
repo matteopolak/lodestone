@@ -61,6 +61,7 @@ fn run(commands: &ServerCommands, state: &WorldStateHandle, text: &str) -> Optio
         border: None,
         access: None,
         blocks: None,
+        block_entities: None,
     };
     commands.run(&world, &source(), text)
 }

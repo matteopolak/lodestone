@@ -316,6 +316,7 @@ fn direct_and_contextual_plugin_dispatch_keep_their_distinct_source_contracts() 
         border: None,
         access: None,
         blocks: None,
+        block_entities: None,
     };
     let outcome = ServerCommands::new()
         .run_with_contextual_dispatch(

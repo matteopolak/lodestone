@@ -65,6 +65,8 @@ const BOSS_PROGRESS: i32 = 12;
 
 const BOSS_REMOVE: i32 = 13;
 
+const PASSENGERS: i32 = 14;
+
 impl ServerProtocol for TagProto {
     fn decode(&self, _s: State, _id: i32, _p: &[u8]) -> ServerBound {
         unimplemented!("streamer never decodes")
@@ -153,6 +155,12 @@ impl ServerProtocol for TagProto {
                 .collect(),
         }
     }
+    fn encode_set_passengers(&self, vehicle_id: i32, passenger_ids: &[i32]) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: PASSENGERS,
+            payload: std::iter::once(vehicle_id).chain(passenger_ids.iter().copied()).flat_map(i32::to_be_bytes).collect(),
+        }
+    }
     fn encode_set_entity_link(&self, source_id: i32, target_id: Option<i32>) -> ServerDirective {
         ServerDirective::Send {
             packet_id: LINK,
@@ -211,6 +219,7 @@ fn snap(id: i32, x: f64) -> EntitySnapshot {
         object_data: 0,
         equipment: Vec::new(),
         leash_link: None,
+        passengers: Vec::new(),
     }
 }
 
@@ -880,4 +889,38 @@ fn unchanged_leash_link_emits_no_extra_link_on_resync() {
     let _ = s.sync(&TagProto, &[snapshot.clone()]);
     let out = s.sync(&TagProto, &[snapshot]);
     assert!(out.is_empty(), "unchanged leash_link must not re-send LINK: {out:?}");
+}
+
+/// A mob that rides a boat reaches the client as a passenger list closing the
+/// pass: sent on boarding, resent empty on dismount, absent when nothing
+/// changed, and present from the first frame for a viewer who arrives late.
+#[test]
+fn a_mob_riding_a_boat_streams_the_boats_passenger_list() {
+    let mobs = crate::MobHandle::default();
+    let (boat, boat_uuid, zombie, zombie_uuid) = mobs.with(|sim| {
+        let boat = sim.spawn_vehicle("minecraft:oak_boat".parse().unwrap(), Vec3::new(2.0, 64.0, 0.0), 0.0);
+        let boat_uuid = sim.command_entities().into_iter().find(|e| e.entity_id == boat).unwrap().uuid;
+        let zombie = sim.spawn_species("minecraft:zombie".parse().unwrap(), Vec3::new(5.0, 64.0, 0.0));
+        (boat, boat_uuid, zombie.id(), zombie.uuid())
+    });
+    let ids = |list: &[i32]| -> Vec<u8> { list.iter().copied().flat_map(i32::to_be_bytes).collect() };
+
+    let mut s = EntityStreamer::default();
+    let out = s.sync(&TagProto, &mobs.with(|sim| sim.snapshots()));
+    assert!(out.iter().all(|d| sent(d).0 != PASSENGERS), "an unmounted pair streams no passenger list: {out:?}");
+
+    mobs.with(|sim| assert_eq!(sim.mount_mob_rider(boat_uuid, zombie_uuid), crate::MobMountOutcome::Mounted { vehicle: boat }));
+    let out = s.sync(&TagProto, &mobs.with(|sim| sim.snapshots()));
+    assert_eq!(sent(out.last().unwrap()), (PASSENGERS, ids(&[boat, zombie]).as_slice()));
+
+    assert!(s.sync(&TagProto, &mobs.with(|sim| sim.snapshots())).is_empty(), "an unchanged list is not resent");
+
+    let mut late = EntityStreamer::default();
+    let out = late.sync(&TagProto, &mobs.with(|sim| sim.snapshots()));
+    assert_eq!(sent(out.last().unwrap()), (PASSENGERS, ids(&[boat, zombie]).as_slice()));
+    assert!(out.iter().filter(|d| sent(d).0 == ADD).count() == 2, "both spawns precede the list: {out:?}");
+
+    mobs.with(|sim| assert_eq!(sim.dismount_mob_rider(zombie), Some(boat)));
+    let out = s.sync(&TagProto, &mobs.with(|sim| sim.snapshots()));
+    assert_eq!(sent(out.last().unwrap()), (PASSENGERS, ids(&[boat]).as_slice()));
 }

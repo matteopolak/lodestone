@@ -168,6 +168,7 @@ fn run(
         border: None,
     access: None,
         blocks: None,
+        block_entities: None,
     };
     commands.run(&world, source, text)
 }
@@ -723,6 +724,7 @@ fn gamerule_writes_the_store_it_is_handed_including_the_production_world_state()
         border: None,
     access: None,
         blocks: None,
+        block_entities: None,
     };
     let outcome = commands
         .run(&command_world, &alice, "gamerule random_tick_speed 6")
@@ -859,7 +861,7 @@ fn run_stateful(
     source: &CommandSource,
     text: &str,
 ) -> Option<lodestone_server::CommandOutcome> {
-    let world = CommandWorld { rules: state, players, state, mobs: None, border: None, access: None, blocks: None };
+    let world = CommandWorld { rules: state, players, state, mobs: None, border: None, access: None, blocks: None, block_entities: None };
     commands.run(&world, source, text)
 }
 
@@ -1385,7 +1387,7 @@ fn summon_spawns_into_the_shared_mob_handle_at_the_resolved_position() {
 
     assert!(mobs.snapshots().is_empty(), "nothing spawned yet");
 
-    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None, block_entities: None };
     let outcome =
         commands.run(&world, &alice, "summon minecraft:cow ~11 ~1 ~4").expect("root matched");
     assert!(outcome.response.is_ran(), "{outcome:?}");
@@ -1422,6 +1424,7 @@ fn summon_warden_lands_on_live_terrain_before_entity_streaming_reads_its_snapsho
         border: None,
         access: None,
         blocks: Some(&blocks),
+        block_entities: None,
     };
 
     let outcome = commands
@@ -1453,7 +1456,7 @@ fn summon_refuses_an_unknown_entity_type_at_parse_time() {
     let players = roster();
     let mobs = lodestone_server::MobHandle::default();
 
-    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None, block_entities: None };
     let outcome =
         commands.run(&world, &alice, "summon minecraft:not_a_real_mob").expect("root matched");
     assert!(!outcome.response.is_ran(), "{outcome:?}");
@@ -1881,7 +1884,7 @@ fn worldborder_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     feed: &'a lodestone_server::BorderFeed,
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state, players: &[], state, mobs: None, border: Some(feed), access: None, blocks: None }
+    CommandWorld { rules: state, players: &[], state, mobs: None, border: Some(feed), access: None, blocks: None, block_entities: None }
 }
 
 /// **The composition that matters**: the command mutates the *same* feed the
@@ -2064,7 +2067,7 @@ fn worldborder_setting_to_the_current_value_is_refused_and_does_not_mutate() {
 fn worldborder_with_no_border_refuses_cleanly_instead_of_panicking() {
     let commands = ServerCommands::new();
     let state = lodestone_server::world_state::WorldStateHandle::new();
-    let world = CommandWorld { rules: &state, players: &[], state: &state, mobs: None, border: None, access: None, blocks: None };
+    let world = CommandWorld { rules: &state, players: &[], state: &state, mobs: None, border: None, access: None, blocks: None, block_entities: None };
     let alice = source(1, "alice");
 
     let outcome = commands.run(&world, &alice, "worldborder get").expect("root matched");
@@ -2124,7 +2127,7 @@ fn scoreboard_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     players: &'a [PlayerCandidate],
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None, blocks: None }
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None, blocks: None, block_entities: None }
 }
 
 #[test]
@@ -2323,7 +2326,7 @@ fn team_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     players: &'a [PlayerCandidate],
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None, blocks: None }
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None, blocks: None, block_entities: None }
 }
 
 #[test]
@@ -2544,7 +2547,7 @@ fn data_world<'a>(
     state: &'a lodestone_server::world_state::WorldStateHandle,
     players: &'a [PlayerCandidate],
 ) -> CommandWorld<'a> {
-    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None, blocks: None }
+    CommandWorld { rules: state as &(dyn RuleStore + Sync), players, state, mobs: None, border: None, access: None, blocks: None, block_entities: None }
 }
 
 #[test]
@@ -2667,6 +2670,7 @@ fn execute_if_unless_block_reads_a_real_chunk_source() {
         #[cfg(not(target_arch = "wasm32"))]
         access: None,
         blocks: Some(&source_blocks),
+        block_entities: None,
     };
 
     let matches = commands
@@ -2754,6 +2758,7 @@ fn execute_if_unless_blocks_all_compares_every_cell() {
         #[cfg(not(target_arch = "wasm32"))]
         access: None,
         blocks: Some(&source_blocks),
+        block_entities: None,
     };
 
     let matches = commands
@@ -2805,6 +2810,7 @@ fn execute_if_blocks_masked_skips_air_source_cells() {
         #[cfg(not(target_arch = "wasm32"))]
         access: None,
         blocks: Some(&source_blocks),
+        block_entities: None,
     };
 
     let all_fails = commands
@@ -2839,6 +2845,7 @@ fn execute_if_blocks_over_the_area_cap_refuses_by_name() {
         #[cfg(not(target_arch = "wasm32"))]
         access: None,
         blocks: Some(&source_blocks),
+        block_entities: None,
     };
 
     // 40 * 40 * 40 = 64000 > 32768.
@@ -2895,6 +2902,7 @@ fn execute_if_unless_biome_reads_a_real_chunk_source() {
         #[cfg(not(target_arch = "wasm32"))]
         access: None,
         blocks: Some(&source_blocks),
+        block_entities: None,
     };
 
     let matches = commands
@@ -2995,6 +3003,7 @@ fn execute_if_unless_loaded_reads_column_residency() {
         #[cfg(not(target_arch = "wasm32"))]
         access: None,
         blocks: Some(&source_blocks),
+        block_entities: None,
     };
 
     let resident = commands.run(&world, &alice, "execute if loaded 0 64 0 run gamemode creative").expect("root matched");
@@ -3076,6 +3085,7 @@ fn execute_run_forwards_rewritten_context_and_plugin_result_to_store_sinks() {
         border: None,
         access: None,
         blocks: None,
+        block_entities: None,
     };
     commands.run(&world, &alice, "scoreboard objectives add out dummy").unwrap();
 
@@ -3148,6 +3158,7 @@ fn execute_plugin_bridge_fails_closed_and_keeps_builtin_precedence() {
         border: None,
         access: None,
         blocks: None,
+        block_entities: None,
     };
     let caller = CommandCaller::new(uuid(1), "alice");
 
@@ -3336,7 +3347,7 @@ fn execute_summon_spawns_into_the_shared_mob_handle_at_the_chains_current_positi
     let mobs = MobHandle::default();
 
     let world =
-        CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
+        CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None, block_entities: None };
 
     let outcome = commands
         .run(&world, &alice, "execute positioned ~11 ~1 ~4 summon minecraft:cow run gamemode creative alice")
@@ -3364,7 +3375,7 @@ fn execute_summon_of_a_hostile_mob_on_peaceful_refuses_and_does_not_continue_the
     let mobs = MobHandle::default();
 
     let world =
-        CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
+        CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None, block_entities: None };
 
     let outcome =
         commands.run(&world, &alice, "execute summon minecraft:zombie run gamemode creative alice").expect("root matched");
@@ -3388,7 +3399,7 @@ fn execute_summon_then_at_s_cannot_resolve_the_new_non_player_source() {
     let mobs = MobHandle::default();
 
     let world =
-        CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None };
+        CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs), border: None, access: None, blocks: None, block_entities: None };
 
     let outcome = commands.run(&world, &alice, "execute summon minecraft:cow run gamemode creative @s").expect("root matched");
     assert!(!outcome.response.is_ran(), "{outcome:?}");

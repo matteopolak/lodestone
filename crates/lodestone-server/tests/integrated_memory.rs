@@ -450,6 +450,7 @@ fn entity_encoder_defaults_are_harmless_noops() {
         object_data: 0,
         equipment: Vec::new(),
         leash_link: None,
+        passengers: Vec::new(),
     };
 
     assert_eq!(proto.encode_add_entity(&snap), ServerDirective::None);
@@ -542,6 +543,7 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
         object_data: 0,
         equipment: Vec::new(),
         leash_link: None,
+        passengers: Vec::new(),
     };
     entities.set(vec![pig(0.0)]);
 

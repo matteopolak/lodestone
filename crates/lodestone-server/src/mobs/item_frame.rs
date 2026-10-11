@@ -552,6 +552,7 @@ impl<'w> MobSim<'w> {
                 object_data: i32::from(item_frame::data_3d(f.facing)),
                 equipment: Vec::new(),
                 leash_link: None,
+                passengers: Vec::new(),
             });
         }
     }
