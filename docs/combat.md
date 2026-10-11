@@ -102,7 +102,7 @@ A main-hand click on a block with an axe does nothing, and the click falls throu
 - **Facing knockback**: swap per-connection yaw into `attack_direction`.
 - **`encode_damage_event`**: a new optional `ServerProtocol` method needing a damage-type id per source; the client consumer exists.
 - **Regenerate damage types** after a bump with `just regen-damage-types`. The data lives in the inner server jar under `.cache/mc/<version>/versions/<version>/`; the outer bundler jar has none of it.
-- **Shield rules**: constants and the decision live in `lodestone_server::shield`; the call site is the `take_player_hits` loop in `play_loop`.
+- **Shield rules**: constants and the decision live in `lodestone_server::shield`; the call site is the `take_player_hits` loop in `player_tick`.
 
 ## Configuration
 

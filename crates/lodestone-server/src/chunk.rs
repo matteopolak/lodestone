@@ -2179,10 +2179,11 @@ pub trait ChunkSource: Send + Sync {
     /// or a bee nest's occupants.
     ///
     /// This is not the live world's registry: [`crate::block_entities::BlockEntityRegistry`]
-    /// holds every entity a player has placed or mutated, and is consulted first
-    /// by every caller. This answers the narrower question "what did generation
-    /// put here", which is what lets a chest that has never been opened be
-    /// hydrated into the registry on the first click instead of arriving empty.
+    /// is consulted first by every caller. A persistent world adopts generated
+    /// entities into its registry when the chunk generates, so this only still
+    /// matters for a world whose source has no registry attached: there it is
+    /// what lets a chest that has never been opened be hydrated on the first
+    /// click instead of arriving empty.
     ///
     /// Defaulted, because it regenerates a column and an implementor with a
     /// retained column should override it — unlike [`block_state_id`](Self::block_state_id),

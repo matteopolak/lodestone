@@ -39,8 +39,10 @@ fn only_the_removal_path_takes_an_entity_out_of_the_registry() {
     // `destroy_at` is the single remover; its callers are this module (for
     // every immediate removal), the registry's own deferred wrapper, and the
     // blast stage, which takes a crater's entities under the lock that
-    // publishes it and hands the removals to this module to dispose.
-    assert_eq!(mentions(".destroy_at("), ["block_entities/removal.rs", "block_removal.rs", "tick.rs"]);
+    // publishes it and hands the removals to this module to dispose, and the
+    // brushing finish, which turns the block into its base block and pops the
+    // entity's revealed item itself rather than the removal drops.
+    assert_eq!(mentions(".destroy_at("), ["block_entities/removal.rs", "block_removal.rs", "server/brushing.rs", "tick.rs"]);
     // The deferred form is for reaction code that cannot spawn items.
     assert_eq!(mentions(".destroy_deferred("), ["random_tick/redstone.rs"]);
 }

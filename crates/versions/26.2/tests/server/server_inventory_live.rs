@@ -176,6 +176,9 @@ struct CraftingSource;
 
 const TABLE_POS: BlockPos = BlockPos::new(2, 4, 2);
 
+/// Beside the joining player's feet, inside the reach an open menu requires.
+const FURNACE_POS: BlockPos = BlockPos::new(8, 64, 9);
+
 impl ChunkSource for CraftingSource {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         let mut column = AirSource.column(cx, cz);
@@ -311,7 +314,7 @@ async fn open_furnace_publishes_background_slots_and_properties_without_clicks()
         let mut furnace = Furnace::new(FurnaceKind::Furnace);
         furnace.set_input(Some(stack("minecraft:iron_ore", 3)));
         furnace.set_fuel(Some(stack("minecraft:coal", 1)));
-        registry.insert(TABLE_POS, BlockEntity::Furnace(furnace));
+        registry.insert(FURNACE_POS, BlockEntity::Furnace(furnace));
     });
     let server_task = spawn_inventory_server(server_io, AirSource, block_entities.clone());
     let (mut handle, mut events) = ClientBuilder::new(
@@ -325,7 +328,7 @@ async fn open_furnace_publishes_background_slots_and_properties_without_clicks()
         .wait_for_spawn(Duration::from_secs(30))
         .await
         .expect("client spawn");
-    open_block(&handle, TABLE_POS);
+    open_block(&handle, FURNACE_POS);
     fold_until(&mut events, &mut menus, "furnace never opened", |menus| {
         menus.opened().is_some() && menus.container_data(3) == Some(200)
     }).await;
@@ -336,7 +339,7 @@ async fn open_furnace_publishes_background_slots_and_properties_without_clicks()
     assert_eq!(menus.container_data(2), Some(0));
 
     let tick = |count| block_entities.with(|registry| {
-        let Some(BlockEntity::Furnace(furnace)) = registry.get_mut(TABLE_POS) else {
+        let Some(BlockEntity::Furnace(furnace)) = registry.get_mut(FURNACE_POS) else {
             panic!("furnace missing");
         };
         for _ in 0..count {

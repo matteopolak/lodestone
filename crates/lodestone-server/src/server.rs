@@ -69,6 +69,7 @@ use self::play_state::*;
 mod player_actions;
 use self::player_actions::*;
 mod player_effects;
+mod player_tick;
 use self::player_effects::*;
 mod player_persistence;
 use self::player_persistence::*;

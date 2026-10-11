@@ -25,6 +25,10 @@ runtime records and to registry-name strings only when writing NBT or a
 protocol payload. JSON parsing is the only string-to-entity boundary in the
 worldgen parser.
 
+## Persistence
+
+`RegionChunkSource` adopts a generated chunk's block entities into the live registry as it generates the chunk (`adopt_generated_block_entities`) and retains the column in its edit map. Saves write the registry and nothing else, so the registry is the single source of truth: an entity a player destroys is gone from the next save, and an entity nobody touched is still written. Chests, barrels and shulker boxes holding an unrolled loot table load back as opaque records so the table survives; the first open rolls it. In-memory worlds without a `RegionChunkSource` have no registry attached to the source and still read the generated record through `ChunkSource::block_entity` (container clicks, block removal, `/data`).
+
 ## How to change it
 
 Add a structure-piece family to `spawner_entity_type` when its generator emits a fixed spawner entity. Keep the mapping keyed by piece kind and let the receiving column's final block field provide positions; do not key payloads by world coordinates or replay a separate orientation transform. Extend the packet and source tests with independently expected field values and orientation controls when adding a new family.

@@ -13,7 +13,7 @@
 //! vanilla data files), and a finished block turns into plain gravel.
 //!
 //! Controls, run by hand: dropping the `brushing::begin` call in the use-item-on dispatch ends the
-//! dusted updates; dropping the brushing tick in the play loop does the same; removing the
+//! dusted updates; dropping the brushing tick in `server/player_tick.rs` (the pass both play loops share) does the same; removing the
 //! `mark_client_dirty` call leaves no block-entity data on the wire; and dropping the gravity-tick
 //! arm's settle leaves the dust where it was.
 

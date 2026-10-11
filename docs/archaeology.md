@@ -11,12 +11,12 @@ Suspicious sand and gravel hold a loot table until a player brushes them 10 time
 - **Use.** Right-clicking a block with a brush starts an `ItemInUse` of 200 ticks. `server::brushing::tick` re-aims each tick (a miss ends the use) and strokes at elapsed ticks where `elapsed % 10 == 5`. A stroke plays sound and particles, then calls `Brushable::brush`: ignored inside a 10-tick cooldown, the first counted stroke rolls the loot once, and the dusted state (0..3) steps with the count (0, 1-2 -> 1, 3-5 -> 2, 6+ -> 3). The tenth stroke removes the entity, drops the item from the hit face, turns the block into its base block, costs one durability, and sends level event 3008 (`NetUpdate::BrushCompleted` on the client).
 - **Decay.** Counted strokes schedule a `Gravity` tick. `Brushable::settle` waits 40 ticks after the last stroke, then retracts 2 strokes every 4 ticks.
 - **Falling.** The block falls like sand; the entity travels with the falling block and is reinserted where it lands.
-- **Hydration.** Generated entities stay in the column until first brushed; saves of an edited chunk merge unhydrated brushables back in (`region_source::append_unhydrated_brushables`).
+- **Hydration.** Generated entities enter the live registry when their chunk is generated, like every generated block entity ([block-entity-generation](block-entity-generation.md)).
 - **First person.** `entity_first_person` poses the brush hand with a swipe of `-15 + 75*cos` over the use progress.
 
 ## How to change it
 
-Cadence constants live in `archaeology.rs` (cooldown, reset, retraction) and `server/brushing.rs` (use length, stroke phase). The wasm loop does not brush. Level event 3008 carries a block state id converted per wire in the 26.2 encoder.
+Cadence constants live in `archaeology.rs` (cooldown, reset, retraction) and `server/brushing.rs` (use length, stroke phase). Brushing runs in `server/player_tick.rs`, shared by the native and browser loops. Level event 3008 carries a block state id converted per wire in the 26.2 encoder.
 
 ## Configuration
 

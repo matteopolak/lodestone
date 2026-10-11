@@ -12,7 +12,8 @@ Control flows `entry_points` -> `connection_driver` (handshake, status, login, j
 |---|---|
 | `entry_points` | public `serve_connection*` wrappers (assemble arguments only) |
 | `connection_driver` | handshake, status ping, login (offline and online), join sequence, hand-off |
-| `play_loop` | native and browser `serve_play` loops, vitals ticking, stall watch, client-loaded gate |
+| `play_loop` | native and browser `serve_play` loops, stall watch, client-loaded gate |
+| `player_tick` | the per-player gameplay tick and world-event publication both loops call |
 | `play_dispatch`, `play_state` | `dispatch_play_packet`; teleport acknowledgements and client movement record |
 | `online_mode`, `resource_pack` | online configuration; resource-pack push feed and responses |
 | `join_trace`, `join_snapshots` | opt-in join timing; inventory, experience, attribute snapshots |

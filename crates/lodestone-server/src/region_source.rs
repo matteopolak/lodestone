@@ -883,27 +883,6 @@ fn refuse_unreadable_world(region_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Brushable entities a column still carries that the live registry has not hydrated. The
-/// registry is authoritative for everything else, but a generated suspicious block is only
-/// hydrated when first brushed, so dropping it here would erase its loot on the first save of an
-/// edited chunk.
-fn append_unhydrated_brushables(
-    column: &ChunkColumn,
-    entities: &mut Vec<(BlockPos, crate::block_entities::BlockEntity)>,
-) {
-    for (pos, entity) in column.block_entities() {
-        if !matches!(entity, crate::block_entities::BlockEntity::Brushable(_))
-            || entities.iter().any(|(held, _)| held == pos)
-        {
-            continue;
-        }
-        let state = column.block_state_id(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16));
-        if crate::structure_loot::is_brushable_block(state.name()) {
-            entities.push((*pos, entity.clone()));
-        }
-    }
-}
-
 /// The chunk a block position belongs to.
 ///
 /// `>> 4` rather than `/ 16`: an arithmetic shift floors, and truncating
@@ -1144,7 +1123,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
         // authority for saving, because a live furnace takes precedence over
         // the disk copy.
         column.set_block_entities(extras.block_entities.clone());
-        let restored = self.restore_block_entities(&extras);
+        let restored = self.restore_block_entities(&extras.block_entities);
         let ticks = self
             .state
             .scheduled
@@ -1172,13 +1151,13 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     /// Cheap enough for the caller's thread — which is the tick or serving
     /// thread — because it is a `Mutex` and a `HashMap` insert per entity, no
     /// I/O, and a chunk with any block entities at all is rare.
-    fn restore_block_entities(&self, extras: &ChunkExtras) -> u64 {
-        if extras.block_entities.is_empty() {
+    fn restore_block_entities(&self, entities: &[(BlockPos, crate::block_entities::BlockEntity)]) -> u64 {
+        if entities.is_empty() {
             return 0;
         }
         let restored = self.state.block_entities.with(|registry| {
             let mut count = 0u64;
-            for (pos, entity) in &extras.block_entities {
+            for (pos, entity) in entities {
                 if registry.get(*pos).is_none() {
                     registry.insert(*pos, entity.clone());
                     count += 1;
@@ -1191,6 +1170,31 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             .block_entities_loaded
             .fetch_add(restored, Ordering::Relaxed);
         restored
+    }
+
+    /// Makes the live registry the only holder of a freshly generated chunk's
+    /// block entities (structure containers, spawners, suspicious blocks, signs,
+    /// banners, nests), the way a disk load does for a saved chunk.
+    ///
+    /// Saves write the registry and nothing else, so an entity that stayed only
+    /// in generated chunk data would vanish with the first save of its chunk.
+    /// The column is retained in the edit map as well: a save of a chunk that
+    /// holds registry entries needs a column to write them into, and a
+    /// generator cannot reproduce one a player has since changed.
+    fn adopt_generated_block_entities(&self, cx: i32, cz: i32, column: &ChunkColumn) {
+        if column.generation_stage() != crate::chunk::ChunkGenerationStage::Full
+            || column.block_entities().is_empty()
+        {
+            return;
+        }
+        // Registry first, edits second: the lock order `save_region` documents.
+        self.restore_block_entities(column.block_entities());
+        self.state
+            .edits
+            .lock()
+            .expect("world edit lock poisoned")
+            .entry((cx, cz))
+            .or_insert_with(|| column.clone());
     }
 
     /// Resolves edits and disk before generation; either hit is terminal.
@@ -1385,7 +1389,9 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
             return column;
         }
         self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
-        self.inner.column_at(cx, cz, stage)
+        let column = self.inner.column_at(cx, cz, stage);
+        self.adopt_generated_block_entities(cx, cz, &column);
+        column
     }
 
     fn packet_generation_stage(
@@ -1915,8 +1921,6 @@ impl WorldSaveHandle {
             // The live registry is authoritative, including when its list is
             // empty: a removed container must not reappear from a stale column
             // copy retained by the Anvil loader.
-            let mut entities = entities;
-            append_unhydrated_brushables(&column, &mut entities);
             column.set_block_entities(entities);
             snapshots.push(NativeDirtyChunkSnapshot {
                 column_x,
@@ -2401,8 +2405,7 @@ impl WorldSaveHandle {
             let Some(column) = column else {
                 continue;
             };
-            let mut extras = extras_by_chunk.get(&(cx, cz)).cloned().unwrap_or_default();
-            append_unhydrated_brushables(&column, &mut extras.block_entities);
+            let extras = extras_by_chunk.get(&(cx, cz)).cloned().unwrap_or_default();
             let extras = &extras;
             self.state
                 .stats
@@ -3572,6 +3575,107 @@ mod tests {
         assert!(
             column.block_entities().is_empty(),
             "a state with no block-entity type must never gain a synthesized record"
+        );
+    }
+
+    /// Chunk of seed 42 holding a chest, a spawner and a bee nest, and a chunk of a trail ruins
+    /// site holding suspicious gravel.
+    const GENERATED_CHUNKS: [(i32, i32); 2] = [(-24, -33), (2, -34)];
+
+    fn generated_world(dir: &Path) -> RegionChunkSource<crate::chunk::Terrain263ChunkSource> {
+        RegionChunkSource::new(
+            crate::overworld_chunk_source_of_type(42, crate::WorldType::Overworld),
+            dir,
+            Dimension::Overworld,
+            MIN_Y,
+            HEIGHT,
+        )
+        .expect("open world")
+    }
+
+    fn is_chest(entity: &crate::block_entities::BlockEntity) -> bool {
+        use crate::block_entities::BlockEntity;
+        matches!(entity, BlockEntity::Container { id, .. } | BlockEntity::Opaque { id, .. } if id.name() == "minecraft:chest")
+    }
+
+    /// What generation put in `GENERATED_CHUNKS`, read from a generator no world wraps.
+    fn generated_entities() -> Vec<(BlockPos, crate::block_entities::BlockEntity)> {
+        let generator = crate::overworld_chunk_source_of_type(42, crate::WorldType::Overworld);
+        GENERATED_CHUNKS
+            .iter()
+            .flat_map(|&(cx, cz)| generator.column(cx, cz).block_entities().to_vec())
+            .collect()
+    }
+
+    /// Every kind of generated block entity survives the first save of a chunk whose only edit is
+    /// some other block, and comes back from a second world with its data.
+    #[test]
+    fn generated_block_entities_survive_the_first_save_of_an_edited_chunk() {
+        use crate::block_entities::BlockEntity;
+        let expected = generated_entities();
+        let has = |want: fn(&BlockEntity) -> bool| expected.iter().any(|(_, e)| want(e));
+        assert!(
+            has(is_chest)
+                && has(|e| matches!(e, BlockEntity::Spawner(_)))
+                && has(|e| matches!(e, BlockEntity::Beehive(_)))
+                && has(|e| matches!(e, BlockEntity::Brushable(_))),
+            "the fixture chunks must hold a chest, a spawner, a nest and a brushable block"
+        );
+        let dir = tempdir("generated-entities");
+        {
+            let world = generated_world(&dir);
+            for &(cx, cz) in &GENERATED_CHUNKS {
+                let _ = world.column(cx, cz);
+                world.set_block(cx * 16, 310, cz * 16, marker());
+            }
+            world.save_handle().save().expect("save");
+        }
+        let world = generated_world(&dir);
+        for &(cx, cz) in &GENERATED_CHUNKS {
+            let _ = world.column(cx, cz);
+        }
+        for (pos, entity) in &expected {
+            let held = world.block_entities().with(|registry| registry.get(*pos).cloned());
+            assert_eq!(held.as_ref(), Some(entity), "generated block entity at {pos:?} lost or changed");
+        }
+    }
+
+    /// A generated chest a player destroyed stays destroyed: the generator would put it back, the
+    /// saved chunk must not.
+    #[test]
+    fn a_destroyed_generated_chest_stays_destroyed_after_save_and_reopen() {
+        let generator = crate::overworld_chunk_source_of_type(42, crate::WorldType::Overworld);
+        let (cx, cz) = GENERATED_CHUNKS[0];
+        let column = generator.column(cx, cz);
+        let (pos, _) = column
+            .block_entities()
+            .iter()
+            .find(|(_, e)| is_chest(e))
+            .expect("the room holds a chest");
+        let pos = *pos;
+        let was = column.block_state_id(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16));
+        let dir = tempdir("destroyed-generated-chest");
+        {
+            let world = generated_world(&dir);
+            let _ = world.column(cx, cz);
+            world.block_entities().with(|registry| {
+                registry.destroy_at(pos, was);
+            });
+            world.set_block(pos.x, pos.y, pos.z, Block::Air.default_state());
+            world.save_handle().save().expect("save");
+        }
+        let world = generated_world(&dir);
+        let reopened = world.column(cx, cz);
+        assert_eq!(
+            reopened.block_state_id(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16)).name(),
+            "minecraft:air"
+        );
+        assert!(world.block_entities().with(|registry| registry.get(pos).is_none()));
+        assert!(reopened.block_entities().iter().all(|(p, _)| *p != pos));
+        let others = column.block_entities().len() - 1;
+        assert!(
+            others > 0 && world.block_entities().with(|registry| registry.iter().count()) >= others,
+            "the chunk's other generated entities must still be there"
         );
     }
 }

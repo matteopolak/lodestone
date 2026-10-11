@@ -201,9 +201,6 @@ impl<'w> MobSim<'w> {
     /// would never trigger a raid through the beds-only query. This is the
     /// one [`super::raid`]'s `create_or_extend_raid` and `crate::server`'s
     /// Bad-Omen-to-Raid-Omen conversion check both use instead.
-    ///
-    /// Native-only, for [`occupied_homes_in_range`](Self::occupied_homes_in_range)'s
-    /// own reason.
     #[must_use]
     pub fn occupied_village_pois_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
         let mut found = self.bed_claims.occupied_in_range(center, radius);

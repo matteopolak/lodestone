@@ -706,10 +706,6 @@ impl<'w> MobSim<'w> {
     /// real and stays disclosed. A village whose villagers have claimed jobs
     /// and a bell but genuinely no bed (no sleep-in-bed behaviour/work-rest schedule
     /// has claimed one) still centres correctly; a beds-only query would not.
-    ///
-    /// Native-only, for [`super::MobSim::occupied_village_pois_in_range`]'s own
-    /// reason.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn create_or_extend_raid(
         &mut self,
         origin: lodestone_model::BlockPos,

@@ -2129,7 +2129,11 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
                 locked,
             ))
         }
-        "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" | "minecraft:shulker_box" => {
+        // A container still holding an unrolled loot table stays opaque so the
+        // table is not dropped; the first open rolls it.
+        "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" | "minecraft:shulker_box"
+            if field(nbt, "LootTable").is_none() =>
+        {
             BlockEntity::Container {
                 id: crate::block_entities::BlockEntityKind::from_name(id),
                 slots: items_from_nbt(
@@ -2141,7 +2145,7 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
         // The 3x3 containers load as the same simulated kind they are saved
         // from; read back as opaque data they would stop dispensing and stop
         // reading to comparators after a restart. One still holding an unrolled
-        // loot table stays opaque so the table is not dropped.
+        // loot table stays opaque for the same reason as above.
         "minecraft:dispenser" | "minecraft:dropper" if field(nbt, "LootTable").is_none() => BlockEntity::Container {
             id: crate::block_entities::BlockEntityKind::from_name(id),
             slots: items_from_nbt(field(nbt, "Items"), crate::block_entities::CONTAINER_3X3_SIZE),
