@@ -85,6 +85,13 @@ pub(crate) fn destroy(env: Env<'_>, pos: BlockPos, was: StateId, cause: Cause<'_
     settle(env, pos, was, cause, loot, rng);
 }
 
+/// [`destroy`] for a caller that already took the cell's entity out of the
+/// registry (to do so together with the block write), as `removal`.
+pub(crate) fn destroy_removed(env: Env<'_>, removal: Removal, pos: BlockPos, was: StateId, cause: Cause<'_>, rng: &mut SpawnRng) {
+    let loot = loot(cause, was, pos, rng);
+    dispose(env, removal, cause, loot, rng);
+}
+
 /// Takes the entity out and drops `loot` plus the cell's contents. For a
 /// caller that rolled the loot itself.
 pub(crate) fn settle(env: Env<'_>, pos: BlockPos, was: StateId, cause: Cause<'_>, loot: Vec<PoppedItem>, rng: &mut SpawnRng) {

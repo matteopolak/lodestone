@@ -1179,9 +1179,9 @@ fn recheck_comparators_around<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?
 struct ResidentTickSource<'a> {
     source: &'a dyn ChunkSource,
     cold_read: std::sync::atomic::AtomicBool,
-    /// Every write with the state it replaced, so a deferred caller can put the
-    /// world back before it retries.
-    journal: std::sync::Mutex<Vec<(i32, i32, i32, StateId)>>,
+    /// When present, writes are held here instead of reaching the world, and
+    /// reads see them; [`Self::commit`] publishes them all or none.
+    staged: Option<std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), StateId>>>,
 }
 
 impl<'a> ResidentTickSource<'a> {
@@ -1189,15 +1189,39 @@ impl<'a> ResidentTickSource<'a> {
         Self {
             source,
             cold_read: std::sync::atomic::AtomicBool::new(false),
-            journal: std::sync::Mutex::new(Vec::new()),
+            staged: None,
         }
     }
 
-    /// Undoes every write made through this wrapper, newest first.
-    fn roll_back(&self) {
-        let journal = std::mem::take(&mut *self.journal.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-        for (x, y, z, old) in journal.into_iter().rev() {
-            resident_tick_set_block(self.source, x, y, z, old);
+    /// A wrapper whose writes stay private until [`Self::commit`], so a caller
+    /// that finds a cold cell part-way through leaves the world untouched
+    /// instead of exposing a half-written result to readers.
+    fn staging(source: &'a dyn ChunkSource) -> Self {
+        Self {
+            staged: Some(std::sync::Mutex::new(std::collections::HashMap::new())),
+            ..Self::new(source)
+        }
+    }
+
+    /// Writes every staged cell to the world. If one cannot be written, the
+    /// cells already written are restored and the wrapper reports a cold read.
+    fn commit(&self) {
+        let Some(staged) = &self.staged else { return };
+        let staged = std::mem::take(&mut *staged.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let mut written: Vec<(i32, i32, i32, StateId)> = Vec::with_capacity(staged.len());
+        for ((x, y, z), state) in staged {
+            let old = resident_tick_state_id(self.source, x, y, z);
+            if let Some(old) = old
+                && resident_tick_set_block(self.source, x, y, z, state)
+            {
+                written.push((x, y, z, old));
+                continue;
+            }
+            for (x, y, z, old) in written.into_iter().rev() {
+                resident_tick_set_block(self.source, x, y, z, old);
+            }
+            self.mark_cold();
+            return;
         }
     }
 
@@ -1219,6 +1243,11 @@ impl ChunkSource for ResidentTickSource<'_> {
     }
 
     fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        if let Some(staged) = &self.staged
+            && let Some(state) = staged.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(x, y, z))
+        {
+            return *state;
+        }
         resident_tick_state_id(self.source, x, y, z).unwrap_or_else(|| {
             self.mark_cold();
             crate::chunk::air_state()
@@ -1239,11 +1268,14 @@ impl ChunkSource for ResidentTickSource<'_> {
     }
 
     fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
-        let old = resident_tick_state_id(self.source, x, y, z);
-        if !resident_tick_set_block(self.source, x, y, z, state) {
+        if let Some(staged) = &self.staged {
+            if resident_tick_state_id(self.source, x, y, z).is_some() {
+                staged.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert((x, y, z), state);
+            } else {
+                self.mark_cold();
+            }
+        } else if !resident_tick_set_block(self.source, x, y, z, state) {
             self.mark_cold();
-        } else if let Some(old) = old {
-            self.journal.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((x, y, z, old));
         }
     }
 }
@@ -2497,7 +2529,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // outputs stay staged until the entire blast has completed, so a
             // deferred retry neither advances the stream nor publishes a
             // partial crater.
-            let resident_world = ResidentTickSource::new(&*world);
+            let resident_world = ResidentTickSource::staging(&*world);
             let mut candidate_blast_rng = blast_rng.clone();
             let outcome = if detonation.destroys_blocks {
                 crate::block_drops::blast_blocks(
@@ -2511,15 +2543,25 @@ async fn run_tick_loop_with_weather_impl<W>(
             } else {
                 Default::default()
             };
-            if resident_world.had_cold_read() {
-                // The blast wrote some cells before reaching a cold one;
-                // restore them so the retry sees the original crater and
-                // destroys each entity.
-                resident_world.roll_back();
+            // The crater is staged, so a cold cell leaves the world exactly as
+            // it was and the retry destroys each entity from the original.
+            // The crater and the destroyed cells' block entities leave together:
+            // the registry stays locked across both, so a reader that sees the
+            // air then asks the registry cannot still find the entity.
+            let removals = if resident_world.had_cold_read() {
+                None
+            } else {
+                block_entities.with(|registry| {
+                    resident_world.commit();
+                    (!resident_world.had_cold_read())
+                        .then(|| outcome.destroyed.iter().map(|&(at, was)| registry.destroy_at(at, was)).collect::<Vec<_>>())
+                })
+            };
+            let Some(removals) = removals else {
                 pending_detonations.push(detonation);
                 pending_detonations.extend(detonations);
                 break;
-            }
+            };
             blast_rng = candidate_blast_rng;
             let crate::block_drops::BlastOutcome { changes, destroyed, primed_tnt } = outcome;
             for (at, new_state) in changes {
@@ -2530,9 +2572,10 @@ async fn run_tick_loop_with_weather_impl<W>(
             // what it stored spills whatever the drop rule says.
             let drops = world_state.block_drops();
             let removal_env = crate::block_removal::Env { block_entities: &block_entities, mobs: &mobs, feed: &block_tick_out, stored: &|p| world.block_entity(p.x, p.y, p.z) };
-            for (at, was) in destroyed {
-                crate::block_removal::destroy(
+            for ((at, was), removal) in destroyed.into_iter().zip(removals) {
+                crate::block_removal::destroy_removed(
                     removal_env,
+                    removal,
                     at,
                     was,
                     crate::block_removal::Cause::Blast { radius: detonation.radius, drops, empties_hives: detonation.empties_hives },

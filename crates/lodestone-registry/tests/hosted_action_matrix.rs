@@ -134,6 +134,17 @@ async fn every_registry_selected_host_consumes_a_real_adapter_action_and_keeps_p
                 panic!("protocol {protocol_version} must receive the fixture column: {error}")
             });
 
+        // Joins send the real spawn, so the break must come from within reach.
+        handle
+            .move_to(
+                Vec3::new(f64::from(target.x) + 0.5, f64::from(target.y), f64::from(target.z) + 0.5),
+                Rotation::default(),
+                true,
+                false,
+            )
+            .unwrap_or_else(|error| {
+                panic!("protocol {protocol_version} must move into reach of the target: {error}")
+            });
         handle
             .send_action(break_action(target))
             .unwrap_or_else(|error| {
