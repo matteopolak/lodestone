@@ -130,11 +130,16 @@ struct SleepVoteInner {
     /// `LOCAL_PLAYER_ENTITY_ID` otherwise (singleplayer) — so a multi-player
     /// roster never collides two connections under one key.
     sleepers: Vec<i32>,
-    /// The straw bed head each sleeper lies in, by player id.
-    straw_beds: Vec<(i32, lodestone_model::BlockPos)>,
-    /// Straw bed heads whose sleeper has left since the tick loop last drained
-    /// them; the loop destroys each.
-    vacated_straw_beds: Vec<lodestone_model::BlockPos>,
+    /// The bed head each sleeper lies in, by player id.
+    beds: Vec<(i32, lodestone_model::BlockPos)>,
+    /// Bed heads a sleeper has lain down in since the tick loop last drained
+    /// them; the loop sets each bed's occupied flag, so the change reaches every
+    /// connection through the loop's feed.
+    newly_occupied: Vec<lodestone_model::BlockPos>,
+    /// Bed heads whose sleeper has left since the tick loop last drained them;
+    /// the loop frees each (a straw bed is destroyed, any other bed loses its
+    /// occupied flag).
+    vacated_beds: Vec<lodestone_model::BlockPos>,
     /// The number of players who can vote. This crate has no spectator
     /// concept, so every connected player counts.
     active: u32,
@@ -159,14 +164,26 @@ impl SleepVote {
         }
     }
 
-    /// Records a player lying down in the straw bed whose head is at `head`;
-    /// the bed is queued for destruction when they get up or are woken.
-    pub fn lay_down_straw(&self, entity_id: i32, head: lodestone_model::BlockPos) {
+    /// Records a player lying down in the bed whose head is at `head`; the bed
+    /// is queued to be freed when they get up or are woken.
+    pub fn lay_down_in(&self, entity_id: i32, head: lodestone_model::BlockPos) {
         self.lay_down(entity_id);
         let mut inner = self.0.lock().expect("sleep vote lock poisoned");
-        if !inner.straw_beds.iter().any(|(id, _)| *id == entity_id) {
-            inner.straw_beds.push((entity_id, head));
+        if !inner.beds.iter().any(|(id, _)| *id == entity_id) {
+            inner.beds.push((entity_id, head));
+            inner.newly_occupied.push(head);
         }
+    }
+
+    /// Whether a sleeper is in the bed whose head is at `head`, ahead of the
+    /// tick loop writing the bed's occupied flag.
+    pub fn bed_taken(&self, head: lodestone_model::BlockPos) -> bool {
+        self.0.lock().expect("sleep vote lock poisoned").beds.iter().any(|(_, bed)| *bed == head)
+    }
+
+    /// Drains the bed heads sleepers have lain down in.
+    pub(crate) fn take_newly_occupied(&self) -> Vec<lodestone_model::BlockPos> {
+        std::mem::take(&mut self.0.lock().expect("sleep vote lock poisoned").newly_occupied)
     }
 
     /// Whether the player is currently in a bed.
@@ -186,9 +203,9 @@ impl SleepVote {
         self.0.lock().expect("sleep vote lock poisoned").dark_outside
     }
 
-    /// Drains the straw bed heads whose sleepers have left.
-    pub(crate) fn take_vacated_straw_beds(&self) -> Vec<lodestone_model::BlockPos> {
-        std::mem::take(&mut self.0.lock().expect("sleep vote lock poisoned").vacated_straw_beds)
+    /// Drains the bed heads whose sleepers have left.
+    pub(crate) fn take_vacated_beds(&self) -> Vec<lodestone_model::BlockPos> {
+        std::mem::take(&mut self.0.lock().expect("sleep vote lock poisoned").vacated_beds)
     }
 
     /// Records a player getting up — `ServerBound::PlayerCommand`'s
@@ -197,9 +214,9 @@ impl SleepVote {
     pub fn get_up(&self, entity_id: i32) {
         let mut inner = self.0.lock().expect("sleep vote lock poisoned");
         inner.sleepers.retain(|&id| id != entity_id);
-        if let Some(index) = inner.straw_beds.iter().position(|(id, _)| *id == entity_id) {
-            let (_, head) = inner.straw_beds.swap_remove(index);
-            inner.vacated_straw_beds.push(head);
+        if let Some(index) = inner.beds.iter().position(|(id, _)| *id == entity_id) {
+            let (_, head) = inner.beds.swap_remove(index);
+            inner.vacated_beds.push(head);
         }
     }
 
@@ -225,8 +242,8 @@ impl SleepVote {
     pub(crate) fn clear(&self) {
         let mut inner = self.0.lock().expect("sleep vote lock poisoned");
         inner.sleepers.clear();
-        let woken = std::mem::take(&mut inner.straw_beds);
-        inner.vacated_straw_beds.extend(woken.into_iter().map(|(_, head)| head));
+        let woken = std::mem::take(&mut inner.beds);
+        inner.vacated_beds.extend(woken.into_iter().map(|(_, head)| head));
     }
 }
 
@@ -263,6 +280,8 @@ pub(crate) enum BedRefusal {
     NotDark,
     /// A hostile mob is within 8 blocks horizontally and 5 vertically.
     NotSafe,
+    /// Someone is already in the bed.
+    Occupied,
 }
 
 impl BedRefusal {
@@ -273,6 +292,7 @@ impl BedRefusal {
             Self::Obstructed => "This bed is obstructed",
             Self::NotDark => "You can sleep only at night or during thunderstorms",
             Self::NotSafe => "You may not rest now; there are monsters nearby",
+            Self::Occupied => "This bed is occupied",
         }
     }
 }
@@ -421,15 +441,15 @@ mod tests {
     fn dropping_a_seat_gets_the_sleeper_up_and_vacates_their_straw_bed() {
         let vote = SleepVote::new();
         let head = lodestone_model::BlockPos::new(4, 70, -2);
-        vote.lay_down_straw(7, head);
+        vote.lay_down_in(7, head);
         vote.lay_down(8);
         let seat = SleepSeat::new(&vote, 7);
         assert!(vote.is_sleeping(7));
-        assert!(vote.take_vacated_straw_beds().is_empty(), "still seated: nothing vacated");
+        assert!(vote.take_vacated_beds().is_empty(), "still seated: nothing vacated");
         drop(seat);
         assert!(!vote.is_sleeping(7));
         assert!(vote.is_sleeping(8), "another player's entry stays");
-        assert_eq!(vote.take_vacated_straw_beds(), vec![head]);
+        assert_eq!(vote.take_vacated_beds(), vec![head]);
     }
 
     /// Reach is 3 blocks in x and z and 2 in y from the cell's bottom centre.
@@ -556,16 +576,16 @@ mod tests {
         let head = lodestone_model::BlockPos::new(1, 64, 2);
         let other = lodestone_model::BlockPos::new(9, 64, 9);
         let vote = SleepVote::new();
-        vote.lay_down_straw(1, head);
-        vote.lay_down_straw(2, other);
-        assert!(vote.take_vacated_straw_beds().is_empty(), "still asleep");
+        vote.lay_down_in(1, head);
+        vote.lay_down_in(2, other);
+        assert!(vote.take_vacated_beds().is_empty(), "still asleep");
         vote.get_up(1);
-        assert_eq!(vote.take_vacated_straw_beds(), vec![head]);
-        assert!(vote.take_vacated_straw_beds().is_empty(), "drained once");
+        assert_eq!(vote.take_vacated_beds(), vec![head]);
+        assert!(vote.take_vacated_beds().is_empty(), "drained once");
         vote.clear();
-        assert_eq!(vote.take_vacated_straw_beds(), vec![other], "a skip wakes the rest");
+        assert_eq!(vote.take_vacated_beds(), vec![other], "a skip wakes the rest");
         vote.get_up(2);
-        assert!(vote.take_vacated_straw_beds().is_empty(), "already woken");
+        assert!(vote.take_vacated_beds().is_empty(), "already woken");
     }
 
     /// The roster round-trips the shared vote: `lay_down`/`get_up`/`set_active`

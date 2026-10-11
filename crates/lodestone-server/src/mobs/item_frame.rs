@@ -17,10 +17,11 @@
 //!   with an item in the frame pops the item (frame stays); a hit on an empty
 //!   frame breaks it; an explosion breaks it either way. A fixed frame only
 //!   yields to a creative player, an invulnerable one likewise, and a mob's
-//!   damage is refused while mob griefing is off. Creative breakers drop
-//!   nothing. Projectiles, explosions and fire reach this through
-//!   `resolve_projectile_impacts`, `explode` and the tick driver, and leave
-//!   their sounds in [`MobSim::take_frame_events`].
+//!   damage is refused while mob griefing is off. Creative breakers, and
+//!   projectiles a creative player fired, drop nothing. Projectiles and
+//!   explosions reach this through `resolve_projectile_impacts` and `explode`,
+//!   and leave their sounds in [`MobSim::take_frame_events`]. Fire never hurts
+//!   a frame.
 //! * Every change to a frame's item, rotation or existence is queued for
 //!   [`MobSim::take_frame_signal_changes`], which the driver publishes as the
 //!   comparator output of an entity-backed source.
@@ -120,23 +121,23 @@ pub enum FrameDamage {
     Projectile {
         /// Whether a mob fired it.
         by_mob: bool,
+        /// Whether a creative-mode player fired it.
+        creative_shooter: bool,
     },
     /// An explosion whose damage reaches blocklike entities.
     Explosion {
         /// Whether a mob caused it.
         by_mob: bool,
     },
-    /// Standing in fire.
-    Fire,
 }
 
 impl FrameDamage {
     fn creative(self) -> bool {
-        matches!(self, Self::Player { creative: true })
+        matches!(self, Self::Player { creative: true } | Self::Projectile { creative_shooter: true, .. })
     }
 
     fn by_mob(self) -> bool {
-        matches!(self, Self::Projectile { by_mob: true } | Self::Explosion { by_mob: true })
+        matches!(self, Self::Projectile { by_mob: true, .. } | Self::Explosion { by_mob: true })
     }
 }
 
@@ -310,7 +311,7 @@ impl<'w> MobSim<'w> {
         Some(hit)
     }
 
-    /// Drains what projectiles, explosions and fire did to frames since the
+    /// Drains what projectiles and explosions did to frames since the
     /// last call, for the driver to sound and to forget framed maps.
     pub fn take_frame_events(&mut self) -> Vec<FrameHit> {
         std::mem::take(&mut self.pending_frame_events)
@@ -335,25 +336,6 @@ impl<'w> MobSim<'w> {
         for id in ids {
             self.hurt_frame_with(id, FrameDamage::Explosion { by_mob });
         }
-    }
-
-    /// The frames whose cell holds a fire, for the driver to burn once it
-    /// knows the world read behind `state` was complete.
-    #[must_use]
-    pub(crate) fn plan_frame_fire(&self, state: &dyn Fn(i32, i32, i32) -> StateId) -> Vec<i32> {
-        let mut ids: Vec<i32> = self
-            .frames
-            .iter()
-            .filter(|(_, f)| {
-                matches!(
-                    state(f.cell.x, f.cell.y, f.cell.z).block(),
-                    lodestone_data::block::Block::Fire | lodestone_data::block::Block::SoulFire
-                )
-            })
-            .map(|(&id, _)| id)
-            .collect();
-        ids.sort_unstable();
-        ids
     }
 
     fn note_frame_signal(&mut self, id: i32) {

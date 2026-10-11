@@ -144,7 +144,7 @@ fn fixed_and_invulnerable_frames_ignore_blasts_but_not_creative_players() {
         let id = only_frame(&sim);
         sim.queue_blast(Vec3::new(8.0, 65.5, 3.5), 4.0, false, true);
         assert!(sim.is_item_frame(id), "{flag} frame survives a blast");
-        for damage in [FrameDamage::Fire, FrameDamage::Projectile { by_mob: false }] {
+        for damage in [FrameDamage::Projectile { by_mob: false, creative_shooter: false }] {
             assert_eq!(sim.hurt_frame_with(id, damage), Some(FrameHit::Ignored), "{flag} {damage:?}");
         }
         assert!(
@@ -230,29 +230,6 @@ fn a_mobs_arrow_is_refused_while_mob_griefing_is_off() {
     sim.spawn_projectile_from(rk("minecraft:arrow"), Projectile::arrow(Vec3::new(9.0, 65.5, 3.5), velocity), Some(cow));
     sim.tick();
     assert!(sim.frame_state(id).unwrap().2.is_none(), "with griefing on it pops the item");
-}
-
-// -- Fire -----------------------------------------------------------------------
-
-#[test]
-fn a_frame_standing_in_fire_pops_its_item_and_is_then_destroyed() {
-    let world = ChunkWorld::new(-64, 384);
-    let mut sim = MobSim::new(&world);
-    let id = full_frame(&mut sim);
-    let fire = Block::Fire.default_state();
-    let in_fire = |x: i32, y: i32, z: i32| if (x, y, z) == (6, 65, 3) { fire } else { air_state() };
-    let elsewhere = |_: i32, _: i32, _: i32| fire;
-    let beside = |x: i32, y: i32, z: i32| if (x, y, z) == (7, 65, 3) { fire } else { air_state() };
-    assert!(sim.plan_frame_fire(&beside).is_empty(), "fire in the next cell does not burn it");
-    assert_eq!(sim.plan_frame_fire(&elsewhere), vec![id], "fire in its own cell does");
-
-    for _ in 0..2 {
-        for id in sim.plan_frame_fire(&in_fire) {
-            sim.hurt_frame_with(id, FrameDamage::Fire);
-        }
-    }
-    assert!(!sim.is_item_frame(id));
-    assert_eq!(dropped(&sim), vec![("minecraft:diamond".to_owned(), 1), ("minecraft:item_frame".to_owned(), 1)]);
 }
 
 // -- Comparator input ------------------------------------------------------------
@@ -443,31 +420,18 @@ async fn a_queued_blast_breaks_a_frame_and_the_loop_sounds_it() {
     assert_eq!(sounds, vec!["minecraft:entity.item_frame.break".to_owned()]);
 }
 
-/// A frame whose own cell holds fire is hurt by the loop every tick: the item
-/// pops on the first, the frame goes on the second, each with its sound.
+/// A frame is not ticked as a burning entity, so fire in its own cell leaves it
+/// and its item alone.
 #[tokio::test(start_paused = true)]
-async fn the_loop_burns_a_frame_standing_in_fire() {
+async fn the_loop_leaves_a_frame_standing_in_fire_alone() {
     let rig = Rig::new();
     rig.set_block(5, 1, ROW_Z, Block::Fire.default_state());
     let mobs = MobHandle::new(ChunkWorld::new(MIN_Y, HEIGHT));
     mobs.with(|sim| full_frame_at(sim, BlockPos::new(5, 1, ROW_Z)));
     let lp = Loop::start(rig, mobs).await;
     lp.ticks(4).await;
-    assert_eq!(lp.mobs.with(|sim| sim.frame_count()), 0);
-    let sounds: Vec<String> = lp
-        .feed
-        .drain_effects_for(uuid::Uuid::nil())
-        .into_iter()
-        .filter_map(|e| match e {
-            crate::effects::WorldEffect::Sound { sound, .. } => Some(sound),
-            _ => None,
-        })
-        .filter(|s| s.contains("item_frame"))
-        .collect();
-    assert_eq!(
-        sounds,
-        vec!["minecraft:entity.item_frame.remove_item".to_owned(), "minecraft:entity.item_frame.break".to_owned()]
-    );
+    assert_eq!(lp.mobs.with(|sim| sim.frame_count()), 1);
+    assert!(lp.mobs.with(|sim| sim.frame_state(only_frame(sim)).and_then(|f| f.2)).is_some(), "the item stays");
 }
 
 fn full_frame_at(sim: &mut MobSim<'_>, cell: BlockPos) {

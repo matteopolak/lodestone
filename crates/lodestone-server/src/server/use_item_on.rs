@@ -420,14 +420,10 @@ where
     // storage. The `existing_menu` branch therefore cannot find these stations;
     // dispatch them through their virtual menu implementations below.
     let clicked_block = source.block_state_id(pos.x, pos.y, pos.z).block();
-    if let Some(station) = match clicked_block {
-        Block::Anvil | Block::ChippedAnvil | Block::DamagedAnvil => Some(Station::Anvil),
-        Block::Grindstone => Some(Station::Grindstone),
-        Block::SmithingTable => Some(Station::Smithing),
-        Block::Loom => Some(Station::Loom),
-        Block::Stonecutter => Some(Station::Stonecutter),
-        _ => None,
-    } {
+    if let Some(station) = [Station::Anvil, Station::Grindstone, Station::Smithing, Station::Loom, Station::Stonecutter]
+        .into_iter()
+        .find(|station| station_blocks(*station).contains(&clicked_block))
+    {
         return open_workstation_screen(
             conn,
             proto,
@@ -644,6 +640,12 @@ where
             }
             return Ok(());
         }
+        // The head half carries the flag the sleeper set; a bed someone is in
+        // refuses everyone, including the sleeper clicking it again.
+        if crate::world_spawn::bed_occupied(head_state) || sleep_vote.bed_taken(head) {
+            apply(conn, state, proto.encode_action_bar(crate::sleep::BedRefusal::Occupied.message())).await?;
+            return Ok(());
+        }
         // Already in a bed: nothing happens.
         if sleep_vote.is_sleeping(player_entity_id) {
             return Ok(());
@@ -674,17 +676,16 @@ where
                 refused = Some(crate::sleep::BedRefusal::NotDark);
             } else if game_mode != GameMode::Creative {
                 let centre = Vec3::new(f64::from(head.x) + 0.5, f64::from(head.y), f64::from(head.z) + 0.5);
-                if mobs.with(|sim| sim.monster_prevents_rest(centre, 8.0, 5.0)) {
+                if mobs.with(|sim| sim.monster_prevents_rest(centre, 8.0, 5.0, placer)) {
                     refused = Some(crate::sleep::BedRefusal::NotSafe);
                 }
             }
         }
         if let Some(reason) = refused {
             apply(conn, state, proto.encode_action_bar(reason.message())).await?;
-        } else if is_straw {
-            sleep_vote.lay_down_straw(player_entity_id, head);
         } else {
-            sleep_vote.lay_down(player_entity_id);
+            // The tick loop writes the occupied flag, so every connection sees it.
+            sleep_vote.lay_down_in(player_entity_id, head);
         }
         return Ok(());
     }

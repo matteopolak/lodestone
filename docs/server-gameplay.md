@@ -46,7 +46,7 @@ The server keeps its own grid and re-derives the result on every input change fr
 
 Disagreement detection compares the client's claim against the whole derived menu state, not only the slots the client names; a client cannot predict a result it never computed.
 
-A crafting table has no block entity: opening it creates a transient grid in per-connection state. Closing must return the grid and the cursor stack to the player (or drop them). The close handler collects slots written by `PlayerInventory::add`, deduplicates, and publishes final values in window-0 numbering so the client's closed menu receives them.
+A crafting table has no block entity: opening it creates a transient grid in per-connection state. Closing must return the grid and the cursor stack to the player (or drop them). The close handler collects slots written by `PlayerInventory::add`, deduplicates, and publishes final values in window-0 numbering so the client's closed menu receives them. The same `open_containers::close_menu` runs when the server closes the window itself (block removed or replaced, player out of reach).
 
 Recipe-book place requests use an opaque index into the recipe list the server sent at join. That list must be sent, and the index space must come from the same ordering used to resolve it, or the wrong recipe is placed.
 

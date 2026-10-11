@@ -145,37 +145,99 @@ pub(super) fn sync_open_container<P: ServerProtocol>(
     directives
 }
 
-/// Whether the block entity under `open` is still there. A menu over a block
-/// entity (chest, furnace, shulker box, beacon, lectern) outlives neither the
-/// entity nor the block: every removal takes the entity out of the registry
-/// (`crate::block_removal`), so its absence is the removal. The positional
-/// menus (crafting table and the other workstations) hold no entity and stay
-/// open.
-fn menu_still_valid(block_entities: &BlockEntityHandle, open: &OpenContainer) -> bool {
-    match open.shape {
-        MenuKind::Container { .. } | MenuKind::ShulkerBox | MenuKind::Beacon | MenuKind::Lectern => {
-            block_entities.with(|reg| reg.get(open.pos).is_some())
-        }
-        MenuKind::Player | MenuKind::CraftingTable | MenuKind::ItemCombiner { .. } | MenuKind::Enchanting => true,
+/// Reach of a player's block interaction, in blocks, from the eye to the
+/// nearest face of the block.
+const BLOCK_INTERACTION_RANGE: f64 = 4.5;
+/// Extra reach an open menu tolerates beyond [`BLOCK_INTERACTION_RANGE`] before
+/// it closes.
+const MENU_RANGE_BUFFER: f64 = 4.0;
+
+/// The blocks a positional menu (one with no block entity of its own) is bound
+/// to; `None` for a menu whose validity is its block entity's presence.
+fn positional_menu_blocks(shape: MenuKind) -> Option<&'static [Block]> {
+    match shape {
+        MenuKind::CraftingTable => Some(&[Block::CraftingTable]),
+        MenuKind::Enchanting => Some(&[Block::EnchantingTable]),
+        MenuKind::ItemCombiner { station, .. } => Some(station_blocks(station)),
+        MenuKind::Player
+        | MenuKind::Container { .. }
+        | MenuKind::ShulkerBox
+        | MenuKind::Beacon
+        | MenuKind::Lectern => None,
     }
 }
 
+/// The blocks that open `station`'s menu, and the only ones that keep it open.
+pub(super) fn station_blocks(station: Station) -> &'static [Block] {
+    match station {
+        Station::Anvil => &[Block::Anvil, Block::ChippedAnvil, Block::DamagedAnvil],
+        Station::Grindstone => &[Block::Grindstone],
+        Station::Smithing => &[Block::SmithingTable],
+        Station::Loom => &[Block::Loom],
+        Station::Stonecutter => &[Block::Stonecutter],
+    }
+}
+
+/// Whether the player's eye (`feet` plus [`EYE_HEIGHT`]) is within reach of the
+/// block at `pos`: distance to the block's cube, not its centre. An unknown
+/// position counts as in range.
+fn within_menu_range(feet: Option<(f64, f64, f64)>, pos: BlockPos) -> bool {
+    let Some((x, y, z)) = feet else { return true };
+    let gap = |eye: f64, min: i32| {
+        let min = f64::from(min);
+        (min - eye).max(eye - (min + 1.0)).max(0.0)
+    };
+    let (dx, dy, dz) = (gap(x, pos.x), gap(y + EYE_HEIGHT, pos.y), gap(z, pos.z));
+    let reach = BLOCK_INTERACTION_RANGE + MENU_RANGE_BUFFER;
+    dx * dx + dy * dy + dz * dz < reach * reach
+}
+
+/// Whether `open` is still a usable menu: its anchor is still there (the block
+/// entity for a container, lectern, beacon or shulker box; the right block for
+/// a crafting table or workstation) and the player is still in reach of it.
+/// Every removal takes a block entity out of the registry
+/// (`crate::block_removal`), so its absence is the removal.
+fn menu_still_valid<S: ChunkSource + ?Sized>(
+    source: &S,
+    block_entities: &BlockEntityHandle,
+    open: &OpenContainer,
+    feet: Option<(f64, f64, f64)>,
+) -> bool {
+    let anchored = match positional_menu_blocks(open.shape) {
+        Some(blocks) => blocks.contains(&source.block_state_id(open.pos.x, open.pos.y, open.pos.z).block()),
+        None => block_entities.with(|reg| reg.get(open.pos).is_some()),
+    };
+    anchored && within_menu_range(feet, open.pos)
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn publish_open_container<T: Transport, P: ServerProtocol>(
+pub(super) async fn publish_open_container<T: Transport, P: ServerProtocol, S: ChunkSource + ?Sized>(
     conn: &mut Connection<T>,
     proto: &P,
+    source: &S,
     state: &mut State,
+    inventory: &mut PlayerInventory,
     block_entities: &BlockEntityHandle,
     block_ticks: &BlockTickFeed,
+    mobs: &MobHandle,
+    players: Option<&PlayerRegistry>,
     player_uuid: uuid::Uuid,
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    drops_rng: &mut SpawnRng,
+    experience: &mut crate::experience::PlayerExperience,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
+    open_merchant: &mut Option<OpenMerchant>,
 ) -> Result<(), ServerError> {
-    if let Some(open) = open_container.take_if(|open| !menu_still_valid(block_entities, open)) {
-        apply(conn, state, proto.encode_close_container(open.window_id)).await?;
-        *container_sync = ContainerSync::default();
-        crate::lid_viewers::release_and_publish(block_entities, block_ticks, player_uuid);
-        return Ok(());
+    if let Some(open) = open_container.as_ref().filter(|open| !menu_still_valid(source, block_entities, open, player_pos)) {
+        let window_id = open.window_id;
+        apply(conn, state, proto.encode_close_container(window_id)).await?;
+        return close_menu(
+            conn, proto, state, window_id, inventory, block_entities, block_ticks, mobs, players, player_uuid,
+            player_pos, player_rot, drops_rng, experience, open_container, container_sync, open_merchant,
+        )
+        .await;
     }
     if let Some(open) = open_container.as_mut() {
         let (slots, data) = container_state(block_entities, open.pos);
@@ -183,6 +245,118 @@ pub(super) async fn publish_open_container<T: Transport, P: ServerProtocol>(
             apply(conn, state, directive).await?;
         }
     }
+    Ok(())
+}
+
+/// Ends the active menu: returns the virtual crafting/workstation grids and the
+/// carried stack to the inventory (overflow is thrown, never deleted), spills a
+/// beacon's payment, pays a furnace's accumulated experience, and releases the
+/// window. Shared by the client's close packet and the server's own close of a
+/// menu that stopped being valid ([`publish_open_container`]), so both paths
+/// settle the same items.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn close_menu<T: Transport, P: ServerProtocol>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    window_id: i32,
+    inventory: &mut PlayerInventory,
+    block_entities: &BlockEntityHandle,
+    block_ticks: &BlockTickFeed,
+    mobs: &MobHandle,
+    players: Option<&PlayerRegistry>,
+    player_uuid: uuid::Uuid,
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    drops_rng: &mut SpawnRng,
+    experience: &mut crate::experience::PlayerExperience,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
+    open_merchant: &mut Option<OpenMerchant>,
+) -> Result<(), ServerError> {
+    // Closing returns carried items and virtual crafting/workstation
+    // cells to the player's inventory; overflow becomes a dropped
+    // stack so closing a menu cannot delete items.
+    let mut returning = inventory.take_table_crafting();
+    returning.extend(inventory.take_workstation());
+    if let Some(carried) = inventory.click_state_mut().carried.take() {
+        returning.push(carried);
+    }
+    inventory.click_state_mut().reset();
+    // Bundle selection belongs to the open menu and is cleared with the
+    // other menu-local scratch state.
+    inventory.clear_selected_bundle_items();
+    let mut spilled = Vec::new();
+    let mut changed = Vec::new();
+    for stack in returning {
+        let (written, leftover) = inventory.add(stack);
+        changed.extend(written);
+        if let Some(leftover) = leftover {
+            spilled.push(leftover);
+        }
+    }
+    changed.sort_unstable();
+    changed.dedup();
+    for native in changed {
+        if let Some(menu_slot) = window_zero_menu_slot(native) {
+            apply(
+                conn,
+                state,
+                proto.encode_container_slot(0, 0, menu_slot, inventory.native(native)),
+            )
+            .await?;
+        }
+    }
+    // A beacon payment is dropped directly rather than merged into the
+    // inventory. It lives on the block entity, outside virtual menu
+    // scratch storage, so read the payment field directly.
+    if open_container.as_ref().is_some_and(|open| open.window_id == window_id && open.shape == MenuKind::Beacon)
+        && let Some(pos) = open_container.as_ref().map(|open| open.pos)
+        && let Some(payment) = block_entities.with(|reg| match reg.get_mut(pos) {
+            Some(BlockEntity::Beacon(beacon)) => beacon.payment.take(),
+            _ => None,
+        })
+    {
+        spilled.push(payment);
+    }
+    spawn_dropped_stacks(mobs, player_pos, player_rot, drops_rng, spilled);
+    if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
+        // Furnace experience is paid on close from recipes accumulated
+        // since the last drain. Experience orbs are not modeled here, so
+        // award the points directly to the player's experience bar.
+        let pos = open_container.as_ref().map(|open| open.pos);
+        if let Some(pos) = pos {
+            let used = block_entities.with(|reg| match reg.get_mut(pos) {
+                Some(BlockEntity::Furnace(furnace)) => furnace.take_recipes_used(),
+                _ => std::collections::HashMap::new(),
+            });
+            if !used.is_empty() {
+                let points = crate::furnace::experience_for_recipes(&used, || {
+                    drops_rng.next_f32()
+                });
+                if points > 0 {
+                    experience.give_points(i32::try_from(points).unwrap_or(i32::MAX));
+                    republish_experience(players, player_uuid, experience);
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_set_experience(
+                            experience.progress(),
+                            experience.level(),
+                            experience.total(),
+                        ),
+                    )
+                    .await?;
+                }
+            }
+        }
+        *open_container = None;
+        crate::lid_viewers::release_and_publish(block_entities, block_ticks, player_uuid);
+        *container_sync = ContainerSync::default();
+    }
+    // Any window close ends the active menu, including a merchant menu.
+    // `OpenMerchant` has no window id, so clear it unconditionally.
+    *open_merchant = None;
     Ok(())
 }
 

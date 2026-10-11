@@ -567,6 +567,23 @@ pub(crate) fn bed_head(pos: lodestone_model::BlockPos, state: BlockStateId) -> O
     Some(lodestone_model::BlockPos::new(pos.x + dx, pos.y, pos.z + dz))
 }
 
+/// Whether someone is in the bed half `state`: the block's `occupied` flag.
+pub(crate) fn bed_occupied(state: BlockStateId) -> bool {
+    state.properties().iter().any(|&(key, value)| key == "occupied" && value == "true")
+}
+
+/// `state` with its `occupied` flag set to `occupied`, or `None` for a block
+/// that has no such flag.
+pub(crate) fn with_bed_occupied(state: BlockStateId, occupied: bool) -> Option<BlockStateId> {
+    let mut properties: std::collections::BTreeMap<String, String> = state
+        .properties()
+        .iter()
+        .map(|&(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    *properties.get_mut("occupied")? = occupied.to_string();
+    BlockStateId::from_exact_parts(state.name(), &properties)
+}
+
 /// The foot cell of the bed whose head is at `head`: one step against `facing`.
 pub(crate) fn bed_foot(head: lodestone_model::BlockPos, head_state: BlockStateId) -> Option<lodestone_model::BlockPos> {
     let (dx, dz) = bed_facing_steps(head_state)?;

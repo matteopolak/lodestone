@@ -2141,6 +2141,9 @@ struct ProjectileMeta {
     /// entity-id [`owner`](Self::owner) is not. For a restored projectile whose
     /// shooter is a mob, this is that mob's uuid until the mob is resolved.
     owner_uuid: Option<Uuid>,
+    /// Whether the launching player was in creative mode when they fired it.
+    /// Not saved: a restored projectile counts its shooter as survival.
+    shooter_creative: bool,
     /// Whether the projectile has left its owner's hitbox, vanilla's
     /// `LeftOwner`.
     left_owner: bool,

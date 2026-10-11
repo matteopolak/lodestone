@@ -50,7 +50,7 @@ fn stuck_arrow(sim: &mut MobSim<'_>, pickup: ArrowPickup) -> i32 {
         key("arrow"),
         Projectile::arrow(Vec3::new(5.5, 1.5, 4.0), Vec3::new(0.0, 0.0, 2.0)),
     );
-    sim.set_projectile_shooter(id, alice(), pickup);
+    sim.set_projectile_shooter(id, alice(), pickup, false);
     sim.resolve_projectile_impacts();
     for _ in 0..8 {
         sim.tick_stuck_arrows();
@@ -145,7 +145,7 @@ fn an_arrow_in_flight_reloads_in_flight() {
         key("arrow"),
         Projectile::arrow(Vec3::new(1.0, 5.0, 1.0), Vec3::new(0.5, 0.25, 1.5)),
     );
-    sim.set_projectile_shooter(id, alice(), ArrowPickup::CreativeOnly);
+    sim.set_projectile_shooter(id, alice(), ArrowPickup::CreativeOnly, true);
     let records = sim.saved_entities();
     let record = saved(&records, "arrow");
     assert_eq!(get(record, "inGround"), Some(&Nbt::Byte(0)));
@@ -170,7 +170,7 @@ fn lifetime_despawns_an_arrow_but_not_a_reclaimable_trident() {
         key("trident"),
         Projectile::arrow(Vec3::new(5.5, 1.5, 4.0), Vec3::new(0.0, 0.0, 2.0)),
     );
-    sim.set_projectile_shooter(trident, alice(), ArrowPickup::Allowed);
+    sim.set_projectile_shooter(trident, alice(), ArrowPickup::Allowed, false);
     sim.resolve_projectile_impacts();
     for _ in 0..1300 {
         sim.tick_stuck_arrows();

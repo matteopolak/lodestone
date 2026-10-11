@@ -418,7 +418,11 @@ pub(super) fn apply_workstation_clicked<P: ServerProtocol>(
         creative,
     )
     .cost;
-    let anvil_may_pickup = move |_index: usize, _item: &ItemStack| (creative || xp_level >= anvil_cost) && anvil_cost > 0;
+    // The result slot follows the input cells; every other slot takes freely.
+    let result_index = layout.len() - 36 - 1;
+    let anvil_may_pickup = move |index: usize, _item: &ItemStack| {
+        index != result_index || ((creative || xp_level >= anvil_cost) && anvil_cost > 0)
+    };
     let may_pickup: Option<MayPickup<'_>> = (station == Station::Anvil).then_some(&anvil_may_pickup as _);
     let dropped = do_click_with(
         &layout, &mut slots, &mut state, click, creative, Some(&recipe), may_pickup, None,

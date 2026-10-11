@@ -88,6 +88,8 @@ struct ProjectileHit {
     /// retaliation direction above already covers the general "who did this"
     /// case).
     owner: Option<i32>,
+    /// Whether the projectile's shooter is a creative-mode player.
+    shooter_creative: bool,
 }
 
 /// One splash/lingering potion impact [`MobSim::resolve_projectile_impacts`]
@@ -302,6 +304,7 @@ impl<'w> MobSim<'w> {
                 owner,
                 potion: None,
                 owner_uuid: None,
+                shooter_creative: false,
                 left_owner: false,
                 arrow,
             },
@@ -703,6 +706,7 @@ impl<'w> MobSim<'w> {
                         speed: delta.length(),
                         origin: from,
                         owner,
+                        shooter_creative: meta.is_some_and(|m| m.shooter_creative),
                     });
                 }
                 (_, Some(block_t)) => {
@@ -807,7 +811,7 @@ impl<'w> MobSim<'w> {
                 let by_mob = hit
                     .owner
                     .is_some_and(|owner| self.get(owner).is_some() || self.withers.contains_key(&owner));
-                self.hurt_frame_with(hit.target, super::FrameDamage::Projectile { by_mob });
+                self.hurt_frame_with(hit.target, super::FrameDamage::Projectile { by_mob, creative_shooter: hit.shooter_creative });
             }
             return;
         }

@@ -8,6 +8,35 @@ use lodestone_model::ResourceKey;
 
 use crate::mob_spawn::{MobCategory, SpawnRng};
 
+/// How a monster-class mob bears on a player trying to sleep nearby.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RestRule {
+    /// Not a monster-class mob: never keeps anyone from sleeping.
+    Ignored,
+    /// Keeps every non-creative player awake while within range.
+    Prevents,
+    /// A neutral monster: keeps a player awake only while angry at that player.
+    PreventsWhileAngry,
+}
+
+/// The [`RestRule`] of a species. "Monster-class" is a lineage the reference
+/// registers separately from the spawn category: ghasts, slimes, magma cubes,
+/// hoglins, phantoms, shulkers and the dragon are in the monster spawn category
+/// but never keep a player awake.
+pub(super) fn rest_rule(entity_type: &ResourceKey) -> RestRule {
+    match entity_type.path() {
+        "zombified_piglin" => RestRule::PreventsWhileAngry,
+        "blaze" | "bogged" | "breeze" | "cave_spider" | "creaking" | "creeper" | "drowned"
+        | "elder_guardian" | "enderman" | "endermite" | "evoker" | "giant" | "guardian" | "husk"
+        | "illusioner" | "parched" | "piglin" | "piglin_brute" | "pillager" | "ravager"
+        | "silverfish" | "skeleton" | "spider" | "stray" | "vex" | "vindicator" | "warden"
+        | "witch" | "wither" | "wither_skeleton" | "zoglin" | "zombie" | "zombie_villager" => {
+            RestRule::Prevents
+        }
+        _ => RestRule::Ignored,
+    }
+}
+
 /// Whether `entity_type` belongs to the hostile "monster" species category and
 /// therefore resists natural despawn.
 ///

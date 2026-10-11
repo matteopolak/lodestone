@@ -183,11 +183,12 @@ fn byte(flag: bool) -> Nbt {
 }
 
 impl<'w> MobSim<'w> {
-    /// Records the player who fired a projectile and, for the arrow family,
-    /// who may take it back.
-    pub fn set_projectile_shooter(&mut self, id: i32, shooter: Uuid, pickup: ArrowPickup) {
+    /// Records the player who fired a projectile, whether they are in creative
+    /// mode, and, for the arrow family, who may take it back.
+    pub fn set_projectile_shooter(&mut self, id: i32, shooter: Uuid, pickup: ArrowPickup, creative: bool) {
         if let Some(meta) = self.projectile_meta.get_mut(&id) {
             meta.owner_uuid = Some(shooter);
+            meta.shooter_creative = creative;
             if let Some(arrow) = &mut meta.arrow {
                 arrow.pickup = pickup;
             }

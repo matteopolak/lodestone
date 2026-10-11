@@ -106,16 +106,28 @@ impl<'w> MobSim<'w> {
         self.get(id).map(SimMob::position)
     }
 
-    /// Whether a mob that keeps a player from resting stands within
-    /// `horizontal` blocks of `centre` on x and z and `vertical` on y: any
-    /// monster, except the zombified piglin, which only counts while angry at
-    /// the player (anger is not queried here, so it never counts).
+    /// Whether a mob that keeps `player` from resting stands within
+    /// `horizontal` blocks of `centre` on x and z and `vertical` on y. Which
+    /// mobs count is each species' [`species::RestRule`]; a neutral one counts
+    /// only while angry at this player: a live grudge against them, or a live
+    /// grudge with no target under the universal-anger rule off Peaceful.
     #[must_use]
-    pub fn monster_prevents_rest(&self, centre: Vec3, horizontal: f64, vertical: f64) -> bool {
+    pub fn monster_prevents_rest(&self, centre: Vec3, horizontal: f64, vertical: f64, player: Uuid) -> bool {
+        let universal = self.universal_anger && self.difficulty != lodestone_model::Difficulty::Peaceful;
         self.mobs.iter().any(|m| {
             let at = m.position();
-            m.category == MobCategory::Monster
-                && m.entity_type.path() != "zombified_piglin"
+            let counts = match species::rest_rule(&m.entity_type) {
+                species::RestRule::Ignored => false,
+                species::RestRule::Prevents => true,
+                species::RestRule::PreventsWhileAngry => m.anger.is_some_and(|anger| {
+                    self.tick_count < anger.end_time
+                        && match anger.attacker {
+                            Some(attacker) => attacker == player,
+                            None => universal,
+                        }
+                }),
+            };
+            counts
                 && (at.x - centre.x).abs() <= horizontal
                 && (at.z - centre.z).abs() <= horizontal
                 && (at.y - centre.y).abs() <= vertical

@@ -259,7 +259,7 @@ mod tests {
                 arrow_key(),
                 Projectile::arrow(Vec3::new(5.5, 1.5, 4.0), Vec3::new(0.0, 0.0, 2.0)),
             );
-            sim.set_projectile_shooter(id, uuid::Uuid::from_u128(1), pickup);
+            sim.set_projectile_shooter(id, uuid::Uuid::from_u128(1), pickup, false);
             sim.resolve_projectile_impacts();
             for _ in 0..rattle_ticks {
                 sim.tick_stuck_arrows();

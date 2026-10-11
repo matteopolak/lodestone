@@ -249,6 +249,10 @@ struct HostCore {
     /// guest's residency claim has to move the store that store's own eviction
     /// actually reads, exactly like `hub_block_ticks`/`subscribers` above.
     tickets: TicketStoreHandle,
+    /// The tick loop's night-skip vote, shared with every connection `publish`
+    /// accepts so a guest's bed click reaches the same roster and sees the same
+    /// sky.
+    sleep_vote: SleepVote,
 }
 
 /// Hand-written: neither [`ServerProtocol`] nor [`ChunkSource`] requires
@@ -2718,6 +2722,8 @@ impl IntegratedServer {
         // block would move the original out of reach of the tick task, which
         // passes the same inner handle to `run_tick_loop_with_weather`.
         let conn_sleep_vote = sleep_vote.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_sleep_vote = sleep_vote.clone();
         let conn_sleep_feed = sleep_feed.clone();
         let conn_border = border_feed.clone();
         // A third clone, held on `Self` for RCON's `/worldborder` to reach —
@@ -2974,6 +2980,7 @@ impl IntegratedServer {
                     subscribers,
                     view_radius,
                     tickets: host_tickets,
+                    sleep_vote: host_sleep_vote,
                 }),
                 #[cfg(not(target_arch = "wasm32"))]
                 relay_task: Some(relay_task),
@@ -4911,6 +4918,7 @@ impl IntegratedServer {
         // the same real handle `host.tickets` carries, not a
         // fresh default — see `HostCore::tickets`'s own doc comment.
         let tickets = host.tickets.clone();
+        let guest_sleep_vote = host.sleep_vote.clone();
         let signal = self.shutdown.clone();
         // Moved out here for the same reason `open_to_lan`'s own
         // `conn_commands`/`conn_access`/`conn_online_mode` are: the accept
@@ -4933,6 +4941,7 @@ impl IntegratedServer {
                         let mobs = mobs.clone();
                         let world_state = world_state.clone();
                         let tickets = tickets.clone();
+                        let conn_sleep_vote = guest_sleep_vote.clone();
                         let commands = conn_commands.clone();
                         let access = conn_access.clone();
                         let online_mode = conn_online_mode.clone();
@@ -4958,7 +4967,7 @@ impl IntegratedServer {
                             .push(subscriber);
                         drop(spawn(async move {
                             let mut conn = Connection::new(socket);
-                            let sleep_vote = SleepVote::default();
+                            let sleep_vote = conn_sleep_vote;
                             let sleep_feed = SleepFeed::default();
                             let border = crate::border::BorderFeed::default();
                             let live_save = crate::live_save::LiveSaveSlot::default();
@@ -7751,7 +7760,7 @@ mod tests {
                     lodestone_model::Vec3::new(0.0, 0.0, 2.0),
                 ),
             );
-            sim.set_projectile_shooter(arrow, owner, crate::mobs::ArrowPickup::Allowed);
+            sim.set_projectile_shooter(arrow, owner, crate::mobs::ArrowPickup::Allowed, false);
             sim.resolve_projectile_impacts();
             for _ in 0..8 {
                 sim.tick_stuck_arrows();
@@ -7767,7 +7776,7 @@ mod tests {
                 None,
                 lodestone_data::potion::PotionId::from_name("minecraft:swiftness"),
             );
-            sim.set_projectile_shooter(potion, owner, crate::mobs::ArrowPickup::Allowed);
+            sim.set_projectile_shooter(potion, owner, crate::mobs::ArrowPickup::Allowed, false);
             sim.spawn_item(
                 key("gravel"),
                 lodestone_model::Vec3::new(12.5, 1.0, 12.5),

@@ -785,89 +785,12 @@ where
             }
         }
         ServerBound::ContainerClosed { window_id } => {
-            // Closing returns carried items and virtual crafting/workstation
-            // cells to the player's inventory; overflow becomes a dropped
-            // stack so closing a menu cannot delete items.
-            let mut returning = inventory.take_table_crafting();
-            returning.extend(inventory.take_workstation());
-            if let Some(carried) = inventory.click_state_mut().carried.take() {
-                returning.push(carried);
-            }
-            inventory.click_state_mut().reset();
-            // Bundle selection belongs to the open menu and is cleared with the
-            // other menu-local scratch state.
-            inventory.clear_selected_bundle_items();
-            let mut spilled = Vec::new();
-            let mut changed = Vec::new();
-            for stack in returning {
-                let (written, leftover) = inventory.add(stack);
-                changed.extend(written);
-                if let Some(leftover) = leftover {
-                    spilled.push(leftover);
-                }
-            }
-            changed.sort_unstable();
-            changed.dedup();
-            for native in changed {
-                if let Some(menu_slot) = window_zero_menu_slot(native) {
-                    apply(
-                        conn,
-                        state,
-                        proto.encode_container_slot(0, 0, menu_slot, inventory.native(native)),
-                    )
-                    .await?;
-                }
-            }
-            // A beacon payment is dropped directly rather than merged into the
-            // inventory. It lives on the block entity, outside virtual menu
-            // scratch storage, so read the payment field directly.
-            if open_container.as_ref().is_some_and(|open| open.window_id == window_id && open.shape == MenuKind::Beacon)
-                && let Some(pos) = open_container.as_ref().map(|open| open.pos)
-                && let Some(payment) = block_entities.with(|reg| match reg.get_mut(pos) {
-                    Some(BlockEntity::Beacon(beacon)) => beacon.payment.take(),
-                    _ => None,
-                })
-            {
-                spilled.push(payment);
-            }
-            spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, spilled);
-            if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
-                // Furnace experience is paid on close from recipes accumulated
-                // since the last drain. Experience orbs are not modeled here, so
-                // award the points directly to the player's experience bar.
-                let pos = open_container.as_ref().map(|open| open.pos);
-                if let Some(pos) = pos {
-                    let used = block_entities.with(|reg| match reg.get_mut(pos) {
-                        Some(BlockEntity::Furnace(furnace)) => furnace.take_recipes_used(),
-                        _ => std::collections::HashMap::new(),
-                    });
-                    if !used.is_empty() {
-                        let points = crate::furnace::experience_for_recipes(&used, || {
-                            drops_rng.next_f32()
-                        });
-                        if points > 0 {
-                            experience.give_points(i32::try_from(points).unwrap_or(i32::MAX));
-                            republish_experience(players, player_uuid, experience);
-                            apply(
-                                conn,
-                                state,
-                                proto.encode_set_experience(
-                                    experience.progress(),
-                                    experience.level(),
-                                    experience.total(),
-                                ),
-                            )
-                            .await?;
-                        }
-                    }
-                }
-                *open_container = None;
-                crate::lid_viewers::release_and_publish(block_entities, block_ticks, player_uuid);
-                *container_sync = ContainerSync::default();
-            }
-            // Any window close ends the active menu, including a merchant menu.
-            // `OpenMerchant` has no window id, so clear it unconditionally.
-            *open_merchant = None;
+            close_menu(
+                conn, proto, state, window_id, inventory, block_entities, block_ticks, mobs, players,
+                player_uuid, *player_pos, *player_rot, drops_rng, experience, open_container,
+                container_sync, open_merchant,
+            )
+            .await?;
         }
         // Merchant trade-row selection. See `attempt_villager_trade`'s own
         // doc for why this executes the trade in one operation rather than through

@@ -2502,8 +2502,9 @@ where
                 // connection, so this connection needs its own timer to notice — see
                 // `sync_open_container`'s own doc comment.
                 publish_open_container(
-                    conn, proto, &mut state, block_entities, block_ticks, player_uuid,
-                    &mut open_container, &mut container_sync,
+                    conn, proto, source.get(), &mut state, &mut inventory, block_entities, block_ticks, mobs,
+                    entities.players(), player_uuid, player_pos, player_rot, &mut drops_rng, &mut experience,
+                    &mut open_container, &mut container_sync, &mut open_merchant,
                 )
                 .await?;
                 // Keep tick updates for visible columns ordered, but send them
@@ -3713,8 +3714,9 @@ where
                 republish_inventory(entities.players(), player_uuid, &inventory);
                 // The world tick can publish changes without inbound packets.
                 publish_open_container(
-                    conn, proto, &mut state, block_entities, block_ticks, player_uuid,
-                    &mut open_container, &mut container_sync,
+                    conn, proto, source.get(), &mut state, &mut inventory, block_entities, block_ticks, mobs,
+                    entities.players(), player_uuid, player_pos, player_rot, &mut drops_rng, &mut experience,
+                    &mut open_container, &mut container_sync, &mut open_merchant,
                 )
                 .await?;
                 queue_tick_block_updates(

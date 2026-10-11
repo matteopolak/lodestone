@@ -679,7 +679,7 @@ pub(super) fn spawn_player_projectile(
         // The shooter's uuid is what survives a save; an arrow-family shot also
         // records who may take it back (a survival shooter's returns the item,
         // a creative shooter's can only be cleared).
-        sim.set_projectile_shooter(id, shooter, crate::mobs::ArrowPickup::for_shooter(creative));
+        sim.set_projectile_shooter(id, shooter, crate::mobs::ArrowPickup::for_shooter(creative), creative);
     });
 }
 
