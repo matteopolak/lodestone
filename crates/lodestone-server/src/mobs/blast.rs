@@ -12,7 +12,7 @@ impl MobSim<'_> {
     /// fires in the crater. With `destroys_blocks` clear the terrain is left
     /// alone and only the damage and the explosion packet remain.
     pub(crate) fn queue_blast(&mut self, centre: Vec3, power: f32, fire: bool, destroys_blocks: bool) {
-        self.explode(centre, power, lodestone_entity::DamageFlags::default());
+        self.explode_by(centre, power, lodestone_entity::DamageFlags::default(), false, destroys_blocks);
         self.pending_detonations.push(Detonation { centre, radius: power, fire, destroys_blocks });
     }
 }

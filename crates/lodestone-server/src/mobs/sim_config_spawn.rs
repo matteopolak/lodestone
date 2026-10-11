@@ -99,6 +99,8 @@ impl<'w> MobSim<'w> {
             lightning_bolts: HashMap::new(),
             pending_lightning_fires: Vec::new(),
             pending_lightning_cushions: Vec::new(),
+            pending_frame_events: Vec::new(),
+            frame_signal_dirty: Vec::new(),
             pending_projectile_block_hits: Vec::new(),
             workstation_claims: villager::WorkstationClaims::new(),
             bed_claims: villager::BedClaims::new(),

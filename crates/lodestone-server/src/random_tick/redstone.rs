@@ -612,6 +612,10 @@ impl crate::redstone::RedstoneLookup for RedstoneColumns<'_, '_> {
             entities.with(|registry| registry.comparator_output(pos).unwrap_or(0))
         })
     }
+
+    fn entity_analog_output(&self, cell: BlockPos, facing: Direction) -> Option<u8> {
+        self.block_entities?.with(|registry| registry.entity_analog_output(cell, facing))
+    }
 }
 
 /// A [`ChunkSource`] that reports every chunk not resident, so a
@@ -738,6 +742,23 @@ pub(crate) fn propagate_and_react_with_entities_across_chunks<Q: ScheduledTickQu
 /// next world-tick increment, before that tick's scheduled drain.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_piston_event<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    world: &dyn ChunkSource,
+    pos: BlockPos,
+    block_ticks: &mut Q,
+    current_tick: u64,
+    block_entities: Option<&BlockEntityHandle>,
+) -> Vec<RandomTickEvent> {
+    notify_block(column, min_x, min_z, world, pos, block_ticks, current_tick, block_entities)
+}
+
+/// Delivers one neighbour notification to the block at `pos` and runs the
+/// reaction it triggers, for a change the block cannot see in block states: a
+/// comparator whose entity-backed input changed, say.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn notify_block<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,

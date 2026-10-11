@@ -151,6 +151,122 @@ pub struct PlayerCandidate {
     pub xp_points: i32,
 }
 
+/// What a selector needs to know about an entity to match it.
+pub trait SelectorSubject {
+    /// The persistent identity.
+    fn uuid(&self) -> Uuid;
+    /// The plain-text name `name=` compares against: a player's login name, or
+    /// the empty string for an entity without a custom name.
+    fn name(&self) -> &str;
+    /// The canonical entity-type id, e.g. `minecraft:player`.
+    fn entity_type(&self) -> &str;
+    /// The entity's position.
+    fn position(&self) -> Vec3;
+    /// The game mode, for a player; `None` for anything else.
+    fn game_mode(&self) -> Option<GameMode>;
+    /// The scoreboard holder name: a player's login name, an entity's uuid text.
+    fn score_holder(&self) -> String;
+}
+
+impl SelectorSubject for PlayerCandidate {
+    fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+    fn name(&self) -> &str {
+        &self.username
+    }
+    fn entity_type(&self) -> &str {
+        lodestone_command_mc::entity::PLAYER_TYPE
+    }
+    fn position(&self) -> Vec3 {
+        self.position
+    }
+    fn game_mode(&self) -> Option<GameMode> {
+        Some(self.game_mode)
+    }
+    fn score_holder(&self) -> String {
+        self.username.clone()
+    }
+}
+
+/// A non-player entity the selectors can match, snapshotted from the mob
+/// simulation when a command runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldEntityCandidate {
+    pub uuid: Uuid,
+    pub entity_id: i32,
+    /// The canonical entity-type id, e.g. `minecraft:item_frame`.
+    pub entity_type: String,
+    pub position: Vec3,
+}
+
+impl SelectorSubject for WorldEntityCandidate {
+    fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+    fn name(&self) -> &str {
+        ""
+    }
+    fn entity_type(&self) -> &str {
+        &self.entity_type
+    }
+    fn position(&self) -> Vec3 {
+        self.position
+    }
+    fn game_mode(&self) -> Option<GameMode> {
+        None
+    }
+    fn score_holder(&self) -> String {
+        self.uuid.to_string()
+    }
+}
+
+/// Anything a selector can resolve to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommandTarget {
+    Player(PlayerCandidate),
+    World(WorldEntityCandidate),
+}
+
+impl SelectorSubject for CommandTarget {
+    fn uuid(&self) -> Uuid {
+        match self {
+            Self::Player(p) => p.uuid(),
+            Self::World(w) => w.uuid(),
+        }
+    }
+    fn name(&self) -> &str {
+        match self {
+            Self::Player(p) => SelectorSubject::name(p),
+            Self::World(w) => w.name(),
+        }
+    }
+    fn entity_type(&self) -> &str {
+        match self {
+            Self::Player(p) => p.entity_type(),
+            Self::World(w) => w.entity_type(),
+        }
+    }
+    fn position(&self) -> Vec3 {
+        match self {
+            Self::Player(p) => SelectorSubject::position(p),
+            Self::World(w) => w.position(),
+        }
+    }
+    fn game_mode(&self) -> Option<GameMode> {
+        match self {
+            Self::Player(p) => p.game_mode(),
+            Self::World(_) => None,
+        }
+    }
+    fn score_holder(&self) -> String {
+        match self {
+            Self::Player(p) => p.score_holder(),
+            Self::World(w) => w.score_holder(),
+        }
+    }
+}
+
 /// Why a selector matched nothing, or could not be resolved.
 ///
 /// Distinguished because the real command distinguishes them: "no players
@@ -195,6 +311,19 @@ pub fn resolve_players(
     selector: &EntitySelector,
     source: &CommandSource,
     candidates: &[PlayerCandidate],
+    shuffle: &dyn Fn(usize) -> Vec<usize>,
+    score: &dyn Fn(&str, &str) -> Option<i32>,
+    team: &dyn Fn(&str) -> String,
+) -> Result<Vec<PlayerCandidate>, SelectorError> {
+    resolve_subjects(selector, source, candidates, shuffle, score, team)
+}
+
+/// [`resolve_players`] over any [`SelectorSubject`]: players alone, or players
+/// with the world's entities when the selector reaches entities.
+pub fn resolve_subjects<T: SelectorSubject + Clone>(
+    selector: &EntitySelector,
+    source: &CommandSource,
+    candidates: &[T],
     // A deterministic index permutation for `sort=random`, supplied by the
     // caller. Passed in rather than generated here because this crate is
     // synchronous and wasm-safe and must not reach for a clock, and because a
@@ -214,12 +343,12 @@ pub fn resolve_players(
     // for the identical reason: this crate must stay ignorant of
     // `crate::commands::team_store`'s storage shape.
     team: &dyn Fn(&str) -> String,
-) -> Result<Vec<PlayerCandidate>, SelectorError> {
+) -> Result<Vec<T>, SelectorError> {
     if selector.current_entity {
         let Some(entity) = source.entity.as_ref() else {
             return Err(SelectorError::NotAnEntity);
         };
-        let Some(me) = candidates.iter().find(|c| c.uuid == entity.uuid) else {
+        let Some(me) = candidates.iter().find(|c| c.uuid() == entity.uuid) else {
             return Err(SelectorError::NoPlayersFound);
         };
         return if matches_predicates(me, selector, score, team) {
@@ -232,7 +361,7 @@ pub fn resolve_players(
     if let Some(name) = selector.player_name.as_deref() {
         return candidates
             .iter()
-            .find(|c| c.username == name)
+            .find(|c| c.name() == name && c.entity_type() == lodestone_command_mc::entity::PLAYER_TYPE)
             .cloned()
             .map(|c| vec![c])
             .ok_or(SelectorError::NoPlayersFound);
@@ -241,7 +370,7 @@ pub fn resolve_players(
     if let Some(uuid) = selector.entity_uuid {
         return candidates
             .iter()
-            .find(|c| c.uuid == uuid)
+            .find(|c| c.uuid() == uuid)
             .cloned()
             .map(|c| vec![c])
             .ok_or(SelectorError::NoPlayersFound);
@@ -253,10 +382,10 @@ pub fn resolve_players(
         selector.position.z.unwrap_or(source.position.z),
     );
 
-    let mut matched: Vec<PlayerCandidate> = candidates
+    let mut matched: Vec<T> = candidates
         .iter()
-        .filter(|c| matches_predicates(c, selector, score, team))
-        .filter(|c| matches_region(c, selector, origin))
+        .filter(|c| matches_predicates(*c, selector, score, team))
+        .filter(|c| matches_region(*c, selector, origin))
         .cloned()
         .collect();
 
@@ -280,7 +409,7 @@ pub fn resolve_players(
             if permutation.len() == matched.len()
                 && permutation.iter().all(|&i| i < matched.len())
             {
-                let reordered: Vec<PlayerCandidate> =
+                let reordered: Vec<T> =
                     permutation.iter().map(|&i| matched[i].clone()).collect();
                 matched = reordered;
             }
@@ -296,37 +425,33 @@ pub fn resolve_players(
     Ok(matched)
 }
 
-fn distance_sqr(candidate: &PlayerCandidate, origin: (f64, f64, f64)) -> f64 {
-    let (dx, dy, dz) = (
-        candidate.position.x - origin.0,
-        candidate.position.y - origin.1,
-        candidate.position.z - origin.2,
-    );
+fn distance_sqr<T: SelectorSubject>(candidate: &T, origin: (f64, f64, f64)) -> f64 {
+    let position = candidate.position();
+    let (dx, dy, dz) = (position.x - origin.0, position.y - origin.1, position.z - origin.2);
     dx * dx + dy * dy + dz * dz
 }
 
-fn matches_predicates(
-    candidate: &PlayerCandidate,
+fn matches_predicates<T: SelectorSubject>(
+    candidate: &T,
     selector: &EntitySelector,
     score: &dyn Fn(&str, &str) -> Option<i32>,
     team: &dyn Fn(&str) -> String,
 ) -> bool {
-    // `limit_to_type` is `minecraft:player` for every player-shaped selector,
-    // and a roster only holds players, so it is satisfied by construction. A
-    // *different* positive type narrows to nothing — `@e[type=cow]` cannot match
-    // a player — and saying so here is what keeps `/give @e[type=cow] …` from
+    // A positive `type=` narrows to that type alone: `@e[type=cow]` cannot match
+    // a player, and saying so here is what keeps `/give @e[type=cow] …` from
     // silently hitting everybody.
     if let Some(kind) = selector.limit_to_type.as_deref() {
-        if kind != lodestone_command_mc::entity::PLAYER_TYPE {
+        if kind != candidate.entity_type() {
             return false;
         }
     }
     selector.predicates.iter().all(|predicate| match predicate {
-        SelectorPredicate::Name { name, inverted } => (&candidate.username == name) != *inverted,
-        SelectorPredicate::GameMode { mode, inverted } => (candidate.game_mode == *mode) != *inverted,
-        SelectorPredicate::EntityType { id, inverted } => {
-            (id == lodestone_command_mc::entity::PLAYER_TYPE) != *inverted
+        SelectorPredicate::Name { name, inverted } => (candidate.name() == name) != *inverted,
+        // Only a player has a game mode; anything else fails, inverted or not.
+        SelectorPredicate::GameMode { mode, inverted } => {
+            candidate.game_mode().is_some_and(|actual| (actual == *mode) != *inverted)
         }
+        SelectorPredicate::EntityType { id, inverted } => (id == candidate.entity_type()) != *inverted,
         // A roster holds live players only, so the real is-alive check is always
         // satisfied.
         // Stated rather than skipped so a future roster that carries the dead
@@ -339,13 +464,13 @@ fn matches_predicates(
         // scoreboard has never seen, both come back `None` from `score` and
         // both refuse the match — the real rule does not distinguish them either.
         SelectorPredicate::Scores(entries) => entries.iter().all(|(objective, range)| {
-            score(&candidate.username, objective).is_some_and(|value| range.matches(value))
+            score(&candidate.score_holder(), objective).is_some_and(|value| range.matches(value))
         }),
         // The real `team=` predicate: compare the holder's team
         // name (`""` when on no team) against `name` directly — see
         // `SelectorPredicate::Team`'s own doc for why there is no `Option`
         // three-way to model here.
-        SelectorPredicate::Team { name, inverted } => (team(&candidate.username) == *name) != *inverted,
+        SelectorPredicate::Team { name, inverted } => (team(&candidate.score_holder()) == *name) != *inverted,
     })
 }
 
@@ -355,8 +480,8 @@ fn matches_predicates(
 /// radius in blocks and `dx dy dz` is an axis-aligned **box** whose far corner
 /// is `+1.0` past the delta, which is why `dx=0` still selects the caller's
 /// own block column rather than nothing.
-fn matches_region(
-    candidate: &PlayerCandidate,
+fn matches_region<T: SelectorSubject>(
+    candidate: &T,
     selector: &EntitySelector,
     origin: (f64, f64, f64),
 ) -> bool {
@@ -370,9 +495,8 @@ fn matches_region(
             let (low, high) = if delta < 0.0 { (delta, 0.0) } else { (0.0, delta) };
             value >= base + low && value <= base + high + 1.0
         };
-        if !axis(candidate.position.x, origin.0, dx)
-            || !axis(candidate.position.y, origin.1, dy)
-            || !axis(candidate.position.z, origin.2, dz)
+        let position = candidate.position();
+        if !axis(position.x, origin.0, dx) || !axis(position.y, origin.1, dy) || !axis(position.z, origin.2, dz)
         {
             return false;
         }

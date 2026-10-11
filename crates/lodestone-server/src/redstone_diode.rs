@@ -81,22 +81,12 @@
 //! The real comparator's input-signal query additionally reads a
 //! two-away block's analog output signal (a hopper/chest's fill level)
 //! or an item frame's rotation, when the immediate target is itself a
-//! redstone conductor — the "comparator reads a hopper's contents"
-//! behaviour is the trap most
-//! likely to be skipped while looking done. It **is** skipped here, and
-//! explicitly, not silently: this module's real input-signal-query equivalent is
-//! [`crate::redstone::input_signal`], the same reduced function repeaters
-//! use, which has no block-entity or entity query reachable from
-//! `crates/lodestone-server/src/redstone.rs` (`crate::block_entities`
-//! exists in this crate but nothing in this module's call chain threads a
-//! `BlockEntityRegistry` through it — doing so is real, bounded future
-//! work, not a design dead end: the real comparator block entity would only need a
-//! banked-output-signal-shaped read from whatever container type sits at
-//! `target_pos.relative(facing)`). Every comparator circuit in this
-//! module's own tests reads only redstone-native inputs (dust, torches,
-//! other diodes) — container-facing comparators are a real, named,
-//! uncloseable-today gap, exactly like `crate::growth_tick`'s own
-//! tree-growth gap.
+//! redstone conductor. The item-frame half is implemented:
+//! [`crate::redstone::comparator_input_signal`] reads it through
+//! [`crate::redstone::RedstoneLookup::entity_analog_output`]. The container
+//! half is **not**: a hopper or chest's fill level needs a block-entity read
+//! of whatever sits at `target_pos.relative(facing)`, which no comparator
+//! query here does yet, so container-facing comparators remain a named gap.
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{

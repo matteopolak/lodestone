@@ -25,7 +25,7 @@ The cascade dust triggers is two layers deep: a wire's power change fans out thr
 
 Delay constants (live-oracle-measured): torch, comparator, observer 2 game ticks; repeater `2 * d` (2/4/6/8), same on both edges; observer pulse 2 ticks wide, starting on tick 2. A `powered=true` comparator does not lock a repeater by itself: a diode's lock contribution is its output signal (a comparator's stored analog output), so a freshly placed `comparator[powered=true]` has output 0 and locks nothing.
 
-Comparator analog output lives in the typed comparator block-entity sidecar, not a block-state property. The scheduled tick's reaction carries the new output through the world-tick commit, updates the sidecar and emits a block-entity-data effect with numeric `OutputSignal`; reads query the sidecar by position; chunk NBT saves and restores it; new sidecars start at 0.
+A comparator facing a conductor also reads an item frame hanging on that conductor's far face (`rotation + 1`, or 0 when empty) through `RedstoneLookup::entity_analog_output`; see [item-frames](./item-frames.md). Comparator analog output lives in the typed comparator block-entity sidecar, not a block-state property. The scheduled tick's reaction carries the new output through the world-tick commit, updates the sidecar and emits a block-entity-data effect with numeric `OutputSignal`; reads query the sidecar by position; chunk NBT saves and restores it; new sidecars start at 0.
 
 ### A partial state string was delivered as zero
 

@@ -380,7 +380,14 @@ impl<'w> MobSim<'w> {
             match effect.action {
                 WitherTickAction::None => {}
                 WitherTickAction::EmergeBlast(position) => {
-                    self.explode(position, pure::EMERGE_EXPLOSION_POWER, lodestone_entity::DamageFlags::default());
+                    let griefing = self.mob_griefing;
+                    self.explode_by(
+                        position,
+                        pure::EMERGE_EXPLOSION_POWER,
+                        lodestone_entity::DamageFlags::default(),
+                        true,
+                        griefing,
+                    );
                 }
                 WitherTickAction::FireSkull => self.maybe_fire_skull(effect.id),
             }

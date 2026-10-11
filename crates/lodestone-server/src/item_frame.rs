@@ -60,6 +60,20 @@ pub fn relative(pos: BlockPos, face: BlockFace) -> BlockPos {
     BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
 }
 
+/// The redstone direction of a facing.
+#[must_use]
+pub fn direction_of(face: BlockFace) -> crate::neighbor_update::Direction {
+    use crate::neighbor_update::Direction;
+    match face {
+        BlockFace::Down => Direction::Down,
+        BlockFace::Up => Direction::Up,
+        BlockFace::North => Direction::North,
+        BlockFace::South => Direction::South,
+        BlockFace::West => Direction::West,
+        BlockFace::East => Direction::East,
+    }
+}
+
 /// The wire and save value of a facing: down 0, up 1, north 2, south 3, west 4, east 5.
 #[must_use]
 pub fn data_3d(face: BlockFace) -> u8 {
@@ -358,5 +372,7 @@ pub(crate) fn publish_broken(
     forget_map(maps, broken.map);
 }
 
+#[cfg(test)]
+mod gap_tests;
 #[cfg(test)]
 mod tests;

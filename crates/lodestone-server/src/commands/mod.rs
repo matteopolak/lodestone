@@ -175,7 +175,8 @@ pub use registrar::{
     level_filter, level_permission,
 };
 pub use source::{
-    CommandSource, EntityAnchor, PlayerCandidate, SelectorError, SourceEntity, resolve_players,
+    CommandSource, CommandTarget, EntityAnchor, PlayerCandidate, SelectorError, SelectorSubject, SourceEntity,
+    WorldEntityCandidate, resolve_players, resolve_subjects,
 };
 
 use crate::command::{CommandCaller, CommandDispatch, CommandResponse};

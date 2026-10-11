@@ -295,6 +295,22 @@ impl<'w> MobSim<'w> {
     /// damage and is absent from the result — a wall genuinely shields it,
     /// this is not a distance cutoff.
     pub fn explode(&mut self, centre: Vec3, radius: f32, flags: DamageFlags) -> Vec<(i32, f32)> {
+        self.explode_by(centre, radius, flags, false, true)
+    }
+
+    /// [`explode`](Self::explode) saying who caused the blast and whether it
+    /// breaks terrain, which decide whether item frames take it: a mob's blast
+    /// is refused them while mob griefing is off, and any blast that breaks
+    /// no terrain is too.
+    pub(crate) fn explode_by(
+        &mut self,
+        centre: Vec3,
+        radius: f32,
+        flags: DamageFlags,
+        by_mob: bool,
+        destroys_blocks: bool,
+    ) -> Vec<(i32, f32)> {
+        self.blast_frames(centre, radius, by_mob, destroys_blocks);
         let mut dealt = Vec::new();
         for m in &mut self.mobs {
             let shape = m.shape();

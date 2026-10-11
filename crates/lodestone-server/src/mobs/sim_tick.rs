@@ -992,7 +992,8 @@ impl<'w> MobSim<'w> {
         // blast damage. This keeps self-removal independent of whether terrain
         // shields the mob from its own blast.
         for (id, pos) in detonations {
-            self.explode(pos, CREEPER_EXPLOSION_RADIUS, DamageFlags::default());
+            let griefing = self.mob_griefing;
+            self.explode_by(pos, CREEPER_EXPLOSION_RADIUS, DamageFlags::default(), true, griefing);
             self.mobs.retain(|m| m.id != id);
             // Record the detonation separately from damage so a connected client
             // can receive the explosion event (particle and sound handling) even

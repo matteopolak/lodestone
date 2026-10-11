@@ -476,7 +476,9 @@ pub(crate) use falling_blocks::merge_falling_block_tick_effect_batches;
 mod vehicles;
 mod cushion;
 mod item_frame;
-pub use item_frame::{FrameBroken, FrameHit, FrameInteraction, FramedMapRef};
+pub use item_frame::{
+    FrameBroken, FrameDamage, FrameHit, FrameInteraction, FrameSignal, FramedMapRef,
+};
 
 // No re-export: every `impl MobSim` method in each is already `pub`. See
 // `mobs::dragon`/`mobs::end_crystal`'s own module docs for the pure
@@ -2739,6 +2741,14 @@ pub struct MobSim<'w> {
     /// Cushions a bolt broke this tick, awaiting the driver's sound and
     /// particles. Drained by [`take_lightning_broken_cushions`](Self::take_lightning_broken_cushions).
     pending_lightning_cushions: Vec<cushion::CushionBroken>,
+    /// What damage that is not a player's swing did to item frames, awaiting
+    /// the driver's sounds and map markers. Drained by
+    /// [`take_frame_events`](Self::take_frame_events).
+    pending_frame_events: Vec<FrameHit>,
+    /// Frames whose comparator output may have changed (spawned, item or
+    /// rotation changed, removed), awaiting the driver. Drained by
+    /// [`take_frame_signal_changes`](Self::take_frame_signal_changes).
+    frame_signal_dirty: Vec<FrameSignal>,
     /// Every projectile-vs-block impact this tick's
     /// [`resolve_projectile_impacts`](Self::resolve_projectile_impacts) found,
     /// awaiting the driver — see [`ProjectileBlockHit`]'s own doc for why this
@@ -2942,6 +2952,8 @@ struct TrackedFrame {
     invisible: bool,
     /// A fixed frame cannot be used, hit or broken by survival players.
     fixed: bool,
+    /// An invulnerable frame shrugs off every damage source except a creative player's.
+    invulnerable: bool,
     /// Ticks since the last support check.
     ticks_since_check: u32,
 }

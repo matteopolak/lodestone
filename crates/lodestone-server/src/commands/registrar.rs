@@ -601,6 +601,46 @@ impl<'a> Ctx<'a> {
             &|holder| teams.team_of(holder),
         )
     }
+
+    /// [`resolve`](Self::resolve) for a selector that reaches entities: the
+    /// players plus the world's entities the mob simulation can name (item
+    /// frames so far), narrowed and ordered together so `limit` and `sort`
+    /// span both.
+    ///
+    /// # Errors
+    ///
+    /// [`SelectorError`], as [`resolve`](Self::resolve).
+    pub fn resolve_targets(
+        &self,
+        selector: &lodestone_command_mc::EntitySelector,
+    ) -> Result<Vec<super::source::CommandTarget>, SelectorError> {
+        use super::source::{CommandTarget, WorldEntityCandidate};
+        let mut candidates: Vec<CommandTarget> =
+            self.world.players.iter().cloned().map(CommandTarget::Player).collect();
+        if selector.includes_entities
+            && let Some(mobs) = self.world.mobs
+        {
+            candidates.extend(mobs.with(|sim| sim.frame_command_entities()).into_iter().map(|e| {
+                CommandTarget::World(WorldEntityCandidate {
+                    uuid: e.uuid,
+                    entity_id: e.entity_id,
+                    entity_type: e.entity_type.to_string(),
+                    position: e.position,
+                })
+            }));
+        }
+        let scoreboard = self.world.state.scoreboard();
+        let teams = self.world.state.team();
+        let shuffle = super::source::seeded_shuffle(self.world.state.tick_time().game_time as u64);
+        super::source::resolve_subjects(
+            selector,
+            &self.source,
+            &candidates,
+            &shuffle,
+            &|holder, objective| scoreboard.get_score(holder, objective).ok(),
+            &|holder| teams.team_of(holder),
+        )
+    }
 }
 
 /// Builds a [`super::ServerCommands`]' tree, executors, modifiers and wire

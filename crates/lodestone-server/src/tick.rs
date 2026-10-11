@@ -1119,6 +1119,57 @@ impl TickDriver {
 /// guard in spirit if not in configurability.
 const MAX_COMMAND_CHAIN_LENGTH: u32 = 65_536;
 
+/// Tells every comparator that reads the cell `cell`, directly or through one
+/// conductor, to look at its input again: the horizontal neighbours the
+/// reference notifies when an entity-backed output changes.
+fn recheck_comparators_around<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
+    world: &dyn ChunkSource,
+    block_ticks: &mut Q,
+    game_tick: u64,
+    block_entities: &BlockEntityHandle,
+    cell: BlockPos,
+) {
+    use crate::neighbor_update::Direction;
+    for direction in [Direction::North, Direction::South, Direction::West, Direction::East] {
+        let near = direction.relative(cell);
+        let Some(state) = resident_tick_state_id(world, near.x, near.y, near.z) else {
+            continue;
+        };
+        let comparator = if crate::redstone::is_comparator(state) {
+            near
+        } else if crate::redstone::is_redstone_conductor(state) {
+            let far = direction.relative(near);
+            match resident_tick_state_id(world, far.x, far.y, far.z) {
+                Some(state) if crate::redstone::is_comparator(state) => far,
+                _ => continue,
+            }
+        } else {
+            continue;
+        };
+        if !resident_tick_footprint(world, comparator.x, comparator.z, 1) {
+            continue;
+        }
+        let (cx, cz) = (comparator.x.div_euclid(16), comparator.z.div_euclid(16));
+        let Some(mut column) = resident_tick_column(world, cx, cz) else {
+            continue;
+        };
+        if comparator.y < column.min_y || comparator.y >= column.min_y + column.height {
+            continue;
+        }
+        let resident = ResidentTickSource::new(world);
+        crate::random_tick::notify_block(
+            &mut column,
+            cx * 16,
+            cz * 16,
+            &resident,
+            comparator,
+            block_ticks,
+            game_tick,
+            Some(block_entities),
+        );
+    }
+}
+
 /// Resident read/write boundary supplied to tick-owned callbacks. Command
 /// predicates and cross-column callbacks can ask for arbitrary block or biome
 /// cells, so the caller cannot pre-compute their footprint. This wrapper records a cold read and supplies
@@ -4768,6 +4819,59 @@ async fn run_tick_loop_with_weather_impl<W>(
             });
             for frame in broken {
                 crate::item_frame::publish_broken(&block_tick_out, world_state.maps(), frame);
+            }
+        }
+
+        // A frame standing in fire is hurt every tick, so its item pops and the
+        // next tick the frame goes.
+        let burning_frames = mobs.with(|sim| {
+            sim.plan_frame_fire(&|x, y, z| frame_world.block_state_id(x, y, z))
+        });
+        if !frame_world.had_cold_read() {
+            for id in burning_frames {
+                mobs.with(|sim| sim.hurt_frame_with(id, crate::mobs::FrameDamage::Fire));
+            }
+        }
+        // What projectiles, blasts and fire did to frames: sounds and map markers.
+        for hit in mobs.with(MobSim::take_frame_events) {
+            match hit {
+                crate::mobs::FrameHit::Ignored => {}
+                crate::mobs::FrameHit::ItemPopped { glow, centre, map } => {
+                    crate::item_frame::publish_sound(
+                        &block_tick_out,
+                        crate::item_frame::FrameSound::RemoveItem,
+                        glow,
+                        centre,
+                    );
+                    crate::item_frame::forget_map(world_state.maps(), map);
+                }
+                crate::mobs::FrameHit::Broken(broken) => {
+                    crate::item_frame::publish_broken(&block_tick_out, world_state.maps(), broken);
+                }
+            }
+        }
+        // A frame's item or rotation is a comparator input: publish the new
+        // outputs, then wake the comparators that read them.
+        let frame_signals = mobs.with(MobSim::take_frame_signal_changes);
+        if !frame_signals.is_empty() {
+            block_entities.with(|registry| {
+                for signal in &frame_signals {
+                    registry.publish_entity_analog(
+                        signal.entity_id,
+                        signal.output.map(|strength| {
+                            (signal.cell, crate::item_frame::direction_of(signal.facing), strength)
+                        }),
+                    );
+                }
+            });
+            for signal in &frame_signals {
+                recheck_comparators_around(
+                    &*world,
+                    block_ticks,
+                    game_tick,
+                    &block_entities,
+                    signal.cell,
+                );
             }
         }
 

@@ -113,6 +113,28 @@ struct PotionImpact {
     margin: f64,
 }
 
+/// Whether a projectile of this registry path hurts the entity it strikes,
+/// whatever damage that comes to. Potions and the other carriers only act where
+/// they land.
+fn hurts_on_direct_hit(path: &str) -> bool {
+    matches!(
+        path,
+        "arrow"
+            | "spectral_arrow"
+            | "trident"
+            | "snowball"
+            | "egg"
+            | "ender_pearl"
+            | "fireball"
+            | "small_fireball"
+            | "wither_skull"
+            | "wind_charge"
+            | "breeze_wind_charge"
+            | "llama_spit"
+            | "shulker_bullet"
+    )
+}
+
 /// The `minecraft:damage_type` a projectile's impact deals, from the
 /// projectile's registry path.
 ///
@@ -634,6 +656,22 @@ impl<'w> MobSim<'w> {
                 }
             }
 
+            // Item frames are targets too: they sit in the open cell in front of
+            // their wall, so the sweep reaches one before the wall behind it.
+            for (&id, frame) in &self.frames {
+                if Some(id) == owner {
+                    continue;
+                }
+                let bb = frame.bounding_box();
+                let min = Vec3::new(bb.min[0] - margin, bb.min[1] - margin, bb.min[2] - margin);
+                let max = Vec3::new(bb.max[0] + margin, bb.max[1] + margin, bb.max[2] + margin);
+                if let Some(t) = lodestone_entity::projectile::clip_aabb(from, delta, min, max)
+                    && nearest.is_none_or(|(best, _)| t < best)
+                {
+                    nearest = Some((t, id));
+                }
+            }
+
             let block_t = first_solid_along(self.world, from, delta);
             match (nearest, block_t) {
                 (Some((entity_t, target)), block) if block.is_none_or(|b| entity_t <= b) => {
@@ -743,13 +781,14 @@ impl<'w> MobSim<'w> {
         // that finishes off an already-hit mob still drops loot through the
         // shared reap below. No source exemption — see `mobs::wither`'s own
         // module doc for why.
+        let griefing = self.mob_griefing;
         for &centre in &wither_skull_blasts {
-            self.explode(centre, crate::wither::SKULL_EXPLOSION_POWER, DamageFlags::default());
+            self.explode_by(centre, crate::wither::SKULL_EXPLOSION_POWER, DamageFlags::default(), true, griefing);
         }
         // The large-fireball projectile's unconditional blast, with the same ordering
         // reasoning as the wither skull's just above.
         for &centre in &fireball_blasts {
-            self.explode(centre, GHAST_FIREBALL_EXPLOSION_POWER, DamageFlags::default());
+            self.explode_by(centre, GHAST_FIREBALL_EXPLOSION_POWER, DamageFlags::default(), true, griefing);
         }
         // Through the shared reaper, so an arrow kill drops the same loot a melee
         // kill does — the same argument `attack`'s own killing blow makes.
@@ -761,6 +800,17 @@ impl<'w> MobSim<'w> {
     /// [`SimMob::apply_damage`] funnel every other source uses, plus the
     /// retaliation record and the hurt sound.
     fn resolve_projectile_hit(&mut self, hit: &ProjectileHit) {
+        // A frame takes the hit by what the projectile is, not by its damage:
+        // a snowball deals none and still knocks the item out.
+        if self.frames.contains_key(&hit.target) {
+            if hurts_on_direct_hit(&hit.entity_type) {
+                let by_mob = hit
+                    .owner
+                    .is_some_and(|owner| self.get(owner).is_some() || self.withers.contains_key(&owner));
+                self.hurt_frame_with(hit.target, super::FrameDamage::Projectile { by_mob });
+            }
+            return;
+        }
         let mut effect =
             lodestone_entity::projectile::impact_effect(&hit.entity_type, hit.speed);
         // A snowball deals `3` damage to a blaze-type target — the one

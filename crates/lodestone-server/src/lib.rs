@@ -110,6 +110,7 @@ mod advancements;
 pub mod beacon;
 mod block_breaking;
 mod block_entities;
+pub(crate) mod entity_analog;
 /// Rolling a broken block's loot table and popping the result as item entities
 /// — the join between [`loot`],
 /// [`MobSim::spawn_item`] and `server`'s block-break arm.

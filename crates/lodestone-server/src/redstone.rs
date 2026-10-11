@@ -124,6 +124,14 @@ pub type WorldState = StateId;
 pub trait RedstoneLookup {
     fn state_at(&self, pos: BlockPos) -> WorldState;
     fn comparator_output(&self, pos: BlockPos) -> u8;
+
+    /// The analog output of an entity-backed source (an item frame) sitting in
+    /// `cell` and pointing `facing`, for a comparator facing the same way.
+    /// `None` when there is no single such source. A lookup with no entity
+    /// table has none.
+    fn entity_analog_output(&self, _cell: BlockPos, _facing: Direction) -> Option<u8> {
+        None
+    }
 }
 
 impl<F> RedstoneLookup for F
@@ -1052,14 +1060,11 @@ where
         .max(control_input_signal(lookup, ccw.relative(pos), ccw, side_input_diodes_only))
 }
 
-/// Vanilla's own diode-block input-signal getter, reduced: vanilla additionally
-/// reads a two-away block's analog output signal (a hopper/chest's fill
-/// level via its own get-analog-output-signal routine) and an item frame's
-/// rotation when the immediate target is a redstone conductor — this crate
-/// has no block-entity/analog-output query reachable from this module (see
-/// `crate::redstone_diode`'s own doc comment for the full citation of this
-/// exact trap). What *is* implemented is the base case every
-/// circuit not touching a container needs: the direct signal facing into the
+/// Vanilla's own diode-block input-signal getter, reduced: the comparator's
+/// extra reads (a block's analog output, an item frame's rotation) are
+/// [`comparator_input_signal`]'s, and a container's fill level is not read at
+/// all (see `crate::redstone_diode`). What this implements is the base case
+/// every circuit needs: the direct signal facing into the
 /// diode, maxed with an immediately-adjacent wire's own power (vanilla's own
 /// belt-and-suspenders read, since `getSignal` for a wire in a
 /// horizontal direction already returns the same value).
@@ -1080,8 +1085,9 @@ where
 /// The analog output signal a block reports to a comparator facing it, for the
 /// blocks whose signal is a function of their own state. A respawn anchor
 /// reports its charge level scaled to the 0..=15 range: 0, 3, 7, 11 or 15 for
-/// 0..=4 charges. Container and item-frame signals need a block-entity or
-/// entity read and are not modelled; see `crate::redstone_diode`.
+/// 0..=4 charges. A container's signal needs a block-entity read and is not
+/// modelled (see `crate::redstone_diode`); an item frame's is an entity read,
+/// through [`RedstoneLookup::entity_analog_output`].
 #[must_use]
 pub fn state_analog_output(state: StateId) -> Option<u8> {
     crate::respawn_anchor::is_anchor(state).then(|| {
@@ -1091,15 +1097,31 @@ pub fn state_analog_output(state: StateId) -> Option<u8> {
 }
 
 /// A comparator's input signal: the diode input, replaced by the analog output
-/// of the block it faces when that block has one.
+/// of the block it faces when that block has one. When it faces a redstone
+/// conductor that is not strongly powered, the comparator looks one block
+/// further for an entity-backed source in that cell pointing away from it (an
+/// item frame hung on the conductor's far face) or a block with an analog
+/// output, and the larger of the two replaces the input, even at zero.
 #[must_use]
 pub fn comparator_input_signal<L>(lookup: &L, pos: BlockPos, facing: Direction) -> u8
 where
     L: RedstoneLookup + ?Sized,
 {
-    match state_analog_output(lookup.state_at(facing.relative(pos))) {
-        Some(output) => output,
-        None => input_signal(lookup, pos, facing),
+    let target_pos = facing.relative(pos);
+    let target = lookup.state_at(target_pos);
+    if let Some(output) = state_analog_output(target) {
+        return output;
+    }
+    let input = input_signal(lookup, pos, facing);
+    if input >= 15 || !is_redstone_conductor(target) {
+        return input;
+    }
+    let far = facing.relative(target_pos);
+    let entity = lookup.entity_analog_output(far, facing);
+    let block = state_analog_output(lookup.state_at(far));
+    match (entity, block) {
+        (None, None) => input,
+        (a, b) => a.unwrap_or(0).max(b.unwrap_or(0)),
     }
 }
 

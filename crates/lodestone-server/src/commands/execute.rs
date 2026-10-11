@@ -708,7 +708,7 @@ fn register_summon(registrar: &mut Registrar, execute: NodeId) {
         // *current* source's position, honouring whatever `positioned`/`at`
         // already rewrote earlier in this same chain.
         let pos = base.position;
-        let new_entity = super::summon::spawn_entity(ctx, &entity, pos)?;
+        let new_entity = super::summon::spawn_entity(ctx, &entity, pos, None)?;
         let mut next = base;
         next.name = new_entity.username.clone();
         next.entity = Some(new_entity);

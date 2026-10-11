@@ -13,9 +13,17 @@
 //!
 //! * [`MobSim::interact_frame`]: an empty frame takes one held item; a filled
 //!   one turns its item an eighth. A fixed frame ignores both.
-//! * [`MobSim::hurt_frame`]: a hit with an item in the frame pops the item
-//!   (frame stays); a hit on an empty frame breaks it. A fixed frame only
-//!   yields to a creative player. Creative breakers drop nothing.
+//! * [`MobSim::hurt_frame_with`]: damage from a [`FrameDamage`] source. A hit
+//!   with an item in the frame pops the item (frame stays); a hit on an empty
+//!   frame breaks it; an explosion breaks it either way. A fixed frame only
+//!   yields to a creative player, an invulnerable one likewise, and a mob's
+//!   damage is refused while mob griefing is off. Creative breakers drop
+//!   nothing. Projectiles, explosions and fire reach this through
+//!   `resolve_projectile_impacts`, `explode` and the tick driver, and leave
+//!   their sounds in [`MobSim::take_frame_events`].
+//! * Every change to a frame's item, rotation or existence is queued for
+//!   [`MobSim::take_frame_signal_changes`], which the driver publishes as the
+//!   comparator output of an entity-backed source.
 //! * Every 101st tick [`MobSim::plan_frame_checks`] reports frames that no
 //!   longer survive; the tick driver breaks them once its world read was complete.
 //! * Persistence is `minecraft:item_frame` / `minecraft:glow_item_frame`
@@ -100,6 +108,65 @@ pub enum FrameHit {
     Broken(FrameBroken),
 }
 
+/// What is hurting a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameDamage {
+    /// A player's swing; a creative one drops nothing and breaks fixed frames.
+    Player {
+        /// Whether the player is in creative mode.
+        creative: bool,
+    },
+    /// A projectile that hurts what it strikes.
+    Projectile {
+        /// Whether a mob fired it.
+        by_mob: bool,
+    },
+    /// An explosion whose damage reaches blocklike entities.
+    Explosion {
+        /// Whether a mob caused it.
+        by_mob: bool,
+    },
+    /// Standing in fire.
+    Fire,
+}
+
+impl FrameDamage {
+    fn creative(self) -> bool {
+        matches!(self, Self::Player { creative: true })
+    }
+
+    fn by_mob(self) -> bool {
+        matches!(self, Self::Projectile { by_mob: true } | Self::Explosion { by_mob: true })
+    }
+}
+
+/// A frame's comparator output after a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameSignal {
+    /// The frame's network entity id.
+    pub entity_id: i32,
+    /// The cell it hangs in.
+    pub cell: BlockPos,
+    /// Its facing.
+    pub facing: BlockFace,
+    /// The signal strength: 0 when empty, the rotation plus one when holding an
+    /// item. `None` once the frame is gone.
+    pub output: Option<u8>,
+}
+
+/// A frame as `/kill` and entity selectors see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameCommandEntity {
+    /// The network entity id.
+    pub entity_id: i32,
+    /// The persistent uuid.
+    pub uuid: Uuid,
+    /// `minecraft:item_frame` or `minecraft:glow_item_frame`.
+    pub entity_type: ResourceKey,
+    /// The box centre.
+    pub position: Vec3,
+}
+
 /// A removed frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameBroken {
@@ -128,9 +195,11 @@ impl<'w> MobSim<'w> {
                 drop_chance: 1.0,
                 invisible: false,
                 fixed: false,
+                invulnerable: false,
                 ticks_since_check: 0,
             },
         );
+        self.note_frame_signal(id);
         id
     }
 
@@ -199,6 +268,7 @@ impl<'w> MobSim<'w> {
         let (glow, centre) = (frame.glow, frame.centre());
         if frame.item.is_some() {
             frame.rotation = (frame.rotation + 1) % NUM_ROTATIONS;
+            self.note_frame_signal(id);
             return FrameInteraction::Rotated { glow, centre };
         }
         let Some(held) = held.filter(|stack| stack.count > 0) else {
@@ -210,33 +280,125 @@ impl<'w> MobSim<'w> {
         let mut single = held.clone();
         single.count = 1;
         frame.item = Some(single);
+        self.note_frame_signal(id);
         FrameInteraction::Inserted { glow, centre }
     }
 
     /// A player hits frame `id`; `creative` breakers drop nothing.
     pub fn hurt_frame(&mut self, id: i32, creative: bool) -> Option<FrameHit> {
+        self.hurt_frame_with(id, FrameDamage::Player { creative })
+    }
+
+    /// Damages frame `id`. A non-player source leaves its outcome in
+    /// [`take_frame_events`](Self::take_frame_events) for the driver to sound;
+    /// the player's swing reports it to its own caller.
+    pub fn hurt_frame_with(&mut self, id: i32, damage: FrameDamage) -> Option<FrameHit> {
         let frame = self.frames.get(&id)?;
-        if frame.fixed {
-            return if creative { self.kill_frame(id, false).map(FrameHit::Broken) } else { Some(FrameHit::Ignored) };
+        let creative = damage.creative();
+        let hit = if frame.fixed && !creative {
+            FrameHit::Ignored
+        } else if frame.fixed {
+            self.kill_frame(id, false).map(FrameHit::Broken)?
+        } else if frame.invulnerable && !creative {
+            FrameHit::Ignored
+        } else if !self.mob_griefing && damage.by_mob() {
+            FrameHit::Ignored
+        } else if frame.item.is_none() || matches!(damage, FrameDamage::Explosion { .. }) {
+            self.kill_frame(id, !creative).map(FrameHit::Broken)?
+        } else {
+            let (glow, centre) = (frame.glow, frame.centre());
+            let map = frame.map_ref(id);
+            let drop_chance = frame.drop_chance;
+            let popped = self.frames.get_mut(&id).and_then(|f| f.item.take())?;
+            if !creative && self.drop_roll(drop_chance) {
+                let at = self.frames.get(&id).map(TrackedFrame::drop_position)?;
+                self.drop_frame_stack(&popped, at);
+            }
+            self.note_frame_signal(id);
+            FrameHit::ItemPopped { glow, centre, map }
+        };
+        if !matches!(damage, FrameDamage::Player { .. }) && hit != FrameHit::Ignored {
+            self.pending_frame_events.push(hit);
         }
-        if frame.item.is_none() {
-            return self.kill_frame(id, !creative).map(FrameHit::Broken);
+        Some(hit)
+    }
+
+    /// Drains what projectiles, explosions and fire did to frames since the
+    /// last call, for the driver to sound and to forget framed maps.
+    pub fn take_frame_events(&mut self) -> Vec<FrameHit> {
+        std::mem::take(&mut self.pending_frame_events)
+    }
+
+    /// Damages every frame inside `2 * radius` of an explosion at `centre`,
+    /// walls notwithstanding: the reference hurts blocklike entities by
+    /// distance alone. `destroys_blocks` is whether the blast breaks terrain;
+    /// with mob griefing off only such a blast reaches frames.
+    pub(crate) fn blast_frames(&mut self, centre: Vec3, radius: f32, by_mob: bool, destroys_blocks: bool) {
+        if radius < 1.0e-5 || !(self.mob_griefing || destroys_blocks) {
+            return;
         }
-        let (glow, centre) = (frame.glow, frame.centre());
-        let map = frame.map_ref(id);
-        let drop_chance = frame.drop_chance;
-        let popped = self.frames.get_mut(&id).and_then(|f| f.item.take())?;
-        if !creative && self.drop_roll(drop_chance) {
-            let at = self.frames.get(&id).map(TrackedFrame::drop_position)?;
-            self.drop_frame_stack(&popped, at);
+        let reach = f64::from(radius) * 2.0;
+        let mut ids: Vec<i32> = self
+            .frames
+            .iter()
+            .filter(|(_, f)| (f.centre() - centre).length() <= reach)
+            .map(|(&id, _)| id)
+            .collect();
+        ids.sort_unstable();
+        for id in ids {
+            self.hurt_frame_with(id, FrameDamage::Explosion { by_mob });
         }
-        Some(FrameHit::ItemPopped { glow, centre, map })
+    }
+
+    /// The frames whose cell holds a fire, for the driver to burn once it
+    /// knows the world read behind `state` was complete.
+    #[must_use]
+    pub(crate) fn plan_frame_fire(&self, state: &dyn Fn(i32, i32, i32) -> StateId) -> Vec<i32> {
+        let mut ids: Vec<i32> = self
+            .frames
+            .iter()
+            .filter(|(_, f)| {
+                matches!(
+                    state(f.cell.x, f.cell.y, f.cell.z).block(),
+                    lodestone_data::block::Block::Fire | lodestone_data::block::Block::SoulFire
+                )
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn note_frame_signal(&mut self, id: i32) {
+        if let Some(f) = self.frames.get(&id) {
+            let output = Some(f.item.as_ref().map_or(0, |_| f.rotation % NUM_ROTATIONS + 1));
+            self.frame_signal_dirty.push(FrameSignal { entity_id: id, cell: f.cell, facing: f.facing, output });
+        }
+    }
+
+    /// Drains the frames whose comparator output changed since the last call,
+    /// the latest state of each.
+    pub fn take_frame_signal_changes(&mut self) -> Vec<FrameSignal> {
+        let mut latest: Vec<FrameSignal> = Vec::new();
+        for change in std::mem::take(&mut self.frame_signal_dirty).into_iter().rev() {
+            if !latest.iter().any(|seen| seen.entity_id == change.entity_id) {
+                latest.push(change);
+            }
+        }
+        latest.reverse();
+        latest
     }
 
     /// Removes frame `id`; with `drops` its item and the framed stack drop.
     /// A fixed frame drops nothing either way.
     pub fn kill_frame(&mut self, id: i32, drops: bool) -> Option<FrameBroken> {
         let frame = self.frames.remove(&id)?;
+        self.frame_signal_dirty.push(FrameSignal {
+            entity_id: id,
+            cell: frame.cell,
+            facing: frame.facing,
+            output: None,
+        });
         if drops && !frame.fixed {
             let at = frame.drop_position();
             self.drop_frame_stack(&ItemStack::new(item_frame::item_key(frame.glow), 1), at);
@@ -315,6 +477,7 @@ impl<'w> MobSim<'w> {
                         ("Facing".to_owned(), Nbt::Byte(item_frame::data_3d(f.facing) as i8)),
                         ("Invisible".to_owned(), Nbt::Byte(i8::from(f.invisible))),
                         ("Fixed".to_owned(), Nbt::Byte(i8::from(f.fixed))),
+                        ("Invulnerable".to_owned(), Nbt::Byte(i8::from(f.invulnerable))),
                         ("block_pos".to_owned(), Nbt::IntArray(vec![f.cell.x, f.cell.y, f.cell.z])),
                     ],
                 }
@@ -325,7 +488,7 @@ impl<'w> MobSim<'w> {
     /// Re-creates one saved frame with its stored uuid. A missing `Facing`
     /// reads as down, and a missing `block_pos` as the cell holding the saved
     /// box centre.
-    pub(super) fn restore_frame(&mut self, saved: &SavedEntity) {
+    pub(super) fn restore_frame(&mut self, saved: &SavedEntity) -> i32 {
         let field = |key: &str| saved.extra.iter().find(|(name, _)| name == key).map(|(_, value)| value);
         let flag = |key: &str| matches!(field(key), Some(Nbt::Byte(v)) if *v != 0);
         let facing = match field("Facing") {
@@ -339,7 +502,7 @@ impl<'w> MobSim<'w> {
         };
         let glow = saved.id.path() == "glow_item_frame";
         let id = self.spawn_item_frame(cell, facing, glow);
-        let Some(frame) = self.frames.get_mut(&id) else { return };
+        let Some(frame) = self.frames.get_mut(&id) else { return id };
         frame.uuid = saved.uuid;
         // The Anvil reader leaves a non-item entity's `Item` in the extra fields; the
         // native store hands it over as the record's own stack.
@@ -356,6 +519,44 @@ impl<'w> MobSim<'w> {
         }
         frame.invisible = flag("Invisible");
         frame.fixed = flag("Fixed");
+        frame.invulnerable = flag("Invulnerable");
+        self.note_frame_signal(id);
+        id
+    }
+
+    /// Creates a frame from a `/summon` record and returns its uuid and
+    /// network id. The record reads exactly as a saved one does: `Facing`,
+    /// `Item`, `ItemRotation`, `ItemDropChance`, `Invisible`, `Fixed`,
+    /// `Invulnerable` and `block_pos`, with a missing `Facing` hanging down.
+    /// Nothing checks the spot; the periodic support check breaks a frame
+    /// with no wall.
+    pub fn summon_item_frame(&mut self, saved: &SavedEntity) -> (Uuid, i32) {
+        let id = self.restore_frame(saved);
+        (saved.uuid, id)
+    }
+
+    /// Every frame as a command selector sees it: uuid, type, box centre.
+    #[must_use]
+    pub fn frame_command_entities(&self) -> Vec<FrameCommandEntity> {
+        let mut out: Vec<_> = self
+            .frames
+            .iter()
+            .map(|(&entity_id, f)| FrameCommandEntity {
+                entity_id,
+                uuid: f.uuid,
+                entity_type: item_frame::entity_key(f.glow),
+                position: f.centre(),
+            })
+            .collect();
+        out.sort_by_key(|e| e.entity_id);
+        out
+    }
+
+    /// Removes the frame with this uuid for `/kill`: nothing drops and a framed
+    /// map forgets its marker.
+    pub fn kill_frame_by_uuid(&mut self, uuid: Uuid) -> Option<FrameBroken> {
+        let id = self.frames.iter().find(|(_, f)| f.uuid == uuid).map(|(&id, _)| id)?;
+        self.kill_frame(id, false)
     }
 
     pub(super) fn push_frame_snapshots(&self, out: &mut Vec<EntitySnapshot>) {
@@ -407,6 +608,10 @@ impl<'w> MobSim<'w> {
 impl TrackedFrame {
     fn centre(&self) -> Vec3 {
         item_frame::centre(self.cell, self.facing)
+    }
+
+    pub(super) fn bounding_box(&self) -> crate::cushion::Aabb {
+        item_frame::bounding_box(self.cell, self.facing, self.item.as_ref().is_some_and(|s| s.components.map_id.is_some()))
     }
 
     fn drop_position(&self) -> Vec3 {

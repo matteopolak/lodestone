@@ -1462,6 +1462,9 @@ pub fn merge_tick_effect_batches(
 #[derive(Debug, Default)]
 pub struct BlockEntityRegistry {
     entities: HashMap<BlockPos, BlockEntity>,
+    /// Analog outputs of entities, read by comparators; never saved, as the
+    /// entities republish theirs on load.
+    entity_outputs: crate::entity_analog::EntityAnalogOutputs,
 }
 
 impl BlockEntityRegistry {
@@ -1562,6 +1565,22 @@ impl BlockEntityRegistry {
             }
         }
         out
+    }
+
+    /// The analog output of the entity-backed source a comparator facing
+    /// `facing` finds in `cell`.
+    #[must_use]
+    pub(crate) fn entity_analog_output(&self, cell: BlockPos, facing: crate::neighbor_update::Direction) -> Option<u8> {
+        self.entity_outputs.read(cell, facing)
+    }
+
+    /// Publishes (or with `None` removes) entity `id`'s analog output.
+    pub(crate) fn publish_entity_analog(
+        &mut self,
+        id: i32,
+        output: Option<(BlockPos, crate::neighbor_update::Direction, u8)>,
+    ) {
+        self.entity_outputs.publish(id, output);
     }
 
     #[must_use]

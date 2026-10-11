@@ -492,9 +492,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   slow tick phases.
 - [Item frames](./item-frames.md) — Item frames and glow item frames on the
   integrated server: placing a frame item, putting an item in the frame, turning it,
-  knocking it out, persistence, and the frame marker a framed filled map gains. Rules
-  live in `lodestone_server::item_frame` (pure) and `lodestone_server::mobs::MobSim`
-  (state, `mobs/item_frame.rs`); drawing is
+  knocking it out, damage from projectiles, blasts and fire, `/summon` and `/kill`,
+  the comparator signal, persistence, and the frame marker a framed filled map gains.
+  Rules live in `lodestone_server::item_frame` (pure) and
+  `lodestone_server::mobs::MobSim` (state, `mobs/item_frame.rs`); drawing is
   [filled-map-rendering](./filled-map-rendering.md) and the item-frame render path.
 - [Item save format](./item-save-format.md) — `lodestone_server::item_nbt` is the
   one save form of an item stack, `{id, count, components?}`, shared by container
