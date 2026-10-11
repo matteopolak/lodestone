@@ -2,18 +2,122 @@
 
 use super::*;
 
-/// This world's per-player `.dat` store, if it has one.
+/// This world's per-player record store: the directory its source carries on native, else the
+/// memory store the slot owns.
 ///
-/// One accessor rather than the same `world_registries().and_then(...)` chain at
-/// three call sites, because the failure mode of getting it wrong is invisible:
-/// a chain that returns `None` where a store exists produces a server that joins,
-/// plays and saves nothing, with no error. Keeping this lookup in one accessor
-/// makes the save-store dependency explicit at each call site.
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_data::PlayerDataStore> {
-    source
+/// One accessor rather than the same `world_registries().and_then(...)` chain at each call site,
+/// because the failure mode of getting it wrong is invisible: a chain that returns `None` where a
+/// store exists produces a server that joins, plays and saves nothing, with no error.
+pub(super) fn player_store<S: ChunkSource + ?Sized>(
+    source: &S,
+    live_save: &crate::live_save::LiveSaveSlot,
+) -> Option<crate::player_data::PlayerDataStore> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let directory = source
         .world_registries()
-        .and_then(|registries| registries.player_data)
+        .and_then(|registries| registries.player_data);
+    #[cfg(target_arch = "wasm32")]
+    let directory = {
+        let _ = source;
+        None
+    };
+    directory.or_else(|| live_save.memory_store())
+}
+
+/// A browser has no locator backend, so the type is uninhabited and no value of it exists.
+#[cfg(target_arch = "wasm32")]
+pub(super) enum NativePlayerSession {}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn persist_native_player(
+    _session: Option<&NativePlayerSession>,
+    _player_pos: Option<(f64, f64, f64)>,
+    _player_rot: Option<Rotation>,
+    _fallback: Vec3,
+    _dimension: crate::dimension::Dimension,
+    _game_mode: GameMode,
+    _vitals: &PlayerVitals,
+    _experience: &crate::experience::PlayerExperience,
+    _inventory: &PlayerInventory,
+) {
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn publish_native_player(
+    _session: Option<&NativePlayerSession>,
+    _live_save: &crate::live_save::LiveSaveSlot,
+    _player_pos: Option<(f64, f64, f64)>,
+    _player_rot: Option<Rotation>,
+    _fallback: Vec3,
+    _dimension: crate::dimension::Dimension,
+    _game_mode: GameMode,
+    _vitals: &PlayerVitals,
+    _experience: &crate::experience::PlayerExperience,
+    _inventory: &PlayerInventory,
+) {
+}
+
+/// What a returning player's saved record restores into a connection's locals.
+pub(super) struct RestoredPlayer {
+    pub preserved: Vec<(String, lodestone_core::Nbt)>,
+    pub vitals: PlayerVitals,
+    pub inventory: PlayerInventory,
+    pub experience: crate::experience::PlayerExperience,
+    pub rotation: Option<Rotation>,
+}
+
+/// The parts of a restore the native locator supplies; all `None` in a browser.
+#[derive(Default)]
+struct LocatorRestore {
+    vitals: Option<PlayerVitals>,
+    experience: Option<crate::experience::PlayerExperience>,
+    inventory: Option<PlayerInventory>,
+    rotation: Option<Rotation>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn locator_restore(native: Option<&NativePlayerSession>) -> LocatorRestore {
+    let runtime = native.and_then(NativePlayerSession::runtime);
+    LocatorRestore {
+        vitals: runtime.map(|r| PlayerVitals::restored(r.health, r.air_supply)),
+        experience: runtime.map(|r| r.experience),
+        inventory: native.and_then(NativePlayerSession::inventory),
+        rotation: native.and_then(NativePlayerSession::initial_rotation),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn locator_restore(native: Option<&NativePlayerSession>) -> LocatorRestore {
+    match native {
+        Some(session) => match *session {},
+        None => LocatorRestore::default(),
+    }
+}
+
+/// Restores from the complete record when there is one, else from the native locator's runtime
+/// state, else defaults. Fields the record models nothing of (hunger, the ender chest, the recipe
+/// book) ride in `preserved` so a save writes them back unchanged.
+pub(super) fn restore_player(
+    saved: Option<&crate::player_data::PlayerData>,
+    native: Option<&NativePlayerSession>,
+) -> RestoredPlayer {
+    let locator = locator_restore(native);
+    RestoredPlayer {
+        preserved: saved.map(|d| d.preserved.clone()).unwrap_or_default(),
+        vitals: saved
+            .map(|data| PlayerVitals::restored(data.health, data.air_supply))
+            .or(locator.vitals)
+            .unwrap_or_default(),
+        inventory: saved
+            .map(crate::player_data::PlayerData::to_inventory)
+            .or(locator.inventory)
+            .unwrap_or_default(),
+        experience: saved
+            .map(|data| data.experience)
+            .or(locator.experience)
+            .unwrap_or_default(),
+        rotation: locator.rotation,
+    }
 }
 
 /// The native half of one live connection's bounded player persistence.
@@ -320,7 +424,7 @@ pub(super) fn publish_native_player(
 /// are positions the server itself placed them at.
 ///
 /// A `None` store is a world with nothing to save into, and this is then a no-op
-/// rather than an error; that is the in-memory and browser case.
+/// rather than an error.
 ///
 /// Blocking (a gzip encode plus two renames, a few hundred bytes) and called
 /// from the connection task. Deliberately *not* `spawn_blocking`: it is orders of
@@ -343,7 +447,6 @@ pub(super) fn publish_native_player(
 /// dimension is not actually known. An ambiguous saved position cannot be
 /// recovered; falling back to the world spawn avoids trusting a coordinate
 /// whose dimension is unknown.
-#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn join_position_for_saved_player(
     saved: Option<&crate::player_data::PlayerData>,
     world_spawn: Vec3,
@@ -369,7 +472,6 @@ pub(super) fn join_position_for_saved_player(
 ///
 /// See [`persist_player`]'s own doc comment for why `player_pos` is an
 /// `Option` and `fallback` exists.
-#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn player_save_snapshot(
     player_pos: Option<(f64, f64, f64)>,
@@ -401,7 +503,6 @@ pub(super) fn player_save_snapshot(
     )
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn persist_player(
     store: Option<&crate::player_data::PlayerDataStore>,
@@ -437,7 +538,6 @@ pub(super) fn persist_player(
 /// in-memory only (no disk I/O), unlike [`persist_player`]: `serve_play`
 /// calls this once per iteration of its own `select!` loop, not only at the
 /// two deliberate save points.
-#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn live_publish_player(
     live_save: &crate::live_save::LiveSaveSlot,
@@ -453,6 +553,11 @@ pub(super) fn live_publish_player(
     preserved: &[(String, lodestone_core::Nbt)],
     dimension: crate::dimension::Dimension,
 ) {
+    // Only the native shutdown flush reads the mirror; the browser has no shutdown path, so the
+    // periodic save into the memory store is its only writer.
+    if cfg!(target_arch = "wasm32") {
+        return;
+    }
     let data = player_save_snapshot(
         player_pos, player_rot, fallback, vitals, game_mode, inventory, experience, preserved,
         dimension,

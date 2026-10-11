@@ -15,7 +15,7 @@ use lodestone_server::{
     EntitySnapshot, ExplosionFeed, MetadataField, MobHandle, MobSim, NoEntities,
     OnlineModeConfig, PluginChannelRegistry, ResourcePackPushFeed, ServerBound, ServerDirective,
     ServerError, ServerProtocol, TicketStoreHandle, WeatherEvent, WeatherFeed, access::AccessHandle,
-    serve_connection, serve_connection_with_mob_events, serve_connection_with_online_mode,
+    serve_connection, serve_connection_with_access_and_state, serve_connection_with_mob_events, serve_connection_with_online_mode,
     world_state::WorldStateHandle,
 };
 use std::str::FromStr;
@@ -104,6 +104,23 @@ const PONG_RESPONSE_S2C: i32 = 92;
 /// Stand-in reply to a server-originated control ping. Its only observable
 /// server effect is that the Play connection remains usable.
 const PONG_C2S: i32 = 93;
+
+/// Stand-in `system_chat`: the line as one string.
+const SYSTEM_CHAT_S2C: i32 = 94;
+/// Stand-in `animate`: an entity id and the action byte.
+const ANIMATE_S2C: i32 = 95;
+/// Stand-in `custom_payload`: the channel string and the raw bytes.
+const CUSTOM_PAYLOAD_S2C: i32 = 96;
+/// Stand-in `resource_pack_push`: the url string.
+const RESOURCE_PACK_PUSH_S2C: i32 = 97;
+/// Stand-in `chat`: the message string.
+const CHAT_C2S: i32 = 98;
+/// Stand-in `chat_command`: the command string without the slash.
+const CHAT_COMMAND_C2S: i32 = 99;
+/// Stand-in configuration-phase `custom_payload`: the channel string, then the raw bytes.
+const CUSTOM_PAYLOAD_C2S: i32 = 100;
+/// Stand-in `swing`: no payload, always the main hand.
+const SWING_C2S: i32 = 101;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
@@ -205,10 +222,14 @@ impl ServerProtocol for FakeProtocol {
             State::Login if packet_id == LOGIN_START => {
                 let mut r = Reader::new(payload);
                 let username = r.string(16).expect("username");
-                ServerBound::LoginStart {
-                    username,
-                    uuid: Uuid::nil(),
-                }
+                // Every login is `Uuid::nil()` except a `Peer…` name, which gets an identity of
+                // its own so two players can share one registry.
+                let uuid = if username.starts_with("Peer") {
+                    Uuid::from_u128(0x5eed_0000 + username.bytes().map(u128::from).sum::<u128>())
+                } else {
+                    Uuid::nil()
+                };
+                ServerBound::LoginStart { username, uuid }
             }
             State::Login if packet_id == LOGIN_ACKNOWLEDGED => ServerBound::LoginAcknowledged,
             State::Configuration if packet_id == FINISH_CONFIGURATION => {
@@ -342,6 +363,27 @@ impl ServerProtocol for FakeProtocol {
                 ServerBound::PingRequest {
                     time: r.i64().expect("ping time"),
                 }
+            }
+            State::Configuration if packet_id == CUSTOM_PAYLOAD_C2S => {
+                let mut r = Reader::new(payload);
+                let channel = r.string(64).expect("channel").parse().expect("valid channel");
+                ServerBound::CustomPayload { channel, data: r.remaining_bytes().to_vec() }
+            }
+            State::Play if packet_id == SWING_C2S => {
+                ServerBound::Swing { hand: lodestone_model::Hand::Main }
+            }
+            State::Play if packet_id == CHAT_C2S => {
+                let mut r = Reader::new(payload);
+                ServerBound::Chat {
+                    message: r.string(256).expect("chat message"),
+                    timestamp_millis: 0,
+                    salt: 0,
+                    signature: None,
+                }
+            }
+            State::Play if packet_id == CHAT_COMMAND_C2S => {
+                let mut r = Reader::new(payload);
+                ServerBound::ChatCommand { command: r.string(256).expect("command") }
             }
             State::Play if packet_id == PONG_C2S => {
                 let mut r = Reader::new(payload);
@@ -518,6 +560,32 @@ impl ServerProtocol for FakeProtocol {
             packet_id: GAME_RULE_VALUES_S2C,
             payload: w.as_slice().to_vec(),
         }
+    }
+
+    fn encode_system_chat(&self, message: &str) -> ServerDirective {
+        let mut w = Writer::default();
+        w.string(message);
+        ServerDirective::Send { packet_id: SYSTEM_CHAT_S2C, payload: w.as_slice().to_vec() }
+    }
+
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(entity_id);
+        w.u8(action);
+        ServerDirective::Send { packet_id: ANIMATE_S2C, payload: w.as_slice().to_vec() }
+    }
+
+    fn encode_custom_payload(&self, channel: &ResourceKey, data: &[u8]) -> ServerDirective {
+        let mut w = Writer::default();
+        w.string(&channel.to_string());
+        w.bytes(data);
+        ServerDirective::Send { packet_id: CUSTOM_PAYLOAD_S2C, payload: w.as_slice().to_vec() }
+    }
+
+    fn encode_resource_pack_push(&self, push: &lodestone_server::ResourcePackPush) -> ServerDirective {
+        let mut w = Writer::default();
+        w.string(push.url.as_str());
+        ServerDirective::Send { packet_id: RESOURCE_PACK_PUSH_S2C, payload: w.as_slice().to_vec() }
     }
 
     /// Mirrors the real v770 wire shape (a byte event plus a float parameter)

@@ -11,7 +11,6 @@ use super::*;
 /// tick loop's own cadence (`block_entities.rs`'s `BLOCK_ENTITY_TICK_INTERVAL`)
 /// so a change is visible within one real tick of it happening, not only the
 /// next time the client happens to send a packet.
-#[cfg(not(target_arch = "wasm32"))]
 pub(super) const CONTAINER_SYNC_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Which block-entity container (if any) this connection currently has open:

@@ -252,7 +252,7 @@ mod tests {
                     .and_then(|inventory| inventory.native(4))
                     .cloned(),
             );
-            assert!(anvil.path_for(uuid).is_file());
+            assert!(anvil.path_for(uuid).expect("directory-backed").is_file());
             assert_ne!(locator.dimension, BuiltinDimension::Unspecified);
         }
         drop(storage);

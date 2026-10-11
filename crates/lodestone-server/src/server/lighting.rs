@@ -467,12 +467,6 @@ impl PendingRelights {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) struct DetachedRelight {
-    pub(super) batch: RelightBatch,
-    pub(super) handle: crate::worldgen_dispatch::DispatchHandle<RelightBatchOutcome>,
-}
-
 pub(super) fn relight_transaction_outcome(error: crate::chunk::ResidentLightTransactionError) -> RelightBatchOutcome {
     use crate::chunk::ResidentLightTransactionError;
     match error {
@@ -508,12 +502,6 @@ pub(super) fn compute_detached_relight_batch(
         Ok(()) => RelightBatchOutcome::Committed(lights),
         Err(error) => relight_transaction_outcome(error),
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) struct CooperativeRelight<'a> {
-    pub(super) batch: RelightBatch,
-    pub(super) future: std::pin::Pin<Box<dyn std::future::Future<Output = RelightBatchOutcome> + 'a>>,
 }
 
 #[cfg(target_arch = "wasm32")]

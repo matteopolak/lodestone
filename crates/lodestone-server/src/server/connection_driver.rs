@@ -441,8 +441,7 @@ where
                 // An in-memory world answers `None` and every existing caller
                 // therefore behaves exactly as before.
                 let home_source = source;
-                #[cfg(not(target_arch = "wasm32"))]
-                let saved_player = player_store(source.get()).and_then(|store| {
+                let saved_player = player_store(source.get(), live_save).and_then(|store| {
                     match store.read(login_uuid.unwrap_or_default()) {
                         Ok(data) => data,
                         // Logged, never swallowed. A save we cannot read is not a
@@ -460,8 +459,6 @@ where
                         }
                     }
                 });
-                #[cfg(target_arch = "wasm32")]
-                let saved_player: Option<()> = None;
                 #[cfg(not(target_arch = "wasm32"))]
                 let mut native_player = NativePlayerSession::load(
                     source.get(),
@@ -491,14 +488,20 @@ where
                 // would respawn a dead player back where they died. See
                 // `join_position_for_saved_player`'s own doc comment for why a
                 // saved position is not always trusted verbatim.
-                #[cfg(not(target_arch = "wasm32"))]
                 let join_pos = {
                     let anvil_pos =
                         join_position_for_saved_player(saved_player.as_ref(), spawn_position);
-                    let candidate = native_player
-                        .as_ref()
-                        .map_or(anvil_pos, |native| native.join_position(anvil_pos));
-                    if saved_player.is_some() || native_player.is_some() {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let (candidate, has_locator, keeps_home_terrain) = (
+                        native_player
+                            .as_ref()
+                            .map_or(anvil_pos, |native| native.join_position(anvil_pos)),
+                        native_player.is_some(),
+                        restored_dimension_source.is_none(),
+                    );
+                    #[cfg(target_arch = "wasm32")]
+                    let (candidate, has_locator, keeps_home_terrain) = (anvil_pos, false, true);
+                    if saved_player.is_some() || has_locator {
                         // A restored Overworld position may have been written by
                         // an older session before terrain clearance was enforced.
                         // Re-read the live source before trusting it; a saved
@@ -513,7 +516,7 @@ where
                                 1,
                             ))
                             .await?;
-                        if restored_dimension_source.is_none()
+                        if keeps_home_terrain
                             && !crate::world_spawn::is_spawn_position_clear(source.get(), candidate)
                         {
                             tracing::warn!(
@@ -529,21 +532,20 @@ where
                         spawn_position
                     }
                 };
-                #[cfg(target_arch = "wasm32")]
-                let join_pos = spawn_position;
                 // Vanilla's own player-game-type field, restored — a player who typed
                 // `/gamemode survival` and quit comes back in survival. Shadowed
                 // rather than assigned so a world with no save keeps the mode the
                 // host opened with.
                 #[cfg(not(target_arch = "wasm32"))]
+                let locator_game_mode = native_player
+                    .as_ref()
+                    .and_then(NativePlayerSession::game_mode);
+                #[cfg(target_arch = "wasm32")]
+                let locator_game_mode: Option<GameMode> = None;
                 let game_mode = saved_player
                     .as_ref()
                     .and_then(|data| data.game_mode)
-                    .or_else(|| {
-                        native_player
-                            .as_ref()
-                            .and_then(NativePlayerSession::game_mode)
-                    })
+                    .or(locator_game_mode)
                     .unwrap_or(game_mode);
 
                 state = State::Play;
@@ -1099,6 +1101,8 @@ where
                     live_save,
                     #[cfg(not(target_arch = "wasm32"))]
                     native_player,
+                    #[cfg(target_arch = "wasm32")]
+                    None,
                 ));
                 return service.run(play).await;
             }

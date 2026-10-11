@@ -820,7 +820,7 @@ fn player_unknown_component_refuses_save_before_replacing_previous_file() {
     store
         .write(uuid, &PlayerData::default())
         .expect("write a valid previous player file");
-    let path = store.path_for(uuid);
+    let path = store.path_for(uuid).expect("directory-backed");
     let previous = std::fs::read(&path).expect("read previous player file");
     assert!(
         store.write(uuid, &data).is_err(),
@@ -890,7 +890,7 @@ fn player_item_custom_data_invalid_save_preserves_the_previous_file() {
         },
     });
     store.write(uuid, &valid).expect("valid custom data saves");
-    let saved_root = lodestone_anvil::player_dat::read_from_file(&store.path_for(uuid))
+    let saved_root = lodestone_anvil::player_dat::read_from_file(&store.path_for(uuid).expect("directory-backed"))
         .expect("read the saved NBT")
         .expect("saved player exists");
     let lodestone_core::Nbt::Compound(root_fields) = saved_root else {

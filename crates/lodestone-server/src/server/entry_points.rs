@@ -164,6 +164,61 @@ where
     .await
 }
 
+/// [`serve_connection`] against a caller-owned world state and player-save slot, so the caller can
+/// observe the live record the loop saves (into the slot's memory store when the source has no
+/// directory) and drive the world's shared feeds.
+///
+/// # Errors
+///
+/// As [`serve_connection`].
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_live_save<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    world: &crate::world_state::WorldStateHandle,
+    block_entities: &BlockEntityHandle,
+    live_save: &crate::live_save::LiveSaveSlot,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Borrowed(source),
+        entities,
+        view_radius,
+        view_radius,
+        block_entities,
+        &MobHandle::default(),
+        &TicketStoreHandle::default(),
+        &BlockTickFeed::default(),
+        &ExplosionFeed::default(),
+        &WeatherFeed::default(),
+        &CommandDispatch::none(),
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        &PluginChannelRegistry::default(),
+        world,
+        live_save,
+        // The inert default admits everybody and grants no operator role.
+        #[cfg(not(target_arch = "wasm32"))]
+        &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+        // Offline mode.
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+    )
+    .await
+}
+
 /// [`serve_connection`], plus the host's access lists and this connection's
 /// remote address.
 ///

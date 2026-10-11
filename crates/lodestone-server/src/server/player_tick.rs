@@ -1,11 +1,13 @@
 //! The per-player gameplay tick one connection runs every 50 ms vitals pass, native and browser alike:
-//! brush strokes, item-use completion, border, drowning, melee hits and shield, burning, beacons,
-//! omens, queued mob effects, dragon deaths, status effects and hunger.
+//! deferred dig completion, brush strokes, item-use completion, border, drowning, melee hits and
+//! shield, burning, beacons, omens, queued mob effects, dragon deaths, status effects and hunger;
+//! and the shared feeds a connection drains on its container-sync pass (chat, swings, sleep skips,
+//! resource packs, plugin channels, effects aimed at it).
 
 use super::*;
 
-/// Everything one pass reads or mutates. The two play loops own the locals; this borrows them so
-/// the pass is a single function and neither loop can drift from the other.
+/// Everything one pass reads or mutates. The play loop owns the locals; this borrows them so the
+/// pass is a single function.
 pub(super) struct PlayerTick<'a, T, P, S>
 where
     T: Transport,
@@ -40,6 +42,12 @@ where
     pub mobs: &'a MobHandle,
     pub block_ticks: &'a BlockTickFeed,
     pub block_entities: &'a BlockEntityHandle,
+    pub pending_break: &'a mut Option<PendingBreak>,
+    /// The loop's tick count on its own clock, the one a dig's start was stamped with.
+    pub dig_tick: u64,
+    pub open_container: &'a mut Option<OpenContainer>,
+    pub container_sync: &'a mut ContainerSync,
+    pub relights: Option<&'a mut PendingRelights>,
 }
 
 /// Runs one pass of the per-player tick.
@@ -79,7 +87,50 @@ where
         mobs,
         block_ticks,
         block_entities,
+        pending_break,
+        dig_tick,
+        open_container,
+        container_sync,
+        relights,
     } = tick;
+
+    // A hold-and-release dig whose stop packet left progress below the break threshold completes
+    // here. A block another update already removed is skipped, since breaking air would emit
+    // duplicate drops; a column that is not resident keeps the dig pending for the next pass
+    // rather than turning a timer probe into synchronous generation.
+    if let Some(dig) = (*pending_break).filter(|dig| dig.deferred_break_ready(Some(dig_tick)))
+        && let Some(current) = resident_block_state(source.get(), dig.pos.x, dig.pos.y, dig.pos.z)
+    {
+        *pending_break = None;
+        if current.block() != Block::Air {
+            let allowed = adjudicate_block_break(conn, proto, source.get(), state, world, dig.pos, player_uuid).await?;
+            if allowed {
+                let creative = matches!(game_mode, GameMode::Creative);
+                destroy_block(
+                    conn,
+                    proto,
+                    source.get(),
+                    state,
+                    relights,
+                    block_entities,
+                    open_container,
+                    container_sync,
+                    mobs,
+                    drops_rng,
+                    inventory.selected_item(),
+                    block_ticks,
+                    player_uuid,
+                    !creative && world.block_drops(),
+                    world.block_drops(),
+                    dig.pos,
+                    advancements,
+                    (!creative).then_some(&mut *vitals),
+                    creative,
+                )
+                .await?;
+            }
+        }
+    }
 
     // A held brush strokes on its own clock the same way, and a tick
     // whose ray finds no block ends the use.
@@ -1245,5 +1296,151 @@ where
         apply(conn, state, proto.encode_game_event(kind, value)).await?;
     }
 
+    Ok(())
+}
+
+/// One connection's read positions in the world's append-only feeds.
+pub(super) struct ConnectionFeeds {
+    chat: u64,
+    swing: u64,
+    plugin: u64,
+    sleep: crate::sleep::SleepCursor,
+}
+
+impl ConnectionFeeds {
+    /// Chat starts at the log's current end so a joining player receives only messages published
+    /// this session. Swings start at the registration-time snapshot, which excludes older swings
+    /// but keeps those appended before the first drain. Plugin broadcasts start at zero: a
+    /// broadcast is host-published state, and a client announcing `minecraft:brand` support at
+    /// join is owed the brand payload queued before it arrived.
+    pub(super) fn new(
+        players: Option<&PlayerRegistry>,
+        initial_swing_cursor: Option<u64>,
+        world: &crate::world_state::WorldStateHandle,
+    ) -> Self {
+        Self {
+            chat: players.map_or(0, PlayerRegistry::chat_cursor),
+            swing: initial_swing_cursor.unwrap_or(0),
+            plugin: 0,
+            sleep: world.sleep_feed().cursor(),
+        }
+    }
+}
+
+/// What a connection's feed pass reads and mutates beyond the feed cursors.
+pub(super) struct FeedDrain<'a> {
+    pub players: Option<&'a PlayerRegistry>,
+    pub world: &'a crate::world_state::WorldStateHandle,
+    pub resource_packs: &'a ResourcePackPushFeed,
+    pub plugin_channels: &'a PluginChannelRegistry,
+    pub client_channels: &'a mut ClientChannels,
+    pub player_uuid: uuid::Uuid,
+    pub player_entity_id: i32,
+    pub username: &'a str,
+    pub game_mode: &'a mut GameMode,
+    pub abilities: &'a mut Abilities,
+    pub inventory: &'a mut PlayerInventory,
+    pub advancements: &'a mut AdvancementManager,
+    pub effects: &'a mut crate::mob_effects::ActiveEffects,
+    pub vitals: &'a mut PlayerVitals,
+    pub experience: &'a mut crate::experience::PlayerExperience,
+    pub player_pos: &'a mut Option<(f64, f64, f64)>,
+    pub player_rot: &'a mut Option<Rotation>,
+    pub teleport_acknowledgements: &'a mut Option<TeleportAcknowledgements>,
+}
+
+/// Feeds the sleep vote its voter count and delivers everything the shared feeds owe this
+/// connection: night skips, resource-pack pushes, other players' chat and arm swings, effects
+/// another player's command aimed at this one, and plugin-channel broadcasts.
+pub(super) async fn publish_connection_feeds<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    feeds: &mut ConnectionFeeds,
+    drain: FeedDrain<'_>,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    let FeedDrain {
+        players,
+        world,
+        resource_packs,
+        plugin_channels,
+        client_channels,
+        player_uuid,
+        player_entity_id,
+        username,
+        game_mode,
+        abilities,
+        inventory,
+        advancements,
+        effects,
+        vitals,
+        experience,
+        player_pos,
+        player_rot,
+        teleport_acknowledgements,
+    } = drain;
+    // The voter count. Every player in the registry counts; with no registry (singleplayer)
+    // nothing is fed and the vote's one-sleeper floor is the correct single-player rule.
+    if let Some(registry) = players {
+        world.sleep_vote().set_active(registry.len() as u32);
+    }
+    // A skipped night re-anchors this client's day clock to the morning. Every connection of the
+    // world reads the one feed through its own cursor.
+    for event in world.sleep_feed().since(&mut feeds.sleep) {
+        match event {
+            SleepEvent::SkippedNight { game_time, morning } => {
+                apply(conn, state, proto.encode_set_time(game_time, Some(morning))).await?;
+            }
+        }
+    }
+    for push in resource_packs.drain_all() {
+        apply(conn, state, proto.encode_resource_pack_push(&push)).await?;
+    }
+    if let Some(registry) = players {
+        for line in registry.chat_since(&mut feeds.chat) {
+            apply(conn, state, proto.encode_system_chat(&line.rendered())).await?;
+        }
+        // Arm swings, excluding the connection that produced each event.
+        for event in registry.swings_since(&mut feeds.swing) {
+            if event.entity_id != player_entity_id {
+                apply(conn, state, proto.encode_animate(event.entity_id, swing_action(event.hand))).await?;
+            }
+        }
+        // A drain, not a cursor: the queue is per-uuid with this connection as its only reader,
+        // which is what makes the delivery directed. A cursor over a shared log would hand one
+        // player's game-mode change to everyone.
+        for effect in registry.take_effects(player_uuid) {
+            apply_own_effect(
+                conn,
+                proto,
+                state,
+                game_mode,
+                abilities,
+                inventory,
+                Some(registry),
+                player_uuid,
+                effect,
+                advancements,
+                world,
+                effects,
+                vitals,
+                experience,
+                player_entity_id,
+                username,
+                player_pos,
+                player_rot,
+                teleport_acknowledgements,
+            )
+            .await?;
+        }
+    }
+    // Host-published plugin-channel broadcasts, filtered to channels this client announced.
+    for (channel, data) in plugin_channels.outbound_since(&mut feeds.plugin, client_channels) {
+        apply(conn, state, proto.encode_custom_payload(&channel, &data)).await?;
+    }
     Ok(())
 }

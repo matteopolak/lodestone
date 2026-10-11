@@ -39,3 +39,4 @@ include!("serve_play/pickup.rs");
 include!("serve_play/ban.rs");
 include!("serve_play/encoding.rs");
 include!("serve_play/misc.rs");
+include!("serve_play/shared_loop.rs");

@@ -1,19 +1,13 @@
-//! A browser-compatible periodic driver for `server::serve_play`'s wasm32 arm.
+//! A browser-compatible periodic driver for `server::serve_play`.
 //!
 //! # What it is
 //!
-//! Native `serve_play` races its socket read against four `tokio::time::
-//! interval_at` timers inside one `tokio::select!` (`keep_alive_tick`,
-//! `time_sync_tick`, `vitals_tick`, `container_sync_tick`) — see that
-//! function's own doc comment. The wasm32 arm has never had an equivalent:
 //! `tokio::time` is compiled in for this crate's wasm32 target (`Cargo.toml`
 //! lists the `time` feature), but calling it does not merely fail to build —
 //! it **hangs on its first poll**, silently, with no panic and no log line
-//! (measured; see this repo's `CLAUDE.md`). So every timed system that used to
-//! ride one of those four timers has simply never run in the browser, and
-//! `IntegratedServer::open_in_memory`'s wasm32 loop degraded to a bare
-//! `while let Some(packet) = conn.read_packet().await? { .. }` with no timer
-//! arm at all.
+//! (measured; see this repo's `CLAUDE.md`). `server::play_platform::PlayInterval`
+//! therefore wraps a [`BrowserInterval`] on wasm32 and a `tokio::time` interval
+//! natively, so the one `serve_play` loop owns every timer on both targets.
 //!
 //! [`BrowserInterval`] waits on a host timer through `lodestone-time`, so ready
 //! input and message tasks can run between deadlines. Generation cooperation
@@ -45,9 +39,8 @@
 //!
 //! # Configuration
 //!
-//! None — every call site supplies its own `Duration` (`server::serve_play`'s
-//! wasm32 arm uses the same `VANILLA_TICK_MILLIS`-derived cadences the native
-//! arm's constants already document).
+//! None — every call site supplies its own `Duration` (`server::serve_play` uses the
+//! same cadences as the native build).
 //!
 //! # Dependencies
 //!

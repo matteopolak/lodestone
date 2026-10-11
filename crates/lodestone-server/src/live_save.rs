@@ -1,5 +1,5 @@
-//! [`LiveSaveSlot`]: the one piece of [`crate::player_data`] that has to
-//! compile on every target, not just native.
+//! [`LiveSaveSlot`]: the cancellation-safe mirror of a connection's latest player record, and the
+//! memory store a directory-less world saves into.
 //!
 //! # What it is
 //!
@@ -39,36 +39,17 @@
 //! have stopped) and persists it directly — independent of whether the
 //! connection future that built it is still alive to run its own cleanup.
 //!
-//! # Why this file, and not `player_data.rs`
+//! # Every target
 //!
-//! [`crate::player_data`] is `#[cfg(not(target_arch = "wasm32"))]` in full —
-//! correctly, because [`PlayerDataStore`](crate::player_data::PlayerDataStore)
-//! is a `std::fs` schema over `lodestone-anvil`, and `lodestone-anvil` is not
-//! even a wasm32 dependency of this crate (see `Cargo.toml`'s target-split
-//! dependency tables). But `LiveSaveSlot` is threaded unconditionally through
-//! `crate::server`'s and `crate::integrated`'s connection-setup functions —
-//! as a struct field, `::default()`/`::new()` constructions, and function
-//! parameters shared by both the native and the wasm32 `serve_play`/
-//! `serve_connection_inner` — so the *type* has to exist on every target even
-//! though its filesystem-bearing payload cannot.
+//! The slot compiles on every target. Its complete-record half carries a
+//! [`PlayerDataStore`](crate::player_data::PlayerDataStore) that is a directory on native and a
+//! memory map elsewhere, so the connection loop saves the same way in both. The typed native
+//! locator half is native only.
 //!
-//! The split: this module compiles unconditionally, and only the payload
-//! field plus [`LiveSaveSlot::publish`]/[`LiveSaveSlot::take`] (the two
-//! methods that actually name [`PlayerDataStore`](crate::player_data::PlayerDataStore)
-//! and [`PlayerData`](crate::player_data::PlayerData)) are
-//! `#[cfg(not(target_arch = "wasm32"))]`. On wasm32 the slot is a
-//! zero-field, zero-cost handle with no publish/take at all — not a runtime
-//! no-op, a *compile-time absent* one, matching "there is no player store in
-//! the browser" the way `#[cfg]`-ing the field out (rather than making
-//! `publish` silently do nothing there) keeps a wasm32 caller from ever
-//! believing a snapshot could exist.
-//!
-//! Every existing caller of `publish`/`take` already sits inside a
-//! `#[cfg(not(target_arch = "wasm32"))]`-gated function
-//! (`crate::server::live_publish_player`, `crate::IntegratedServer::
-//! shutdown`'s own `take()` call), so gating the methods rather than the type
-//! required no caller change at all — only the struct's *declaration* needed
-//! to move somewhere the wasm32 build reaches.
+//! A slot also owns the memory store a world without a directory falls back to. A browser slot
+//! has one from construction, so the periodic save, the disconnect save and a rejoin on the same
+//! server go through the loop's one path; a native slot has one only from
+//! [`LiveSaveSlot::with_memory_store`], leaving in-memory native worlds unsaved as before.
 //!
 //! # How to change it
 //!
@@ -81,10 +62,10 @@
 //! [`LiveSaveSlot::publish`] is a no-op for a `None` store — the in-memory/LAN
 //! case, where there is nothing to persist — matching
 //! `crate::server::persist_player`'s own behaviour for the same input.
-#[derive(Debug, Clone, Default)]
-pub struct LiveSaveSlot(
-    #[cfg(not(target_arch = "wasm32"))]
-    std::sync::Arc<
+#[derive(Debug, Clone)]
+pub struct LiveSaveSlot {
+    /// The latest complete record, mirrored for the shutdown flush.
+    complete: std::sync::Arc<
         std::sync::Mutex<
             Option<(
                 crate::player_data::PlayerDataStore,
@@ -98,7 +79,7 @@ pub struct LiveSaveSlot(
     /// independently consumable game mode can survive cancellation without
     /// changing or replacing full player persistence.
     #[cfg(not(target_arch = "wasm32"))]
-    std::sync::Arc<
+    native: std::sync::Arc<
         std::sync::Mutex<
             Option<(
                 std::sync::Arc<crate::world_storage::WorldStorage>,
@@ -106,9 +87,28 @@ pub struct LiveSaveSlot(
             )>,
         >,
     >,
-);
+    /// The store a world with no directory of its own saves into.
+    memory: Option<crate::player_data::PlayerDataStore>,
+}
+
+impl Default for LiveSaveSlot {
+    /// An empty slot; in a browser it carries a memory store, because there is no directory.
+    fn default() -> Self {
+        let memory = cfg!(target_arch = "wasm32").then(crate::player_data::PlayerDataStore::in_memory);
+        Self::build(memory)
+    }
+}
 
 impl LiveSaveSlot {
+    fn build(memory: Option<crate::player_data::PlayerDataStore>) -> Self {
+        Self {
+            complete: std::sync::Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            native: std::sync::Arc::default(),
+            memory,
+        }
+    }
+
     /// A fresh, empty slot — the compatibility value every entry point other
     /// than the singleplayer one passes, mirroring `BlockTickFeed::default()`
     /// and its siblings in `crate::server`: nothing reads a slot the
@@ -118,14 +118,20 @@ impl LiveSaveSlot {
         Self::default()
     }
 
+    /// An empty slot whose world saves into memory, whatever the target.
+    #[must_use]
+    pub fn with_memory_store() -> Self {
+        Self::build(Some(crate::player_data::PlayerDataStore::in_memory()))
+    }
+
+    /// The memory store a world with no directory saves into, if this slot has one.
+    #[must_use]
+    pub fn memory_store(&self) -> Option<crate::player_data::PlayerDataStore> {
+        self.memory.clone()
+    }
+
     /// Publishes the latest snapshot, replacing whatever was there. A `None`
     /// `store` is a no-op — there is nothing to persist into.
-    ///
-    /// Native only: the payload names
-    /// [`PlayerDataStore`](crate::player_data::PlayerDataStore), which does
-    /// not exist on wasm32. Every call site already lives inside a
-    /// `#[cfg(not(target_arch = "wasm32"))]`-gated function.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn publish(
         &self,
         store: Option<crate::player_data::PlayerDataStore>,
@@ -135,14 +141,11 @@ impl LiveSaveSlot {
         let Some(store) = store else {
             return;
         };
-        *self.0.lock().expect("live save slot lock poisoned") = Some((store, uuid, data));
+        *self.complete.lock().expect("live save slot lock poisoned") = Some((store, uuid, data));
     }
 
     /// Takes the latest snapshot, if [`Self::publish`] was ever called with a
     /// real store.
-    ///
-    /// Native only, for the same reason [`Self::publish`] is.
-    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn take(
         &self,
@@ -151,7 +154,7 @@ impl LiveSaveSlot {
         uuid::Uuid,
         crate::player_data::PlayerData,
     )> {
-        self.0.lock().expect("live save slot lock poisoned").take()
+        self.complete.lock().expect("live save slot lock poisoned").take()
     }
 
     /// Publishes the latest bounded native player data, replacing the
@@ -167,7 +170,7 @@ impl LiveSaveSlot {
             return;
         };
         *self
-            .1
+            .native
             .lock()
             .expect("native live save slot lock poisoned") = Some((storage, record));
     }
@@ -183,7 +186,7 @@ impl LiveSaveSlot {
         std::sync::Arc<crate::world_storage::WorldStorage>,
         crate::world_storage::NativePlayerData,
     )> {
-        self.1
+        self.native
             .lock()
             .expect("native live save slot lock poisoned")
             .take()

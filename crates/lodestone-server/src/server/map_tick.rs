@@ -4,18 +4,15 @@ use super::*;
 
 /// Attaches the world's map folder (once, from the first connection that has one) and starts this
 /// connection's map bookkeeping.
-pub(super) fn start_map_session<S: ChunkSource + ?Sized>(
+pub(super) fn start_map_session(
     world: &crate::world_state::WorldStateHandle,
-    source: &S,
+    store: Option<&crate::player_data::PlayerDataStore>,
     player_uuid: uuid::Uuid,
     username: &str,
 ) -> crate::maps::MapSession {
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(store) = player_store(source) {
-        world.maps().attach_directory(store.world_dir().join("data").join("minecraft").join("maps"));
+    if let Some(dir) = store.and_then(crate::player_data::PlayerDataStore::world_dir) {
+        world.maps().attach_directory(dir.join("data").join("minecraft").join("maps"));
     }
-    #[cfg(target_arch = "wasm32")]
-    let _ = source;
     crate::maps::MapSession::new(world.maps().clone(), player_uuid, username)
 }
 

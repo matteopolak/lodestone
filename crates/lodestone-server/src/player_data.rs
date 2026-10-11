@@ -574,99 +574,135 @@ fn inventory_from_nbt(nbt: Option<&Nbt>) -> Vec<Option<ItemStack>> {
     out
 }
 
+/// The error a [`PlayerDataStore`] operation returns: the Anvil container's on native, the
+/// record's own on a target with no directory backing.
 #[cfg(not(target_arch = "wasm32"))]
-mod store {
-    use std::path::{Path, PathBuf};
+pub type StoreError = lodestone_anvil::Error;
+/// See the native alias.
+#[cfg(target_arch = "wasm32")]
+pub type StoreError = PlayerDataError;
 
-    use super::PlayerData;
-
-    /// Reads and writes player `.dat` files under one world directory.
-    ///
-    /// # Why this holds no lock
-    ///
-    /// It is a path and nothing else — every operation goes straight to the
-    /// filesystem, so two clones are interchangeable and there is no shared mutable
-    /// state to migrate when the server moves to an ECS proposal queue. Cloning is
-    /// an `Arc` bump of the directory path.
-    ///
-    /// One player's file is only ever touched by that player's own connection task,
-    /// so there is no cross-connection race to guard: offline mode derives the uuid
-    /// from the username, which means two connections with the *same name* would
-    /// share a file — and vanilla refuses the second such login before it reaches
-    /// here.
-    #[derive(Debug, Clone)]
-    pub struct PlayerDataStore {
-        dir: std::sync::Arc<PathBuf>,
-        world: std::sync::Arc<PathBuf>,
-    }
-
-    impl PlayerDataStore {
-        /// Roots a store at `world_dir`, creating `players/data` eagerly.
-        ///
-        /// Eager creation for the reason [`crate::region_source::RegionChunkSource::new`]
-        /// gives: a later save must not fail for a reason the caller could have been
-        /// told about at world open.
-        ///
-        /// # Errors
-        ///
-        /// [`lodestone_anvil::Error::Io`] if the directory cannot be created.
-        pub fn new(world_dir: &Path) -> Result<Self, lodestone_anvil::Error> {
-            let dir = lodestone_anvil::player_dat::dir_in(world_dir);
-            std::fs::create_dir_all(&dir).map_err(lodestone_anvil::Error::Io)?;
-            Ok(Self {
-                dir: std::sync::Arc::new(dir),
-                world: std::sync::Arc::new(world_dir.to_path_buf()),
-            })
-        }
-
-        /// The world folder this store is rooted at.
-        #[must_use]
-        pub fn world_dir(&self) -> &Path {
-            &self.world
-        }
-
-        /// The file `uuid`'s data lives in.
-        #[must_use]
-        pub fn path_for(&self, uuid: uuid::Uuid) -> PathBuf {
-            self.dir.join(format!("{uuid}.dat"))
-        }
-
-        /// Loads `uuid`'s saved state, or `Ok(None)` for a player who has never
-        /// saved.
-        ///
-        /// # Errors
-        ///
-        /// The file exists but will not decode, or was written by another game
-        /// version. Both are refusals rather than a silent empty
-        /// player: overwriting a save we cannot read is the one outcome that loses
-        /// data irrecoverably.
-        pub fn read(&self, uuid: uuid::Uuid) -> Result<Option<PlayerData>, lodestone_anvil::Error> {
-            let Some(root) = lodestone_anvil::player_dat::read_from_file(&self.path_for(uuid))? else {
-                return Ok(None);
-            };
-            Ok(PlayerData::from_nbt(&root).map(Some)?)
-        }
-
-        /// Writes `data` as `uuid`'s saved state.
-        ///
-        /// # Errors
-        ///
-        /// [`lodestone_anvil::Error::Io`] on a filesystem failure, or
-        /// [`lodestone_anvil::Error::Nbt`] if the tree will not encode.
-        pub fn write(
-            &self,
-            uuid: uuid::Uuid,
-            data: &PlayerData,
-        ) -> Result<(), lodestone_anvil::Error> {
-            let root = data.to_nbt()?;
-            lodestone_anvil::player_dat::write_to_file(&root, &self.path_for(uuid))
-        }
-    }
-
+/// Reads and writes player records: `.dat` files under one world directory on native, or a map
+/// held in memory for a world with nothing on disk (the browser's, which has no filesystem).
+///
+/// # Why this holds no lock for the directory backing
+///
+/// It is a path and nothing else, so two clones are interchangeable and there is no shared mutable
+/// state to migrate when the server moves to an ECS proposal queue. One player's file is only ever
+/// touched by that player's own connection task, so there is no cross-connection race to guard:
+/// offline mode derives the uuid from the username, which means two connections with the *same
+/// name* would share a file, and vanilla refuses the second such login before it reaches here.
+///
+/// The memory backing shares one map between clones, so a rejoin on the same server restores what
+/// the last session saved and nothing outlives the server.
+#[derive(Debug, Clone)]
+pub struct PlayerDataStore {
+    backing: Backing,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use store::PlayerDataStore;
+#[derive(Debug, Clone)]
+enum Backing {
+    #[cfg(not(target_arch = "wasm32"))]
+    Directory {
+        dir: std::sync::Arc<std::path::PathBuf>,
+        world: std::sync::Arc<std::path::PathBuf>,
+    },
+    Memory(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<uuid::Uuid, PlayerData>>>),
+}
+
+impl PlayerDataStore {
+    /// An empty store that keeps records in memory.
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self { backing: Backing::Memory(std::sync::Arc::default()) }
+    }
+
+    /// Roots a store at `world_dir`, creating `players/data` eagerly.
+    ///
+    /// Eager creation for the reason [`crate::region_source::RegionChunkSource::new`]
+    /// gives: a later save must not fail for a reason the caller could have been
+    /// told about at world open.
+    ///
+    /// # Errors
+    ///
+    /// [`lodestone_anvil::Error::Io`] if the directory cannot be created.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(world_dir: &std::path::Path) -> Result<Self, lodestone_anvil::Error> {
+        let dir = lodestone_anvil::player_dat::dir_in(world_dir);
+        std::fs::create_dir_all(&dir).map_err(lodestone_anvil::Error::Io)?;
+        Ok(Self {
+            backing: Backing::Directory {
+                dir: std::sync::Arc::new(dir),
+                world: std::sync::Arc::new(world_dir.to_path_buf()),
+            },
+        })
+    }
+
+    /// The world folder this store is rooted at, or `None` for a memory store.
+    #[must_use]
+    pub fn world_dir(&self) -> Option<&std::path::Path> {
+        match &self.backing {
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Directory { world, .. } => Some(world),
+            Backing::Memory(_) => None,
+        }
+    }
+
+    /// The file `uuid`'s data lives in, or `None` for a memory store.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn path_for(&self, uuid: uuid::Uuid) -> Option<std::path::PathBuf> {
+        match &self.backing {
+            Backing::Directory { dir, .. } => Some(dir.join(format!("{uuid}.dat"))),
+            Backing::Memory(_) => None,
+        }
+    }
+
+    /// Loads `uuid`'s saved state, or `Ok(None)` for a player who has never
+    /// saved.
+    ///
+    /// # Errors
+    ///
+    /// The file exists but will not decode, or was written by another game
+    /// version. Both are refusals rather than a silent empty
+    /// player: overwriting a save we cannot read is the one outcome that loses
+    /// data irrecoverably.
+    pub fn read(&self, uuid: uuid::Uuid) -> Result<Option<PlayerData>, StoreError> {
+        match &self.backing {
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Directory { dir, .. } => {
+                let path = dir.join(format!("{uuid}.dat"));
+                let Some(root) = lodestone_anvil::player_dat::read_from_file(&path)? else {
+                    return Ok(None);
+                };
+                Ok(PlayerData::from_nbt(&root).map(Some)?)
+            }
+            Backing::Memory(records) => {
+                Ok(records.lock().expect("player record map poisoned").get(&uuid).cloned())
+            }
+        }
+    }
+
+    /// Writes `data` as `uuid`'s saved state.
+    ///
+    /// # Errors
+    ///
+    /// [`lodestone_anvil::Error::Io`] on a filesystem failure, or
+    /// [`lodestone_anvil::Error::Nbt`] if the tree will not encode. A memory store cannot fail.
+    pub fn write(&self, uuid: uuid::Uuid, data: &PlayerData) -> Result<(), StoreError> {
+        match &self.backing {
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Directory { dir, .. } => {
+                let root = data.to_nbt()?;
+                lodestone_anvil::player_dat::write_to_file(&root, &dir.join(format!("{uuid}.dat")))
+            }
+            Backing::Memory(records) => {
+                records.lock().expect("player record map poisoned").insert(uuid, data.clone());
+                Ok(())
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

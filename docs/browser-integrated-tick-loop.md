@@ -13,9 +13,16 @@ The browser integrated server runs the same authoritative world tick as the nati
 - The connection timer publishes world changes during initial join but does not advance the player's vitals until `PlayerLoaded` after a ready frame is presented; the shared `player_tick_ready` gate also releases the world's initial tick hold in both connection loops, so air and health do not change under the terrain screen. A late timer never replays skipped vitals ticks.
 - Tests: `tick_deadline` (anchored late service, bounded recovery, debt shedding, pause resets), `browser_timer` (the separate connection-interval delay policy), `integrated_server_generated_fluid_seed_reaches_live_tick_loop`, `integrated_server_fluid_tick_crosses_into_its_next_chunk_owner`, `integrated_item_tick::integrated_tick_loop_advances_a_live_dropped_item`. `just wasm-check` covers browser compilation, confinement and worker control tests; visible acceptance needs `just run-wasm` with ordinary singleplayer (placed-water progression, a mined item's motion; probe controls in [browser-worldgen-worker](browser-worldgen-worker.md)).
 
-## Shared player tick
+## One play loop
 
-Both `serve_play` loops call `server::player_tick::run` once per vitals pass (brushing, item use, border, drowning, melee and shields, burning, beacons, omens, queued mob effects, dragon deaths, status effects, hunger) and `player_tick::publish_world_events` for the effect lane (sounds, particles, level events), explosions, mob cues and weather. Add per-player gameplay there, never in one loop. Still native-only: periodic player save, deferred dig continuation, resource-pack pushes, plugin-channel broadcasts, chat/swing/command cursors and the sleep vote.
+There is one `serve_play` (`server/play_loop.rs`) for native and browser. Platform differences sit behind `server/play_platform.rs`: `PlayInterval` (tokio interval vs `BrowserInterval`), `within_budget` (tokio timeout vs a `browser_sleep` race), `RelightDriver` (detached worker task vs a cooperative future), `PlayProbe` (worldgen progress, browser only) and `JOIN_BATCH_COLUMNS`. Per-player gameplay lives in `server::player_tick`: `run` (once per vitals pass, including the deferred dig, which needs the real tick clock), `publish_world_events`, and `publish_connection_feeds` (sleep voter count and night skips, resource-pack pushes, chat, swings, directed command effects, plugin-channel broadcasts). Add per-player gameplay there, never in one loop.
+
+The periodic player save runs in both builds. `player_persistence::player_store` returns the world's player directory natively and otherwise the `LiveSaveSlot` memory store (`PlayerDataStore::in_memory`), which `LiveSaveSlot::default()` supplies on wasm only.
+
+Native-only, and why:
+- Resource-pack HTTP serving and profile-key validation (`lodestone-auth`): the browser has no host server or session service. The push drain itself is shared.
+- Keep-alive timeout: the browser peer is in-process, so the interval is disabled there.
+- The native locator session (`NativePlayerSession`, `world_storage`) and the shutdown flush of `LiveSaveSlot::take`: they need `std::fs`.
 
 ## How to change it
 

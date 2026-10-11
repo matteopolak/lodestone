@@ -232,6 +232,11 @@ impl SleepVote {
         self.0.lock().expect("sleep vote lock poisoned").active = active;
     }
 
+    /// The number of players who can vote, as last fed by a connection.
+    pub fn active(&self) -> u32 {
+        self.0.lock().expect("sleep vote lock poisoned").active
+    }
+
     /// A consistent single-lock read for the tick loop: `(active, sleepers)`.
     pub(crate) fn snapshot(&self) -> (u32, Vec<i32>) {
         let inner = self.0.lock().expect("sleep vote lock poisoned");

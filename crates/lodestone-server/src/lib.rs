@@ -514,6 +514,7 @@ mod scheduled_tick;
 mod server;
 mod shield;
 mod sleep;
+pub use sleep::{SleepEvent, SleepFeed, SleepVote};
 mod spawn;
 pub mod tool_use;
 /// Spawn eggs: which entity a `*_spawn_egg` names, and where a right-click puts
@@ -721,7 +722,7 @@ pub use server::{
     MAX_CLIENT_VIEW_RADIUS,
     encode_chunk_with_source, EntitySource, NoEntities, ResourcePackPushFeed, ServeSummary,
     ServerError, serve_connection,
-    serve_connection_with_commands, serve_connection_with_mob_events,
+    serve_connection_with_commands, serve_connection_with_live_save, serve_connection_with_mob_events,
     serve_connection_with_plugin_channels, serve_connection_with_resource_pack,
 };
 pub use initial_packet::{InitialPacketInput, PreparedInitialPacket, prepare_initial_packet_with_protocol};

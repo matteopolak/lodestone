@@ -72,10 +72,13 @@ fn players_sleeping_percentage() -> u32 {
 pub(crate) const MILLIS_PER_TICK: u64 = 50;
 pub(crate) const TICK_PERIOD: Duration = Duration::from_millis(MILLIS_PER_TICK);
 
-/// Native runtime deadlines use its timer clock. Shared elapsed-time metrics
-/// use `lodestone_time::Instant`; this alias is unavailable on browser targets.
+/// The play loop's deadline clock: tokio's on native, so a paused test runtime
+/// advances it, and `lodestone_time::Instant` in a browser, where tokio's clock
+/// traps.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) type PlayTimerInstant = tokio::time::Instant;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type PlayTimerInstant = lodestone_time::Instant;
 
 
 /// A slow phase is worth an operator-facing trace once it consumes a complete

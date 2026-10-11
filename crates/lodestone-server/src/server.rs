@@ -64,6 +64,8 @@ mod play_dispatch;
 use self::play_dispatch::*;
 mod play_loop;
 use self::play_loop::*;
+mod play_platform;
+use self::play_platform::*;
 mod play_state;
 use self::play_state::*;
 mod player_actions;
@@ -170,7 +172,6 @@ use crate::world_spawn::{RespawnPoint, is_bed_block, is_legal_bed_respawn};
 /// disconnects immediately if the *previous* challenge is still pending at
 /// that point — so an unanswered challenge is caught within one more
 /// interval of being sent (up to ~15s later), not two intervals (~30s).
-#[cfg(not(target_arch = "wasm32"))]
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(15_000);
 
 /// MOTD included in the server-list status reply.
@@ -291,7 +292,6 @@ fn expired_profile_public_key_reason() -> Text {
 /// This crate has no fixed server tick loop (see the module docs), so a
 /// 1-second wall-clock interval stands in for "every 20 ticks" at vanilla's
 /// normal 20 TPS.
-#[cfg(not(target_arch = "wasm32"))]
 const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 
 /// The largest view radius a client may raise itself to mid-session on a path
@@ -321,7 +321,6 @@ pub const MAX_CLIENT_VIEW_RADIUS: i32 = 258;
 /// wall-clock elapsed time into the tick-based `game_time`
 /// [`ServerProtocol::encode_set_time`] carries, in the absence of a real
 /// per-tick server loop.
-#[cfg(not(target_arch = "wasm32"))]
 const MILLIS_PER_TICK: u128 = 50;
 
 /// The melee knockback bonus for a sprinting, full-strength attack is `0.5`.
@@ -340,7 +339,6 @@ const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 /// hit, then every 20 thereafter — see `crate::vitals`'s module doc comment)
 /// are the whole point, not an approximation, so this must fire at the real
 /// 20 TPS rate rather than some coarser stand-in.
-#[cfg(not(target_arch = "wasm32"))]
 const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Cadence of the server-driven entity/player streaming pass ([`stream_pass`]).
@@ -365,21 +363,7 @@ const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 /// pass is a diff — [`EntityStreamer`] emits nothing when nothing changed.
 /// Tick-published entities are compared once per publication; the player
 /// registry is sampled on every pass because connections update it directly.
-#[cfg(not(target_arch = "wasm32"))]
 const ENTITY_STREAM_INTERVAL: Duration = Duration::from_millis(50);
-
-/// [`VITALS_TICK_INTERVAL`]'s wasm32 counterpart — same value (vanilla's 20
-/// TPS, same as every other timer in this file), kept as its own literal
-/// rather than sharing the native constant. Independent literals that happen
-/// to agree are this crate's own established shape for a per-target cadence
-/// (see `tick.rs`'s module doc on why `MILLIS_PER_TICK` is not shared either),
-/// and here it is load-bearing: [`VITALS_TICK_INTERVAL`] is only compiled for
-/// `not(wasm32)`, so a single shared constant would have to drop its `cfg`
-/// entirely, which reintroduces exactly the "second file the
-/// `tokio::time::Instant` ban allows" shape `tick.rs` warns against for the
-/// neighbouring clock type.
-#[cfg(target_arch = "wasm32")]
-const WASM_VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How many [`VITALS_TICK_INTERVAL`] ticks between periodic player saves
 /// The measured cadence is 600 ticks, i.e. 30 s at this crate's 20 TPS stand-in.
@@ -393,7 +377,6 @@ const WASM_VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 /// 30 s rather than the autosave's default: a player file is a few hundred bytes
 /// against a region file's megabytes, and the thing being bounded is *how much of
 /// a session an alt-F4 costs*, not disk bandwidth.
-#[cfg(not(target_arch = "wasm32"))]
 const PLAYER_SAVE_EVERY_VITALS_TICKS: u32 = 600;
 
 
