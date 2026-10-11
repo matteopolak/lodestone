@@ -26,7 +26,7 @@ is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a p
   on `v26-2` and `v26-3` and nothing else, so a legacy family is invisible to every command below unless you name
   its feature.
 - **Hosted protocols are explicit and narrower than joining support.** `v1-7` hosts protocol 5,
-  `v1-8` hosts 47, `v1-9` hosts only 340, `v1-13` hosts 404, and `v26-3` hosts 777 (`v26-2` only joins 776);
+  `v1-8` hosts 47, `v1-9` hosts 110/210/316/340, `v1-13` hosts 404, and `v26-3` hosts 777 (`v26-2` only joins 776);
   `lodestone-registry` keeps `Family` and `ServerFamily` as separate tables so other family
   revisions remain join-only.
 - **A family may speak several protocols**: `v1-9` serves 110/210/316/340 and `v1-14` serves
