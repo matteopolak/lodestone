@@ -66,6 +66,7 @@ impl<'w> MobSim<'w> {
             players: Vec::new(),
             sleeping_players: Vec::new(),
             shoulder_riders: HashMap::new(),
+            entity_tags: HashMap::new(),
             tame_rng: SpawnRng::new(TAME_ROLL_SEED),
             zombie_conversion_rng: SpawnRng::new(ZOMBIE_VILLAGER_CONVERSION_SEED),
             gossip_spread_rng: SpawnRng::new(GOSSIP_SPREAD_SEED),

@@ -225,22 +225,11 @@
 //!   datapacks are tracked separately.
 //! * **`on <relation>`**
 //!   (owner/leasher/target/attacker/vehicle/controller/origin/passengers).
-//!   Narrower than "the mob simulation does not expose relationship queries"
-//!   — several of those *are* already `pub` on `SimMob` (`owner_uuid`,
-//!   `leash_holder`, `attack_target_id`, the mount/rider pair on `MobSim`).
-//!   The real, deeper blocker sits one layer below: **a non-player entity
-//!   can never become the acting source of an `/execute` chain at all**, on
-//!   this server, today. `as <targets>`/`positioned as`/`rotated as`/`facing
-//!   entity` all resolve `<targets>` through [`Ctx::resolve`] →
-//!   `super::source::resolve_players`, which only ever matches against
-//!   `ctx.world.players: &[PlayerCandidate]` — a mob's uuid is never in that
-//!   list, selector or not. `execute summon <entity>` is the one way this
-//!   file makes a non-player the acting source, and its own doc above notes
-//!   the same consequence: `@s` afterward cannot resolve it either. So
-//!   `on <relation>` needs selector resolution widened to cover arbitrary
-//!   entities first — a `CommandSource`/`PlayerCandidate` architecture
-//!   change, not an addition to this file — before the relationship
-//!   accessors above are reachable from anywhere.
+//!   `as`, `at`, `positioned as`, `rotated as`, `facing entity` and `if entity`
+//!   resolve `<targets>` through [`Ctx::resolve_targets`], so a mob, item or
+//!   projectile can be the acting source. The relation accessors are `pub` on
+//!   `SimMob` (`owner_uuid`, `leash_holder`, `attack_target_id`, the mount/rider
+//!   pair on `MobSim`) but nothing maps a source entity to them yet.
 //! * **`positioned over <heightmap>`.** [`lodestone_command_mc::HeightmapArg`]
 //!   is built and tested (the four heightmap-type survivors of the real
 //!   "keep after worldgen" filter), but unwired: computing a heightmap needs the **world's
@@ -277,7 +266,7 @@ use lodestone_command_mc::{
 use lodestone_model::Rotation;
 
 use super::registrar::{ArgKey, Ctx, Registrar, StoreSink};
-use super::source::{CommandSource, EntityAnchor, PlayerCandidate, SelectorError, SourceEntity};
+use super::source::{CommandSource, CommandTarget, EntityAnchor, SelectorError, SelectorSubject};
 
 /// The game-masters permission level — the one permission gate, on the root
 /// `execute` literal; every subcommand beneath it is ungated in the real
@@ -459,12 +448,8 @@ fn register_as(registrar: &mut Registrar, execute: NodeId) {
             .into_iter()
             .map(|target| {
                 let mut next = base.clone();
-                next.name = target.username.clone();
-                next.entity = Some(SourceEntity {
-                    uuid: target.uuid,
-                    entity_id: target.entity_id,
-                    username: target.username,
-                });
+                next.name = target.display_name();
+                next.entity = Some(target.source_entity());
                 next
             })
             .collect())
@@ -491,8 +476,8 @@ fn register_at(registrar: &mut Registrar, execute: NodeId) {
             .into_iter()
             .map(|target| {
                 let mut next = base.clone();
-                next.position = target.position;
-                next.rotation = target.rotation;
+                next.position = target.position();
+                next.rotation = target.rotation();
                 next
             })
             .collect())
@@ -535,7 +520,7 @@ fn register_positioned(registrar: &mut Registrar, execute: NodeId) {
             .into_iter()
             .map(|target| {
                 let mut next = base.clone();
-                next.position = target.position;
+                next.position = target.position();
                 next
             })
             .collect())
@@ -574,7 +559,7 @@ fn register_rotated(registrar: &mut Registrar, execute: NodeId) {
             .into_iter()
             .map(|target| {
                 let mut next = base.clone();
-                next.rotation = target.rotation;
+                next.rotation = target.rotation();
                 next
             })
             .collect())
@@ -1182,8 +1167,8 @@ fn one(mut sources: Vec<CommandSource>) -> CommandSource {
 /// run …` with no matches silently runs nothing, and `execute if entity
 /// @e[type=…]` reports a normal (failing) test rather than a parse-shaped
 /// refusal.
-fn resolve_optional(ctx: &Ctx<'_>, selector: &EntitySelector) -> Result<Vec<PlayerCandidate>, String> {
-    match ctx.resolve(selector) {
+fn resolve_optional(ctx: &Ctx<'_>, selector: &EntitySelector) -> Result<Vec<CommandTarget>, String> {
+    match ctx.resolve_targets(selector) {
         Ok(candidates) => Ok(candidates),
         Err(SelectorError::NoPlayersFound) => Ok(Vec::new()),
         Err(other) => Err(other.to_string()),
@@ -1205,11 +1190,12 @@ fn anchor_position(source: &CommandSource) -> lodestone_model::Vec3 {
 /// always has a body, so `eyes` always adds height (no bodiless case to
 /// guard against, the
 /// asymmetry [`anchor_position`]'s own doc names).
-fn candidate_anchor_position(candidate: &PlayerCandidate, anchor: AnchorInput) -> lodestone_model::Vec3 {
+fn candidate_anchor_position(candidate: &CommandTarget, anchor: AnchorInput) -> lodestone_model::Vec3 {
+    let position = candidate.position();
     if anchor == AnchorInput::Eyes {
-        lodestone_model::Vec3::new(candidate.position.x, candidate.position.y + EYE_HEIGHT, candidate.position.z)
+        lodestone_model::Vec3::new(position.x, position.y + EYE_HEIGHT, position.z)
     } else {
-        candidate.position
+        position
     }
 }
 

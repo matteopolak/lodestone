@@ -82,10 +82,13 @@
 
 use lodestone_command::FloatArgument;
 use lodestone_command_mc::{Coordinates, EntityArg, EntitySelector, Vec3Arg};
+use lodestone_model::Vec3;
+
+use crate::mobs::TeleportOutcome;
 
 use super::effect::Effect;
 use super::registrar::{Ctx, Registrar};
-use super::source::PlayerCandidate;
+use super::source::{CommandTarget, SelectorSubject};
 use super::CommandResult;
 
 /// The game-masters permission level.
@@ -121,7 +124,7 @@ fn register_tree(registrar: &mut Registrar, root: lodestone_command::NodeId, nam
     // `<targets>` → `<destination>` below) is the reachable equivalent.
 
     // ---- /tp <targets> <location> [<yaw> <pitch>] ------------------------
-    let (targets_node, targets_key) = registrar.arg(tp, "targets", EntityArg::players());
+    let (targets_node, targets_key) = registrar.arg(tp, "targets", EntityArg::entities());
     let (targets_loc_node, targets_loc_key) = registrar.arg(targets_node, "location", Vec3Arg::new());
     registrar.exec(targets_loc_node, move |ctx| {
         let selector = ctx.get(targets_key).clone();
@@ -145,12 +148,13 @@ fn register_tree(registrar: &mut Registrar, root: lodestone_command::NodeId, nam
 
     // ---- /tp <targets> <destination> -------------------------------------
     let (targets_dest_node, targets_dest_key) =
-        registrar.arg(targets_node, "destination", EntityArg::player());
+        registrar.arg(targets_node, "destination", EntityArg::entity());
     registrar.exec(targets_dest_node, move |ctx| {
         let selector = ctx.get(targets_key).clone();
         let dest_selector = ctx.get(targets_dest_key).clone();
         let destination = resolve_one(ctx, &dest_selector)?;
-        let (x, y, z) = (destination.position.x, destination.position.y, destination.position.z);
+        let destination_position = destination.position();
+        let (x, y, z) = (destination_position.x, destination_position.y, destination_position.z);
         teleport_targets(ctx, &selector, x, y, z, None, None)
     });
 }
@@ -161,8 +165,11 @@ fn self_uuid(ctx: &Ctx<'_>) -> Result<uuid::Uuid, String> {
 }
 
 /// One entity from a selector, or the real "no entities found" shape.
-fn resolve_one(ctx: &Ctx<'_>, selector: &EntitySelector) -> Result<PlayerCandidate, String> {
-    let candidates = ctx.resolve(selector)?;
+fn resolve_one(ctx: &Ctx<'_>, selector: &EntitySelector) -> Result<CommandTarget, String> {
+    let candidates = ctx.resolve_targets(selector).map_err(|error| match error {
+        super::source::SelectorError::NoPlayersFound => "No entity was found".to_string(),
+        other => other.to_string(),
+    })?;
     candidates.into_iter().next().ok_or_else(|| "No entity was found".to_string())
 }
 
@@ -175,8 +182,9 @@ fn resolve_location(ctx: &Ctx<'_>, coords: Coordinates) -> (f64, f64, f64) {
     coords.resolve(origin, rotation)
 }
 
-/// Queues [`Effect::Teleport`] for every resolved target and reports the
-/// real single/multiple split.
+/// Moves every resolved target and reports the real single/multiple split. A
+/// player gets a directed [`Effect::Teleport`]; any other entity is moved in the
+/// mob simulation, and one whose kind cannot be moved is skipped.
 fn teleport_targets(
     ctx: &mut Ctx<'_>,
     selector: &EntitySelector,
@@ -186,16 +194,37 @@ fn teleport_targets(
     yaw: Option<f32>,
     pitch: Option<f32>,
 ) -> CommandResult {
-    let targets = ctx.resolve(selector)?;
+    let targets = ctx.resolve_targets(selector).map_err(|error| match error {
+        super::source::SelectorError::NoPlayersFound => "No entity was found".to_string(),
+        other => other.to_string(),
+    })?;
+    let mut moved: Vec<String> = Vec::new();
     for target in &targets {
-        ctx.effect(target.uuid, Effect::Teleport { x, y, z, yaw, pitch });
+        match target {
+            CommandTarget::Player(player) => {
+                ctx.effect(player.uuid, Effect::Teleport { x, y, z, yaw, pitch });
+                moved.push(target.display_name());
+            }
+            CommandTarget::World(entity) => {
+                let outcome = ctx
+                    .world
+                    .mobs
+                    .and_then(|mobs| mobs.with(|sim| sim.teleport_entity(entity.uuid, Vec3::new(x, y, z), yaw)));
+                if outcome == Some(TeleportOutcome::Moved) {
+                    moved.push(target.display_name());
+                }
+            }
+        }
     }
-    if let [only] = targets.as_slice() {
-        ctx.send_success(format!("Teleported {} to {}", only.username, fmt_pos(x, y, z)));
+    if moved.is_empty() {
+        return Err("Unable to teleport that entity".to_string());
+    }
+    if let [only] = moved.as_slice() {
+        ctx.send_success(format!("Teleported {only} to {}", fmt_pos(x, y, z)));
     } else {
-        ctx.send_success(format!("Teleported {} entities to {}", targets.len(), fmt_pos(x, y, z)));
+        ctx.send_success(format!("Teleported {} entities to {}", moved.len(), fmt_pos(x, y, z)));
     }
-    Ok(i32::try_from(targets.len()).unwrap_or(i32::MAX))
+    Ok(i32::try_from(moved.len()).unwrap_or(i32::MAX))
 }
 
 fn fmt_pos(x: f64, y: f64, z: f64) -> String {

@@ -113,6 +113,7 @@ pub mod enchantment;
 pub mod entity_census;
 pub mod entity_dimensions;
 pub mod entity_type;
+pub mod entity_type_tags;
 pub mod entity_types;
 pub mod face_occlusion;
 pub mod redstone_conductor;

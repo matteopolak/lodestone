@@ -568,7 +568,9 @@ impl<'a> Ctx<'a> {
         names
     }
 
-    /// Resolve an entity selector against the roster, from this source.
+    /// Resolve an entity selector against the connected players, from this
+    /// source. Players-only commands use this: a selector that reaches entities
+    /// finds none of them here, which is the reference "No player was found".
     ///
     /// # Errors
     ///
@@ -578,34 +580,13 @@ impl<'a> Ctx<'a> {
         &self,
         selector: &lodestone_command_mc::EntitySelector,
     ) -> Result<Vec<PlayerCandidate>, SelectorError> {
-        let scoreboard = self.world.state.scoreboard();
-        let teams = self.world.state.team();
-        // `sort=random`'s seed. `game_time` is a monotonic per-tick counter
-        // (`WorldTime`'s own doc), so two `@r` resolutions inside the same
-        // tick — e.g. two selectors in one `/execute` chain — draw the same
-        // permutation; two resolutions a tick apart do not. That is weaker
-        // than a fresh draw per call, but it is what is available without
-        // threading a persistent, mutable RNG handle through every
-        // `CommandWorld` construction site the way `crate::server`'s
-        // `drops_rng` is (a wider, separately-scoped change) — and it closes
-        // the actual bug this replaces: `no_shuffle` here made every `@r`
-        // resolution the *same* permutation forever, not merely within a
-        // tick.
-        let shuffle = super::source::seeded_shuffle(self.world.state.tick_time().game_time as u64);
-        super::source::resolve_players(
-            selector,
-            &self.source,
-            self.world.players,
-            &shuffle,
-            &|holder, objective| scoreboard.get_score(holder, objective).ok(),
-            &|holder| teams.team_of(holder),
-        )
+        let tags = self.tag_table();
+        self.resolve_over(selector, self.world.players, &tags)
     }
 
     /// [`resolve`](Self::resolve) for a selector that reaches entities: the
-    /// players plus the world's entities the mob simulation can name (item
-    /// frames so far), narrowed and ordered together so `limit` and `sort`
-    /// span both.
+    /// players plus every entity the mob simulation owns, narrowed and ordered
+    /// together so `limit` and `sort` span both.
     ///
     /// # Errors
     ///
@@ -620,25 +601,47 @@ impl<'a> Ctx<'a> {
         if selector.includes_entities
             && let Some(mobs) = self.world.mobs
         {
-            candidates.extend(mobs.with(|sim| sim.frame_command_entities()).into_iter().map(|e| {
+            candidates.extend(mobs.with(|sim| sim.command_entities()).into_iter().map(|e| {
                 CommandTarget::World(WorldEntityCandidate {
                     uuid: e.uuid,
                     entity_id: e.entity_id,
                     entity_type: e.entity_type.to_string(),
                     position: e.position,
+                    rotation: e.rotation,
+                    name: e.name,
+                    dimension: self.source.dimension.clone(),
                 })
             }));
         }
+        let tags = self.tag_table();
+        self.resolve_over(selector, &candidates, &tags)
+    }
+
+    /// Every tag the mob simulation holds, by uuid; empty with no simulation.
+    fn tag_table(&self) -> std::collections::HashMap<uuid::Uuid, Vec<String>> {
+        self.world.mobs.map(|mobs| mobs.with(|sim| sim.tag_table())).unwrap_or_default()
+    }
+
+    fn resolve_over<T: super::source::SelectorSubject + Clone>(
+        &self,
+        selector: &lodestone_command_mc::EntitySelector,
+        candidates: &[T],
+        tags: &std::collections::HashMap<uuid::Uuid, Vec<String>>,
+    ) -> Result<Vec<T>, SelectorError> {
         let scoreboard = self.world.state.scoreboard();
         let teams = self.world.state.team();
+        // `sort=random`'s seed. `game_time` is a monotonic per-tick counter
+        // (`WorldTime`'s own doc), so two `@r` resolutions inside the same
+        // tick draw the same permutation; two a tick apart do not.
         let shuffle = super::source::seeded_shuffle(self.world.state.tick_time().game_time as u64);
         super::source::resolve_subjects(
             selector,
             &self.source,
-            &candidates,
+            candidates,
             &shuffle,
             &|holder, objective| scoreboard.get_score(holder, objective).ok(),
             &|holder| teams.team_of(holder),
+            &|uuid| tags.get(&uuid).cloned().unwrap_or_default(),
         )
     }
 }

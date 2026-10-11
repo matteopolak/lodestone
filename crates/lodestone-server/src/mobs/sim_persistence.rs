@@ -40,6 +40,19 @@ impl<'w> MobSim<'w> {
         out.extend(self.saved_projectiles());
         out.extend(self.saved_cushions());
         out.extend(self.saved_frames());
+        for record in &mut out {
+            let tags = self.entity_tags(record.uuid);
+            if !tags.is_empty() {
+                record.extra.retain(|(name, _)| name != "Tags");
+                record.extra.push((
+                    "Tags".to_owned(),
+                    lodestone_core::Nbt::List {
+                        element_type: lodestone_core::NbtTag::String,
+                        elements: tags.into_iter().map(lodestone_core::Nbt::String).collect(),
+                    },
+                ));
+            }
+        }
         out
     }
 
@@ -217,6 +230,18 @@ impl<'w> MobSim<'w> {
         for saved in projectiles {
             if self.restore_projectile(saved) {
                 restored += 1;
+            }
+        }
+        for saved in entities {
+            let Some((_, lodestone_core::Nbt::List { elements, .. })) =
+                saved.extra.iter().find(|(name, _)| name == "Tags")
+            else {
+                continue;
+            };
+            for element in elements {
+                if let lodestone_core::Nbt::String(tag) = element {
+                    self.add_entity_tag(saved.uuid, tag);
+                }
             }
         }
         restored

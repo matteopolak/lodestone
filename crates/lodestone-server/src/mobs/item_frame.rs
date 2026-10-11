@@ -154,19 +154,6 @@ pub struct FrameSignal {
     pub output: Option<u8>,
 }
 
-/// A frame as `/kill` and entity selectors see it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FrameCommandEntity {
-    /// The network entity id.
-    pub entity_id: i32,
-    /// The persistent uuid.
-    pub uuid: Uuid,
-    /// `minecraft:item_frame` or `minecraft:glow_item_frame`.
-    pub entity_type: ResourceKey,
-    /// The box centre.
-    pub position: Vec3,
-}
-
 /// A removed frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameBroken {
@@ -535,30 +522,6 @@ impl<'w> MobSim<'w> {
         (saved.uuid, id)
     }
 
-    /// Every frame as a command selector sees it: uuid, type, box centre.
-    #[must_use]
-    pub fn frame_command_entities(&self) -> Vec<FrameCommandEntity> {
-        let mut out: Vec<_> = self
-            .frames
-            .iter()
-            .map(|(&entity_id, f)| FrameCommandEntity {
-                entity_id,
-                uuid: f.uuid,
-                entity_type: item_frame::entity_key(f.glow),
-                position: f.centre(),
-            })
-            .collect();
-        out.sort_by_key(|e| e.entity_id);
-        out
-    }
-
-    /// Removes the frame with this uuid for `/kill`: nothing drops and a framed
-    /// map forgets its marker.
-    pub fn kill_frame_by_uuid(&mut self, uuid: Uuid) -> Option<FrameBroken> {
-        let id = self.frames.iter().find(|(_, f)| f.uuid == uuid).map(|(&id, _)| id)?;
-        self.kill_frame(id, false)
-    }
-
     pub(super) fn push_frame_snapshots(&self, out: &mut Vec<EntitySnapshot>) {
         let mut ids: Vec<i32> = self.frames.keys().copied().collect();
         ids.sort_unstable();
@@ -606,7 +569,7 @@ impl<'w> MobSim<'w> {
 }
 
 impl TrackedFrame {
-    fn centre(&self) -> Vec3 {
+    pub(super) fn centre(&self) -> Vec3 {
         item_frame::centre(self.cell, self.facing)
     }
 

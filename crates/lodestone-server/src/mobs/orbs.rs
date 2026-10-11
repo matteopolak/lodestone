@@ -110,7 +110,7 @@ impl OrbTickOwner {
 /// This is shared by spawn, the pure owner pass, and the central apply
 /// boundary. Truncating a negative coordinate would hand an orb at `x=-0.5`
 /// to chunk `0`, allowing the source and destination writers to disagree.
-fn owner_key(position: Vec3) -> (i32, i32) {
+pub(super) fn owner_key(position: Vec3) -> (i32, i32) {
     (
         (position.x.floor() as i32).div_euclid(16),
         (position.z.floor() as i32).div_euclid(16),

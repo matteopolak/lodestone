@@ -1,6 +1,6 @@
 //! [`CommandSource`] — the real command-source-stack shape, minus the server
-//! handle — and the resolution of an [`EntitySelector`] against a player
-//! roster.
+//! handle — and the resolution of an [`EntitySelector`] against a roster of
+//! players and world entities.
 //!
 //! # What is here and what is deliberately not
 //!
@@ -21,7 +21,7 @@
 //! The split mirrors the real one: a selector parser produces the AST, and
 //! resolving it against a command source is a separate step. Resolution
 //! needs a roster and a caller position, which the grammar crate must not know
-//! about — and keeping the AST inert is what lets [`resolve_players`] be tested
+//! about — and keeping the AST inert is what lets [`resolve_subjects`] be tested
 //! against a hand-built roster with no world at all.
 
 use lodestone_command_mc::{EntitySelector, SelectorOrder, SelectorPredicate};
@@ -162,6 +162,8 @@ pub trait SelectorSubject {
     fn entity_type(&self) -> &str;
     /// The entity's position.
     fn position(&self) -> Vec3;
+    /// Body rotation, for `x_rotation=` / `y_rotation=`.
+    fn rotation(&self) -> Rotation;
     /// The game mode, for a player; `None` for anything else.
     fn game_mode(&self) -> Option<GameMode>;
     /// The scoreboard holder name: a player's login name, an entity's uuid text.
@@ -181,6 +183,9 @@ impl SelectorSubject for PlayerCandidate {
     fn position(&self) -> Vec3 {
         self.position
     }
+    fn rotation(&self) -> Rotation {
+        self.rotation
+    }
     fn game_mode(&self) -> Option<GameMode> {
         Some(self.game_mode)
     }
@@ -198,6 +203,11 @@ pub struct WorldEntityCandidate {
     /// The canonical entity-type id, e.g. `minecraft:item_frame`.
     pub entity_type: String,
     pub position: Vec3,
+    pub rotation: Rotation,
+    /// The custom name as plain text, `""` when unnamed.
+    pub name: String,
+    /// The dimension the entity is in (the one the mob simulation serves).
+    pub dimension: ResourceKey,
 }
 
 impl SelectorSubject for WorldEntityCandidate {
@@ -205,13 +215,16 @@ impl SelectorSubject for WorldEntityCandidate {
         self.uuid
     }
     fn name(&self) -> &str {
-        ""
+        &self.name
     }
     fn entity_type(&self) -> &str {
         &self.entity_type
     }
     fn position(&self) -> Vec3 {
         self.position
+    }
+    fn rotation(&self) -> Rotation {
+        self.rotation
     }
     fn game_mode(&self) -> Option<GameMode> {
         None
@@ -226,6 +239,43 @@ impl SelectorSubject for WorldEntityCandidate {
 pub enum CommandTarget {
     Player(PlayerCandidate),
     World(WorldEntityCandidate),
+}
+
+impl CommandTarget {
+    /// The network entity id.
+    #[must_use]
+    pub fn entity_id(&self) -> i32 {
+        match self {
+            Self::Player(p) => p.entity_id,
+            Self::World(w) => w.entity_id,
+        }
+    }
+
+    /// The name feedback uses: a player's login name, an entity's custom name,
+    /// or its type id when unnamed.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Player(p) => p.username.clone(),
+            Self::World(w) if w.name.is_empty() => w.entity_type.clone(),
+            Self::World(w) => w.name.clone(),
+        }
+    }
+
+    /// The entity as a [`SourceEntity`], for `execute as`.
+    #[must_use]
+    pub fn source_entity(&self) -> SourceEntity {
+        SourceEntity { uuid: self.uuid(), entity_id: self.entity_id(), username: self.display_name() }
+    }
+
+    /// The player behind this target, if it is one.
+    #[must_use]
+    pub fn as_player(&self) -> Option<&PlayerCandidate> {
+        match self {
+            Self::Player(p) => Some(p),
+            Self::World(_) => None,
+        }
+    }
 }
 
 impl SelectorSubject for CommandTarget {
@@ -251,6 +301,12 @@ impl SelectorSubject for CommandTarget {
         match self {
             Self::Player(p) => SelectorSubject::position(p),
             Self::World(w) => w.position(),
+        }
+    }
+    fn rotation(&self) -> Rotation {
+        match self {
+            Self::Player(p) => p.rotation,
+            Self::World(w) => w.rotation,
         }
     }
     fn game_mode(&self) -> Option<GameMode> {
@@ -293,33 +349,21 @@ impl std::fmt::Display for SelectorError {
     }
 }
 
-/// The real selector-resolution rule — the AST plus a roster and a caller,
-/// to a player list.
+/// The real selector-resolution rule — the AST plus candidates and a caller —
+/// over any [`SelectorSubject`]: players alone, or players with the world's
+/// entities when the selector reaches entities.
 ///
 /// The order of operations is the real rule's and each step matters:
 ///
-/// 1. `@s` short-circuits to the caller (vanilla's own current-entity read), still subject to the
-///    predicates — `@s[gamemode=creative]` legitimately matches nobody.
+/// 1. `@s` short-circuits to the caller, still subject to the predicates —
+///    `@s[gamemode=creative]` legitimately matches nobody.
 /// 2. A bare name or uuid is an exact lookup, not a filter.
 /// 3. Otherwise: every candidate, filtered by the predicates, then by
 ///    `distance`/`dx dy dz` around the (possibly `x`/`y`/`z`-overridden) origin,
 ///    then **sorted**, then truncated to `max_results`.
 ///
 /// Sorting before truncating is the whole point of `sort=nearest,limit=3`: the
-/// other order gives three arbitrary players sorted among themselves.
-pub fn resolve_players(
-    selector: &EntitySelector,
-    source: &CommandSource,
-    candidates: &[PlayerCandidate],
-    shuffle: &dyn Fn(usize) -> Vec<usize>,
-    score: &dyn Fn(&str, &str) -> Option<i32>,
-    team: &dyn Fn(&str) -> String,
-) -> Result<Vec<PlayerCandidate>, SelectorError> {
-    resolve_subjects(selector, source, candidates, shuffle, score, team)
-}
-
-/// [`resolve_players`] over any [`SelectorSubject`]: players alone, or players
-/// with the world's entities when the selector reaches entities.
+/// other order gives three arbitrary candidates sorted among themselves.
 pub fn resolve_subjects<T: SelectorSubject + Clone>(
     selector: &EntitySelector,
     source: &CommandSource,
@@ -343,6 +387,8 @@ pub fn resolve_subjects<T: SelectorSubject + Clone>(
     // for the identical reason: this crate must stay ignorant of
     // `crate::commands::team_store`'s storage shape.
     team: &dyn Fn(&str) -> String,
+    // `tag=` resolution: the tags on an entity, by uuid.
+    tags: &dyn Fn(Uuid) -> Vec<String>,
 ) -> Result<Vec<T>, SelectorError> {
     if selector.current_entity {
         let Some(entity) = source.entity.as_ref() else {
@@ -351,7 +397,7 @@ pub fn resolve_subjects<T: SelectorSubject + Clone>(
         let Some(me) = candidates.iter().find(|c| c.uuid() == entity.uuid) else {
             return Err(SelectorError::NoPlayersFound);
         };
-        return if matches_predicates(me, selector, score, team) {
+        return if matches_predicates(me, selector, score, team, tags) {
             Ok(vec![me.clone()])
         } else {
             Err(SelectorError::NoPlayersFound)
@@ -384,7 +430,7 @@ pub fn resolve_subjects<T: SelectorSubject + Clone>(
 
     let mut matched: Vec<T> = candidates
         .iter()
-        .filter(|c| matches_predicates(*c, selector, score, team))
+        .filter(|c| matches_predicates(*c, selector, score, team, tags))
         .filter(|c| matches_region(*c, selector, origin))
         .cloned()
         .collect();
@@ -436,6 +482,7 @@ fn matches_predicates<T: SelectorSubject>(
     selector: &EntitySelector,
     score: &dyn Fn(&str, &str) -> Option<i32>,
     team: &dyn Fn(&str) -> String,
+    tags: &dyn Fn(Uuid) -> Vec<String>,
 ) -> bool {
     // A positive `type=` narrows to that type alone: `@e[type=cow]` cannot match
     // a player, and saying so here is what keeps `/give @e[type=cow] …` from
@@ -471,6 +518,22 @@ fn matches_predicates<T: SelectorSubject>(
         // `SelectorPredicate::Team`'s own doc for why there is no `Option`
         // three-way to model here.
         SelectorPredicate::Team { name, inverted } => (team(&candidate.score_holder()) == *name) != *inverted,
+        SelectorPredicate::Tag { tag, inverted } => {
+            let held = tags(candidate.uuid());
+            let has = if tag.is_empty() { held.is_empty() } else { held.iter().any(|t| t == tag) };
+            has != *inverted
+        }
+        SelectorPredicate::EntityTypeTag { tag, inverted } => {
+            let member = lodestone_data::entity_type_tags::entity_type_tag_members(tag)
+                .is_some_and(|members| members.contains(&candidate.entity_type()));
+            member != *inverted
+        }
+        SelectorPredicate::XRotation(bounds) => {
+            lodestone_command_mc::entity::rotation_in_bounds(bounds, candidate.rotation().pitch)
+        }
+        SelectorPredicate::YRotation(bounds) => {
+            lodestone_command_mc::entity::rotation_in_bounds(bounds, candidate.rotation().yaw)
+        }
     })
 }
 

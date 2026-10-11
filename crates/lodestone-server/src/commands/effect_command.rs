@@ -37,10 +37,10 @@
 //!   of `<seconds>`. An effect instance supports an infinite duration and
 //!   the two-argument `give` form uses it, which is the real default; only
 //!   the explicit spelling is missing.
-//! * **Non-player targets.** The real `<targets>` argument accepts mobs;
-//!   `Effect` is per-*player* by construction (`DirectedEffect` carries a profile
-//!   uuid), and `MobSim` holds no effect state. So this uses `players()`, and the
-//!   narrowing is visible in the wire tree rather than silent at runtime.
+//! * **Non-living targets.** `<targets>` accepts any entity. A player gets a
+//!   directed [`Effect`]; a living mob is changed in the mob simulation; any
+//!   other entity is skipped, and a command that changed nobody fails with the
+//!   reference message.
 //!
 //! # Why seconds, not ticks
 //!
@@ -55,6 +55,7 @@ use lodestone_command_mc::EntityArg;
 
 use super::effect::Effect;
 use super::registrar::{Ctx, Registrar};
+use super::source::CommandTarget;
 use super::CommandResult;
 
 /// The game-masters permission level.
@@ -83,13 +84,17 @@ pub(super) fn register(registrar: &mut Registrar) {
         let Some(sender) = ctx.source.entity.clone() else {
             return Err("That command can only be used by a player".to_string());
         };
-        ctx.effect(sender.uuid, Effect::ClearEffects { effect: None });
+        if ctx.world.players.iter().any(|p| p.uuid == sender.uuid) {
+            ctx.effect(sender.uuid, Effect::ClearEffects { effect: None });
+        } else if !ctx.world.mobs.is_some_and(|mobs| mobs.with(|sim| sim.clear_effect_of(sender.uuid, None))) {
+            return Err(NOTHING_TO_CLEAR.to_string());
+        }
         ctx.send_success(format!("Took every effect from {}", sender.username));
         Ok(1)
     });
 
     let (clear_targets, clear_targets_key) =
-        registrar.arg(clear, "targets", EntityArg::players());
+        registrar.arg(clear, "targets", EntityArg::entities());
     registrar.exec(clear_targets, move |ctx| {
         let selector = ctx.get(clear_targets_key).clone();
         clear_effects(ctx, &selector, None)
@@ -105,7 +110,7 @@ pub(super) fn register(registrar: &mut Registrar) {
 
     // ---- give, executable from <effect> onwards -------------------------------
     let give = registrar.literal(effect, "give");
-    let (give_targets, give_targets_key) = registrar.arg(give, "targets", EntityArg::players());
+    let (give_targets, give_targets_key) = registrar.arg(give, "targets", EntityArg::entities());
     let (give_effect, give_effect_key) =
         registrar.arg(give_targets, "effect", StringArgument::word());
     registrar.exec(give_effect, move |ctx| {
@@ -160,6 +165,21 @@ fn canonical_effect_id(raw: &str) -> String {
     }
 }
 
+const GIVE_FAILED: &str =
+    "Unable to apply this effect (target is either immune to effects, or has something stronger)";
+const NOTHING_TO_CLEAR: &str = "Target has no effects to remove";
+const EFFECT_MISSING: &str = "Target doesn't have the requested effect";
+
+fn resolve_entities(
+    ctx: &Ctx<'_>,
+    selector: &lodestone_command_mc::EntitySelector,
+) -> Result<Vec<CommandTarget>, String> {
+    ctx.resolve_targets(selector).map_err(|error| match error {
+        super::source::SelectorError::NoPlayersFound => "No entity was found".to_string(),
+        other => other.to_string(),
+    })
+}
+
 /// The real give-effect rule.
 fn give_effect_to(
     ctx: &mut Ctx<'_>,
@@ -169,23 +189,35 @@ fn give_effect_to(
     amplifier: u32,
 ) -> CommandResult {
     let id = canonical_effect_id(raw_id);
-    let targets = ctx.resolve(selector)?;
+    let targets = resolve_entities(ctx, selector)?;
+    let mut affected: Vec<String> = Vec::new();
     for target in &targets {
-        ctx.effect(
-            target.uuid,
-            Effect::ApplyEffect {
-                effect: id.clone(),
-                duration,
-                amplifier,
-            },
-        );
+        let applied = match target {
+            CommandTarget::Player(player) => {
+                ctx.effect(
+                    player.uuid,
+                    Effect::ApplyEffect { effect: id.clone(), duration, amplifier },
+                );
+                true
+            }
+            CommandTarget::World(entity) => ctx
+                .world
+                .mobs
+                .is_some_and(|mobs| mobs.with(|sim| sim.apply_effect_to(entity.uuid, &id, duration, amplifier))),
+        };
+        if applied {
+            affected.push(target.display_name());
+        }
     }
-    if let [only] = targets.as_slice() {
-        ctx.send_success(format!("Applied effect {id} to {}", only.username));
+    if affected.is_empty() {
+        return Err(GIVE_FAILED.to_string());
+    }
+    if let [only] = affected.as_slice() {
+        ctx.send_success(format!("Applied effect {id} to {only}"));
     } else {
-        ctx.send_success(format!("Applied effect {id} to {} players", targets.len()));
+        ctx.send_success(format!("Applied effect {id} to {} targets", affected.len()));
     }
-    Ok(i32::try_from(targets.len()).unwrap_or(i32::MAX))
+    Ok(i32::try_from(affected.len()).unwrap_or(i32::MAX))
 }
 
 /// The real clear-effects/clear-one-effect rule.
@@ -195,31 +227,31 @@ fn clear_effects(
     raw_id: Option<String>,
 ) -> CommandResult {
     let id = raw_id.as_deref().map(canonical_effect_id);
-    let targets = ctx.resolve(selector)?;
+    let targets = resolve_entities(ctx, selector)?;
+    let mut affected: Vec<String> = Vec::new();
     for target in &targets {
-        ctx.effect(
-            target.uuid,
-            Effect::ClearEffects {
-                effect: id.clone(),
-            },
-        );
-    }
-    match (&id, targets.as_slice()) {
-        (Some(id), [only]) => {
-            ctx.send_success(format!("Took effect {id} from {}", only.username));
-        }
-        (Some(id), _) => {
-            ctx.send_success(format!("Took effect {id} from {} players", targets.len()));
-        }
-        (None, [only]) => {
-            ctx.send_success(format!("Took every effect from {}", only.username));
-        }
-        (None, _) => {
-            ctx.send_success(format!(
-                "Took every effect from {} players",
-                targets.len()
-            ));
+        let cleared = match target {
+            CommandTarget::Player(player) => {
+                ctx.effect(player.uuid, Effect::ClearEffects { effect: id.clone() });
+                true
+            }
+            CommandTarget::World(entity) => ctx
+                .world
+                .mobs
+                .is_some_and(|mobs| mobs.with(|sim| sim.clear_effect_of(entity.uuid, id.as_deref()))),
+        };
+        if cleared {
+            affected.push(target.display_name());
         }
     }
-    Ok(i32::try_from(targets.len()).unwrap_or(i32::MAX))
+    if affected.is_empty() {
+        return Err(if id.is_some() { EFFECT_MISSING } else { NOTHING_TO_CLEAR }.to_string());
+    }
+    match (&id, affected.as_slice()) {
+        (Some(id), [only]) => ctx.send_success(format!("Took effect {id} from {only}")),
+        (Some(id), _) => ctx.send_success(format!("Took effect {id} from {} targets", affected.len())),
+        (None, [only]) => ctx.send_success(format!("Took every effect from {only}")),
+        (None, _) => ctx.send_success(format!("Took every effect from {} targets", affected.len())),
+    }
+    Ok(i32::try_from(affected.len()).unwrap_or(i32::MAX))
 }

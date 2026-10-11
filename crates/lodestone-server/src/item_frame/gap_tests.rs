@@ -59,7 +59,7 @@ fn set_flag(sim: &mut MobSim<'_>, id: i32, name: &str) {
 }
 
 fn only_frame(sim: &MobSim<'_>) -> i32 {
-    sim.frame_command_entities().first().expect("one frame").entity_id
+    sim.command_entities().into_iter().find(|e| e.entity_type.path().ends_with("item_frame")).expect("one frame").entity_id
 }
 
 // -- Explosions ---------------------------------------------------------------

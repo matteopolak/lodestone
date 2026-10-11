@@ -141,6 +141,7 @@ mod gamerule;
 mod give;
 mod help;
 mod kill;
+mod tag;
 mod nbt_data;
 pub mod nbt_storage;
 pub mod registrar;
@@ -176,7 +177,7 @@ pub use registrar::{
 };
 pub use source::{
     CommandSource, CommandTarget, EntityAnchor, PlayerCandidate, SelectorError, SelectorSubject, SourceEntity,
-    WorldEntityCandidate, resolve_players, resolve_subjects,
+    WorldEntityCandidate, resolve_subjects,
 };
 
 use crate::command::{CommandCaller, CommandDispatch, CommandResponse};
@@ -251,6 +252,7 @@ impl ServerCommands {
         seed::register(&mut registrar);
         world_spawn_commands::register(&mut registrar);
         kill::register(&mut registrar);
+        tag::register(&mut registrar);
         experience::register(&mut registrar);
         clear::register(&mut registrar);
         block_commands::register(&mut registrar);

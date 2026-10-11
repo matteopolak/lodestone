@@ -445,6 +445,8 @@ pub(crate) mod appearance;
 mod sim_effects;
 mod sim_events;
 mod sim_snapshots;
+mod sim_command_entities;
+pub use sim_command_entities::{CommandEntity, EntityKill, TeleportOutcome};
 
 // No re-export: `ProjectileHit`/`projectile_damage_type`/`first_solid_along`
 // `ProjectileHit`/`projectile_damage_type`/`first_solid_along` remain private;
@@ -2171,7 +2173,7 @@ pub(crate) enum ItemTickOwner {
 }
 
 impl ItemTickOwner {
-    fn for_position(position: Vec3) -> Self {
+    pub(super) fn for_position(position: Vec3) -> Self {
         Self::Chunk {
             cx: (position.x.floor() as i32).div_euclid(16),
             cz: (position.z.floor() as i32).div_euclid(16),
@@ -2613,6 +2615,10 @@ pub struct MobSim<'w> {
     /// tick it mounted survive, enough to respawn it in
     /// [`tick_shoulder_dismounts`](Self::tick_shoulder_dismounts).
     shoulder_riders: HashMap<Uuid, ShoulderRider>,
+    /// Entity tags added with `/tag`, by uuid. Players are keyed here too, so one
+    /// store answers `tag=` for every selector subject; see
+    /// [`MobSim::prune_entity_tags`] for how entries for removed entities leave.
+    entity_tags: HashMap<Uuid, std::collections::BTreeSet<String>>,
     /// The `nextInt(3)` / `nextInt(10)` / `nextInt(maxTemper)` draws the taming
     /// mechanisms make, on their own stream so a tame attempt cannot shift which
     /// roll a mob spawn, a despawn pass or an XP award sees — the same isolation

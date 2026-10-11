@@ -1,13 +1,10 @@
 //! `/kill`.
 //!
-//! # Targets are `players()`, not the real "any entity" selector
+//! # Targets are any entity
 //!
-//! The real `<targets>` argument matches any entity, not just players. This
-//! server's [`crate::commands::CommandWorld`] only ever carries
-//! [`crate::commands::PlayerCandidate`]s (see [`crate::commands::source`]'s
-//! module doc for why: entity resolution needs a world this crate deliberately
-//! does not depend on), so `players()` is the same narrowing `/gamemode` and
-//! `/give` already made for the same reason.
+//! `<targets>` resolves through [`Ctx::resolve_targets`], so `@e` reaches every
+//! entity the mob simulation owns. A player is killed by a directed
+//! [`crate::commands::Effect`]; anything else by `MobSim::kill_entity`.
 //!
 //! # Delivery: [`crate::commands::Effect::Kill`] through the ordinary directed
 //! path
@@ -27,12 +24,12 @@ use super::source::{CommandTarget, SelectorError};
 /// The game-masters permission level.
 const KILL_LEVEL: u8 = 2;
 
-/// Removes a non-player entity at once. A killed item frame drops nothing and
-/// its framed map forgets the marker it showed; the removal reaches clients
-/// through the next entity-stream diff.
+/// Kills a non-player entity. A killed item frame drops nothing and its framed
+/// map forgets the marker it showed; the removal reaches clients through the
+/// next entity-stream diff.
 fn kill_world_entity(ctx: &Ctx<'_>, uuid: Uuid) {
     let Some(mobs) = ctx.world.mobs else { return };
-    if let Some(broken) = mobs.with(|sim| sim.kill_frame_by_uuid(uuid)) {
+    if let Some(broken) = mobs.with(|sim| sim.kill_entity(uuid)).and_then(|kill| kill.frame) {
         crate::item_frame::forget_map(ctx.world.state.maps(), broken.map);
     }
 }
@@ -66,13 +63,7 @@ pub(super) fn register(registrar: &mut Registrar) {
             }
         }
         if let [only] = targets.as_slice() {
-            ctx.send_success(format!(
-                "Killed {}",
-                match only {
-                    CommandTarget::Player(player) => player.username.as_str(),
-                    CommandTarget::World(entity) => entity.entity_type.as_str(),
-                }
-            ));
+            ctx.send_success(format!("Killed {}", only.display_name()));
         } else {
             ctx.send_success(format!("Killed {} entities", targets.len()));
         }

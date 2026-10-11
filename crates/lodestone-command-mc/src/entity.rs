@@ -16,12 +16,12 @@
 //! `dx`/`dy`/`dz`, `scores`, each with vanilla's `!` inversion where vanilla
 //! has it.
 //!
-//! `nbt`, `advancements`, `predicate`, `tag`, `team`, `level` and the two
-//! `*_rotation` options are **not** parsed, and each is refused by name rather
-//! than silently ignored — a selector that quietly matched more players than
-//! the author asked for is the worst available failure. Every one of them
-//! needs infrastructure this server does not have (entity NBT, an advancement
-//! predicate engine, teams).
+//! plus `tag`, `x_rotation`, `y_rotation` and `type=#<tag>`. `nbt`,
+//! `advancements`, `predicate` and `level` are **not** parsed, and each is
+//! refused by name rather than silently ignored — a selector that quietly
+//! matched more entities than the author asked for is the worst available
+//! failure. They need infrastructure this server does not have (entity NBT, an
+//! advancement predicate engine, experience levels).
 //!
 //! **None of that is visible on the wire.** `minecraft:entity`'s network
 //! payload is one flags byte — `single` and `players_only` — with no option
@@ -68,12 +68,13 @@ impl<T: PartialOrd + Copy> Bounds<T> {
     }
 }
 
-/// Vanilla's own bounds reader for `f64`.
+/// Vanilla's own bounds reader for `f64`. `allow_swapped` admits `min > max`,
+/// which a rotation range uses to wrap through `±180`.
 ///
 /// The one subtle rule: a `.` is part of the number
 /// **unless** it begins a `..`, which is what lets `1..5` tokenize without
 /// backtracking and `1.5..` still read `1.5`.
-fn read_bounds_f64(reader: &mut StringReader) -> Result<Bounds<f64>, ParseError> {
+fn read_bounds_f64(reader: &mut StringReader, allow_swapped: bool) -> Result<Bounds<f64>, ParseError> {
     let start = reader.cursor();
     if !reader.can_read() {
         return Err(ParseError::new(start, ParseErrorKind::ExpectedDouble));
@@ -103,7 +104,7 @@ fn read_bounds_f64(reader: &mut StringReader) -> Result<Bounds<f64>, ParseError>
     let bounds = Bounds { min: parse(min)?, max: parse(max)? };
     // Vanilla's own bounds reader's swapped-order check.
     if let (Some(min), Some(max)) = (bounds.min, bounds.max) {
-        if min > max {
+        if min > max && !allow_swapped {
             reader.set_cursor(start);
             return Err(ParseError::new(start, ParseErrorKind::DoubleTooLow { found: max, min }));
         }
@@ -188,6 +189,40 @@ pub enum SelectorPredicate {
     /// equality — so the resolver side needs no `Option`, only a holder's
     /// team name defaulted to `""`.
     Team { name: String, inverted: bool },
+    /// `tag=` / `tag=!` — an entity tag added by `/tag`. The empty name means
+    /// "has no tags at all" (and, inverted, "has at least one").
+    Tag { tag: String, inverted: bool },
+    /// `type=#<tag>` / `type=!#<tag>` — membership in a vanilla entity-type tag,
+    /// `tag` being the full id (`minecraft:zombies`).
+    EntityTypeTag { tag: String, inverted: bool },
+    /// `x_rotation=` — the entity's pitch in degrees, compared wrapped to
+    /// `[-180, 180)`. A range whose `min` exceeds its `max` wraps around the
+    /// seam rather than being refused.
+    XRotation(Bounds<f32>),
+    /// `y_rotation=` — the entity's yaw in degrees, as [`Self::XRotation`].
+    YRotation(Bounds<f32>),
+}
+
+/// Whether `rotation`, wrapped to `[-180, 180)`, lies in `bounds` under the
+/// selector's rotation rule: an absent end is `0` (min) or `359` (max), both
+/// wrapped, and `min > max` means the range crosses the seam.
+#[must_use]
+pub fn rotation_in_bounds(bounds: &Bounds<f32>, rotation: f32) -> bool {
+    let min = wrap_degrees(bounds.min.unwrap_or(0.0));
+    let max = wrap_degrees(bounds.max.unwrap_or(359.0));
+    let rotation = wrap_degrees(rotation);
+    if min > max { rotation >= min || rotation <= max } else { rotation >= min && rotation <= max }
+}
+
+fn wrap_degrees(value: f32) -> f32 {
+    let mut wrapped = value % 360.0;
+    if wrapped >= 180.0 {
+        wrapped -= 360.0;
+    }
+    if wrapped < -180.0 {
+        wrapped += 360.0;
+    }
+    wrapped
 }
 
 /// The `x`/`y`/`z` overrides: which components of the caller's position the
@@ -491,7 +526,7 @@ fn enforce(
         return Err(refuse(position, "selector must match at most one entity"));
     }
     if arg.players_only && selector.includes_entities && !selector.current_entity {
-        return Err(refuse(position, "selector must match only players"));
+        return Err(refuse(position, "Only players may be affected by this command, but the provided selection includes entities"));
     }
     Ok(())
 }
@@ -548,7 +583,7 @@ fn parse_option(
         }
         "distance" => {
             let position = reader.cursor();
-            let bounds = read_bounds_f64(reader)?;
+            let bounds = read_bounds_f64(reader, false)?;
             if bounds.min.is_some_and(|v| v < 0.0) || bounds.max.is_some_and(|v| v < 0.0) {
                 return Err(refuse(position, "distance cannot be negative"));
             }
@@ -599,7 +634,13 @@ fn parse_option(
             let position = reader.cursor();
             let inverted = read_inversion(reader);
             if reader.peek() == Some('#') {
-                return Err(refuse(position, "entity-type tags are not supported yet"));
+                reader.skip();
+                let tag = read_resource_key(reader, position)?;
+                if lodestone_data::entity_type_tags::entity_type_tag_members(&tag).is_none() {
+                    return Err(refuse(position, format!("unknown entity type tag #{tag}")));
+                }
+                selector.predicates.push(SelectorPredicate::EntityTypeTag { tag, inverted });
+                return Ok(());
             }
             let id = read_resource_key(reader, position)?;
             if lodestone_data::entity_types::entity_type_id(&id).is_none() {
@@ -641,12 +682,25 @@ fn parse_option(
             let name = reader.read_unquoted_string();
             selector.predicates.push(SelectorPredicate::Team { name, inverted });
         }
+        "tag" => {
+            let inverted = read_inversion(reader);
+            let tag = reader.read_unquoted_string();
+            selector.predicates.push(SelectorPredicate::Tag { tag, inverted });
+        }
+        "x_rotation" | "y_rotation" => {
+            let bounds = read_bounds_f64(reader, true)?;
+            let narrow = Bounds { min: bounds.min.map(|v| v as f32), max: bounds.max.map(|v| v as f32) };
+            selector.predicates.push(if key == "x_rotation" {
+                SelectorPredicate::XRotation(narrow)
+            } else {
+                SelectorPredicate::YRotation(narrow)
+            });
+        }
         // Known to vanilla, not implemented here, and named so the author knows
         // which it is. Each needs a subsystem that does not exist: entity NBT
         // (`nbt`), the advancement predicate engine (`advancements`,
-        // `predicate`), entity tags (`tag`), experience levels (`level`), or
-        // per-entity rotation tracking (`*_rotation`).
-        "nbt" | "advancements" | "predicate" | "tag" | "level" | "x_rotation" | "y_rotation" => {
+        // `predicate`), or experience levels (`level`).
+        "nbt" | "advancements" | "predicate" | "level" => {
             Err(refuse(key_position, format!("selector option '{key}' is not supported yet")))?;
         }
         _ => Err(refuse(key_position, key.to_string()))?,
@@ -997,7 +1051,7 @@ mod tests {
     /// widening the match.
     #[test]
     fn deferred_and_unknown_options_are_both_refused_and_say_which() {
-        let deferred = parse(EntityArg::players(), "@a[tag=foo]").expect_err("tag is deferred");
+        let deferred = parse(EntityArg::players(), "@a[nbt={}]").expect_err("nbt is deferred");
         assert!(
             deferred.to_string().contains("not supported yet"),
             "a deferred option must say so: {deferred}"
@@ -1012,6 +1066,62 @@ mod tests {
         // The control: the same bracket syntax with a *supported* option parses,
         // so the two refusals above are about the option and not the brackets.
         assert!(parse(EntityArg::players(), "@a[limit=1]").is_ok());
+    }
+
+    fn entities(text: &str) -> EntitySelector {
+        parse(EntityArg::entities(), text).unwrap_or_else(|e| panic!("{text:?} should parse: {e}"))
+    }
+
+    /// `tag=`, its inverted and empty forms, the entity-type tag form and both
+    /// rotation options parse to the predicates the resolver reads.
+    #[test]
+    fn tag_type_tag_and_rotation_options_parse() {
+        assert_eq!(
+            entities("@e[tag=a,tag=!b,tag=]").predicates[1..],
+            [
+                SelectorPredicate::Tag { tag: "a".into(), inverted: false },
+                SelectorPredicate::Tag { tag: "b".into(), inverted: true },
+                SelectorPredicate::Tag { tag: String::new(), inverted: false },
+            ]
+        );
+        assert_eq!(
+            entities("@e[type=#zombies]").predicates[1..],
+            [SelectorPredicate::EntityTypeTag { tag: "minecraft:zombies".into(), inverted: false }]
+        );
+        assert_eq!(
+            entities("@e[type=!#minecraft:skeletons]").predicates[1..],
+            [SelectorPredicate::EntityTypeTag { tag: "minecraft:skeletons".into(), inverted: true }]
+        );
+        // A tag leaves the selector free to match any entity type.
+        assert_eq!(entities("@e[type=#zombies]").limit_to_type, None);
+        assert!(parse(EntityArg::entities(), "@e[type=#no_such_tag]").is_err());
+        assert_eq!(
+            entities("@e[x_rotation=-30..30,y_rotation=170..-170]").predicates[1..],
+            [
+                SelectorPredicate::XRotation(Bounds { min: Some(-30.0), max: Some(30.0) }),
+                SelectorPredicate::YRotation(Bounds { min: Some(170.0), max: Some(-170.0) }),
+            ]
+        );
+    }
+
+    /// Hand-derived: with an absent end read as `0` (min) or `359` (max) and a
+    /// `min > max` range crossing the `±180` seam.
+    #[test]
+    fn rotation_bounds_wrap_through_the_seam() {
+        let inside = Bounds { min: Some(-30.0), max: Some(30.0) };
+        assert!(rotation_in_bounds(&inside, 0.0));
+        assert!(rotation_in_bounds(&inside, 360.0), "360 wraps to 0");
+        assert!(!rotation_in_bounds(&inside, 90.0));
+        let seam = Bounds { min: Some(170.0), max: Some(-170.0) };
+        assert!(rotation_in_bounds(&seam, 180.0), "180 wraps to -180, inside the seam range");
+        assert!(rotation_in_bounds(&seam, 175.0));
+        assert!(rotation_in_bounds(&seam, -175.0));
+        assert!(!rotation_in_bounds(&seam, 0.0));
+        // `min` alone: max defaults to 359, which wraps to -1.
+        let open = Bounds { min: Some(10.0), max: None };
+        assert!(rotation_in_bounds(&open, 90.0));
+        assert!(rotation_in_bounds(&open, -45.0));
+        assert!(!rotation_in_bounds(&open, 0.0));
     }
 
     #[test]

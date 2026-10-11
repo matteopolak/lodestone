@@ -661,8 +661,8 @@ pub use mob_spawn::{
 };
 pub use natural_spawn::NaturalSpawner;
 pub use mobs::{
-    AttackOutcome, ChunkWorld, Detonation, InteractOutcome, LiveMobSource, MobHandle, MobOwner,
-    MobSim, PerceivedPlayer, PlayerHit, PlayerIdentity, PlayerPerception, SimMob,
+    AttackOutcome, ChunkWorld, CommandEntity, Detonation, EntityKill, InteractOutcome, LiveMobSource, MobHandle, MobOwner,
+    MobSim, PerceivedPlayer, PlayerHit, PlayerIdentity, PlayerPerception, SimMob, TeleportOutcome,
 };
 pub use neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
 pub use players::{

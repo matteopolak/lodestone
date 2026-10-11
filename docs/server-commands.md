@@ -34,6 +34,14 @@ Handle clones share installation. Callbacks run after both handle locks are rele
 
 Access control is four JSON files (`ops.json`, `whitelist.json`, `banned-players.json`, `banned-ips.json`) behind one shared cloneable handle. Join order is player ban, whitelist, IP ban, player limit, each refusal carrying its translation key. A missing file is an empty list; a malformed one is a hard error (silently reading no operators locks admins out). Bans and ops match on UUID, not name. An unparseable ban expiry keeps the ban. A world with no access lists is maximally permissive; a host opts into restriction. Files decode through closed-schema Serde records: missing fields keep historical defaults, unknown fields or wrong types are hard errors, invalid UUID entries are ignored for compatibility.
 
+### Entity selectors
+
+Players-only arguments (`/gamemode`, `/give`) resolve through `Ctx::resolve`, which matches connected players alone, so a mob source or uuid gives "No player was found" and `@e` is refused at parse time. Entity arguments (`/kill`, `/tp`, `/execute as|at|positioned as|rotated as|facing entity|if entity`, `/effect`, `/tag`) resolve through `Ctx::resolve_targets`, which pools players with `MobSim::command_entities`, the one enumeration of everything the sim streams (mobs, items, orbs, projectiles, boats, minecarts, cushions, frames, TNT, eyes, bolts, crystals, bobbers, wither, dragon). It is built from `MobSim::snapshots`, so a new streamed kind is selectable with no second registration. Each entity carries uuid, type, position, rotation, custom name and tags; the dimension is the source's, since a sim serves one dimension.
+
+Supported options: `type` (`!`, `#tag` from `lodestone_data::entity_type_tags`), `name`, `tag`, `distance`, `x/y/z`, `dx/dy/dz`, `limit`, `sort`, `x_rotation`, `y_rotation`, `gamemode`, `scores`, `team`. `nbt`, `advancements`, `predicate` and `level` are refused by name.
+
+Tags live in `MobSim` keyed by uuid (players included) and persist through the entity record's `Tags` list. By-uuid actions are `MobSim::kill_entity`, `teleport_entity`, `apply_effect_to` and `clear_effect_of`. Gotchas: a mob `/kill` is lethal damage through the normal death pass (loot drops); frames, falling blocks, bolts, bobbers and the dragon cannot be teleported and are skipped; `/data`, `/damage` and `/ride` have no entity form.
+
 ### Client decode
 
 A server tree is a variable-length node stream with no per-node length, decoded into a version-free model keyed by wire registry ids. An unrecognised argument type marks only that node unusable (the reference decoder corrupts every following node). Tab completion and highlighting are pure functions of the tree and chat line: literal children and small fixed-domain types resolve locally; entity selectors, registry types and anything with a suggestion provider ask the server and wait.
