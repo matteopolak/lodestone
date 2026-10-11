@@ -28,7 +28,7 @@ The stance follows the stacks: the main hand's map with an empty off hand is two
 
 ### Item frames
 
-Pictures batch per distinct map; every visible frame's icons merge into one mesh drawn after them with the map-surface depth variant. The mesh cache key includes `decoration_revision`.
+The server side (placement, the framed item, the frame marker) is [item-frames](./item-frames.md). Pictures batch per distinct map; every visible frame's icons merge into one mesh drawn after them with the map-surface depth variant. The mesh cache key includes `decoration_revision`.
 
 ## How to change it
 
@@ -42,7 +42,6 @@ Pictures batch per distinct map; every visible frame's icons merge into one mesh
 
 ## Gaps
 
-- The server draws no frame markers: it has no item frames, so a framed map never gains a marker.
 - Cartography zoom and lock are absent.
 - A decoration's custom name label is not drawn.
 - The paper `map_background` behind a held map and the player's arms around it are not drawn.

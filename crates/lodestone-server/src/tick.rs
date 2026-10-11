@@ -4745,6 +4745,24 @@ async fn run_tick_loop_with_weather_impl<W>(
             }
         }
 
+        // Item frames check their support on the same cadence. A frame that fails
+        // drops itself and its item, and a framed map forgets its marker.
+        let frame_world = ResidentTickSource::new(&*world);
+        let unsupported_frames = mobs.with(|sim| {
+            sim.plan_frame_checks(&|x, y, z| frame_world.block_state_id(x, y, z))
+        });
+        if !frame_world.had_cold_read() && !unsupported_frames.is_empty() {
+            let broken: Vec<_> = mobs.with(|sim| {
+                unsupported_frames
+                    .into_iter()
+                    .filter_map(|id| sim.kill_frame(id, true))
+                    .collect()
+            });
+            for frame in broken {
+                crate::item_frame::publish_broken(&block_tick_out, world_state.maps(), frame);
+            }
+        }
+
         // The ender dragon's phase machine and its crystals' healing proc.
         // Unlike its neighbours above this needs no block reads: every input
         // the phase machine consumes — the live crystal count and the nearest

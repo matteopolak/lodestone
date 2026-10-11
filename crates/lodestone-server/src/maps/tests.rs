@@ -335,7 +335,7 @@ fn a_session_stream_starts_full_and_follows_the_hand() {
     }
 
     // Held in the selected hotbar slot: the full grid and the marker go out at once.
-    let updates = session.tick(pose, &inventory, &Floor);
+    let updates = session.tick(pose, &inventory, &Floor, &[]);
     let [first] = updates.as_slice() else { panic!("one update, got {updates:?}") };
     assert_eq!(first.map_id, id);
     let patch = first.patch.as_ref().unwrap();
@@ -348,7 +348,7 @@ fn a_session_stream_starts_full_and_follows_the_hand() {
     inventory.set_native(0, None);
     inventory.set_native(20, Some(stack));
     let colours_before = handle.with(|store| store.get(id).unwrap().colors.clone());
-    let _ = session.tick(pose, &inventory, &Floor);
+    let _ = session.tick(pose, &inventory, &Floor, &[]);
     assert_eq!(handle.with(|store| store.get(id).unwrap().colors.clone()), colours_before);
 
     // Dropping the session removes the marker.
@@ -378,5 +378,100 @@ fn an_unknown_map_id_is_ignored() {
         }
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
-    assert!(session.tick(pose, &inventory, &Nothing).is_empty());
+    assert!(session.tick(pose, &inventory, &Nothing, &[]).is_empty());
+}
+
+fn framed(entity_id: i32, pos: BlockPos, rotation: i32) -> FramedMap {
+    FramedMap { map_id: 0, entity_id, pos, rotation }
+}
+
+/// A frame's cell is read as integer block coordinates (no half-block centring), so the cell
+/// (6, 3) on a map centred on the origin sits `2 * d + 0.5` truncated half-pixels out; an
+/// east-facing frame turns 270 degrees, which is `(270 + 8) * 16 / 360` truncated sixteenths.
+#[test]
+fn a_frame_marker_sits_at_the_frames_cell_and_turns_with_its_facing() {
+    let mut map = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
+    let who = carrier(Uuid::from_u128(1), 0.0, 0.0, 0.0, Dimension::Overworld);
+    map.tick_in_frame(&who, &framed(7, BlockPos::new(6, 65, 3), 270), false);
+    let markers: Vec<_> = map.decorations().map(|(key, d)| (key.to_owned(), d.kind.clone(), d.x, d.y, d.rotation)).collect();
+    assert_eq!(markers, vec![("frame-7".to_owned(), "frame".to_owned(), 12, 6, 12)]);
+    assert_eq!(map.frames, vec![MapFrame { pos: BlockPos::new(6, 65, 3), rotation: 270, entity_id: 7 }]);
+    assert!(map.is_dirty());
+
+    // A frame on a floor or ceiling turns -90 degrees: `(-90 - 8) * 16 / 360` truncates to -4, which is 12.
+    map.tick_in_frame(&who, &framed(8, BlockPos::new(-6, 65, 0), -90), false);
+    let rotation = map.decorations().find(|(key, _)| *key == "frame-8").map(|(_, d)| (d.x, d.y, d.rotation));
+    // -6 * 2 + 0.5 = -11.5 truncates toward zero.
+    assert_eq!(rotation, Some((-11, 0, 12)));
+
+    // Another frame in the same cell replaces the first one's marker.
+    map.tick_in_frame(&who, &framed(9, BlockPos::new(6, 65, 3), 270), false);
+    let keys: Vec<_> = map.decorations().map(|(key, _)| key.to_owned()).collect();
+    assert_eq!(keys, vec!["frame-8".to_owned(), "frame-9".to_owned()]);
+
+    map.removed_from_frame(BlockPos::new(6, 65, 3), 9);
+    map.removed_from_frame(BlockPos::new(-6, 65, 0), 8);
+    assert_eq!(map.decorations().count(), 0);
+    assert!(map.frames.is_empty());
+}
+
+#[test]
+fn a_frame_off_the_map_shows_no_marker_and_a_frame_adds_no_holder_marker() {
+    let mut map = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
+    let who = carrier(Uuid::from_u128(1), 0.0, 0.0, 0.0, Dimension::Overworld);
+    map.tick_in_frame(&who, &framed(7, BlockPos::new(200, 65, 0), 0), false);
+    assert_eq!(map.decorations().count(), 0, "63 blocks is the edge at scale 0");
+    map.tick_in_frame(&who, &framed(7, BlockPos::new(1, 65, 0), 0), false);
+    assert!(map.decorations().all(|(_, d)| d.kind == "frame"), "the viewer is not a holder");
+}
+
+#[test]
+fn a_session_shows_a_framed_map_on_every_tenth_tick() {
+    let handle = MapHandle::default();
+    let id = handle.create_for_use(0, 0, Dimension::Overworld);
+    let mut session = MapSession::new(handle.clone(), Uuid::from_u128(9), "Viewer");
+    let pose = PlayerPose { x: 0.5, z: 0.5, yaw: 0.0, dimension: Dimension::Overworld, game_time: 0 };
+    struct Nothing;
+    impl ChunkSource for Nothing {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(-64, 384)
+        }
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            StateId::AIR
+        }
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
+    }
+    let inventory = PlayerInventory::new();
+    let frames = [FramedMap { map_id: id, entity_id: 4, pos: BlockPos::new(6, 65, 3), rotation: 270 }];
+    for tick in 1..10 {
+        assert!(session.tick(pose, &inventory, &Nothing, &frames).is_empty(), "tick {tick}");
+    }
+    let updates = session.tick(pose, &inventory, &Nothing, &frames);
+    let [update] = updates.as_slice() else { panic!("one update, got {updates:?}") };
+    assert_eq!(update.map_id, id);
+    assert!(update.patch.is_some(), "the whole grid goes out with the first update");
+    let kinds: Vec<_> = update.decorations.iter().flatten().map(|d| (d.kind.path().to_owned(), d.x, d.y, d.rotation)).collect();
+    assert_eq!(kinds, vec![("frame".to_owned(), 12, 6, 12)]);
+
+    // Once the frame is gone the viewer's holder is released on the next due tick.
+    for _ in 0..10 {
+        let _ = session.tick(pose, &inventory, &Nothing, &[]);
+    }
+    handle.removed_from_frame(id, BlockPos::new(6, 65, 3), 4);
+    assert_eq!(handle.with(|store| store.get(id).unwrap().decorations().count()), 0);
+}
+
+#[test]
+fn a_viewer_who_stopped_holding_the_map_loses_their_marker_but_a_holder_keeps_it() {
+    let mut map = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
+    let who = carrier(Uuid::from_u128(1), 3.0, 3.0, 0.0, Dimension::Overworld);
+    map.tick_carried_by(&who);
+    assert_eq!(map.decorations().map(|(key, _)| key).collect::<Vec<_>>(), vec!["Mapper"]);
+    map.tick_in_frame(&who, &framed(7, BlockPos::new(6, 65, 3), 270), true);
+    assert_eq!(map.decorations().map(|(key, _)| key).collect::<Vec<_>>(), vec!["Mapper", "frame-7"]);
+    map.tick_in_frame(&who, &framed(7, BlockPos::new(6, 65, 3), 270), false);
+    assert_eq!(map.decorations().map(|(key, _)| key).collect::<Vec<_>>(), vec!["frame-7"]);
 }

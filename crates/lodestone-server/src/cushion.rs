@@ -53,7 +53,7 @@ impl Aabb {
         }
     }
 
-    fn deflated(self, by: f64) -> Self {
+    pub(crate) fn deflated(self, by: f64) -> Self {
         Self {
             min: self.min.map(|v| v + by),
             max: self.max.map(|v| v - by),
@@ -66,7 +66,7 @@ impl Aabb {
         (0..3).all(|a| self.min[a] < other.max[a] && self.max[a] > other.min[a])
     }
 
-    fn shifted(self, cell: [i32; 3]) -> Self {
+    pub(crate) fn shifted(self, cell: [i32; 3]) -> Self {
         let d = cell.map(f64::from);
         Self {
             min: [self.min[0] + d[0], self.min[1] + d[1], self.min[2] + d[2]],
@@ -75,7 +75,7 @@ impl Aabb {
     }
 
     /// Every cell from the floor of the minimum to the floor of the maximum.
-    fn cells(&self) -> impl Iterator<Item = (i32, i32, i32)> {
+    pub(crate) fn cells(&self) -> impl Iterator<Item = (i32, i32, i32)> {
         let lo = self.min.map(|v| v.floor() as i32);
         let hi = self.max.map(|v| v.floor() as i32);
         (lo[0]..=hi[0]).flat_map(move |x| {

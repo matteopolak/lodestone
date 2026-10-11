@@ -17,6 +17,7 @@ The integrated server's map saved data: using an empty map creates a filled map,
 
 - New colour table: `just oracle-map-colors`, then `just regen-map-colors`; the tests assert the committed dump matches the generated table.
 - Wire shape: `V770ServerProtocol::encode_map_item_data_body` (26.2 crate); other families would add `encode_map_item_data`.
+- Item-frame markers: a frame holding a map reports it to every connection's `MapSession::tick`, which keeps a `frame` marker and sends the map to viewers who do not hold it; see [item-frames](./item-frames.md).
 - Banner markers: `UseItemOn` with a filled map on a banner block goes through `server/map_tick.rs::filled_map_banner_click` before ordinary block use, toggling `MapData::toggle_banner`; the marker persists in the `banners` list.
 - Persistence is native-only (`lodestone-anvil` is not linked on wasm); `read_saved`/`write_saved` are cfg-split.
 

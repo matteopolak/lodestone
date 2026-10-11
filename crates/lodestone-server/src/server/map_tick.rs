@@ -32,6 +32,7 @@ pub(super) async fn tick_maps<T, P, S>(
     player_pos: Option<(f64, f64, f64)>,
     player_rot: Option<Rotation>,
     inventory: &PlayerInventory,
+    mobs: &MobHandle,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -46,7 +47,8 @@ where
         dimension,
         game_time: world.time().game_time,
     };
-    for update in session.tick(pose, inventory, source) {
+    let frames = mobs.with(|sim| sim.framed_maps());
+    for update in session.tick(pose, inventory, source, &frames) {
         apply(conn, state, proto.encode_map_item_data(&update)).await?;
     }
     Ok(())

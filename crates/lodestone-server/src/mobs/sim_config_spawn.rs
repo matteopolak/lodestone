@@ -77,6 +77,7 @@ impl<'w> MobSim<'w> {
             universal_anger: false,
             vehicles: HashMap::new(),
             cushions: HashMap::new(),
+            frames: HashMap::new(),
             tnt: HashMap::new(),
             eyes: HashMap::new(),
             eye_rng: SpawnRng::new(eye_of_ender::EYE_SEED),

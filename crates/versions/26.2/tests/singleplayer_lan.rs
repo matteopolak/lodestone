@@ -13,3 +13,5 @@ mod lan_player_stream;
 mod client_adapter_decorator_escape_hatch;
 #[path = "singleplayer_lan/singleplayer_map_stream.rs"]
 mod singleplayer_map_stream;
+#[path = "singleplayer_lan/singleplayer_item_frame.rs"]
+mod singleplayer_item_frame;

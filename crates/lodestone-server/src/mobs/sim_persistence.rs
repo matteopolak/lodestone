@@ -39,6 +39,7 @@ impl<'w> MobSim<'w> {
         }
         out.extend(self.saved_projectiles());
         out.extend(self.saved_cushions());
+        out.extend(self.saved_frames());
         out
     }
 
@@ -158,6 +159,11 @@ impl<'w> MobSim<'w> {
                     | "splash_potion" | "lingering_potion" | "experience_bottle"
             ) {
                 projectiles.push(saved);
+                continue;
+            }
+            if matches!(saved.id.path(), "item_frame" | "glow_item_frame") {
+                self.restore_frame(saved);
+                restored += 1;
                 continue;
             }
             if saved.id.path() == "cushion" {

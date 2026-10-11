@@ -612,6 +612,23 @@ pub enum MetadataField {
     /// appended). Only cushions push it, and only on protocol 777 does the
     /// serializer exist.
     CushionColor(u8),
+    /// A hanging entity's facing (index 8, the `DIRECTION` serializer): the
+    /// 3D data value, down 0, up 1, north 2, south 3, west 4, east 5. Only item
+    /// frames push it; the client also derives the facing from the entity's
+    /// yaw and pitch.
+    HangingFacing(u8),
+    /// An item frame's framed stack (index 9, `ITEM_STACK`). Always pushed, so
+    /// emptying a frame resends it; a `count` of 0 is the empty stack.
+    FrameItem {
+        /// The framed item's registry key (`minecraft:air` when empty).
+        item: ResourceKey,
+        /// Always 1 for a filled frame, 0 for an empty one.
+        count: u8,
+        /// The stack's components, e.g. a filled map's `map_id`.
+        components: Option<std::sync::Arc<lodestone_model::ItemComponents>>,
+    },
+    /// An item frame's rotation in eighth turns (index 10, `INT`), `0..8`.
+    FrameRotation(u8),
     /// Vanilla's own base-entity pose synced-data field — index **6**, the one and only `POSE`-serializer
     /// claimant in the jar dump (`entity_data_index_jvm.txt`), so no species
     /// switch is needed to disambiguate it the way index 8 or 18 need one.

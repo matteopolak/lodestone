@@ -366,7 +366,10 @@ where
         .is_some_and(|item| block_items::block_placed_by(item).is_some())
         || inventory
             .native(hand_native_for_use)
-            .is_some_and(|stack| crate::cushion::color_for_stack(stack).is_some());
+            .is_some_and(|stack| {
+                crate::cushion::color_for_stack(stack).is_some()
+                    || crate::item_frame::glow_of_item(stack).is_some()
+            });
     let existing_menu = block_entities.with(|reg| reg.get(pos).and_then(BlockEntity::menu_name));
     if let Some(menu) = existing_menu.filter(|_| !sneaking || !holding_block_item) {
         return open_container_screen(
@@ -908,6 +911,40 @@ where
                 if burned {
                     crate::cushion::publish_broken(block_ticks, position, color);
                 }
+                let native = hand_native;
+                if consume_one(inventory, native, game_mode) && game_mode != GameMode::Creative {
+                    let remainder = inventory.native(native).cloned();
+                    if let Some(menu_slot) = window_zero_menu_slot(native) {
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                        )
+                        .await?;
+                    }
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    // A frame item hangs an entity in the cell in front of the clicked face. Like the
+    // cushion it is not a block item; a refused placement keeps the stack and ends the click.
+    if let Some(stack) = inventory.native(hand_native).cloned() {
+        let dimension = source.dimension().unwrap_or(crate::dimension::Dimension::Overworld);
+        match crate::item_frame::apply_frame_item(
+            &stack,
+            pos,
+            face,
+            matches!(game_mode, GameMode::Survival | GameMode::Creative),
+            (dimension.min_y(), dimension.min_y() + dimension.height()),
+            &|x, y, z| source.block_state_id(x, y, z),
+            mobs,
+        ) {
+            crate::item_frame::FrameApplied::NotAFrame => {}
+            crate::item_frame::FrameApplied::Refused => return Ok(()),
+            crate::item_frame::FrameApplied::Placed { centre, glow, .. } => {
+                crate::item_frame::publish_sound(block_ticks, crate::item_frame::FrameSound::Place, glow, centre);
                 let native = hand_native;
                 if consume_one(inventory, native, game_mode) && game_mode != GameMode::Creative {
                     let remainder = inventory.native(native).cloned();

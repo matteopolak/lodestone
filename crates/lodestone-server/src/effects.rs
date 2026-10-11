@@ -229,6 +229,29 @@ pub fn cushion_sound(kind: CushionSound, pos: Vec3, seed: i64) -> Option<WorldEf
     })
 }
 
+/// An item-frame sound at `pos`: full volume and pitch in the neutral category,
+/// named for the plain or glowing frame.
+#[must_use]
+pub fn item_frame_sound(kind: crate::item_frame::FrameSound, glow: bool, pos: Vec3, seed: i64) -> Option<WorldEffect> {
+    use crate::item_frame::FrameSound;
+    let event = match kind {
+        FrameSound::Place => "place",
+        FrameSound::AddItem => "add_item",
+        FrameSound::Rotate => "rotate_item",
+        FrameSound::RemoveItem => "remove_item",
+        FrameSound::Break => "break",
+    };
+    let name = format!("minecraft:entity.{}.{event}", if glow { "glow_item_frame" } else { "item_frame" });
+    sound_exists(&name).then(|| WorldEffect::Sound {
+        sound: name,
+        category: SoundCategory::Neutral,
+        pos,
+        volume: 1.0,
+        pitch: 1.0,
+        seed,
+    })
+}
+
 /// The sound a straw bed gives off when its rule destroys it, at the block
 /// centre.
 #[must_use]

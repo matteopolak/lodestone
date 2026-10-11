@@ -85,7 +85,7 @@ use lodestone_entity::{
     seen_percent,
 };
 use lodestone_model::{
-    BlockPos, Difficulty, EntityEquipment, EquipmentSlot as ModelEquipmentSlot, Identifier,
+    BlockFace, BlockPos, Difficulty, EntityEquipment, EquipmentSlot as ModelEquipmentSlot, Identifier,
     ItemStack, ResourceKey, Rotation, Vec3,
 };
 use uuid::Uuid;
@@ -475,6 +475,8 @@ pub(crate) use falling_blocks::merge_falling_block_tick_effect_batches;
 // `tick_vehicles`.
 mod vehicles;
 mod cushion;
+mod item_frame;
+pub use item_frame::{FrameBroken, FrameHit, FrameInteraction, FramedMapRef};
 
 // No re-export: every `impl MobSim` method in each is already `pub`. See
 // `mobs::dragon`/`mobs::end_crystal`'s own module docs for the pure
@@ -2670,6 +2672,8 @@ pub struct MobSim<'w> {
     vehicles: HashMap<i32, TrackedVehicle>,
     /// Live cushions, keyed by network entity id; see `mobs::cushion`.
     cushions: HashMap<i32, TrackedCushion>,
+    /// Live item frames and glow item frames, keyed by network entity id; see `mobs::item_frame`.
+    frames: HashMap<i32, TrackedFrame>,
     /// Live primed TNT, keyed by network entity id — see [`TrackedTnt`] for
     /// why this is a plain map beside [`vehicles`](Self::vehicles) rather than
     /// a [`SimMob`].
@@ -2915,6 +2919,29 @@ struct TrackedCushion {
     color: u8,
     /// The player entity id seated on it.
     rider: Option<i32>,
+    /// Ticks since the last support check.
+    ticks_since_check: u32,
+}
+
+/// One live item frame: a block-attached entity holding at most one item.
+#[derive(Debug, Clone)]
+struct TrackedFrame {
+    uuid: Uuid,
+    /// The air cell it hangs in.
+    cell: BlockPos,
+    /// The way it faces, away from its wall.
+    facing: BlockFace,
+    /// Whether it is the glowing kind.
+    glow: bool,
+    /// The framed stack, always of one.
+    item: Option<ItemStack>,
+    /// The item's rotation in eighth turns, `0..8`.
+    rotation: u8,
+    /// Chance the framed item drops when popped or the frame breaks.
+    drop_chance: f32,
+    invisible: bool,
+    /// A fixed frame cannot be used, hit or broken by survival players.
+    fixed: bool,
     /// Ticks since the last support check.
     ticks_since_check: u32,
 }

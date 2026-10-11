@@ -269,6 +269,7 @@ impl<'w> MobSim<'w> {
             });
         }
         self.push_cushion_snapshots(&mut out);
+        self.push_frame_snapshots(&mut out);
         // Primed TNT. Sorted ids, for the same reason every other sidecar loop
         // in this method is: a stable per-tick update order for
         // the snapshot stream.

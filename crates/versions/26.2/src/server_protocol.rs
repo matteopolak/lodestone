@@ -311,6 +311,15 @@ const METADATA_SER_BYTE: i32 = 0;
 /// dye ordinal as a VarInt). Appended in 26.3; absent from the 776 index dump.
 const METADATA_IDX_CUSHION_COLOR: u8 = 8;
 const METADATA_SER_DYE_COLOR: i32 = 43;
+
+/// The hanging-entity class's direction accessor (index 8, serializer 12
+/// `DIRECTION`, a VarInt 3D data value), and the item-frame class's own item
+/// (index 9, `ITEM_STACK`) and rotation (index 10, `INT`) accessors. All three
+/// are rows of `tests/support/entity_data_index_jvm.txt`.
+const METADATA_IDX_HANGING_DIRECTION: u8 = 8;
+const METADATA_SER_DIRECTION: i32 = 12;
+const METADATA_IDX_FRAME_ITEM: u8 = 9;
+const METADATA_IDX_FRAME_ROTATION: u8 = 10;
 const METADATA_IDX_SHARED_FLAGS: u8 = 0;
 
 /// the abstract-horse class's own flags accessor's metadata index — **also 18**, also `BYTE`.
@@ -4820,6 +4829,25 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_CRYSTAL_SHOW_BOTTOM);
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*show);
+                }
+                MetadataField::HangingFacing(direction) => {
+                    w.u8(METADATA_IDX_HANGING_DIRECTION);
+                    w.var_i32(METADATA_SER_DIRECTION);
+                    w.var_i32(i32::from(*direction));
+                }
+                MetadataField::FrameItem { item, count, components } => {
+                    w.u8(METADATA_IDX_FRAME_ITEM);
+                    w.var_i32(METADATA_SER_ITEM_STACK);
+                    let mut stack = ItemStack::new(item.clone(), u32::from(*count));
+                    if let Some(components) = components {
+                        stack.components = (**components).clone();
+                    }
+                    write_optional_item_stack(self.wire, &mut w, Some(&stack));
+                }
+                MetadataField::FrameRotation(rotation) => {
+                    w.u8(METADATA_IDX_FRAME_ROTATION);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(i32::from(*rotation & 7));
                 }
                 MetadataField::CushionColor(color) => {
                     w.u8(METADATA_IDX_CUSHION_COLOR);

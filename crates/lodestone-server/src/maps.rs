@@ -34,8 +34,10 @@
 //! - Terrain access is the [`MapTerrain`] trait; the connection's implementation is
 //!   [`ColumnCache::terrain`], which samples snapshots of resident columns only and
 //!   never generates one.
-//! - Item frames: [`MapFrame`] markers are loaded, kept and drawn, but this server has no
-//!   item-frame entities, so nothing creates one.
+//! - Item frames: [`FramedMap`] is what an item frame holding a filled map tells the map
+//!   each tenth tick ([`MapSession::tick`] takes the list); [`MapData::tick_in_frame`] keeps a
+//!   [`MapFrame`] marker and a `frame` decoration, and [`MapData::removed_from_frame`] drops them
+//!   when the frame loses the map. A framed map is sent to every player in the dimension.
 //! - Not modelled: scale/lock post-processing (cartography table), exploration-map target
 //!   decorations from the `map_decorations` item component, and hiding a marker when its
 //!   wearer has an invisibility-equipment item on.
@@ -83,6 +85,8 @@ const OFF_MAP_LIMIT: f32 = 320.0;
 /// How far inside the edge a marker may sit and still be drawn on the map.
 const INSIDE_LIMIT: f32 = 63.0;
 const DECORATION_RESEND_TICKS: u32 = 5;
+/// Ticks between an item frame showing its map to each player.
+const FRAME_INTERVAL_TICKS: u32 = 10;
 /// Ticks between flushes of changed maps to disk.
 const FLUSH_INTERVAL_TICKS: u32 = 200;
 /// Ticks a column snapshot is reused before it is taken again.
@@ -122,6 +126,19 @@ impl MapFrame {
     fn decoration_key(&self) -> String {
         format!("frame-{}", self.entity_id)
     }
+}
+
+/// A filled map in an item frame, as the frame reports it to [`MapSession::tick`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct FramedMap {
+    pub map_id: i32,
+    /// The frame's network entity id, which keys its decoration.
+    pub entity_id: i32,
+    /// The cell the frame occupies.
+    pub pos: BlockPos,
+    /// The marker rotation in degrees: the facing's quarter turns, or -90 for a frame on a floor
+    /// or ceiling.
+    pub rotation: i32,
 }
 
 /// One decoration as the map stores it: the type's registry path (`player`, `banner_red`, ...),
@@ -360,6 +377,53 @@ impl MapData {
         if who.dimension.key() == self.dimension && self.tracking_position {
             self.add_decoration("player", who.name, who.x, who.z, f64::from(who.yaw), None, Some(who.game_time));
         }
+    }
+
+    /// Notes that `who` is shown the map by the item frame `frame`: creates their holder and keeps
+    /// the frame's marker. No holder marker is added, and one left from when `who` held the map
+    /// is dropped unless `holds` says they still do.
+    pub fn tick_in_frame(&mut self, who: &Carrier<'_>, frame: &FramedMap, holds: bool) {
+        self.holder_index(who);
+        if !holds && self.decorations.iter().any(|(key, _)| key == who.name) {
+            self.remove_decoration(who.name);
+        }
+        if !self.tracking_position {
+            return;
+        }
+        if let Some(existing) = self.frames.iter().find(|have| have.pos == frame.pos)
+            && existing.entity_id != frame.entity_id
+        {
+            let key = existing.decoration_key();
+            self.remove_decoration(&key);
+        }
+        let marker = MapFrame { pos: frame.pos, rotation: frame.rotation, entity_id: frame.entity_id };
+        self.add_decoration(
+            "frame",
+            &marker.decoration_key(),
+            f64::from(frame.pos.x),
+            f64::from(frame.pos.z),
+            f64::from(frame.rotation),
+            None,
+            Some(who.game_time),
+        );
+        match self.frames.iter().position(|have| have.pos == frame.pos) {
+            Some(index) if self.frames[index] == marker => {}
+            Some(index) => {
+                self.frames[index] = marker;
+                self.dirty = true;
+            }
+            None => {
+                self.frames.push(marker);
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Forgets the frame at `pos`, whose entity was `entity_id`, once it no longer holds this map.
+    pub fn removed_from_frame(&mut self, pos: BlockPos, entity_id: i32) {
+        self.remove_decoration(&format!("frame-{entity_id}"));
+        self.frames.retain(|have| have.pos != pos);
+        self.dirty = true;
     }
 
     /// Drops `uuid`'s holder and the marker kept under `name`.
@@ -957,6 +1021,14 @@ impl MapHandle {
     }
 
     /// Writes changed maps to disk.
+    pub fn removed_from_frame(&self, map_id: i32, pos: BlockPos, entity_id: i32) {
+        self.with(|store| {
+            if let Some(map) = store.get(map_id) {
+                map.removed_from_frame(pos, entity_id);
+            }
+        });
+    }
+
     pub fn flush(&self) -> usize {
         self.with(MapStore::flush)
     }
@@ -1050,6 +1122,7 @@ pub struct MapSession {
     uuid: Uuid,
     name: String,
     carried: BTreeSet<i32>,
+    framed: BTreeSet<i32>,
     cache: ColumnCache,
     ticks: u32,
 }
@@ -1067,15 +1140,17 @@ pub struct PlayerPose {
 impl MapSession {
     #[must_use]
     pub fn new(handle: MapHandle, uuid: Uuid, name: &str) -> Self {
-        Self { handle, uuid, name: name.to_owned(), carried: BTreeSet::new(), cache: ColumnCache::default(), ticks: 0 }
+        Self { handle, uuid, name: name.to_owned(), carried: BTreeSet::new(), framed: BTreeSet::new(), cache: ColumnCache::default(), ticks: 0 }
     }
 
     /// One server tick: tick every carried map, sample the ones in hand, and return the updates owed.
+    /// Every [`FRAME_INTERVAL_TICKS`]th tick the maps in `frames` are shown to this player as well.
     pub fn tick<S: ChunkSource + ?Sized>(
         &mut self,
         pose: PlayerPose,
         inventory: &PlayerInventory,
         source: &S,
+        frames: &[FramedMap],
     ) -> Vec<MapUpdate> {
         self.ticks = self.ticks.wrapping_add(1);
         let hands = [usize::from(inventory.selected_hotbar_slot()), OFFHAND_NATIVE];
@@ -1099,8 +1174,19 @@ impl MapSession {
         let has_ceiling = pose.dimension == Dimension::Nether;
         let mut updates = Vec::new();
         let flush_due = self.ticks % FLUSH_INTERVAL_TICKS == 0;
+        let frames_due = self.ticks % FRAME_INTERVAL_TICKS == 0;
+        let framed: BTreeSet<i32> = if frames_due {
+            frames.iter().map(|frame| frame.map_id).collect()
+        } else {
+            self.framed.clone()
+        };
         self.handle.with(|store| {
-            let dropped: BTreeSet<i32> = self.carried.iter().copied().filter(|id| !carried.contains_key(id)).collect();
+            let dropped: BTreeSet<i32> = self
+                .carried
+                .union(&self.framed)
+                .copied()
+                .filter(|id| !carried.contains_key(id) && !framed.contains(id))
+                .collect();
             store.release(self.uuid, &dropped);
             for (&id, &in_hand) in &carried {
                 let Some(map) = store.get(id) else { continue };
@@ -1112,18 +1198,29 @@ impl MapSession {
                     updates.push(update);
                 }
             }
+            if frames_due {
+                for frame in frames {
+                    let Some(map) = store.get(frame.map_id) else { continue };
+                    map.tick_in_frame(&who, frame, carried.contains_key(&frame.map_id));
+                    if let Some(update) = map.next_update(self.uuid, frame.map_id) {
+                        updates.push(update);
+                    }
+                }
+            }
             if flush_due {
                 store.flush();
             }
         });
         self.carried = carried.into_keys().collect();
+        self.framed = framed;
         updates
     }
 }
 
 impl Drop for MapSession {
     fn drop(&mut self) {
-        let carried = std::mem::take(&mut self.carried);
+        let mut carried = std::mem::take(&mut self.carried);
+        carried.append(&mut self.framed);
         self.handle.with(|store| {
             store.release(self.uuid, &carried);
             store.flush();

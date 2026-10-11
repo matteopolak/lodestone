@@ -4568,6 +4568,8 @@ mod cosmetic_metadata_tests {
         METADATA_IDX_RABBIT_TYPE, METADATA_IDX_SHEEP_WOOL, METADATA_IDX_WOLF_COLLAR, METADATA_IDX_WOLF_INTERESTED, METADATA_IDX_ENDERMAN_CARRIED, METADATA_IDX_RAIDER_CELEBRATING, METADATA_IDX_LIVING_FLAGS, METADATA_SER_OPTIONAL_BLOCK_STATE, METADATA_SER_BOOLEAN,
         METADATA_SER_BYTE, METADATA_SER_INT, METADATA_SER_OPTIONAL_COMPONENT, V770ServerProtocol,
         holder_variant_slot, METADATA_IDX_CUSHION_COLOR, METADATA_SER_DYE_COLOR,
+        METADATA_IDX_FRAME_ITEM, METADATA_IDX_FRAME_ROTATION, METADATA_IDX_HANGING_DIRECTION, METADATA_SER_DIRECTION,
+        METADATA_SER_ITEM_STACK,
     };
     use crate::packets::metadata::{MetadataClass, TrackedEntity, read_entity_metadata};
 
@@ -4646,6 +4648,58 @@ mod cosmetic_metadata_tests {
         let decoded =
             read_entity_metadata_with(&mut reader, tracked, &StackCodecContext::new(latest, &registries)).unwrap();
         assert_eq!(decoded.metadata.variant, Some(EntityVariant::Dyed { color: 13, sheared: false }));
+    }
+
+    /// A frame's facing, item and rotation sit at the three rows the 26.3 jar dump lists, and the
+    /// 26.3 client decode reads the framed map and the turn back from the bytes.
+    #[test]
+    fn item_frame_fields_encode_at_the_26_3_dump_rows() {
+        use crate::adapter::StackCodecContext;
+        use crate::packets::metadata::read_entity_metadata_with;
+        use lodestone_model::{ItemComponents, ResourceKey};
+
+        for (field, expected) in [
+            ("HangingEntity.DATA_DIRECTION", (METADATA_IDX_HANGING_DIRECTION, METADATA_SER_DIRECTION)),
+            ("ItemFrame.DATA_ITEM", (METADATA_IDX_FRAME_ITEM, METADATA_SER_ITEM_STACK)),
+            ("ItemFrame.DATA_ROTATION", (METADATA_IDX_FRAME_ROTATION, METADATA_SER_INT)),
+        ] {
+            assert_eq!(dump_row(INDEX_DUMP_777, field), expected, "{field}");
+        }
+        // The values the dump lists, spelled out so the constants cannot drift with it.
+        assert_eq!((METADATA_IDX_HANGING_DIRECTION, METADATA_IDX_FRAME_ITEM, METADATA_IDX_FRAME_ROTATION), (8, 9, 10));
+
+        let components = ItemComponents { map_id: Some(5), ..ItemComponents::default() };
+        let fields = [
+            MetadataField::HangingFacing(2),
+            MetadataField::FrameItem {
+                item: ResourceKey::new("minecraft", "filled_map").unwrap(),
+                count: 1,
+                components: Some(std::sync::Arc::new(components)),
+            },
+            MetadataField::FrameRotation(11),
+        ];
+        let ServerDirective::Send { payload, .. } = V770ServerProtocol.encode_set_entity_data(7, &fields) else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        // Entity id, then `index serializer value` for the facing; the rotation wraps to 3 of 8.
+        assert_eq!(&payload[..5], [7, 8, 12, 2, 9]);
+        assert_eq!(payload[payload.len() - 4..], [10, 1, 3, 0xFF]);
+
+        let tracked = TrackedEntity { class: Some(MetadataClass::ItemFrame), ..TrackedEntity::default() };
+        let mut reader = Reader::new(&payload);
+        assert_eq!(reader.var_i32().unwrap(), 7);
+        let decoded = read_entity_metadata_with(&mut reader, tracked, &StackCodecContext::v26_2()).unwrap();
+        assert!(decoded.complete);
+        assert_eq!(decoded.metadata.item_frame_rotation, Some(3));
+        let lodestone_model::Reported::Reported(Some(stack)) = decoded.metadata.item else { panic!("a framed stack") };
+        assert_eq!((stack.item.to_string(), stack.count, stack.components.map_id), ("minecraft:filled_map".to_owned(), 1, Some(5)));
+
+        // An empty frame sends the empty stack, which clears a previously framed item.
+        let empty = [MetadataField::FrameItem { item: ResourceKey::new("minecraft", "air").unwrap(), count: 0, components: None }];
+        let ServerDirective::Send { payload, .. } = V770ServerProtocol.encode_set_entity_data(7, &empty) else {
+            panic!("a Send")
+        };
+        assert_eq!(payload, [7, 9, 7, 0, 0xFF]);
     }
 
     /// A block-state particle is the block particle's id followed by the state's

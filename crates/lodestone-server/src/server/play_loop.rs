@@ -1446,6 +1446,7 @@ where
                     player_pos,
                     player_rot,
                     &inventory,
+                    mobs,
                 )
                 .await?;
 
@@ -3685,6 +3686,7 @@ where
                         player_pos,
                         player_rot,
                         &inventory,
+                        mobs,
                     )
                     .await?;
                     travel.tick(

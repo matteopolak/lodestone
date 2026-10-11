@@ -130,6 +130,7 @@ pub mod bone_meal;
 /// [`bone_meal`] and [`spawn_egg`] are.
 pub mod boat;
 pub mod cushion;
+pub mod item_frame;
 mod border;
 /// A wasm32-only periodic driver (`BrowserInterval`) for `server::serve_play`'s
 /// browser build — see that module's own doc for why `tokio::time` cannot be

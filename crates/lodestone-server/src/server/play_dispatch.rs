@@ -1166,6 +1166,30 @@ where
                 }
                 return Ok(());
             }
+            // A frame pops its item, then breaks. Adventure and spectator players cannot
+            // build, so cannot do either.
+            if mobs.with(|sim| sim.is_item_frame(entity_id)) {
+                if matches!(*game_mode, GameMode::Survival | GameMode::Creative)
+                    && let Some(hit) = mobs.with(|sim| sim.hurt_frame(entity_id, *game_mode == GameMode::Creative))
+                {
+                    match hit {
+                        crate::mobs::FrameHit::Ignored => {}
+                        crate::mobs::FrameHit::ItemPopped { glow, centre, map } => {
+                            crate::item_frame::publish_sound(
+                                block_ticks,
+                                crate::item_frame::FrameSound::RemoveItem,
+                                glow,
+                                centre,
+                            );
+                            crate::item_frame::forget_map(world.maps(), map);
+                        }
+                        crate::mobs::FrameHit::Broken(broken) => {
+                            crate::item_frame::publish_broken(block_ticks, world.maps(), broken);
+                        }
+                    }
+                }
+                return Ok(());
+            }
             apply_attack(
                 mobs,
                 *player_pos,
@@ -1227,6 +1251,57 @@ where
                     // Boarding consumes no item, and a refused board must not fall
                     // through to the taming chain — a boat is not tameable and the
                     // fall-through would only cost a wasted roll.
+                    return Ok(());
+                }
+                // A frame takes the held item or turns the one it holds. Adventure and
+                // spectator players cannot.
+                if mobs.with(|sim| sim.is_item_frame(entity_id)) {
+                    if !matches!(*game_mode, GameMode::Survival | GameMode::Creative) {
+                        return Ok(());
+                    }
+                    let native = usize::from(inventory.selected_hotbar_slot());
+                    let held = inventory.native(native).cloned();
+                    let map_over_limit = held
+                        .as_ref()
+                        .and_then(crate::maps::filled_map_id)
+                        .is_some_and(|map_id| {
+                            world.maps().with(|store| {
+                                store
+                                    .get(map_id)
+                                    .is_some_and(|map| map.tracked_over(crate::maps::TRACKED_DECORATION_LIMIT))
+                            })
+                        });
+                    let interaction =
+                        mobs.with(|sim| sim.interact_frame(entity_id, held.as_ref(), &|_| map_over_limit));
+                    match interaction {
+                        crate::mobs::FrameInteraction::Inserted { glow, centre } => {
+                            crate::item_frame::publish_sound(
+                                block_ticks,
+                                crate::item_frame::FrameSound::AddItem,
+                                glow,
+                                centre,
+                            );
+                            if consume_one(inventory, native, *game_mode) && *game_mode != GameMode::Creative {
+                                let hotbar_slot =
+                                    i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+                                apply(
+                                    conn,
+                                    state,
+                                    proto.encode_container_slot(0, 0, hotbar_slot, inventory.native(native)),
+                                )
+                                .await?;
+                            }
+                        }
+                        crate::mobs::FrameInteraction::Rotated { glow, centre } => {
+                            crate::item_frame::publish_sound(
+                                block_ticks,
+                                crate::item_frame::FrameSound::Rotate,
+                                glow,
+                                centre,
+                            );
+                        }
+                        crate::mobs::FrameInteraction::Pass | crate::mobs::FrameInteraction::Refused => {}
+                    }
                     return Ok(());
                 }
                 // A cushion is a seat, not a mob: a sneaking click or an
