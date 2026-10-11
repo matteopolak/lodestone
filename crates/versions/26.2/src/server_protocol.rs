@@ -549,10 +549,6 @@ const METADATA_SER_SNIFFER_STATE: i32 = 35;
 /// server always joins into the overworld (this type's own doc comment).
 const OVERWORLD_CLOCK_HOLDER_ID: i32 = 0;
 
-/// Fixed decoding/encoding context for protocol 776 (mirrors [`crate::adapter`]'s
-/// own `CTX`; kept private to this module since only this file names raw
-/// packet ids on the server side).
-const CTX: Ctx = Ctx { version: 776 };
 
 /// The block-state id for `minecraft:stone`, resolved by name so a change to
 /// the generated table cannot silently desync this from the real registry
@@ -770,21 +766,20 @@ fn difficulty_to_ordinal(difficulty: Difficulty) -> i32 {
     }
 }
 
-/// Encodes a packet body into a fresh byte buffer.
-fn encode_body<T: Encode>(packet: &T) -> Vec<u8> {
+/// Encodes a packet body with `wire`'s own protocol as the context, so a field
+/// whose layout differs between releases (the spawn info's game modes) is
+/// written the way that connection reads it.
+fn encode_body<T: Encode>(wire: Wire, packet: &T) -> Vec<u8> {
     let mut writer = Writer::default();
     packet
-        .encode(&mut writer, CTX)
+        .encode(&mut writer, Ctx { version: wire.protocol() })
         .expect("encoding a well-formed struct into a `Vec<u8>` writer cannot fail");
     writer.into_vec()
 }
 
 /// Builds a [`ServerDirective::Send`] from a packet id and an encodable body.
-fn send<T: Encode>(packet_id: i32, packet: &T) -> ServerDirective {
-    ServerDirective::Send {
-        packet_id,
-        payload: encode_body(packet),
-    }
+fn send<T: Encode>(wire: Wire, packet_id: i32, packet: &T) -> ServerDirective {
+    ServerDirective::Send { packet_id, payload: encode_body(wire, packet) }
 }
 
 /// `minecraft:custom_stat` registry paths by numeric id, from
@@ -2223,7 +2218,7 @@ impl V770ServerProtocol {
 
         match state {
             State::Handshaking if packet_id == handshaking::serverbound::INTENTION => {
-                match decode_full::<Intention>(payload) {
+                match decode_full::<Intention>(self.wire, payload) {
                     Some(intention) => {
                         let next_state = if intention.next_state == 2 {
                             State::Login
@@ -2258,13 +2253,13 @@ impl V770ServerProtocol {
             // packet class across both states, which is why
             // `packets::common::PingRequest` documents itself that way.
             State::Status if packet_id == status::serverbound::PING_REQUEST => {
-                match decode_full::<PingRequest>(payload) {
+                match decode_full::<PingRequest>(self.wire, payload) {
                     Some(ping) => ServerBound::PingRequest { time: ping.time },
                     None => ServerBound::Ignored,
                 }
             }
             State::Login if packet_id == login::serverbound::HELLO => {
-                match decode_full::<LoginHello>(payload) {
+                match decode_full::<LoginHello>(self.wire, payload) {
                     Some(hello) => ServerBound::LoginStart {
                         username: hello.name,
                         uuid: hello.profile_id,
@@ -2280,7 +2275,7 @@ impl V770ServerProtocol {
             // still RSA ciphertext; `crate::server`'s connection loop owns
             // decrypting them.
             State::Login if packet_id == login::serverbound::KEY => {
-                match decode_full::<EncryptionResponse>(payload) {
+                match decode_full::<EncryptionResponse>(self.wire, payload) {
                     Some(key) => ServerBound::EncryptionResponse {
                         shared_secret: key.shared_secret,
                         verify_token: key.verify_token,
@@ -2304,7 +2299,7 @@ impl V770ServerProtocol {
                 decode_custom_payload(payload).unwrap_or(ServerBound::Ignored)
             }
             State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
-                match decode_full::<KeepAlive>(payload) {
+                match decode_full::<KeepAlive>(self.wire, payload) {
                     Some(keep_alive) => ServerBound::KeepAlive { id: keep_alive.id },
                     None => ServerBound::Ignored,
                 }
@@ -2318,7 +2313,7 @@ impl V770ServerProtocol {
             // walking, turning player's avatar stood frozen at yaw 0 for
             // every other client.
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_POS => {
-                match decode_full::<MovePlayerPos>(payload) {
+                match decode_full::<MovePlayerPos>(self.wire, payload) {
                     Some(m) => ServerBound::PlayerMoved {
                         x: m.x,
                         y: m.y,
@@ -2332,7 +2327,7 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_POS_ROT => {
-                match decode_full::<MovePlayerPosRot>(payload) {
+                match decode_full::<MovePlayerPosRot>(self.wire, payload) {
                     Some(m) => ServerBound::PlayerMoved {
                         x: m.x,
                         y: m.y,
@@ -2362,7 +2357,7 @@ impl V770ServerProtocol {
             // `ServerBound::SwapItemInHand`; 7 (STAB) still has no server-side
             // model.
             State::Play if packet_id == play::serverbound::PLAYER_ACTION => {
-                match decode_full::<PlayerAction>(payload) {
+                match decode_full::<PlayerAction>(self.wire, payload) {
                     Some(action) => {
                         let pos = unpack_block_pos(action.pos);
                         let face = face_from_ordinal(i32::from(action.direction));
@@ -2406,7 +2401,7 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::USE_ITEM_ON => {
-                match decode_full::<UseItemOn>(payload) {
+                match decode_full::<UseItemOn>(self.wire, payload) {
                     Some(use_item) => ServerBound::UseItemOn {
                         pos: unpack_block_pos(use_item.pos),
                         face: face_from_ordinal(use_item.face),
@@ -2430,7 +2425,7 @@ impl V770ServerProtocol {
             // rotation, and the last `PlayerRotated` is not necessarily the facing
             // at the instant of the throw.
             State::Play if packet_id == play::serverbound::USE_ITEM => {
-                match decode_full::<UseItem>(payload) {
+                match decode_full::<UseItem>(self.wire, payload) {
                     Some(u) => ServerBound::UseItem {
                         // The wire field is a VarInt; anything outside `0..=1` is
                         // malformed and reads as the main hand rather than dropping
@@ -2450,7 +2445,7 @@ impl V770ServerProtocol {
             // the sibling `minecraft:interact` packet is deliberately left
             // undecoded (no interaction model to hand it to).
             State::Play if packet_id == play::serverbound::ATTACK => {
-                match decode_full::<Attack>(payload) {
+                match decode_full::<Attack>(self.wire, payload) {
                     Some(a) => ServerBound::Attack {
                         entity_id: a.entity_id,
                     },
@@ -2491,7 +2486,7 @@ impl V770ServerProtocol {
             // issue's tracker comment for why each is a deep feature rather
             // than a decode gap.
             State::Play if packet_id == play::serverbound::CHANGE_DIFFICULTY => {
-                match decode_full::<ChangeDifficultyServerbound>(payload)
+                match decode_full::<ChangeDifficultyServerbound>(self.wire, payload)
                     .and_then(|p| difficulty_from_ordinal(p.difficulty))
                 {
                     Some(difficulty) => ServerBound::DifficultyChanged { difficulty },
@@ -2499,13 +2494,13 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::LOCK_DIFFICULTY => {
-                match decode_full::<LockDifficulty>(payload) {
+                match decode_full::<LockDifficulty>(self.wire, payload) {
                     Some(p) => ServerBound::DifficultyLockChanged { locked: p.locked },
                     None => ServerBound::Ignored,
                 }
             }
             State::Play if packet_id == play::serverbound::SET_GAME_RULE => {
-                match decode_full::<SetGameRule>(payload) {
+                match decode_full::<SetGameRule>(self.wire, payload) {
                     Some(p) => ServerBound::GameRuleChanged {
                         entries: p.entries.into_iter().map(|e| (e.key, e.value)).collect(),
                     },
@@ -2516,7 +2511,7 @@ impl V770ServerProtocol {
             // itself asked for, and the two packets that unblock it end to
             // end — see `lodestone_server::inventory`'s module doc comment.
             State::Play if packet_id == play::serverbound::SET_CARRIED_ITEM => {
-                match decode_full::<SetCarriedItem>(payload).and_then(|p| u8::try_from(p.slot).ok())
+                match decode_full::<SetCarriedItem>(self.wire, payload).and_then(|p| u8::try_from(p.slot).ok())
                 {
                     // Mirrors vanilla's own hotbar-slot check
                     // (confirmed against the decompiled inventory source) at the decode boundary, per
@@ -2557,7 +2552,7 @@ impl V770ServerProtocol {
             // consumer stay `Ignored`; readiness is the one marker that now
             // gates movement-dependent simulation in `lodestone-server`.
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_ROT => {
-                match decode_full::<MovePlayerRot>(payload) {
+                match decode_full::<MovePlayerRot>(self.wire, payload) {
                     Some(m) => ServerBound::PlayerRotated {
                         yaw: m.yaw,
                         pitch: m.pitch,
@@ -2567,7 +2562,7 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_STATUS_ONLY => {
-                match decode_full::<MovePlayerStatusOnly>(payload) {
+                match decode_full::<MovePlayerStatusOnly>(self.wire, payload) {
                     Some(m) => ServerBound::PlayerStatusOnly {
                         on_ground: m.flags & MOVE_FLAG_ON_GROUND != 0,
                     },
@@ -2575,7 +2570,7 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::PLAYER_ABILITIES => {
-                match decode_full::<ServerboundPlayerAbilities>(payload) {
+                match decode_full::<ServerboundPlayerAbilities>(self.wire, payload) {
                     Some(p) => ServerBound::PlayerAbilitiesChanged {
                         flying: p.flags & SERVERBOUND_ABILITY_FLAG_FLYING != 0,
                     },
@@ -2583,19 +2578,19 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::PLAYER_LOADED => {
-                match decode_full::<PlayerLoaded>(payload) {
+                match decode_full::<PlayerLoaded>(self.wire, payload) {
                     Some(_) => ServerBound::PlayerLoaded,
                     None => ServerBound::Ignored,
                 }
             }
             State::Play if packet_id == play::serverbound::ACCEPT_TELEPORTATION => {
-                match decode_full::<AcceptTeleportation>(payload) {
+                match decode_full::<AcceptTeleportation>(self.wire, payload) {
                     Some(teleport) => ServerBound::TeleportationAccepted { id: teleport.id },
                     None => ServerBound::Ignored,
                 }
             }
             State::Play if packet_id == play::serverbound::CLIENT_TICK_END => {
-                match decode_full::<ClientTickEnd>(payload) {
+                match decode_full::<ClientTickEnd>(self.wire, payload) {
                     Some(_) => ServerBound::ClientTickEnded,
                     None => ServerBound::Ignored,
                 }
@@ -2609,7 +2604,7 @@ impl V770ServerProtocol {
             // transform with the player's root vehicle, so the variant carries
             // only position and orientation.
             State::Play if packet_id == play::serverbound::MOVE_VEHICLE => {
-                match decode_full::<MoveVehicle>(payload) {
+                match decode_full::<MoveVehicle>(self.wire, payload) {
                     Some(m) => ServerBound::VehicleMoved {
                         position: Vec3::new(m.x, m.y, m.z),
                         yaw: m.yaw,
@@ -2623,7 +2618,7 @@ impl V770ServerProtocol {
             // server applies it so a second connected player sees another
             // player's boat animate its paddles.
             State::Play if packet_id == play::serverbound::PADDLE_BOAT => {
-                match decode_full::<PaddleBoat>(payload) {
+                match decode_full::<PaddleBoat>(self.wire, payload) {
                     Some(PaddleBoat { left, right }) => ServerBound::PaddleBoat { left, right },
                     None => ServerBound::Ignored,
                 }
@@ -2670,7 +2665,7 @@ impl V770ServerProtocol {
             // `USE_ITEM`/`USE_ITEM_ON` — anything outside `0..=1` reads as
             // the main hand.
             State::Play if packet_id == play::serverbound::SWING => {
-                match decode_full::<Swing>(payload) {
+                match decode_full::<Swing>(self.wire, payload) {
                     Some(s) => ServerBound::Swing {
                         hand: lodestone_model::Hand::from_wire_ordinal(s.hand)
                             .unwrap_or(lodestone_model::Hand::Main),
@@ -2692,7 +2687,7 @@ impl V770ServerProtocol {
                 // `entityId` is always the sender's own local-player id (1)
                 // and is deliberately dropped: who is waking up comes from the
                 // connection's own player id, not the wire.
-                match decode_full::<PlayerCommand>(payload) {
+                match decode_full::<PlayerCommand>(self.wire, payload) {
                     Some(PlayerCommand { action: 0, .. }) => {
                         ServerBound::PlayerCommand { action: 0 }
                     }
@@ -2724,7 +2719,7 @@ impl V770ServerProtocol {
             // `ServerBound::TeleportToEntity`'s own doc comment for the
             // consumer and its disclosed scope (connected players only).
             State::Play if packet_id == play::serverbound::TELEPORT_TO_ENTITY => {
-                match decode_full::<TeleportToEntity>(payload) {
+                match decode_full::<TeleportToEntity>(self.wire, payload) {
                     Some(t) => ServerBound::TeleportToEntity { uuid: t.uuid },
                     None => ServerBound::Ignored,
                 }
@@ -2757,7 +2752,7 @@ impl V770ServerProtocol {
             // the currently open table rather than trusting `button_id`
             // beyond "which of the three slots".
             State::Play if packet_id == play::serverbound::CONTAINER_BUTTON_CLICK => {
-                match decode_full::<ContainerButtonClick>(payload) {
+                match decode_full::<ContainerButtonClick>(self.wire, payload) {
                     Some(ContainerButtonClick { window_id, button_id }) => {
                         ServerBound::ContainerButtonClick { window_id, button_id }
                     }
@@ -2772,7 +2767,7 @@ impl V770ServerProtocol {
             // `ContainerButtonClick`'s own handler already has for the
             // enchanting table.
             State::Play if packet_id == play::serverbound::CONTAINER_SLOT_STATE_CHANGED => {
-                match decode_full::<ContainerSlotStateChanged>(payload) {
+                match decode_full::<ContainerSlotStateChanged>(self.wire, payload) {
                     Some(ContainerSlotStateChanged { slot_id, container_id, new_state }) => {
                         ServerBound::ContainerSlotStateChanged {
                             window_id: container_id,
@@ -2823,7 +2818,7 @@ impl V770ServerProtocol {
             // position in the book the *server* handed out, not a recipe name; see
             // `ServerBound::RecipePlaced`'s own doc comment.
             State::Play if packet_id == play::serverbound::PLACE_RECIPE => {
-                match decode_full::<PlaceRecipe>(payload) {
+                match decode_full::<PlaceRecipe>(self.wire, payload) {
                     Some(p) => ServerBound::RecipePlaced {
                         window_id: p.container_id,
                         recipe_index: p.recipe,
@@ -2833,7 +2828,7 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::RECIPE_BOOK_CHANGE_SETTINGS => {
-                match decode_full::<RecipeBookChangeSettings>(payload).and_then(|p| {
+                match decode_full::<RecipeBookChangeSettings>(self.wire, payload).and_then(|p| {
                     let book_type = match p.book_type {
                         0 => RecipeBookType::Crafting,
                         1 => RecipeBookType::Furnace,
@@ -2852,7 +2847,7 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::RECIPE_BOOK_SEEN_RECIPE => {
-                match decode_full::<RecipeBookSeenRecipe>(payload) {
+                match decode_full::<RecipeBookSeenRecipe>(self.wire, payload) {
                     Some(p) => ServerBound::RecipeBookRecipeSeen {
                         recipe_index: p.recipe,
                     },
@@ -2863,7 +2858,7 @@ impl V770ServerProtocol {
             // consumer resolves the villager from this connection's tracked
             // open-merchant state; the packet itself carries no window id.
             State::Play if packet_id == play::serverbound::SELECT_TRADE => {
-                match decode_full::<SelectTrade>(payload) {
+                match decode_full::<SelectTrade>(self.wire, payload) {
                     Some(p) => ServerBound::SelectTrade { index: p.index },
                     None => ServerBound::Ignored,
                 }
@@ -2898,7 +2893,7 @@ impl V770ServerProtocol {
             // The server consumer looks the book up in the tracked
             // `PlayerInventory` by `slot`.
             State::Play if packet_id == play::serverbound::EDIT_BOOK => {
-                match decode_full::<EditBook>(payload) {
+                match decode_full::<EditBook>(self.wire, payload) {
                     Some(EditBook { slot, pages, title }) => {
                         ServerBound::EditBook { slot, pages, title }
                     }
@@ -2912,7 +2907,7 @@ impl V770ServerProtocol {
             // `crate::server`'s consumer) is where the ownership/waxed gate
             // and the actual text write happen.
             State::Play if packet_id == play::serverbound::SIGN_UPDATE => {
-                match decode_full::<SignUpdate>(payload) {
+                match decode_full::<SignUpdate>(self.wire, payload) {
                     Some(SignUpdate { pos, is_front_text, line0, line1, line2, line3 }) => {
                         ServerBound::SignUpdate {
                             pos: unpack_block_pos(pos),
@@ -2929,7 +2924,7 @@ impl V770ServerProtocol {
             // `crate::server`'s handler gates on an open anvil menu the same
             // way vanilla's server-side rename-item handler does.
             State::Play if packet_id == play::serverbound::RENAME_ITEM => {
-                match decode_full::<RenameItem>(payload) {
+                match decode_full::<RenameItem>(self.wire, payload) {
                     Some(RenameItem { name }) => ServerBound::RenameItem { name },
                     None => ServerBound::Ignored,
                 }
@@ -2939,7 +2934,7 @@ impl V770ServerProtocol {
             // inventory-swap / creative-create); this arm is only the wire
             // shape, unpacking `pos` the same way `USE_ITEM_ON` above does.
             State::Play if packet_id == play::serverbound::PICK_ITEM_FROM_BLOCK => {
-                match decode_full::<PickItemFromBlock>(payload) {
+                match decode_full::<PickItemFromBlock>(self.wire, payload) {
                     Some(PickItemFromBlock { pos, include_data }) => ServerBound::PickItemFromBlock {
                         pos: unpack_block_pos(pos),
                         include_data,
@@ -2948,7 +2943,7 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::PICK_ITEM_FROM_ENTITY => {
-                match decode_full::<PickItemFromEntity>(payload) {
+                match decode_full::<PickItemFromEntity>(self.wire, payload) {
                     Some(PickItemFromEntity { entity_id, include_data }) => {
                         ServerBound::PickItemFromEntity { entity_id, include_data }
                     }
@@ -2961,7 +2956,7 @@ impl V770ServerProtocol {
             // slot so the next right-click extraction can remove the intended
             // item.
             State::Play if packet_id == play::serverbound::BUNDLE_ITEM_SELECTED => {
-                match decode_full::<SelectBundleItem>(payload) {
+                match decode_full::<SelectBundleItem>(self.wire, payload) {
                     Some(SelectBundleItem { slot_id, selected_item_index }) => {
                         ServerBound::SelectBundleItem { slot_id, selected_item_index }
                     }
@@ -2976,7 +2971,7 @@ impl V770ServerProtocol {
             // they decode into `BlockEntity::CommandBlock` and are consumed by
             // `crate::server` through `crate::command_block`.
             State::Play if packet_id == play::serverbound::SET_COMMAND_BLOCK => {
-                match decode_full::<SetCommandBlock>(payload) {
+                match decode_full::<SetCommandBlock>(self.wire, payload) {
                     Some(SetCommandBlock { pos, command, mode, flags }) => ServerBound::SetCommandBlock {
                         pos: unpack_block_pos(pos),
                         command,
@@ -2989,23 +2984,23 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::SET_COMMAND_MINECART => {
-                let _ = decode_full::<SetCommandMinecart>(payload);
+                let _ = decode_full::<SetCommandMinecart>(self.wire, payload);
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::JIGSAW_GENERATE => {
-                let _ = decode_full::<JigsawGenerate>(payload);
+                let _ = decode_full::<JigsawGenerate>(self.wire, payload);
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::SET_JIGSAW_BLOCK => {
-                let _ = decode_full::<SetJigsawBlock>(payload);
+                let _ = decode_full::<SetJigsawBlock>(self.wire, payload);
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::SET_STRUCTURE_BLOCK => {
-                let _ = decode_full::<SetStructureBlock>(payload);
+                let _ = decode_full::<SetStructureBlock>(self.wire, payload);
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::SET_TEST_BLOCK => {
-                let _ = decode_full::<SetTestBlock>(payload);
+                let _ = decode_full::<SetTestBlock>(self.wire, payload);
                 ServerBound::Ignored
             }
             // The custom-click-action packet: an identifier, then a
@@ -3040,7 +3035,7 @@ impl V770ServerProtocol {
             // *initial* configuration handshake, which is a different wire
             // packet from this one).
             State::Play if packet_id == play::serverbound::CHANGE_GAME_MODE => {
-                match decode_full::<ChangeGameMode>(payload)
+                match decode_full::<ChangeGameMode>(self.wire, payload)
                     .and_then(|p| crate::adapter::game_mode_from_ordinal(p.mode))
                 {
                     Some(mode) => ServerBound::ChangeGameMode { mode },
@@ -3051,7 +3046,7 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::CONFIGURATION_ACKNOWLEDGED => {
-                let _ = decode_full::<ConfigurationAcknowledged>(payload);
+                let _ = decode_full::<ConfigurationAcknowledged>(self.wire, payload);
                 ServerBound::Ignored
             }
             // Deliberately left undecoded (falls through to the wildcard
@@ -3082,7 +3077,7 @@ impl V770ServerProtocol {
             // exactly — the Status arm additionally closes the connection, which
             // this one must not do.
             State::Play if packet_id == play::serverbound::PING_REQUEST => {
-                match decode_full::<PingRequest>(payload) {
+                match decode_full::<PingRequest>(self.wire, payload) {
                     Some(ping) => ServerBound::PingRequest { time: ping.time },
                     None => ServerBound::Ignored,
                 }
@@ -3091,7 +3086,7 @@ impl V770ServerProtocol {
             // `i64` keep-alive echo. A valid reply is an accepted no-op: the
             // server has no `ping` producer or pending-id state to update.
             State::Play if packet_id == play::serverbound::PONG => {
-                match decode_full::<Pong>(payload) {
+                match decode_full::<Pong>(self.wire, payload) {
                     Some(pong) => ServerBound::Pong { id: pong.id },
                     None => ServerBound::Ignored,
                 }
@@ -3108,7 +3103,7 @@ impl V770ServerProtocol {
                 decode_custom_payload(payload).unwrap_or(ServerBound::Ignored)
             }
             State::Play if packet_id == play::serverbound::RESOURCE_PACK => {
-                match decode_full::<ResourcePackResponse>(payload).and_then(|packet| {
+                match decode_full::<ResourcePackResponse>(self.wire, payload).and_then(|packet| {
                     let response = match packet.action {
                         0 => ResourcePackResponseKind::SuccessfullyLoaded,
                         1 => ResourcePackResponseKind::Declined,
@@ -3146,7 +3141,7 @@ impl V770ServerProtocol {
             // and eprintln probing confirmed zero `ChunkBatchAcknowledged`
             // packets ever reached this match in the whole run.
             State::Play if packet_id == play::serverbound::CLIENT_INFORMATION => {
-                match decode_full::<ClientInformation>(payload) {
+                match decode_full::<ClientInformation>(self.wire, payload) {
                     Some(info) => ServerBound::ClientInformationChanged {
                         view_distance: info.view_distance,
                     },
@@ -3175,7 +3170,7 @@ impl V770ServerProtocol {
             // `every_serverbound_variant_is_constructed_by_decode` now fails
             // if any `ServerBound` variant stops being constructed here.
             State::Play if packet_id == play::serverbound::CLIENT_COMMAND => {
-                match decode_full::<ClientCommand>(payload) {
+                match decode_full::<ClientCommand>(self.wire, payload) {
                     Some(p) => ServerBound::ClientCommand { action: p.action },
                     None => ServerBound::Ignored,
                 }
@@ -3192,7 +3187,7 @@ impl V770ServerProtocol {
             // worse than an ignored one: it would run *something*.
             //
             State::Play if packet_id == play::serverbound::CHAT_COMMAND => {
-                match decode_full::<ChatCommand>(payload) {
+                match decode_full::<ChatCommand>(self.wire, payload) {
                     Some(p) => ServerBound::ChatCommand { command: p.command },
                     None => ServerBound::Ignored,
                 }
@@ -3216,7 +3211,7 @@ impl V770ServerProtocol {
             // the frame) and then dropped, the same convention `CHAT_ACK`
             // below uses.
             State::Play if packet_id == play::serverbound::CHAT_COMMAND_SIGNED => {
-                match decode_full::<ChatCommandSigned>(payload) {
+                match decode_full::<ChatCommandSigned>(self.wire, payload) {
                     Some(p) => ServerBound::ChatCommand { command: p.command },
                     None => ServerBound::Ignored,
                 }
@@ -3231,7 +3226,7 @@ impl V770ServerProtocol {
             // `crate::server`'s consumer strips it before consulting
             // `ServerCommands::suggest`.
             State::Play if packet_id == play::serverbound::COMMAND_SUGGESTION => {
-                match decode_full::<CommandSuggestion>(payload) {
+                match decode_full::<CommandSuggestion>(self.wire, payload) {
                     Some(p) => ServerBound::CommandSuggestion { id: p.id, command: p.command },
                     None => ServerBound::Ignored,
                 }
@@ -3255,7 +3250,7 @@ impl V770ServerProtocol {
             // `signature` now survive, for `crate::chat_session::decide` to
             // verify against the sender's announced session, if any.
             State::Play if packet_id == play::serverbound::CHAT => {
-                match decode_full::<ChatMessage>(payload) {
+                match decode_full::<ChatMessage>(self.wire, payload) {
                     Some(p) => ServerBound::Chat {
                         message: p.message,
                         timestamp_millis: p.timestamp,
@@ -3272,7 +3267,7 @@ impl V770ServerProtocol {
             // (`adapter/serverbound.rs`), so decode and encode are pinned to
             // one another exactly as `CHAT`/`CHAT_COMMAND` above are.
             State::Play if packet_id == play::serverbound::CHAT_SESSION_UPDATE => {
-                match decode_full::<ChatSessionUpdate>(payload) {
+                match decode_full::<ChatSessionUpdate>(self.wire, payload) {
                     Some(p) => ServerBound::ChatSessionAnnounced {
                         session_id: p.session_id,
                         expires_at_millis: p.expires_at,
@@ -3293,11 +3288,11 @@ impl V770ServerProtocol {
             // offset — stays permanently `0` regardless of how much chat
             // happens. There is nothing yet for it to acknowledge.
             State::Play if packet_id == play::serverbound::CHAT_ACK => {
-                let _ = decode_full::<ChatAck>(payload);
+                let _ = decode_full::<ChatAck>(self.wire, payload);
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::CHUNK_BATCH_RECEIVED => {
-                match decode_full::<ChunkBatchReceived>(payload) {
+                match decode_full::<ChunkBatchReceived>(self.wire, payload) {
                     Some(p) => ServerBound::ChunkBatchAcknowledged {
                         desired_chunks_per_tick: p.desired_chunks_per_tick,
                     },
@@ -3331,7 +3326,7 @@ impl V770ServerProtocol {
                 decoded.unwrap_or(ServerBound::Ignored)
             }
             State::Play if packet_id == play::serverbound::ENTITY_TAG_QUERY => {
-                match decode_full::<EntityTagQuery>(payload) {
+                match decode_full::<EntityTagQuery>(self.wire, payload) {
                     Some(query) => ServerBound::EntityTagQuery {
                         transaction_id: query.transaction_id,
                         entity_id: query.entity_id,
@@ -3340,7 +3335,7 @@ impl V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::BLOCK_ENTITY_TAG_QUERY => {
-                match decode_full::<BlockEntityTagQuery>(payload) {
+                match decode_full::<BlockEntityTagQuery>(self.wire, payload) {
                     Some(query) => ServerBound::BlockEntityTagQuery {
                         transaction_id: query.transaction_id,
                         pos: unpack_block_pos(query.pos),
@@ -3381,13 +3376,13 @@ impl V770ServerProtocol {
         if state == State::Play {
             match dialect.serverbound_name(state, packet_id) {
                 Some("minecraft:punch") => {
-                    return match decode_full::<Punch>(payload) {
+                    return match decode_full::<Punch>(self.wire, payload) {
                         Some(_) => ServerBound::Swing { hand: lodestone_model::Hand::Main },
                         None => ServerBound::Ignored,
                     };
                 }
                 Some("minecraft:accept_teleportation") => {
-                    return match decode_full::<WireTeleport>(payload) {
+                    return match decode_full::<WireTeleport>(self.wire, payload) {
                         Some(teleport) => ServerBound::TeleportationAccepted { id: teleport.id },
                         None => ServerBound::Ignored,
                     };
@@ -3395,20 +3390,20 @@ impl V770ServerProtocol {
                 Some("minecraft:player_action") => {
                     // `change_destroy_direction` sits at ordinal 1 and shifts the
                     // later actions up by one; it has no server-side model.
-                    return match decode_full::<PlayerAction>(payload) {
+                    return match decode_full::<PlayerAction>(self.wire, payload) {
                         Some(action) if action.action == 1 => ServerBound::Ignored,
                         Some(mut action) => {
                             if action.action > 1 {
                                 action.action -= 1;
                             }
-                            let body = encode_body(&action);
+                            let body = encode_body(self.wire, &action);
                             self.decode_base(state, play::serverbound::PLAYER_ACTION, &body)
                         }
                         None => ServerBound::Ignored,
                     };
                 }
                 Some("minecraft:sign_update") => {
-                    return match decode_full::<WireSign>(payload) {
+                    return match decode_full::<WireSign>(self.wire, payload) {
                         Some(sign) => ServerBound::SignUpdate {
                             pos: sign.pos,
                             is_front_text: sign.slot == SignTextSlot::Front,
@@ -3520,6 +3515,7 @@ impl ServerProtocol for V770ServerProtocol {
         verify_token: &[u8],
     ) -> ServerDirective {
         send(
+            self.wire,
             login::clientbound::HELLO,
             &EncryptionRequest {
                 server_id: String::new(),
@@ -3560,13 +3556,14 @@ impl ServerProtocol for V770ServerProtocol {
         // set up compression).
         vec![
             send(
+                self.wire,
                 login::clientbound::LOGIN_COMPRESSION,
                 &LoginCompression {
                     threshold: COMPRESSION_THRESHOLD,
                 },
             ),
             ServerDirective::SetCompression(COMPRESSION_THRESHOLD),
-            send(login::clientbound::LOGIN_FINISHED, &finished),
+            send(self.wire, login::clientbound::LOGIN_FINISHED, &finished),
         ]
     }
 
@@ -3601,6 +3598,7 @@ impl ServerProtocol for V770ServerProtocol {
             // already derives `Encode`/`Decode` and its own doc comment records
             // the same asymmetry from the decode side.
             State::Login => send(
+                self.wire,
                 login::clientbound::LOGIN_DISCONNECT,
                 &LoginDisconnect {
                     reason: text_to_json_string(reason),
@@ -3634,7 +3632,7 @@ impl ServerProtocol for V770ServerProtocol {
         // the serverbound ping-request packet it answers — which is why the
         // client-side `PingRequest` struct is the right thing to encode here
         // rather than a second one-field mirror of it.
-        send(status::clientbound::PONG_RESPONSE, &PingRequest { time })
+        send(self.wire, status::clientbound::PONG_RESPONSE, &PingRequest { time })
     }
 
     fn encode_registry_data(&self) -> Vec<ServerDirective> {
@@ -3690,6 +3688,7 @@ impl ServerProtocol for V770ServerProtocol {
         // unsent — real vanilla packets this join sequence still does not need
         // (see the module docs' scope note).
         vec![send(
+            self.wire,
             configuration::clientbound::FINISH_CONFIGURATION,
             &FinishConfiguration,
         )]
@@ -3764,7 +3763,7 @@ impl ServerProtocol for V770ServerProtocol {
         let spawn_cz = (spawn.z / 16.0).floor() as i32;
 
         vec![
-            send(play::clientbound::LOGIN, &login),
+            send(self.wire, play::clientbound::LOGIN, &login),
             // The world border is the first world state a joining player is
             // told about, before the time sync and spawn position — vanilla's
             // the player list's send-level-info order.
@@ -3773,6 +3772,7 @@ impl ServerProtocol for V770ServerProtocol {
             // `crate::border`'s module doc, shape B).
             self.encode_initialize_border(&WorldBorder::default()),
             send(
+                self.wire,
                 play::clientbound::SET_DEFAULT_SPAWN_POSITION,
                 &spawn_position,
             ),
@@ -3790,6 +3790,7 @@ impl ServerProtocol for V770ServerProtocol {
             // `SetHealth`), which a HUD would show as absent/dead rather than
             // full health.
             send(
+                self.wire,
                 play::clientbound::SET_HEALTH,
                 &SetHealth {
                     health: 20.0,
@@ -3805,6 +3806,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// (confirmed against the decompiled 26.2 source).
     fn encode_game_mode(&self, mode: GameMode) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::GAME_EVENT,
             &GameEvent {
                 event: GAME_EVENT_CHANGE_GAME_MODE,
@@ -3834,6 +3836,7 @@ impl ServerProtocol for V770ServerProtocol {
             flags |= ABILITY_FLAG_INSTABUILD;
         }
         send(
+            self.wire,
             play::clientbound::PLAYER_ABILITIES,
             &PlayerAbilities {
                 flags,
@@ -3879,6 +3882,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
         use crate::packets::game::ChunkBatchFinished;
         send(
+            self.wire,
             play::clientbound::CHUNK_BATCH_FINISHED,
             &ChunkBatchFinished { batch_size },
         )
@@ -4433,7 +4437,7 @@ impl ServerProtocol for V770ServerProtocol {
         // directions, so the same bidirectional struct this module's
         // `decode` arm above decodes the echo with also encodes the
         // challenge — no mirror-image encoder needed.
-        send(play::clientbound::KEEP_ALIVE, &KeepAlive { id })
+        send(self.wire, play::clientbound::KEEP_ALIVE, &KeepAlive { id })
     }
 
     fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
@@ -5408,6 +5412,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// simulation, not a claim that hunger is unaffected by anything.
     fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::SET_HEALTH,
             &SetHealth {
                 health: health.clamp(0.0, 20.0),
@@ -5497,7 +5502,7 @@ impl ServerProtocol for V770ServerProtocol {
             data_to_keep: 0,
         };
         vec![
-            send(play::clientbound::RESPAWN, &respawn),
+            send(self.wire, play::clientbound::RESPAWN, &respawn),
             // The placement teleport. The player list's respawn moves the rebuilt
             // player entity itself; over the wire that is the same
             // `player_position` packet `begin_play` sends at join, so the two
@@ -5675,7 +5680,7 @@ impl ServerProtocol for V770ServerProtocol {
             data_to_keep: 0x03,
         };
         vec![
-            send(play::clientbound::RESPAWN, &respawn),
+            send(self.wire, play::clientbound::RESPAWN, &respawn),
             ServerDirective::Send {
                 packet_id: play::clientbound::PLAYER_POSITION,
                 payload: encode_player_position_teleport(
@@ -5695,6 +5700,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// `crate::server::apply_difficulty_change` for the consumer.
     fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::CHANGE_DIFFICULTY,
             &ChangeDifficultyClientbound {
                 difficulty: difficulty_to_ordinal(difficulty),
@@ -5710,6 +5716,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// table — see [`GameRuleValues`]'s own doc comment.
     fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::GAME_RULE_VALUES,
             &GameRuleValues {
                 entries: entries
@@ -5852,7 +5859,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// the same single VarInt into `ClientEvent::HeldSlotChanged`); this was
     /// the missing server-side encoder.
     fn encode_set_held_slot(&self, slot: u8) -> ServerDirective {
-        send(play::clientbound::SET_HELD_SLOT, &SetHeldSlot { slot: i32::from(slot) })
+        send(self.wire, play::clientbound::SET_HELD_SLOT, &SetHeldSlot { slot: i32::from(slot) })
     }
 
     /// See [`ServerProtocol::encode_initialize_border`]'s trait doc comment.
@@ -5869,6 +5876,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// `set_default_spawn_position` packets.
     fn encode_initialize_border(&self, border: &WorldBorder) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::INITIALIZE_BORDER,
             &InitializeBorder {
                 center_x: border.center_x(),
@@ -5886,6 +5894,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// See [`ServerProtocol::encode_set_border_center`]'s trait doc comment.
     fn encode_set_border_center(&self, x: f64, z: f64) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::SET_BORDER_CENTER,
             &SetBorderCenter { center_x: x, center_z: z },
         )
@@ -5904,6 +5913,7 @@ impl ServerProtocol for V770ServerProtocol {
         lerp_time_ms: i64,
     ) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::SET_BORDER_LERP_SIZE,
             &SetBorderLerpSize {
                 old_size,
@@ -5916,6 +5926,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// See [`ServerProtocol::encode_set_border_size`]'s trait doc comment.
     fn encode_set_border_size(&self, size: f64) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::SET_BORDER_SIZE,
             &SetBorderSize { size },
         )
@@ -5925,6 +5936,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// comment.
     fn encode_set_border_warning_delay(&self, warning_time: i32) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::SET_BORDER_WARNING_DELAY,
             &SetBorderWarningDelay { warning_time },
         )
@@ -5934,6 +5946,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// comment.
     fn encode_set_border_warning_distance(&self, warning_blocks: i32) -> ServerDirective {
         send(
+            self.wire,
             play::clientbound::SET_BORDER_WARNING_DISTANCE,
             &SetBorderWarningDistance { warning_blocks },
         )

@@ -6,13 +6,13 @@
 use super::*;
 use lodestone_core::{Decode, Reader};
 
-/// Decodes a packet body, asserting the payload was consumed to the last
+/// Decodes a packet body in `wire`'s own protocol context, asserting the payload was consumed to the last
 /// byte. Returns `None` on any decode error or trailing bytes rather than
 /// panicking: a malformed packet from the wire should drop that packet, not
 /// take down the connection.
-pub(super) fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
+pub(super) fn decode_full<T: Decode>(wire: Wire, payload: &[u8]) -> Option<T> {
     let mut reader = Reader::new(payload);
-    let value = T::decode(&mut reader, CTX).ok()?;
+    let value = T::decode(&mut reader, Ctx { version: wire.protocol() }).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
 }

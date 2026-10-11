@@ -3733,9 +3733,9 @@ mod tests {
         let record = encode_player(player.clone()).expect("a player with enchanted items encodes");
         assert_eq!(decode_player(player.locator.uuid, record).expect("it decodes"), player);
 
-        let mut mapped = lodestone_model::ItemStack::new("minecraft:filled_map".parse().unwrap(), 1);
-        mapped.components.map_id = Some(4);
-        inventory.set_native(2, Some(mapped));
+        let mut modelled = lodestone_model::ItemStack::new("minecraft:diamond".parse().unwrap(), 1);
+        modelled.components.custom_model_data = vec![4];
+        inventory.set_native(2, Some(modelled));
         assert_eq!(
             encode_player(NativePlayerData { inventory: Some(inventory), ..player }),
             Err(PlayerRecordError::UnsupportedItemComponents { slot: 2 })

@@ -5,6 +5,9 @@
 
 use super::*;
 
+/// The base release's encoding context, which every fixture here is written in.
+const CTX: Ctx = Ctx { version: 776 };
+
 fn resolve_state_id(state: &str) -> u32 {
     lodestone_data::block_states::state_id(state).unwrap_or_else(air_id)
 }
@@ -2303,7 +2306,7 @@ mod world_admin_tests {
         match directive {
             ServerDirective::Send { packet_id, payload } => {
                 assert_eq!(packet_id, play::clientbound::GAME_RULE_VALUES);
-                let decoded = decode_full::<GameRuleValues>(&payload)
+                let decoded = decode_full::<GameRuleValues>(Wire::BASE, &payload)
                     .expect("well-formed GameRuleValues decodes");
                 assert_eq!(decoded.entries.len(), 1);
                 assert_eq!(decoded.entries[0].key, "minecraft:doDaylightCycle");
@@ -3294,7 +3297,7 @@ mod vehicle_wire_tests {
             pitch: -40.25,
             on_ground: true,
         };
-        let payload = encode_body(&body);
+        let payload = encode_body(Wire::BASE, &body);
         let decoded = V770ServerProtocol.decode(
             State::Play,
             play::serverbound::MOVE_VEHICLE,
@@ -4721,7 +4724,7 @@ mod cosmetic_metadata_tests {
         ) else {
             panic!("a block particle must emit a Send");
         };
-        let packet: LevelParticles = decode_full(&payload).expect("decodes");
+        let packet: LevelParticles = decode_full(crate::server_protocol::Wire::BASE, &payload).expect("decodes");
         assert_eq!((packet.x, packet.y, packet.z), (1.5, 2.25, -3.5));
         assert_eq!((packet.max_speed, packet.count), (0.05, 10));
         let mut options = Reader::new(&packet.options);
@@ -4749,7 +4752,7 @@ mod cosmetic_metadata_tests {
         ) else {
             panic!("a heart must emit a Send");
         };
-        assert!(decode_full::<LevelParticles>(&payload).expect("decodes").options.is_empty());
+        assert!(decode_full::<LevelParticles>(crate::server_protocol::Wire::BASE, &payload).expect("decodes").options.is_empty());
     }
 
     fn check_constants(dump: &str) {

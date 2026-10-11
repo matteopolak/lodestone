@@ -282,6 +282,7 @@ async fn registry_selected_protocol_766_reaches_play_and_confirms_a_block_break(
         .expect("fixture state exists");
     assert_eq!(handle.block_at(TARGET), Some(flower));
 
+    handle.move_to(Vec3::new(8.5, 100.0, 8.5), Rotation::default(), true, false).expect("move into reach of the target");
     handle
         .send_action(ClientAction::BlockAction {
             action: BlockActionKind::StartDestroy,
@@ -432,6 +433,7 @@ async fn hosted_lighting_reaches_client_and_extinguishes_after_a_block_break() {
     assert_eq!(light.sky_at(8, 9, 8), 15, "open sky bbox=(8,105,8)..(8,105,8)");
     assert_eq!(light.block_at(8, 4, 8), 14, "torch bbox=(8,100,8)..(8,100,8)");
     assert_eq!(light.block_at(9, 4, 8), 13, "adjacent air bbox=(9,100,8)..(9,100,8)");
+    handle.move_to(Vec3::new(8.5, 100.0, 8.5), Rotation::default(), true, false).expect("move into reach of the target");
     handle.send_action(ClientAction::BlockAction {
         action: BlockActionKind::StartDestroy,
         pos: TARGET,

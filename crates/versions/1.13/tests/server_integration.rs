@@ -169,6 +169,7 @@ async fn registry_selected_404_server_reaches_play_and_confirms_a_block_break() 
         .expect("fixture state exists");
     assert_eq!(handle.block_at(TARGET), Some(flower.raw()));
 
+    handle.move_to(Vec3::new(8.5, 100.0, 8.5), Rotation::default(), true, false).expect("move into reach of the target");
     handle
         .send_action(ClientAction::BlockAction {
             action: BlockActionKind::StartDestroy,

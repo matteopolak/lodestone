@@ -454,6 +454,9 @@ fn the_pick_predicate_matches_the_vanilla_entity_census() {
         // One from each non-living pickable family.
         ("minecraft:oak_boat", true),
         ("minecraft:bamboo_raft", true),
+        ("minecraft:poplar_boat", true),
+        ("minecraft:poplar_chest_boat", true),
+        ("minecraft:cushion", true),
         ("minecraft:hopper_minecart", true),
         ("minecraft:painting", true),
         ("minecraft:item_frame", true),
@@ -479,8 +482,8 @@ fn the_pick_predicate_matches_the_vanilla_entity_census() {
         .filter(|name| entity_type_can_be_picked(&key(name)))
         .count();
     assert_eq!(
-        pickable, 131,
-        "the 26.2 census has 131 pickable entity types of {}; a change here \
+        pickable, 134,
+        "the census has 134 pickable entity types of {}; a change here \
          means a type moved between the living column and the explicit lists",
         lodestone_data::entity_types::TYPE_COUNT
     );
