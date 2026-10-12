@@ -736,8 +736,18 @@ impl<T: Transport> Driver<T> {
                                     // addition into an outage. Genuinely
                                     // unrecoverable errors (unsupported feature
                                     // or state) still fall through and end it.
+                                    // A bounded prefix is enough to tell a
+                                    // layout disagreement from a truncation.
+                                    let head: String = payload
+                                        .iter()
+                                        .take(48)
+                                        .map(|byte| format!("{byte:02x}"))
+                                        .collect();
                                     tracing::error!(
                                         packet_id,
+                                        protocol = self.adapter.protocol_version(),
+                                        len = payload.len(),
+                                        %head,
                                         %message,
                                         "dropping undecodable packet and continuing session",
                                     );

@@ -520,6 +520,17 @@ fn install_input_bridge(
             let Ok(event) = event.dyn_into::<MouseEvent>() else {
                 return;
             };
+            // A press with no move before it (a first click, a tap) must still
+            // land on what is under it.
+            let dpr = window().map_or(1.0, |window| window.device_pixel_ratio());
+            send_input(
+                &worker_for_button,
+                "pointerMove",
+                &[
+                    ("x", JsValue::from_f64(f64::from(event.offset_x()) * dpr)),
+                    ("y", JsValue::from_f64(f64::from(event.offset_y()) * dpr)),
+                ],
+            );
             send_input(
                 &worker_for_button,
                 "mouseButton",

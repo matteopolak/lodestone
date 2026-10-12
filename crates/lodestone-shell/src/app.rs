@@ -289,6 +289,12 @@ impl BrowserInputQueue {
             BrowserInput::Resized { width, height } => self.resize = Some((width, height)),
             BrowserInput::PointerLock(locked) => self.pointer_lock = Some(locked),
             ordered => {
+                // A pending cursor position precedes this event, so a click is
+                // hit-tested where it happened rather than where the pointer
+                // later moved within the same frame.
+                if let Some((x, y)) = self.cursor.take() {
+                    self.ordered.push_back(BrowserInput::CursorMoved { x, y });
+                }
                 if self.ordered.len() >= Self::MAX_ORDERED {
                     self.ordered.clear();
                     self.focus = Some(false);
@@ -315,10 +321,10 @@ impl BrowserInputQueue {
         if let Some(locked) = self.pointer_lock.take() {
             output.push(BrowserInput::PointerLock(locked));
         }
+        output.extend(self.ordered.drain(..));
         if let Some((x, y)) = self.cursor.take() {
             output.push(BrowserInput::CursorMoved { x, y });
         }
-        output.extend(self.ordered.drain(..));
         let (dx, dy) = std::mem::take(&mut self.motion);
         if dx != 0.0 || dy != 0.0 {
             output.push(BrowserInput::MouseMotion { dx, dy });

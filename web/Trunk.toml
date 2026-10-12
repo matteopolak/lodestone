@@ -1,7 +1,9 @@
 # Trunk configuration for the browser build. Standalone `trunk serve` serves the
 # page only; `just run-wasm` uses the native web server for `/relay`.
 # COOP/COEP keep the page cross-origin isolated for shared-memory workers.
+# `no_spa`: a missing optional asset must 404, not return index.html with a 200.
 [serve]
+no_spa = true
 addresses = ["127.0.0.1"]
 port = 8080
 headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }
