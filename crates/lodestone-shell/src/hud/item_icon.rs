@@ -299,6 +299,7 @@ pub(crate) fn stack_skin_url(stack: &lodestone_game::item::ItemStack) -> Option<
 /// The HUD's draw record for one stack, or `None` for an empty stack or one
 /// whose item id does not parse. Shared by the hotbar and the first-person
 /// hands (`sim::first_person_hands::hands_frame`) so both draw a stack identically.
+#[cfg(feature = "window")]
 pub(crate) fn stack_icon(st: &lodestone_game::item::ItemStack) -> Option<ItemIcon> {
     // Modern servers can retain a vanilla gameplay item id while
     // replacing only its client-side item-definition lookup.
@@ -348,6 +349,7 @@ pub(crate) fn stack_icon(st: &lodestone_game::item::ItemStack) -> Option<ItemIco
 /// the record rather than re-resolved from the stack, so the hand and the
 /// hotbar icon cannot disagree about which model, tint or skin this is — and
 /// so `stack_skin_url`'s fetch is requested once.
+#[cfg(feature = "window")]
 pub(crate) fn held_item_record(record: &ItemIcon) -> crate::gpu::MainHandItem {
     crate::gpu::MainHandItem {
         // The record is built from the icon alone; `hands_frame` fills the id

@@ -306,6 +306,7 @@ impl Meshed {
         }
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn upload_timing_started(&self) -> Option<Instant> {
         #[cfg(not(target_arch = "wasm32"))]
         { self.native_timing.map(|_| Instant::now()) }
@@ -1808,6 +1809,7 @@ impl TerrainMesh {
     }
 
     /// Consume relighting work completed since the previous frame sample.
+    #[cfg(feature = "window")]
     pub(crate) fn take_relight_workload(&mut self) -> RelightWorkload {
         std::mem::take(&mut self.relight_workload)
     }
@@ -3016,6 +3018,7 @@ impl TerrainMesh {
 
     /// Current snapshot evidence for empty geometry. The renderer must also
     /// prove absence before this can settle a presentation-side observation.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn current_empty_section_settled(&self, key: SectionKey) -> bool {
         self.empty_sections.contains(&key) && !self.pending_removals.contains(&key)

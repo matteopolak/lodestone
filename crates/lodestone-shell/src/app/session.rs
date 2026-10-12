@@ -63,6 +63,10 @@ impl WindowApp {
             .ok_or_else(|| anyhow::anyhow!("terminal renderer has no offscreen readback"))
     }
 
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WindowApp {
     pub(crate) fn terminal_set_action(&mut self, action: Action, pressed: bool) {
         self.sim.input_mut(|input| input.set(action, pressed));
     }
@@ -485,7 +489,10 @@ impl WindowApp {
         self.shift_held = shift;
         self.ctrl_held = ctrl;
     }
+}
 
+impl WindowApp {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn new(config: Config) -> Self {
         Self::new_with_app(Sim::client_app(), config)
     }
@@ -660,7 +667,7 @@ impl WindowApp {
             // Ordinary startup always wants a window and always accepts
             // input from it — unchanged from before these fields existed.
             // Only `WindowApp::new_headless_session` seeds `false`.
-            #[cfg(feature = "runtime-presentation")]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
             presentation_desired: true,
             #[cfg(feature = "runtime-presentation")]
             input_armed: true,

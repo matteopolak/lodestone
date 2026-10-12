@@ -181,6 +181,7 @@ pub(crate) fn run_headless(_owned: lodestone_auth::Entitlement, config: Config) 
 }
 
 /// Write a binary (P6) PPM — no image-crate dependency needed for evidence.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_ppm(path: &str, w: u32, h: u32, rgba: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut buf = Vec::with_capacity((w * h * 3 + 32) as usize);

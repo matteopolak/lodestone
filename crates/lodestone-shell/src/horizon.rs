@@ -1,9 +1,9 @@
 //! Client-side ownership and bounded transport state for distant horizon data.
 
 #[cfg(any(target_arch = "wasm32", test))]
-use lodestone_render::{
-    HORIZON_CELLS_PER_TILE, HORIZON_CELL_BLOCKS, HORIZON_TILE_CELLS, HORIZON_TILES_PER_AXIS,
-};
+use lodestone_render::{HORIZON_CELLS_PER_TILE, HORIZON_CELL_BLOCKS, HORIZON_TILE_CELLS};
+#[cfg(any(test, all(target_arch = "wasm32", feature = "window")))]
+use lodestone_render::HORIZON_TILES_PER_AXIS;
 
 use std::sync::Arc;
 
@@ -30,6 +30,7 @@ impl HorizonSurfaceQuery {
         Some(Self { source })
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn sample(&self, block_x: i32, block_z: i32) -> Option<HorizonCell> {
         self.source
             .horizon_sample(block_x, block_z)
@@ -47,7 +48,7 @@ fn horizon_cell(sample: lodestone_server::HorizonSample) -> HorizonCell {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "window"))]
 use std::sync::Mutex;
 
 #[cfg(target_arch = "wasm32")]
@@ -71,7 +72,7 @@ pub(crate) struct HorizonTileRequest {
 #[cfg(target_arch = "wasm32")]
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(test, all(target_arch = "wasm32", feature = "window")))]
 const MAX_WIRE_REQUEST_ID: u64 = 9_007_199_254_740_991;
 
 #[cfg(target_arch = "wasm32")]
@@ -103,21 +104,21 @@ pub(crate) fn parse_tile_request(value: &JsValue) -> Option<HorizonTileRequest> 
     })
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(test, all(target_arch = "wasm32", feature = "window")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingTile {
     coord: lodestone_render::HorizonTileCoord,
     request_id: u64,
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(test, all(target_arch = "wasm32", feature = "window")))]
 #[derive(Debug)]
 enum TileState {
     Pending(PendingTile),
     Ready(Box<[lodestone_render::HorizonCell]>),
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(test, all(target_arch = "wasm32", feature = "window")))]
 #[derive(Debug)]
 pub(crate) struct HorizonTileCache {
     epoch: u32,
@@ -126,7 +127,7 @@ pub(crate) struct HorizonTileCache {
     centre: lodestone_render::HorizonTileCoord,
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(test, all(target_arch = "wasm32", feature = "window")))]
 impl HorizonTileCache {
     fn new(epoch: u32) -> Self {
         Self {
@@ -220,7 +221,7 @@ impl HorizonTileCache {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(test, all(target_arch = "wasm32", feature = "window")))]
 #[derive(Debug)]
 pub(crate) struct HorizonTileResponse {
     pub(crate) epoch: u32,
@@ -320,7 +321,7 @@ fn post_tile_response(
     port.post_message_with_transferable(&message, &transfer)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "window"))]
 /// Page-side horizon client. It stores at most one fixed renderer window of
 /// tiles and asks the worker for a tile only on its first sample.
 pub(crate) struct BrowserHorizonClient {
@@ -328,14 +329,14 @@ pub(crate) struct BrowserHorizonClient {
     port: MessagePort,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "window"))]
 impl std::fmt::Debug for BrowserHorizonClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrowserHorizonClient").finish_non_exhaustive()
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "window"))]
 impl BrowserHorizonClient {
     pub(crate) fn new(epoch: u32, port: MessagePort) -> Self {
         Self {
@@ -374,7 +375,7 @@ impl BrowserHorizonClient {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "window"))]
 fn post_tile_request(port: &MessagePort, request: HorizonTileRequest) -> Result<(), JsValue> {
     let message = js_sys::Object::new();
     js_sys::Reflect::set(
@@ -405,7 +406,7 @@ fn post_tile_request(port: &MessagePort, request: HorizonTileRequest) -> Result<
     port.post_message(&message)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "window"))]
 pub(crate) fn parse_tile_response(value: &JsValue) -> Option<HorizonTileResponse> {
     let string = |key: &str| {
         js_sys::Reflect::get(value, &JsValue::from_str(key))
@@ -481,7 +482,7 @@ impl HorizonWireNumber for f64 {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "window"))]
 pub(crate) fn apply_tile_response(
     cache: &Arc<Mutex<HorizonTileCache>>,
     response: HorizonTileResponse,

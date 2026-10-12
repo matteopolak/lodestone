@@ -32,7 +32,10 @@ use glam::Vec3;
 
 use crate::particles::{ParticleInstance, ParticleRenderer};
 
-use super::distant_terrain::{DistantTerrainRenderer, HorizonGpuError};
+#[cfg(feature = "window")]
+use super::distant_terrain::DistantTerrainRenderer;
+#[cfg(feature = "window")]
+use super::distant_terrain::HorizonGpuError;
 use super::first_person;
 use super::gpu_timing;
 use super::terrain::{
@@ -338,6 +341,7 @@ impl RenderState {
             // An explicit horizon setting installs this later; ordinary chunk
             // rendering remains the default path and pays no distant-tier cost.
             distant_terrain: None,
+            #[cfg(feature = "window")]
             distant_terrain_failed: false,
             sections: HashMap::new(),
             section_fingerprints: HashMap::new(),
@@ -523,6 +527,7 @@ impl RenderState {
         }
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn initialize_deferred_entity_assets(
         &mut self,
         device: &wgpu::Device,
@@ -541,6 +546,7 @@ impl RenderState {
             .complete_deferred_assets(device, queue, self.color_format);
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn allow_deferred_entity_assets(&mut self) {
         self.entities.allow_deferred_assets();
     }
@@ -633,6 +639,7 @@ impl RenderState {
         self.render_distance_chunks = render_distance_chunks;
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn install_distant_terrain(
         &mut self,
         device: &wgpu::Device,
@@ -653,29 +660,34 @@ impl RenderState {
         Ok(())
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn disable_distant_terrain(&mut self) {
         self.distant_terrain = None;
         self.distant_terrain_failed = false;
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn recenter_distant_terrain(&mut self, camera_block: [i32; 2]) {
         if let Some(distant) = &mut self.distant_terrain {
             distant.recenter(camera_block);
         }
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn set_distant_terrain_near_field(&mut self, chunks: u32) {
         if let Some(distant) = &mut self.distant_terrain {
             distant.set_near_field_radius_chunks(chunks);
         }
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn set_distant_terrain_outer_radius(&mut self, chunks: u32) {
         if let Some(distant) = &mut self.distant_terrain {
             distant.set_outer_radius_chunks(chunks);
         }
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn populate_distant_terrain_one(
         &mut self,
         queue: &wgpu::Queue,

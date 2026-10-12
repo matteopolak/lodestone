@@ -259,6 +259,7 @@ impl Sim {
     /// [`crate::audio::music::world_situation`], and note the two traps that live
     /// on the latter: the selector's input is **not** the biome id, and `creative`
     /// is **`instabuild && mayfly`**, not a gamemode check.
+    #[cfg(feature = "window")]
     pub(crate) fn tick_music(
         &mut self,
         now: crate::platform::Instant,
@@ -293,6 +294,7 @@ impl Sim {
     ///
     /// `weather` is the caller's because the shell's [`crate::app::WindowApp`]
     /// owns the `WeatherTracker`, not `Sim`.
+    #[cfg(feature = "window")]
     pub(crate) fn tick_ambience(
         &mut self,
         now: crate::platform::Instant,
@@ -379,6 +381,7 @@ impl Sim {
     /// lives in the chunk section's palette, so it has to be resolved at the
     /// player every tick. Falls back to `overworld` when the dimension is
     /// unknown, which is what a pre-login frame sees.
+    #[cfg(feature = "window")]
     fn ambient_sounds(&self) -> lodestone_sound::ambient::AmbientSounds {
         let dimension = self
             .net
@@ -398,6 +401,7 @@ impl Sim {
     /// values are kept separate because [`lodestone_render::RainAmbience::tick`]
     /// uses the landing height for distance and the roof flag for its muffled
     /// sound choice.
+    #[cfg(feature = "window")]
     fn weather_landing(&self, eye: glam::DVec3) -> (Option<[i32; 3]>, bool) {
         let x = eye.x.floor() as i32;
         let z = eye.z.floor() as i32;
@@ -429,6 +433,7 @@ impl Sim {
     /// the same streamed world and listener column as the visible precipitation
     /// path; an unknown section or climate suppresses the voice rather than
     /// guessing the wrong weather.
+    #[cfg(feature = "window")]
     fn weather_precipitation(
         &self,
         position: [i32; 3],
@@ -468,6 +473,7 @@ impl Sim {
     /// Convert one absolute `MOTION_BLOCKING` height into the weather sound
     /// source and the covered-ear flag. Kept pure so the two exposure controls
     /// can be tested without constructing a connected client.
+    #[cfg(feature = "window")]
     fn weather_landing_from_height(
         x: i32,
         z: i32,
@@ -492,6 +498,7 @@ impl Sim {
     /// simply call `overworld_music_for`: the Nether's biomes all set the attribute
     /// explicitly, so a Nether biome we have no row for should fall back to
     /// **nothing** rather than to the overworld's default track.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn background_music(&self) -> lodestone_sound::music::BackgroundMusic {
         let biome = self.standing_biome_name();
@@ -511,6 +518,7 @@ impl Sim {
     }
 
     /// Whether a boss bar the server is showing asks for boss music.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn boss_bar_wants_music(&self) -> bool {
         self.read(|w| {
@@ -521,6 +529,7 @@ impl Sim {
 
     /// The End's boss-music condition: the player is in the End and a boss bar
     /// asks for music. Fed to the music director as `end_boss_active`.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn music_end_boss_active(&self) -> bool {
         let in_end = self
@@ -533,6 +542,7 @@ impl Sim {
 
     /// The standing biome's `audio/music_volume`, defaulting to the attribute's
     /// own `1.0`.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn music_volume(&self) -> f32 {
         self.standing_biome_name()
@@ -541,6 +551,7 @@ impl Sim {
 
     /// The name of the biome the player is standing in, or `None` when the
     /// registry has not arrived or the column has not streamed in.
+    #[cfg(feature = "window")]
     fn standing_biome_name(&self) -> Option<&'static str> {
         let net = self.net.as_ref()?;
         let names = net.shared_biome_names().snapshot();
@@ -578,6 +589,7 @@ impl Sim {
     /// deliberately **not** a `GameMode::Creative` check. The two come apart in
     /// both directions: a survival player granted both abilities hears creative
     /// music in vanilla, and a creative player whose `mayfly` was revoked does not.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn music_creative(&self) -> bool {
         self.read(|w| {
@@ -592,6 +604,7 @@ impl Sim {
     /// `eye_in_water && in_water()`, matching `FluidState`'s own `submerged`
     /// predicate rather than the raw eye flag: the raw flag alone is true for lava
     /// too, and vanilla's underwater music slot is water-only.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn music_underwater(&self) -> bool {
         let fluid = self.fluid_state();

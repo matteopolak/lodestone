@@ -158,6 +158,7 @@ impl Sim {
     }
 
     /// Consume relighting work completed during the current simulated frame.
+    #[cfg(feature = "window")]
     pub(crate) fn take_relight_workload(&mut self) -> crate::mesher::RelightWorkload {
         self.terrain_mut(TerrainMesh::take_relight_workload)
     }

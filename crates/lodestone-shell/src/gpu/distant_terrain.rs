@@ -11,14 +11,18 @@ use std::cell::RefCell;
 
 use bytemuck::{Pod, Zeroable};
 use lodestone_render::{
-    DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT, DISTANT_TERRAIN_WGSL, DistantTerrain,
-    HORIZON_CELL_BLOCKS, HORIZON_TILE_CELLS, HORIZON_TILES_PER_AXIS, HorizonCell,
-    horizon_tile_intersects_radius,
-    ModelSharedCameraUniform, fog::FogUniform,
-    model_shared_camera_buffer_with_fog, update_model_shared_camera_buffer,
+    DistantTerrain, HORIZON_CELL_BLOCKS, HORIZON_TILE_CELLS, HORIZON_TILES_PER_AXIS,
+    horizon_tile_intersects_radius, fog::FogUniform,
+    update_model_shared_camera_buffer,
+};
+#[cfg(feature = "window")]
+use lodestone_render::{
+    DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT, DISTANT_TERRAIN_WGSL, HorizonCell,
+    ModelSharedCameraUniform, model_shared_camera_buffer_with_fog,
 };
 
 /// Cells along an edge of the two fixed GPU atlases.
+#[cfg(feature = "window")]
 pub(crate) const HORIZON_ATLAS_CELLS: u32 =
     HORIZON_TILES_PER_AXIS as u32 * HORIZON_TILE_CELLS as u32;
 /// Bytes in the height/water and colour/flags atlases combined.
@@ -33,6 +37,7 @@ const TILE_UNIFORM_BYTES: u64 = 32;
 /// The WebGPU baseline alignment. Rejecting a larger required stride keeps the
 /// per-tile uniform allocation a known 20,736 bytes rather than a
 /// device-specific unbounded multiple.
+#[cfg(feature = "window")]
 const MAX_TILE_UNIFORM_STRIDE: u32 = 256;
 /// Group-1 binding zero for one atlas tile.
 ///
@@ -61,16 +66,19 @@ struct TileResidency {
 }
 
 impl TileResidency {
+    #[cfg(feature = "window")]
     const fn empty() -> Self {
         Self {
             populated: [false; HORIZON_TILES_PER_AXIS * HORIZON_TILES_PER_AXIS],
         }
     }
 
+    #[cfg(feature = "window")]
     fn clear(&mut self) {
         self.populated.fill(false);
     }
 
+    #[cfg(feature = "window")]
     fn mark_populated(&mut self, slot: usize) {
         self.populated[slot] = true;
     }
@@ -79,6 +87,7 @@ impl TileResidency {
         self.populated.get(slot).copied().unwrap_or(false)
     }
 
+    #[cfg(feature = "window")]
     fn next_omitted_where(&self, mut eligible: impl FnMut(usize) -> bool) -> Option<usize> {
         self.populated
             .iter()
@@ -111,7 +120,9 @@ impl TileResidency {
 pub(crate) struct DistantTerrainRenderer {
     terrain: DistantTerrain,
     residency: TileResidency,
+    #[cfg(feature = "window")]
     heights_water: wgpu::Texture,
+    #[cfg(feature = "window")]
     colours_flags: wgpu::Texture,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -126,6 +137,7 @@ pub(crate) struct DistantTerrainRenderer {
 }
 
 /// Why a bounded distant-terrain renderer could not be constructed.
+#[cfg(feature = "window")]
 pub(crate) enum HorizonGpuError {
     /// The fixed CPU terrain allocation failed.
     Allocation(lodestone_render::HorizonAllocationError),
@@ -134,6 +146,7 @@ pub(crate) enum HorizonGpuError {
     UnsupportedUniformAlignment(u32),
 }
 
+#[cfg(feature = "window")]
 impl std::fmt::Debug for HorizonGpuError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -146,6 +159,7 @@ impl std::fmt::Debug for HorizonGpuError {
     }
 }
 
+#[cfg(feature = "window")]
 impl From<lodestone_render::HorizonAllocationError> for HorizonGpuError {
     fn from(value: lodestone_render::HorizonAllocationError) -> Self {
         Self::Allocation(value)
@@ -154,6 +168,7 @@ impl From<lodestone_render::HorizonAllocationError> for HorizonGpuError {
 
 impl DistantTerrainRenderer {
     /// Allocate a fixed horizon around the camera's current world block.
+    #[cfg(feature = "window")]
     pub(crate) fn new(
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
@@ -352,6 +367,7 @@ impl DistantTerrainRenderer {
 
     /// Recenter the bounded grid and invalidate all tile samples when the
     /// camera crosses a horizon-tile boundary. No texture or vector grows.
+    #[cfg(feature = "window")]
     pub(crate) fn recenter(&mut self, camera_block: [i32; 2]) {
         let before = self.terrain.centre();
         self.terrain.recenter(camera_block[0], camera_block[1]);
@@ -366,6 +382,7 @@ impl DistantTerrainRenderer {
     /// This is a visual transition only: it neither changes the normal camera
     /// far plane nor requests a chunk. The clamp makes a malformed option no
     /// more expensive than the fixed 256-chunk representation can be.
+    #[cfg(feature = "window")]
     pub(crate) fn set_near_field_radius_chunks(&mut self, chunks: u32) {
         self.near_field_radius_blocks = (chunks.min(256) * HORIZON_CELL_BLOCKS as u32) as f32;
     }
@@ -375,12 +392,14 @@ impl DistantTerrainRenderer {
     /// Population considers only tiles intersecting this circle. Already
     /// populated tiles remain reusable when the option shrinks and grows, but
     /// the shader clips them to the current radius.
+    #[cfg(feature = "window")]
     pub(crate) fn set_outer_radius_chunks(&mut self, chunks: u32) {
         self.outer_radius_blocks = (chunks.min(256) * HORIZON_CELL_BLOCKS as u32) as f32;
     }
 
     /// Query and upload one still-empty tile. A missing sample leaves the tile
     /// nonresident so a later frame can retry it after worker completion.
+    #[cfg(feature = "window")]
     pub(crate) fn populate_one(
         &mut self,
         queue: &wgpu::Queue,
@@ -513,6 +532,7 @@ impl DistantTerrainRenderer {
         !self.residency.submitted_slots_are_complete([slot])
     }
 
+    #[cfg(feature = "window")]
     fn upload_tile(
         queue: &wgpu::Queue,
         heights_water: &wgpu::Texture,

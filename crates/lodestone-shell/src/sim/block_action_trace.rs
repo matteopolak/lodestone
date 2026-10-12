@@ -212,10 +212,12 @@ impl TraceModel {
         self.finish_observed();
     }
 
+    #[cfg(feature = "window")]
     fn handed_off(&mut self, key: SectionKey, now: u64) {
         self.settled(key, now, false);
     }
 
+    #[cfg(feature = "window")]
     fn settled(&mut self, key: SectionKey, now: u64, empty_renderer_absent: bool) {
         for attempt in &mut self.attempts {
             if !attempt.keys_registered { continue; }
@@ -235,6 +237,7 @@ impl TraceModel {
         }
     }
 
+    #[cfg(feature = "window")]
     fn presented(&mut self, now: u64) {
         for attempt in &mut self.attempts {
             if attempt.milestones.handoff.is_some() {
@@ -387,16 +390,19 @@ impl BlockActionTrace {
 
     /// Called only for successful current uploads or an explicit empty-section
     /// renderer removal; a CPU mesh or failed upload does not reach this seam.
+    #[cfg(feature = "window")]
     pub(crate) fn mesh_handed_off(&mut self, key: SectionKey) {
         let Some(now) = self.now() else { return };
         self.model.handed_off(key, now);
     }
 
+    #[cfg(feature = "window")]
     fn empty_renderer_settled(&mut self, key: SectionKey) {
         let Some(now) = self.now() else { return };
         self.model.settled(key, now, true);
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn present_submitted(&mut self) {
         let Some(now) = self.now() else { return };
         self.model.presented(now);
@@ -408,6 +414,7 @@ impl BlockActionTrace {
     }
 
     #[cfg(target_arch = "wasm32")]
+    #[cfg(feature = "window")]
     pub(crate) fn take_report(&mut self) -> Option<BlockActionTraceReport> {
         self.model.reports.pop_front()
     }
@@ -476,6 +483,7 @@ impl super::Sim {
         });
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn trace_block_action_mesh_handoff(&mut self, key: SectionKey) {
         if !self.block_action_trace_enabled { return; }
         self.write(|world| {
@@ -485,6 +493,7 @@ impl super::Sim {
         });
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn pending_block_action_mesh_keys(&self) -> Vec<SectionKey> {
         if !self.block_action_trace_enabled { return Vec::new(); }
         self.read(|world| {
@@ -501,6 +510,7 @@ impl super::Sim {
     }
 
     /// The caller must have observed renderer absence after its normal drains.
+    #[cfg(feature = "window")]
     pub(crate) fn trace_block_action_empty_settled(&mut self, key: SectionKey) {
         if !self.block_action_trace_enabled { return; }
         self.write(|world| {
@@ -518,6 +528,7 @@ impl super::Sim {
         });
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn trace_block_action_mesh_removed(&mut self, key: SectionKey) {
         if !self.block_action_trace_enabled { return; }
         self.write(|world| {
@@ -558,6 +569,7 @@ impl super::Sim {
         });
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn trace_block_action_present_submitted(&mut self) {
         if !self.block_action_trace_enabled { return; }
         self.write(|world| {
@@ -577,6 +589,7 @@ impl super::Sim {
     }
 
     #[cfg(target_arch = "wasm32")]
+    #[cfg(feature = "window")]
     pub(crate) fn take_block_action_trace_report(&mut self) -> Option<String> {
         self.write(|world| {
             world.get_resource_mut::<BlockActionTrace>()?.take_report().map(|report| report.to_string())

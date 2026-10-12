@@ -1769,6 +1769,7 @@ pub(crate) fn vanilla_manager() -> Option<ResourceManager> {
 /// ([`lodestone_mc_cache::cache_root`]) when it holds both a
 /// `lodestone-resources.zip` and a `generated/reports/blocks.json` (both are
 /// required to stitch the atlas).
+#[cfg(not(target_arch = "wasm32"))]
 fn asset_root() -> Option<PathBuf> {
     lodestone_mc_cache::cache_root().filter(|dir| {
         dir.join("lodestone-resources.zip").is_file()

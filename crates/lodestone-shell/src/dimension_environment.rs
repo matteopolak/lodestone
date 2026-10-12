@@ -58,6 +58,7 @@ pub(crate) fn cloud_color_for(info: Option<&DimensionTypeInfo>) -> [f32; 4] {
 /// The base sky-light factor, before weather: the dimension's declared
 /// `sky_light_factor` (the End's is a constant zero), else the time-of-day
 /// curve of `world_time_of_day`.
+#[cfg(feature = "window")]
 #[must_use]
 pub(crate) fn base_sky_light_factor(info: &DimensionTypeInfo, world_time_of_day: i64) -> f32 {
     info.sky_light_factor
@@ -66,6 +67,7 @@ pub(crate) fn base_sky_light_factor(info: &DimensionTypeInfo, world_time_of_day:
 
 /// The lightmap's ambient floor: the declared `ambient_light_color`, else the
 /// overworld's own.
+#[cfg(feature = "window")]
 #[must_use]
 pub(crate) fn ambient_light_for(info: &DimensionTypeInfo) -> [f32; 3] {
     match info.ambient_light_color {

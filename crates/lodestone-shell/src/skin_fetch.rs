@@ -203,6 +203,7 @@ fn read_cached_sheet(_id: uuid::Uuid, _key: &str) -> bool {
 }
 
 /// Hand a decoded sheet to the renderer. Replaces any undrained earlier one.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn publish(id: uuid::Uuid, model: PlayerModelType, image: Image) {
     with_map(&CURRENT, |map| {
         map.insert(id, model);

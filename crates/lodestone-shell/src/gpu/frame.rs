@@ -841,8 +841,11 @@ impl RenderState {
             collect_visible_model_sections(model, camera, &terrain_cull, &mut stats)
         });
         let mut terrain_draws = Vec::with_capacity(visible_model_sections.len());
+        #[cfg(feature = "window")]
         let mut world_pass_begins = 0;
+        #[cfg(feature = "window")]
         let mut world_text_pass_begins = 0;
+        #[cfg(feature = "window")]
         let mut nametag_pass_begins = 0;
 
         let timer = self.gpu_timer.borrow();
@@ -886,7 +889,8 @@ impl RenderState {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        world_pass_begins += 1;
+        #[cfg(feature = "window")]
+        { world_pass_begins += 1; }
         {
             if let Some(distant) = &self.distant_terrain {
                 distant.draw(&mut pass);
@@ -1457,7 +1461,8 @@ impl RenderState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            world_text_pass_begins += 1;
+            #[cfg(feature = "window")]
+            { world_text_pass_begins += 1; }
             self.sign_text.draw(&mut text_pass, sign_text_count);
             self.display_text.draw(&mut text_pass, &display_text_counts);
             drop(text_pass);
@@ -1492,7 +1497,8 @@ impl RenderState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            world_pass_begins += 1;
+            #[cfg(feature = "window")]
+            { world_pass_begins += 1; }
             // A fresh pass inherits no bind groups, so the next terrain bind is
             // a genuine switch — see the declaration above.
             terrain_cam_group_last = None;
@@ -2076,7 +2082,8 @@ impl RenderState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            nametag_pass_begins += 1;
+            #[cfg(feature = "window")]
+            { nametag_pass_begins += 1; }
             self.nametag.draw(&mut pass, name_tag_counts);
         }
 
@@ -2187,19 +2194,33 @@ impl RenderState {
             crate::gpu::gpu_timing::WorldSubphaseCounts {
                 packed_sections_visited: self.sections.len(),
                 model_sections_visited: self.model.as_ref().map_or(0, |m| m.sections.len()),
+                #[cfg(feature = "window")]
                 opaque_sections_drawn: stats.sections_drawn,
+                #[cfg(feature = "window")]
                 water_sections_drawn: stats.water_sections_drawn,
+                #[cfg(feature = "window")]
                 translucent_sections_drawn: stats.translucent_sections_drawn,
+                #[cfg(feature = "window")]
                 entities_drawn: stats.entities_drawn,
+                #[cfg(feature = "window")]
                 block_entities_drawn: stats.block_entities_drawn,
+                #[cfg(feature = "window")]
                 sign_text_vertices: stats.sign_text_vertices,
+                #[cfg(feature = "window")]
                 particles_drawn: stats.particles_drawn,
+                #[cfg(feature = "window")]
                 world_pass_begins,
+                #[cfg(feature = "window")]
                 world_text_pass_begins,
+                #[cfg(feature = "window")]
                 nametag_pass_begins,
+                #[cfg(feature = "window")]
                 terrain_camera_bind_calls: stats.terrain_camera_bind_calls,
+                #[cfg(feature = "window")]
                 terrain_origin_vertex_binds: stats.terrain_origin_vertex_binds,
+                #[cfg(feature = "window")]
                 terrain_indexed_draw_calls: stats.terrain_indexed_draw_calls,
+                #[cfg(feature = "window")]
                 terrain_buffer_bind_pairs: stats.terrain_buffer_binds,
             },
         );

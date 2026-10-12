@@ -87,7 +87,9 @@ pub use debug_lines::{
     DebugLineVertex, chunk_border_vertices, debug_line_vertices, entity_hitbox_vertices,
     f3_overlay_vertices,
 };
+#[cfg(feature = "window")]
 pub(crate) use debug_lines::{EntityHitboxState, f3_overlay_vertices_with_states};
+#[cfg(any(feature = "window", test))]
 pub(crate) use debug_lines::push_box;
 pub use occlusion::TerrainOcclusion;
 pub use plugin_billboards::{PluginBillboardInstance, plugin_billboard_vertices};
@@ -290,6 +292,7 @@ pub struct RenderState {
     atlas_bind_group: wgpu::BindGroup,
     depth: DepthBuffer,
     distant_terrain: Option<distant_terrain::DistantTerrainRenderer>,
+    #[cfg(feature = "window")]
     distant_terrain_failed: bool,
     sections: HashMap<SectionKey, SectionGpu>,
     section_fingerprints: HashMap<SectionKey, u128>,

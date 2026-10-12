@@ -206,7 +206,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         // caller (`WindowApp::new`) seeds this `true`, so this guard is a
         // no-op for them and `resumed` creates a window exactly as it always
         // has.
-        #[cfg(feature = "runtime-presentation")]
+        #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
         if !self.presentation_desired {
             return;
         }
@@ -2397,7 +2397,7 @@ pub(super) fn window_attributes(config: &Config) -> winit::window::WindowAttribu
 ///
 /// It stays independent of DOM access so the sizing arithmetic remains covered by
 /// native unit tests while the standalone page owns canvas measurement and resize forwarding.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 pub(crate) fn dpr_scaled_size(client_width: i32, client_height: i32, dpr: f64) -> Option<(u32, u32)> {
     let w = (f64::from(client_width) * dpr).round();
     let h = (f64::from(client_height) * dpr).round();

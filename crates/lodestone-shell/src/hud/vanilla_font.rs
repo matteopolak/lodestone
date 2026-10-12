@@ -1396,7 +1396,9 @@ fn jar_manager() -> Option<ResourceManager> {
     // This is also the manager [`load_custom_font`] uses, so a server- or
     // locally-selected pack's custom font is discoverable the same way the
     // default font already is.
-    let mut manager = crate::resources::open_vanilla_pack_stack()?;
+    let manager = crate::resources::open_vanilla_pack_stack()?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut manager = manager;
     // The browser has no object store: `platform::assets::Bundle` carries the jar
     // and the blocks report only, so a wasm session keeps bitmap-only coverage
     // rather than paying a 1.5 MB fetch for `unifont.zip` on a bundle that is

@@ -241,6 +241,7 @@ pub(crate) fn hands_to_render(main: Option<&ItemStack>, using: bool) -> (bool, b
 ///
 /// Right-handed: this client has no main-arm option and reports a right main
 /// hand to the server.
+#[cfg(feature = "window")]
 #[must_use]
 pub(crate) fn hands_frame(sample: &FirstPersonHandsSample) -> crate::gpu::FirstPersonHandsFrame {
     let hand = |hand: &HandSample, drawn: bool| crate::gpu::HandFrame {

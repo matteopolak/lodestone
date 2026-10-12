@@ -84,8 +84,11 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{Receiver, TryRecvError};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{Sender, channel};
@@ -94,6 +97,7 @@ use lodestone_auth::metadata::{AccountProfile, AccountsMetadata};
 use uuid::Uuid;
 
 use super::edit_box::EditBox;
+#[cfg(not(target_arch = "wasm32"))]
 use super::focus::KeyEvent;
 use super::nav::MenuKey;
 use crate::offline_identity::{OfflineIdentity, offline_uuid};
@@ -130,11 +134,13 @@ enum SignIn {
     /// Nothing in flight.
     Idle,
     /// An authorization request is pending.
+    #[cfg(not(target_arch = "wasm32"))]
     Requesting {
         rx: Receiver<WorkerMsg>,
         cancel: Arc<AtomicBool>,
     },
     /// Showing the provider URL while polling for the user to finish in their browser.
+    #[cfg(not(target_arch = "wasm32"))]
     Waiting {
         user_code: String,
         verification_uri: String,
@@ -142,6 +148,7 @@ enum SignIn {
         cancel: Arc<AtomicBool>,
     },
     /// The flow ended in an error; shown until dismissed.
+    #[cfg(not(target_arch = "wasm32"))]
     Failed { message: String },
 }
 
@@ -149,7 +156,9 @@ impl std::fmt::Debug for SignIn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SignIn::Idle => write!(f, "Idle"),
+            #[cfg(not(target_arch = "wasm32"))]
             SignIn::Requesting { .. } => write!(f, "Requesting"),
+            #[cfg(not(target_arch = "wasm32"))]
             SignIn::Waiting {
                 user_code,
                 verification_uri,
@@ -159,6 +168,7 @@ impl std::fmt::Debug for SignIn {
                 .field("user_code", user_code)
                 .field("verification_uri", verification_uri)
                 .finish_non_exhaustive(),
+            #[cfg(not(target_arch = "wasm32"))]
             SignIn::Failed { message } => f.debug_struct("Failed").field("message", message).finish(),
         }
     }
@@ -188,6 +198,7 @@ pub enum SignInView {
 }
 
 /// What the background worker reports back over the channel.
+#[cfg(not(target_arch = "wasm32"))]
 enum WorkerMsg {
     /// The provider answered with a prompt to show the user.
     Prompt {
@@ -211,6 +222,7 @@ enum WorkerMsg {
 /// that just returns a channel they control by hand. Keeping this as an
 /// injected closure is what makes [`AccountsNav::handle_key`]'s state
 /// machine testable without a network.
+#[cfg(not(target_arch = "wasm32"))]
 type Spawn = Box<dyn FnOnce() -> (Receiver<WorkerMsg>, Arc<AtomicBool>)>;
 
 /// Mutable state behind [`AccountsNav`]'s `RefCell` — see the module docs for
@@ -363,6 +375,7 @@ pub const NAME_EDIT_DONE_ROW: usize = 1;
 /// deliberate: the cap stops the 17th keystroke rather than letting a player type
 /// a long name and only learn on Done that it was refused. The commit check stays
 /// because the box cap cannot see the *character* rule at all.
+#[cfg(not(target_arch = "wasm32"))]
 const NAME_MAX_LENGTH: usize = 16;
 
 /// What [`AccountsNav::handle_key`] asks the screen-level caller to do. Kept
@@ -592,7 +605,9 @@ impl AccountsNav {
     pub fn sign_in_view(&self) -> SignInView {
         match &self.state.borrow().sign_in {
             SignIn::Idle => SignInView::Idle,
+            #[cfg(not(target_arch = "wasm32"))]
             SignIn::Requesting { .. } => SignInView::Requesting,
+            #[cfg(not(target_arch = "wasm32"))]
             SignIn::Waiting {
                 user_code,
                 verification_uri,
@@ -601,6 +616,7 @@ impl AccountsNav {
                 user_code: user_code.clone(),
                 verification_uri: verification_uri.clone(),
             },
+            #[cfg(not(target_arch = "wasm32"))]
             SignIn::Failed { message } => SignInView::Failed {
                 message: message.clone(),
             },
@@ -795,6 +811,7 @@ impl AccountsNav {
     /// its worker — see [`Spawn`]. Kept as a normal (non-pub) method so
     /// production code always goes through [`Self::handle_key`]; tests reach
     /// it directly with a hand-fed channel.
+    #[cfg(not(target_arch = "wasm32"))]
     fn handle_key_with(&self, key: MenuKey, spawn: Spawn) -> AccountsSignal {
         let mut st = self.state.borrow_mut();
         let list_len = st.metadata.profiles.len() + 1;
@@ -893,6 +910,7 @@ fn select(st: &mut State, logical: usize, path: &Path) {
     st.save_error = st.metadata.save_to(path).err().map(|e| e.to_string());
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn remove_highlighted(st: &mut State, path: &Path) {
     let accounts_len = st.metadata.profiles.len();
     if st.highlighted >= accounts_len {
@@ -946,6 +964,7 @@ fn remove_highlighted(st: &mut State, path: &Path) {
 /// opening the editor writes nothing, so the only place `offline_path` is needed
 /// is [`commit_name_edit`] — one writer, reached from exactly two call sites
 /// (Enter and the Done click), both of which hold `AccountsNav`'s own field.
+#[cfg(not(target_arch = "wasm32"))]
 fn activate_button(st: &mut State, button: usize, path: &Path, spawn: Spawn) -> AccountsSignal {
     match button {
         BUTTON_ADD => {
@@ -993,6 +1012,7 @@ fn third_button(st: &State) -> ThirdButton {
 /// Seeded from the stored value rather than left empty: an editor that starts
 /// blank reads as "your name has been cleared", and the overwhelmingly common
 /// edit is a change to an existing name rather than a fresh one.
+#[cfg(not(target_arch = "wasm32"))]
 fn begin_name_edit(st: &mut State) {
     // Geometry is a placeholder: `draw_edit_box` repositions its clone into the
     // row's `Slot` before reading any of it (the options sub screen's init's
@@ -1048,6 +1068,7 @@ fn commit_name_edit(st: &mut State, offline_path: &Path) {
 /// `MenuKey::Char` before `KeyEvent::from_menu_key`, matching
 /// `create_world::handle_key`: `from_menu_key` returns `None` for a `Char`, and
 /// treating that `None` as "unhandled" would silently drop every keystroke.
+#[cfg(not(target_arch = "wasm32"))]
 fn handle_key_editing_name(st: &mut State, key: MenuKey, offline_path: &Path) -> AccountsSignal {
     match key {
         // Abandon: the stored name is untouched (nothing has been written yet),
@@ -1082,6 +1103,7 @@ fn handle_key_editing_name(st: &mut State, key: MenuKey, offline_path: &Path) ->
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn handle_key_mid_flow(st: &mut State, key: MenuKey) -> AccountsSignal {
     match key {
         // `Enter` as well as `Escape`, because the sign-in screen now *has* a
@@ -1140,6 +1162,7 @@ fn list_len(st: &State) -> usize {
 /// `MenuNav::scroll_server_to_show`'s reason: a keyboard press has no canvas to
 /// hand, and the smallest supported canvas is the *conservative* choice — it can
 /// only ever under-use a taller one, never scroll a row off-screen.
+#[cfg(not(target_arch = "wasm32"))]
 fn scroll_to_show(st: &mut State) {
     let Some(mut list) =
         super::render::accounts_list_spec(list_len(st), st.scroll)
@@ -1151,10 +1174,12 @@ fn scroll_to_show(st: &mut State) {
     st.scroll = list.scroll();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn wrap_next(i: usize, len: usize) -> usize {
     if len == 0 { 0 } else { (i + 1) % len }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn wrap_prev(i: usize, len: usize) -> usize {
     if len == 0 {
         0
@@ -1172,6 +1197,7 @@ fn wrap_prev(i: usize, len: usize) -> usize {
 ///
 /// Kept free of any actual I/O so it is unit-testable with a hand-fed
 /// channel and no real network, browser, or keychain.
+#[cfg(not(target_arch = "wasm32"))]
 fn pump_locked(sign_in: SignIn) -> (SignIn, Option<(Option<String>, Option<AccountProfile>)>) {
     match sign_in {
         SignIn::Requesting { rx, cancel } => match rx.try_recv() {

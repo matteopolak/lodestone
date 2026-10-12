@@ -32,32 +32,44 @@
 //! light at the eye" would make moodiness a function of the player's own torch
 //! and cave ambience would essentially never fire.
 
+#[cfg(feature = "window")]
 use std::borrow::Cow;
+#[cfg(feature = "window")]
 use std::time::Duration;
 
 // The portable clock: `Instant::now()` traps on wasm32. `crate::platform::Instant`
 // *is* `std::time::Instant` on native (`web_time` re-exports `std::time` there), so
 // this changes nothing off the browser. See `crate::platform`.
+#[cfg(feature = "window")]
 use crate::platform::Instant;
 
-use glam::{DVec3, IVec3};
+use glam::DVec3;
+#[cfg(feature = "window")]
+use glam::IVec3;
+#[cfg(feature = "window")]
 use lodestone_render::{Precipitation, RainAmbience, WeatherState};
+#[cfg(feature = "window")]
 use lodestone_sound::JavaRandom;
+#[cfg(feature = "window")]
 use lodestone_sound::ambient::{AmbientLoops, AmbientSounds, LightSample, LoopAction};
 use lodestone_sound::predict::{PredictionLedger, StepAccumulator};
 
+#[cfg(feature = "window")]
 use super::ShellAudio;
 
 /// Real time per client tick — vanilla's 20 Hz, the same constant
 /// [`super::music`] uses for the same reason.
+#[cfg(feature = "window")]
 const TICK: Duration = Duration::from_millis(50);
 
 /// Cap on catch-up ticks in one call. Ten, matching `app::pacing` and
 /// [`super::music`]: alt-tabbing away must not run five minutes of mood
 /// accumulation in one frame.
+#[cfg(feature = "window")]
 const MAX_CATCH_UP_TICKS: u32 = 10;
 
 /// Vanilla's own rain-sound-timer roll bound — a random integer in `0..3`.
+#[cfg(feature = "window")]
 const RAIN_ROLL_BOUND: i32 = 3;
 
 /// Everything one ambience tick needs from the world, gathered by the caller.
@@ -65,6 +77,7 @@ const RAIN_ROLL_BOUND: i32 = 3;
 /// Borrowed rather than owned so a frame can build it from live reads without a
 /// clone; it must not outlive the frame it was built for, for the same staleness
 /// reason `app::weather`'s `ShellWeatherProbe` must not.
+#[cfg(feature = "window")]
 pub(crate) struct AmbienceInput<'a> {
     /// The player's `(x, eyeY, z)` — the centre of the mood sample cube.
     pub(crate) eye: DVec3,
@@ -83,6 +96,7 @@ pub(crate) struct AmbienceInput<'a> {
 }
 
 /// One thing an ambience tick decided should happen.
+#[cfg(feature = "window")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AmbienceEvent {
     /// A positional one-shot: cave mood, an ambient addition, or weather.
@@ -116,12 +130,18 @@ pub(crate) enum AmbienceEvent {
 /// The shell's ambience state.
 #[derive(Debug)]
 pub(crate) struct ShellAmbience {
+    #[cfg(feature = "window")]
     mood: lodestone_sound::ambient::MoodAccumulator,
+    #[cfg(feature = "window")]
     loops: AmbientLoops,
+    #[cfg(feature = "window")]
     rain: RainAmbience,
+    #[cfg(feature = "window")]
     rng: JavaRandom,
     /// Live loop voices, so a handle outlives the tick that started it.
+    #[cfg(feature = "window")]
     voices: Vec<(String, lodestone_sound::PlayHandle)>,
+    #[cfg(feature = "window")]
     last_tick: Option<Instant>,
     /// The local player's step-distance accumulator, and the echo ledger guarding
     /// the sounds it predicts. Here rather than in a resource of their own because
@@ -135,12 +155,20 @@ pub(crate) struct ShellAmbience {
 impl ShellAmbience {
     /// Fresh ambience state. `seed` seeds the shared RNG.
     pub(crate) fn new(seed: i64) -> Self {
+        #[cfg(not(feature = "window"))]
+        let _ = seed;
         Self {
+            #[cfg(feature = "window")]
             mood: lodestone_sound::ambient::MoodAccumulator::new(),
+            #[cfg(feature = "window")]
             loops: AmbientLoops::new(),
+            #[cfg(feature = "window")]
             rain: RainAmbience::default(),
+            #[cfg(feature = "window")]
             rng: JavaRandom::new(seed),
+            #[cfg(feature = "window")]
             voices: Vec::new(),
+            #[cfg(feature = "window")]
             last_tick: None,
             steps: StepAccumulator::new(),
             ledger: PredictionLedger::new(),
@@ -195,6 +223,7 @@ impl ShellAmbience {
     ///
     /// Device-free: `probe` is the caller's world read, and nothing here can
     /// reach a [`ShellAudio`].
+    #[cfg(feature = "window")]
     pub(crate) fn tick(
         &mut self,
         ticks: u32,
@@ -208,6 +237,7 @@ impl ShellAmbience {
         events
     }
 
+    #[cfg(feature = "window")]
     fn tick_once(
         &mut self,
         input: &AmbienceInput<'_>,
@@ -288,6 +318,7 @@ impl ShellAmbience {
 
     /// Tick from wall time: however many whole 20 Hz ticks have elapsed since the
     /// last call, capped at [`MAX_CATCH_UP_TICKS`].
+    #[cfg(feature = "window")]
     pub(crate) fn advance(
         &mut self,
         now: Instant,
@@ -314,6 +345,7 @@ impl ShellAmbience {
     /// `.ogg` corpus on disk) simply records no voice, and the subsequent
     /// `LoopVolume`/`LoopStop` for it are no-ops — so a missing sample degrades
     /// to silence rather than to a leaked table entry.
+    #[cfg(feature = "window")]
     pub(crate) fn submit(&mut self, events: &[AmbienceEvent], audio: &mut ShellAudio) {
         for event in events {
             match event {

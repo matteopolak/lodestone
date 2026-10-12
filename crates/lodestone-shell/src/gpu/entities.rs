@@ -1231,6 +1231,7 @@ fn start_trim_decode(
     receiver
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn decode_trim_images() -> Vec<(lodestone_assets::ResourceLocation, lodestone_assets::Image)> {
     let started = crate::platform::Instant::now();
     let images: Vec<_> = load_trim_sprites().into_iter().collect();
@@ -1483,6 +1484,7 @@ pub(super) fn load_humanoid_armour_textures()
 /// [`EntityRenderer::trim_textures`].
 ///
 /// [`Image`]: lodestone_assets::Image
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn load_trim_sprites() -> HashMap<lodestone_assets::ResourceLocation, lodestone_assets::Image> {
     use lodestone_assets::equipment::ARMOUR_ASSETS;
     use lodestone_assets::trim::{TRIM_MATERIALS, TRIM_PATTERNS, TrimAtlas, trim_sprite_id};

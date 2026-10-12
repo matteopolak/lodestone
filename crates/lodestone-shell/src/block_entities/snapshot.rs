@@ -26,9 +26,11 @@ pub(super) struct BlockEntityFrameCandidate {
 #[derive(Debug, Default)]
 pub(crate) struct BlockEntityFrameSnapshot {
     pub(super) candidates: Vec<BlockEntityFrameCandidate>,
+    #[cfg(feature = "window")]
     pub(crate) scan_counts: BlockEntityScanCounts,
 }
 
+#[cfg(feature = "window")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockEntityScanCounts {
     pub(crate) loaded_chunks: usize,
@@ -90,13 +92,17 @@ fn block_entity_frame_snapshot_from_world(
 ) -> BlockEntityFrameSnapshot {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
+    #[cfg(feature = "window")]
     let mut scan_counts = BlockEntityScanCounts {
         loaded_chunks: world.len(),
         ..Default::default()
     };
     for (pos, chunk) in world.block_entity_chunks() {
-        scan_counts.candidate_chunks += 1;
-        scan_counts.records_visited += chunk.block_entities.len();
+        #[cfg(feature = "window")]
+        {
+            scan_counts.candidate_chunks += 1;
+            scan_counts.records_visited += chunk.block_entities.len();
+        }
         for entity in &chunk.block_entities {
             let block = [
                 pos.x * 16 + i32::from(entity.rel_x),
@@ -122,7 +128,11 @@ fn block_entity_frame_snapshot_from_world(
             });
         }
     }
-    BlockEntityFrameSnapshot { candidates, scan_counts }
+    #[cfg(feature = "window")]
+    let snapshot = BlockEntityFrameSnapshot { candidates, scan_counts };
+    #[cfg(not(feature = "window"))]
+    let snapshot = BlockEntityFrameSnapshot { candidates };
+    snapshot
 }
 
 #[cfg(test)]

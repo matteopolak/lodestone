@@ -958,6 +958,7 @@ pub struct AudioEngine(pub Option<ShellAudio>);
 /// borrows cannot coexist, so the state is taken out for the duration of the tick
 /// and put straight back. `None` is therefore only ever observable *during* a
 /// tick, from inside the tick itself.
+#[cfg(feature = "window")]
 #[derive(Debug, Default, Resource)]
 pub(crate) struct MusicState(pub Option<crate::audio::music::ShellMusic>);
 
@@ -1078,6 +1079,7 @@ impl Sim {
     /// unclaimed. Read by the driver before calling
     /// `crate::app::input::resolve_key`, so the precedence chain itself stays
     /// a pure function of plain data — see that function's own doc.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn plugin_key_intercept_mode(
         &self,
@@ -1093,6 +1095,7 @@ impl Sim {
     /// [`Self::plugin_key_intercept_mode`] returned `Some` for the same key,
     /// regardless of which mode — `Observe` still wants to see the event,
     /// it just does not swallow it from gameplay.
+    #[cfg(feature = "window")]
     pub(crate) fn queue_plugin_key_event(&mut self, key: lodestone_ecs::PhysicalKey, pressed: bool) {
         self.write(|w| {
             w.resource_mut::<lodestone_ecs::PendingPluginKeyEvents>()
@@ -1227,6 +1230,7 @@ impl Sim {
     /// lives outside this module — see `lodestone_render::weather`'s
     /// `rain_column`/`snow_column` doc for why the phase must stay on this
     /// **tick** clock rather than a frame counter.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn interp_alpha(&self) -> f32 {
         self.clock().interp_alpha.clamp(0.0, 1.0)
@@ -1756,6 +1760,7 @@ use meshing::dirty_sections_for_blocks;
 // `sim/camera.rs`'s doc explains) would not reach it — needs `pub(crate)`,
 // matching the item's own visibility before it moved. Not `pub use`: nothing
 // outside this crate names it.
+#[cfg(any(feature = "window", not(target_arch = "wasm32")))]
 pub(crate) use camera::fog_for_render_distance;
 
 // Same reasoning as `fog_for_render_distance` just above: `crate::interact::

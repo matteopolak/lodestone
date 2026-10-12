@@ -21,7 +21,7 @@ use wasm_bindgen::closure::Closure;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{ErrorEvent, MessageChannel, MessageEvent, MessagePort, Worker};
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "window"))]
 use crate::horizon::{
     BrowserHorizonClient, apply_tile_response, parse_tile_response,
 };
@@ -40,6 +40,7 @@ pub(super) enum BrowserIntegratedTransport {
         _progress_port: MessagePort,
         _horizon_port: MessagePort,
         _on_progress: Closure<dyn FnMut(MessageEvent)>,
+        #[cfg(feature = "window")]
         _on_horizon: Closure<dyn FnMut(MessageEvent)>,
         _on_error: Closure<dyn FnMut(ErrorEvent)>,
     },
@@ -434,7 +435,9 @@ pub(super) async fn launch_browser_worker(
         }
     };
     let epoch = NEXT_WORKER_EPOCH.fetch_add(1, Ordering::Relaxed).max(1);
+    #[cfg(feature = "window")]
     let horizon_client = BrowserHorizonClient::new(epoch, page_horizon_port.clone());
+    #[cfg(feature = "window")]
     let horizon_cache = horizon_client.cache();
     // Build this before waiting for `ready` so the worker error callback can
     // wake a client read after startup. A MessagePort itself has no close event.
@@ -592,6 +595,7 @@ pub(super) async fn launch_browser_worker(
     });
     page_progress_port.set_onmessage(Some(on_progress.as_ref().unchecked_ref()));
     page_progress_port.start();
+    #[cfg(feature = "window")]
     let on_horizon = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let Some(response) = parse_tile_response(&event.data()) else {
             tracing::debug!("ignoring malformed browser horizon response");
@@ -605,6 +609,7 @@ pub(super) async fn launch_browser_worker(
             tracing::debug!("ignoring unmatched browser horizon response");
         }
     });
+    #[cfg(feature = "window")]
     page_horizon_port.set_onmessage(Some(on_horizon.as_ref().unchecked_ref()));
     page_horizon_port.start();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
@@ -769,6 +774,7 @@ pub(super) async fn launch_browser_worker(
         worker.terminate();
         return Err(error);
     }
+    #[cfg(feature = "window")]
     if matches!(
         preset,
         crate::menu::create_world::WorldTypePreset::Normal
@@ -777,12 +783,15 @@ pub(super) async fn launch_browser_worker(
     ) {
         let _ = horizon_surface.set(horizon_client);
     }
+    #[cfg(not(feature = "window"))]
+    let _ = (&horizon_surface, preset);
     Ok(BrowserIntegratedTransport::Worker {
         _worker: worker,
         port: transport,
         _progress_port: page_progress_port,
         _horizon_port: page_horizon_port,
         _on_progress: on_progress,
+        #[cfg(feature = "window")]
         _on_horizon: on_horizon,
         _on_error: on_error,
     })

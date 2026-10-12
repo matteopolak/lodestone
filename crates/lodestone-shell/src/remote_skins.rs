@@ -145,6 +145,7 @@ enum FetchState {
     /// A worker is in flight.
     Pending,
     /// Decoded and handed to [`READY`]; kept so a re-request is a no-op.
+    #[cfg(not(target_arch = "wasm32"))]
     Done,
     /// Refused host, dead CDN, oversized body or undecodable PNG. **Remembered
     /// on purpose** — the alternative is retrying every frame forever.

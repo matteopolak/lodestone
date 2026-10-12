@@ -113,6 +113,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -159,8 +160,10 @@ pub use state::{
 };
 pub use events::NetUpdate;
 
+#[cfg(any(feature = "multiplayer", test))]
 use crate::offline_identity::OfflineIdentity;
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The local integrated server's bridge into the client plugin registry.
 ///
 /// It owns only the ECS handle; each command takes one short write guard to
@@ -171,6 +174,7 @@ struct EcsCommandSink {
     ecs: lodestone_ecs::EcsHandle,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl EcsCommandSink {
     fn direct_source(caller: &lodestone_server::CommandCaller) -> lodestone_ecs::commands::CommandSource {
         lodestone_ecs::commands::CommandSource::player(caller.uuid, caller.username.clone())
@@ -228,6 +232,7 @@ impl EcsCommandSink {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl lodestone_server::CommandSink for EcsCommandSink {
     fn run(
         &self,
@@ -293,8 +298,10 @@ pub type SharedHandle = Arc<OnceLock<Arc<ClientHandle>>>;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) type SharedHorizonSurface = Arc<OnceLock<crate::horizon::HorizonSurfaceQuery>>;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "window"))]
 pub(crate) type SharedHorizonSurface = Arc<OnceLock<crate::horizon::BrowserHorizonClient>>;
+#[cfg(all(target_arch = "wasm32", not(feature = "window")))]
+pub(crate) type SharedHorizonSurface = Arc<OnceLock<()>>;
 
 /// The connecting session's local player UUID, published as soon as the
 /// [`LoginProfile`] is built — before the handshake even starts, not just
@@ -645,6 +652,7 @@ pub struct NetClient {
     integrated_tick_monitor: Arc<OnceLock<lodestone_server::IntegratedTickMonitor>>,
     /// Local coarse-horizon estimate, if this session owns a supported
     /// Overworld generator. Remote and custom-source sessions leave it empty.
+    #[cfg(feature = "window")]
     horizon_surface: SharedHorizonSurface,
     /// The world's rain/thunder levels and lightning count, folded by
     /// [`forward`]'s `WeatherChanged` arm. See [`WeatherCell`] for why this is a
@@ -750,6 +758,7 @@ enum RemoteAuth {
     SelectedAccount,
     /// A session the caller already resolved — [`NetClient::connect_online`],
     /// for a caller that did its own sign-in and has a live one in hand.
+    #[cfg(not(target_arch = "wasm32"))]
     Session(OnlineSession),
 }
 
@@ -761,6 +770,7 @@ impl RemoteAuth {
     /// nothing in the tree disagreed with it. Naming the decision gives a gate a
     /// subject, so a future edit that quietly puts the join back on the offline
     /// path fails a test instead of silently un-signing everyone in.
+    #[cfg(feature = "window")]
     fn for_production_join() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         return RemoteAuth::SelectedAccount;
@@ -773,6 +783,7 @@ impl RemoteAuth {
 
 enum Origin {
     /// Dial a real server over TCP. `auth` says which identity to present.
+    #[cfg(any(feature = "multiplayer", test))]
     Remote {
         /// Hostname the player entered and the protocol handshake presents.
         host: String,
@@ -790,6 +801,7 @@ enum Origin {
     /// the registry is the only thing that turns one into an encoder.
     Integrated {
         /// The serverbound half of the version family, from the registry.
+        #[cfg(not(target_arch = "wasm32"))]
         protocol: Box<dyn lodestone_server::ServerProtocol>,
         /// World seed for the bundled overworld generator — a **creation**
         /// parameter only. When `world_dir` names a world that already exists,
@@ -847,6 +859,7 @@ impl std::fmt::Debug for Origin {
     // holds a live access token.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(any(feature = "multiplayer", test))]
             Origin::Remote { host, port, auth } => f
                 .debug_struct("Remote")
                 .field("host", host)
@@ -862,6 +875,7 @@ impl std::fmt::Debug for Origin {
                         RemoteAuth::Offline => "offline",
                         #[cfg(not(target_arch = "wasm32"))]
                         RemoteAuth::SelectedAccount => "selected-account",
+                        #[cfg(not(target_arch = "wasm32"))]
                         RemoteAuth::Session(_) => "session",
                     },
                 )
@@ -1218,8 +1232,12 @@ impl NetClient {
         #[cfg(target_arch = "wasm32")] game_mode: lodestone_model::GameMode,
         #[cfg(not(target_arch = "wasm32"))] world_dir: Option<std::path::PathBuf>,
     ) -> Self {
+        // The browser's world runs in its own worker, which brings its own protocol.
+        #[cfg(target_arch = "wasm32")]
+        let _ = server_protocol;
         Self::connect_impl(
             Origin::Integrated {
+                #[cfg(not(target_arch = "wasm32"))]
                 protocol: server_protocol,
                 seed,
                 world_type,
@@ -1437,6 +1455,7 @@ impl NetClient {
             handle,
             #[cfg(not(target_arch = "wasm32"))]
             integrated_tick_monitor,
+            #[cfg(feature = "window")]
             horizon_surface,
             weather,
             biome_climates,
@@ -1848,6 +1867,7 @@ impl NetClient {
     }
 
     /// Whether this session has a worker or native source for horizon data.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn horizon_enabled(&self) -> bool {
         self.horizon_surface.get().is_some()
@@ -1855,6 +1875,7 @@ impl NetClient {
 
     /// Samples a ready horizon cell. A browser miss starts one bounded tile
     /// request and returns `None` until its response arrives.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn horizon_sample(
         &self,
@@ -1874,6 +1895,7 @@ impl NetClient {
     }
 
     /// Drops browser tile requests when the fixed renderer window recentres.
+    #[cfg(feature = "window")]
     pub(crate) fn recenter_horizon(&self, _camera_block: [i32; 2]) {
         #[cfg(target_arch = "wasm32")]
         if let Some(surface) = self.horizon_surface.get() {
@@ -1966,6 +1988,7 @@ impl NetClient {
             thread: None,
             handle: Arc::new(OnceLock::new()),
             integrated_tick_monitor: Arc::new(OnceLock::new()),
+            #[cfg(feature = "window")]
             horizon_surface: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
@@ -2048,6 +2071,7 @@ impl NetClient {
             thread: None,
             handle: Arc::new(OnceLock::new()),
             integrated_tick_monitor: Arc::new(OnceLock::new()),
+            #[cfg(feature = "window")]
             horizon_surface: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
@@ -2381,7 +2405,9 @@ async fn run_async(
         // must still reach SRV resolution. The outer `Option` distinguishes
         // that remote case from an integrated connection, which has no DNS
         // endpoint at all.
-        let (server, auth, integrated_io, remote_explicit_port) = match origin {
+        let (server, auth, integrated_io, remote_explicit_port): (_, _, _, Option<Option<u16>>) =
+            match origin {
+            #[cfg(any(feature = "multiplayer", test))]
             Origin::Remote { host, port, auth } => (
                 ServerAddress {
                     host,
@@ -2392,6 +2418,7 @@ async fn run_async(
                 Some(port),
             ),
             Origin::Integrated {
+                #[cfg(not(target_arch = "wasm32"))]
                 protocol: server_protocol,
                 seed,
                 world_type,
@@ -2405,6 +2432,7 @@ async fn run_async(
                 lan_port,
                 #[cfg(not(target_arch = "wasm32"))]
                 online_mode,
+                ..
             } => {
                 // The world's **stored** seed wins over the
                 // requested one, so this has to be resolved before the
@@ -2897,14 +2925,11 @@ async fn run_async(
                 }
             }
         };
-        // Browser: `RemoteAuth::SelectedAccount` does not exist and
-        // `RemoteAuth::Session`'s payload is uninhabited, so this is statically
-        // always `None` — `match session {}` says so to the compiler rather than
-        // inventing a stand-in.
+        // Browser: only `RemoteAuth::Offline` exists, so this is statically
+        // always `None`.
         #[cfg(target_arch = "wasm32")]
         let auth: Option<OnlineSession> = match auth {
             RemoteAuth::Offline => None,
-            RemoteAuth::Session(session) => match session {},
         };
 
         // An authenticated session supplies its own profile; every other join
@@ -2989,6 +3014,8 @@ async fn run_async(
                 PlayerLoadedPolicy::Automatic
             })
             .respawn_policy(RespawnPolicy::Manual);
+        #[cfg(target_arch = "wasm32")]
+        let _ = remote_explicit_port;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(explicit_port) = remote_explicit_port {
             let resolved = match lodestone_net::resolve_server_address(

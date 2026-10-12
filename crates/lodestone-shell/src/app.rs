@@ -47,24 +47,31 @@ use crate::platform::Instant;
 // The normal window and terminal presentation targets share the render-target
 // interface; the terminal uses `HeadlessTarget` while the window uses the
 // swapchain-backed target.
-use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, fog::FogSettings};
+use lodestone_render::{GpuContext, RenderTarget, fog::FogSettings};
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_render::HeadlessTarget;
 // Native-only: it blocks on adapter/device selection. The browser arm awaits
 // `attach_window_async` from `spawn_local` instead — see `app::lifecycle::resumed`,
 // which is split at exactly that seam.
 #[cfg(not(target_arch = "wasm32"))]
 use lodestone_render::window::attach_window;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::application::ApplicationHandler;
 #[cfg(target_arch = "wasm32")]
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{
-    DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::event::DeviceEvent;
+use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
 #[cfg(target_arch = "wasm32")]
 use winit::event::{MouseScrollDelta, TouchPhase};
+#[cfg(not(target_arch = "wasm32"))]
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+#[cfg(not(target_arch = "wasm32"))]
 use winit::monitor::MonitorHandle;
-use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::window::Fullscreen;
 
 use crate::chat::ChatInput;
 use crate::config::{Config, Mode};
@@ -189,9 +196,9 @@ use weather::{ExtrapolatedServerClock, ShellWeatherProbe, WeatherTracker, weathe
 /// `()`). `AppEvent` with the feature on, so a caller outside the event loop
 /// can reach a running session — see [`AppEvent`] and
 /// `app::runners::run_headless_session`.
-#[cfg(feature = "runtime-presentation")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
 pub(crate) type ShellEvent = AppEvent;
-#[cfg(not(feature = "runtime-presentation"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "runtime-presentation")))]
 pub(crate) type ShellEvent = ();
 
 /// A mount-local readiness latch shared by the browser control and the event
@@ -618,7 +625,7 @@ fn browser_key_code(code: &str) -> Option<KeyCode> {
 /// `&ActiveEventLoop`, the thing `docs/runtime-presentation.md` cites as
 /// closing the "can a window be created mid-process" question with no spike
 /// needed.
-#[cfg(feature = "runtime-presentation")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum AppEvent {
     /// Create a window, GPU surface and `RenderState` for a session that is
@@ -724,9 +731,12 @@ pub fn run_with_app(app: lodestone_app::App, config: Config) -> anyhow::Result<(
         #[cfg(not(target_arch = "wasm32"))]
         Mode::Window => run_windowed_with_app(app, config),
         #[cfg(target_arch = "wasm32")]
-        Mode::Window => Err(anyhow::anyhow!(
-            "the browser shell is OffscreenCanvas-only; use the Web SDK mount entrypoint from a worker"
-        )),
+        Mode::Window => {
+            let _ = app;
+            Err(anyhow::anyhow!(
+                "the browser shell is OffscreenCanvas-only; use the Web SDK mount entrypoint from a worker"
+            ))
+        }
         other => Err(anyhow::anyhow!(
             "run_with_app only supports Mode::Window: {other:?} has its own \
              composition route (Sim::from_app directly for a diagnostic, or \
@@ -772,6 +782,7 @@ fn sky_fog(render_distance: u32) -> FogSettings {
 
 /// Canonical native framebuffer size for an opt-in live benchmark. Ordinary
 /// play returns `None` and keeps winit's existing logical-size policy.
+#[cfg(not(target_arch = "wasm32"))]
 fn window_physical_size(config: &Config) -> Option<(u32, u32)> {
     config
         .benchmark
@@ -779,6 +790,7 @@ fn window_physical_size(config: &Config) -> Option<(u32, u32)> {
         .map(|benchmark| benchmark.physical_size)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn benchmark_builtin_fullscreen(config: &Config) -> bool {
     config.benchmark.as_ref().is_some_and(|benchmark| {
         benchmark.window_mode == crate::config::BenchmarkWindowMode::BuiltinFullscreen
@@ -798,6 +810,7 @@ fn benchmark_vsync_requested(config: &Config, ordinary: bool) -> bool {
 /// Select the one monitor carrying the platform's hardware built-in flag.
 /// Names and primary-monitor status are deliberately absent: macOS can expose
 /// generic names, and either external monitor may be the desktop primary.
+#[cfg(not(target_arch = "wasm32"))]
 fn select_builtin_monitor<T>(monitors: impl IntoIterator<Item = (T, bool)>) -> Option<T> {
     monitors
         .into_iter()
@@ -814,7 +827,7 @@ fn benchmark_builtin_monitor(event_loop: &ActiveEventLoop) -> Option<MonitorHand
     }))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
 fn benchmark_builtin_monitor(event_loop: &ActiveEventLoop) -> Option<MonitorHandle> {
     // Other platforms do not expose CoreGraphics' laptop-panel flag. Keep the
     // benchmark usable there while macOS remains fail-closed and exact.
@@ -828,7 +841,7 @@ fn monitor_native_id(monitor: &MonitorHandle) -> Option<u32> {
     Some(monitor.native_id())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
 fn monitor_native_id(_monitor: &MonitorHandle) -> Option<u32> {
     None
 }
@@ -1167,6 +1180,7 @@ const PENDING_PICK_TIMEOUT: Duration = Duration::from_millis(500);
 /// final readback differ.
 pub(crate) enum PresentationTarget {
     Surface(lodestone_render::SurfaceTarget<'static>),
+    #[cfg(not(target_arch = "wasm32"))]
     Headless(HeadlessTarget),
 }
 
@@ -1174,6 +1188,7 @@ impl RenderTarget for PresentationTarget {
     fn format(&self) -> wgpu::TextureFormat {
         match self {
             Self::Surface(target) => target.format(),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(target) => target.format(),
         }
     }
@@ -1181,6 +1196,7 @@ impl RenderTarget for PresentationTarget {
     fn raw_view_format(&self) -> wgpu::TextureFormat {
         match self {
             Self::Surface(target) => target.raw_view_format(),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(target) => target.raw_view_format(),
         }
     }
@@ -1188,6 +1204,7 @@ impl RenderTarget for PresentationTarget {
     fn size(&self) -> (u32, u32) {
         match self {
             Self::Surface(target) => target.size(),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(target) => target.size(),
         }
     }
@@ -1195,28 +1212,34 @@ impl RenderTarget for PresentationTarget {
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         match self {
             Self::Surface(target) => target.resize(device, width, height),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(target) => target.resize(device, width, height),
         }
     }
 
     fn reconfigure(&mut self, device: &wgpu::Device) {
-        if let Self::Surface(target) = self {
-            target.reconfigure(device);
+        match self {
+            Self::Surface(target) => target.reconfigure(device),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Headless(_) => {}
         }
     }
 
     fn acquire(&mut self) -> Result<lodestone_render::AcquiredFrame, lodestone_render::TargetError> {
         match self {
             Self::Surface(target) => target.acquire(),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(target) => target.acquire(),
         }
     }
 }
 
 impl PresentationTarget {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn readback(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Vec<u8>> {
         match self {
             Self::Surface(_) => None,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(target) => Some(target.read_texels(device, queue)),
         }
     }
@@ -1224,6 +1247,7 @@ impl PresentationTarget {
     fn default_present_mode(&self) -> Option<wgpu::PresentMode> {
         match self {
             Self::Surface(target) => Some(target.default_present_mode()),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(_) => None,
         }
     }
@@ -1231,6 +1255,7 @@ impl PresentationTarget {
     fn configured_present_mode(&self) -> Option<wgpu::PresentMode> {
         match self {
             Self::Surface(target) => Some(target.configured_present_mode()),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(_) => None,
         }
     }
@@ -1239,13 +1264,16 @@ impl PresentationTarget {
     fn metal_surface_state(&self) -> Option<lodestone_render::target::MetalSurfaceState> {
         match self {
             Self::Surface(target) => target.metal_surface_state(),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(_) => None,
         }
     }
 
     fn set_present_mode(&mut self, device: &wgpu::Device, mode: wgpu::PresentMode) {
-        if let Self::Surface(target) = self {
-            target.set_present_mode(device, mode);
+        match self {
+            Self::Surface(target) => target.set_present_mode(device, mode),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Headless(_) => {}
         }
     }
 
@@ -1264,14 +1292,17 @@ impl PresentationTarget {
     pub(crate) fn mailbox_presented(&self) -> Option<u64> {
         match self {
             Self::Surface(target) => target.mailbox_presented(),
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Headless(_) => None,
         }
     }
 
     /// Headless targets are always copyable; only a window swapchain toggles.
     fn set_copy_source(&mut self, device: &wgpu::Device, enabled: bool) {
-        if let Self::Surface(target) = self {
-            target.set_copy_source(device, enabled);
+        match self {
+            Self::Surface(target) => target.set_copy_source(device, enabled),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Headless(_) => {}
         }
     }
 }
@@ -1705,7 +1736,7 @@ pub(crate) struct WindowApp {
     /// `resumed`/`user_event`). Also cleared by
     /// [`WindowApp::detach_presentation`], so a re-resume after a mid-session
     /// detach does not immediately recreate the window it just dropped.
-    #[cfg(feature = "runtime-presentation")]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
     presentation_desired: bool,
     /// The resolved open question on input while a window is attached at
     /// runtime: whether a real window's

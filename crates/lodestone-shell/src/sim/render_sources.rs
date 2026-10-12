@@ -553,6 +553,7 @@ impl Sim {
     ///
     /// Captures the common state-and-light input for the state-driven block
     /// entity renderers once for this camera position.
+    #[cfg(feature = "window")]
     #[must_use]
     pub(crate) fn block_entity_frame_snapshot(
         &self,
@@ -562,6 +563,7 @@ impl Sim {
         crate::block_entities::block_entity_frame_snapshot(&handle, eye).map(std::sync::Arc::new)
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn block_entity_source_from_snapshot(
         &self,
         snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
@@ -573,6 +575,7 @@ impl Sim {
         }
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn copper_golem_statue_source_from_snapshot(
         &self,
         snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
@@ -580,6 +583,7 @@ impl Sim {
         move |_eye| crate::block_entities::copper_golem_statue_spawns_from_snapshot(&snapshot)
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn bell_source_from_snapshot(
         &self,
         snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
@@ -591,6 +595,7 @@ impl Sim {
         }
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn shulker_source_from_snapshot(
         &self,
         snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
@@ -598,6 +603,7 @@ impl Sim {
         move |_eye| crate::block_entities::shulker_spawns_from_snapshot(&snapshot)
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn conduit_source_from_snapshot(
         &self,
         snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
@@ -609,6 +615,7 @@ impl Sim {
         }
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn lectern_source_from_snapshot(
         &self,
         snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
@@ -616,6 +623,7 @@ impl Sim {
         move |_eye| crate::block_entities::lectern_spawns_from_snapshot(&snapshot)
     }
 
+    #[cfg(feature = "window")]
     pub(crate) fn enchanting_table_source_from_snapshot(
         &self,
         snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
@@ -1207,6 +1215,7 @@ impl Sim {
     /// The candidate is chosen by the app's weather probe, but the particle
     /// engine remains owned by `Sim`; this keeps the weather/session/render
     /// chain from bypassing the normal particle upload path.
+    #[cfg(feature = "window")]
     pub(crate) fn emit_weather_splash(&mut self, position: Option<[f64; 3]>) {
         if let Some([x, y, z]) = position {
             self.particles_mut(|particles| {

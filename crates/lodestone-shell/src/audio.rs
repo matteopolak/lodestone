@@ -127,6 +127,7 @@ use lodestone_sound::music::{Music, MusicStart};
 use wasm_bindgen::{JsCast, closure::Closure};
 
 pub(crate) mod ambient;
+#[cfg(feature = "window")]
 pub(crate) mod music;
 pub(crate) mod subtitles;
 

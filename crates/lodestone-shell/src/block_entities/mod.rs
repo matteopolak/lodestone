@@ -133,9 +133,11 @@ mod snapshot;
 pub(crate) use snapshot::BlockEntityFrameSnapshot;
 pub(crate) use snapshot::block_entity_frame_snapshot;
 
+#[cfg(any(test, feature = "window"))]
 mod scanner;
 #[cfg(test)]
 pub(crate) use scanner::{can_render_structure_boxes, structure_block_outline_vertices, structure_block_vertices_from_loaded_world};
+#[cfg(feature = "window")]
 pub(crate) use scanner::structure_block_vertices;
 #[cfg(test)]
 use scanner::structure_box;

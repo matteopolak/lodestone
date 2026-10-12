@@ -1380,6 +1380,7 @@ impl UiState {
     ///
     /// Called from `WindowApp::drive_ui_from_session` before cursor-grab
     /// reconciliation, so the screen transition is reflected in the same frame.
+    #[cfg(feature = "window")]
     pub(crate) fn reconcile_server_menu_window(&mut self, window_id: Option<i32>) {
         let closed = self.container_server_window.is_some() && window_id.is_none();
         self.container_server_window = window_id;

@@ -71,6 +71,7 @@ pub(crate) fn submit_primary_encoder(
     PrimarySubmitCheckpoints { encoder_finished_at, submitted_at }
 }
 
+#[cfg(feature = "window")]
 pub(crate) fn take_primary_command_counts() -> PrimaryCommandCounts {
     PRIMARY_COMMAND_COUNTS.with(|cell| cell.replace(PrimaryCommandCounts::default()))
 }
@@ -547,9 +548,13 @@ impl WorldSubphase {
 /// these next to it.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorldSubphaseCounts {
+    #[cfg(feature = "window")]
     pub terrain_camera_bind_calls: usize,
+    #[cfg(feature = "window")]
     pub terrain_origin_vertex_binds: usize,
+    #[cfg(feature = "window")]
     pub terrain_indexed_draw_calls: usize,
+    #[cfg(feature = "window")]
     pub terrain_buffer_bind_pairs: usize,
     /// Packed-table sections iterated (`self.sections.len()`) — every one of
     /// them is visited; that loop has no cull counters of its own, only an
@@ -564,24 +569,34 @@ pub(crate) struct WorldSubphaseCounts {
     /// visited-vs-drawn on the loop that actually matters live.
     pub model_sections_visited: usize,
     /// Opaque terrain sections submitted in the production draw pass.
+    #[cfg(feature = "window")]
     pub opaque_sections_drawn: usize,
     /// Water sections submitted after opaque geometry.
+    #[cfg(feature = "window")]
     pub water_sections_drawn: usize,
     /// Translucent block sections submitted in their production pass.
+    #[cfg(feature = "window")]
     pub translucent_sections_drawn: usize,
     /// Entity instances submitted by the entity pass.
+    #[cfg(feature = "window")]
     pub entities_drawn: usize,
     /// Block-entity instances submitted by their renderer.
+    #[cfg(feature = "window")]
     pub block_entities_drawn: usize,
     /// Prepared sign-text vertices submitted with block entities.
+    #[cfg(feature = "window")]
     pub sign_text_vertices: u32,
     /// Particle instances submitted in the frame's particle pass.
+    #[cfg(feature = "window")]
     pub particles_drawn: usize,
     /// Actual terrain/world pass begins, excluding text and nametags.
+    #[cfg(feature = "window")]
     pub world_pass_begins: usize,
     /// Actual raw-view sign/display text pass begins.
+    #[cfg(feature = "window")]
     pub world_text_pass_begins: usize,
     /// Actual raw-view nametag pass begins.
+    #[cfg(feature = "window")]
     pub nametag_pass_begins: usize,
 }
 

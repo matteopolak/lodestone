@@ -379,6 +379,7 @@ impl MapDiagnosticSwitches {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn map_diagnostic_switches_from(enabled: impl Fn(&str) -> bool) -> MapDiagnosticSwitches {
     let all_off = enabled("LODESTONE_MAP_DISABLE_DEPTH");
     MapDiagnosticSwitches {

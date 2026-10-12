@@ -346,6 +346,7 @@ impl Sim {
         // compiles for wasm32 and TRAPS at runtime, and this runs during `Sim`
         // construction — so it would kill a browser tab before the first frame.
         let audio_seed = crate::platform::epoch_duration().as_nanos() as i64;
+        #[cfg(feature = "window")]
         ecs.insert_resource(MusicState(Some(crate::audio::music::ShellMusic::new(
             audio_seed,
         ))));

@@ -63,6 +63,8 @@ impl MenuNav {
         profiles_path: std::path::PathBuf,
         options: Options,
     ) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let _ = profiles_path;
         let hidden_players_path = path
             .parent()
             .map(|d| d.join("hidden_players.json"))

@@ -412,6 +412,7 @@ impl FramePacer {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn redraw_due(&self, now: Instant, target_fps: Option<u32>) -> bool {
         if self.acquisition_retry.is_some_and(|deadline| now < deadline) {
             return false;
@@ -434,6 +435,7 @@ impl FramePacer {
     /// at 100% of a core calling `begin_frame` every iteration only to find
     /// `render == false` most of the time — a cap implemented as a spin loop
     /// checking a clock, which is the busy-wait this method exists to avoid.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn control_flow(&self, now: Instant, target_fps: Option<u32>) -> ControlFlow {
         if let Some(deadline) = self.acquisition_retry.filter(|deadline| now < *deadline) {
             return ControlFlow::WaitUntil(deadline);
