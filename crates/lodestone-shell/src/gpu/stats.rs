@@ -82,6 +82,10 @@ pub struct RenderStats {
     /// dedicated-buffer warning) or the per-block grouping in
     /// `emit_terrain_draws` stopped grouping.
     pub terrain_buffer_binds: usize,
+    /// Order-independent translucent-terrain composites this frame: `1` when
+    /// water and translucent blocks took that path, `0` on the sorted blended
+    /// path. Lets a frame that silently fell back be told from one that did not.
+    pub oit_composites: usize,
     /// Exact bytes of GPU mesh storage occupied by **resident** sections, from
     /// [`RenderState::resident_mesh_bytes`](crate::gpu::RenderState::resident_mesh_bytes).
     ///

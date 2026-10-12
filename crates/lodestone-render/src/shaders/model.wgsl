@@ -517,6 +517,12 @@ fn model_vertex(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return shade_fragment(in);
+}
+
+// The straight-alpha surface colour, shared by the ordinary blended entry point
+// and the three order-independent transparency stages in `oit_stages.wgsl`.
+fn shade_fragment(in: VsOut) -> vec4<f32> {
     // Derivatives and the atlas' texel size, resolved once in uniform control
     // flow so both the static and the animated path below can use them. The
     // dimensions come from the bound texture rather than a uniform, so nothing

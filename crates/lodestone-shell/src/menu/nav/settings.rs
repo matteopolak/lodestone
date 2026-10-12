@@ -569,6 +569,11 @@ impl MenuNav {
                 self.toggle_cutout_leaves();
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::ImprovedTransparency) => {
+                self.options.improved_transparency = !self.options.improved_transparency;
+                self.persist_options();
+                MenuAction::None
+            }
             SettingsOutcome::Cycle(LiveOption::MipmapLevels) => {
                 self.step_mipmap_levels(1);
                 MenuAction::None
@@ -820,21 +825,21 @@ impl MenuNav {
     }
 
     /// Vanilla's `GraphicsPreset::apply`, the
-    /// three fields of its seventeen this client has real consumers for.
+    /// four fields of its seventeen this client has real consumers for.
     ///
-    /// | preset | `renderDistance` | `cloudStatus` | `cutoutLeaves` |
-    /// |---|---|---|---|
-    /// | `Fast` | 8 | `Fast` | `false` |
-    /// | `Fancy` | 16 | `Fancy` | `true` |
-    /// | `Fabulous` | 32 | `Fancy` | `true` |
-    /// | `Custom` | — | — | — |
+    /// | preset | `renderDistance` | `cloudStatus` | `cutoutLeaves` | `improvedTransparency` |
+    /// |---|---|---|---|---|
+    /// | `Fast` | 8 | `Fast` | `false` | `false` |
+    /// | `Fancy` | 16 | `Fancy` | `true` | `false` |
+    /// | `Fabulous` | 32 | `Fancy` | `true` | `true` |
+    /// | `Custom` | — | — | — | — |
     ///
     /// `Custom` writes nothing, matching vanilla's own `switch` (no `CUSTOM`
-    /// arm — see [`Self::step_graphics_preset`]'s doc). The fourteen fields
+    /// arm — see [`Self::step_graphics_preset`]'s doc). The thirteen fields
     /// this client does not have a consumer for at all
     /// (`biomeBlendRadius`, `simulationDistance`, `particles`,
     /// `mipmapLevels`, `entityShadows`, `menuBackgroundBlurriness`,
-    /// `cloudRange`, `improvedTransparency`, `weatherRadius`,
+    /// `cloudRange`, `weatherRadius`,
     /// `maxAnisotropyBit`, `textureFiltering`, `prioritizeChunkUpdates`,
     /// `entityDistanceScaling`, `ambientOcclusion`) are left alone — writing
     /// them would move a settings-row *label* with nothing behind it to
@@ -856,16 +861,19 @@ impl MenuNav {
                 self.options.render_distance = 8;
                 self.options.cloud_status = CloudStatus::Fast;
                 self.options.cutout_leaves = false;
+                self.options.improved_transparency = false;
             }
             GraphicsPreset::Fancy => {
                 self.options.render_distance = 16;
                 self.options.cloud_status = CloudStatus::Fancy;
                 self.options.cutout_leaves = true;
+                self.options.improved_transparency = false;
             }
             GraphicsPreset::Fabulous => {
                 self.options.render_distance = 32;
                 self.options.cloud_status = CloudStatus::Fancy;
                 self.options.cutout_leaves = true;
+                self.options.improved_transparency = true;
             }
             GraphicsPreset::Custom => {}
         }

@@ -103,7 +103,7 @@ pub struct ModelPipeline {
 /// `alpha_cutout_override_is_declared_by_the_model_shader` keeps this from
 /// drifting away from the shader, which would otherwise fail at pipeline
 /// creation on a real device and nowhere else.
-const ALPHA_CUTOUT_OVERRIDE: &str = "alpha_cutout";
+pub(crate) const ALPHA_CUTOUT_OVERRIDE: &str = "alpha_cutout";
 
 fn terrain_origin_stride_supported(limits: &wgpu::Limits, stride: wgpu::BufferAddress) -> bool {
     limits.max_vertex_buffers >= 2
@@ -114,7 +114,7 @@ fn terrain_origin_stride_supported(limits: &wgpu::Limits, stride: wgpu::BufferAd
         && stride.is_multiple_of(wgpu::VERTEX_ALIGNMENT)
 }
 
-fn terrain_origin_vertex_layout(stride: wgpu::BufferAddress) -> wgpu::VertexBufferLayout<'static> {
+pub(crate) fn terrain_origin_vertex_layout(stride: wgpu::BufferAddress) -> wgpu::VertexBufferLayout<'static> {
     static ATTRIBUTES: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
         offset: 0,
@@ -138,12 +138,12 @@ const ALPHA_CUTOUT_CUTOUT: f32 = 0.5;
 /// cutout pass, and the whole reason this is a per-pipeline value: real
 /// stained glass is a partial alpha in the low 0.4s, which a `0.5` test
 /// deletes outright.
-const ALPHA_CUTOUT_TRANSLUCENT: f32 = 0.1;
+pub(crate) const ALPHA_CUTOUT_TRANSLUCENT: f32 = 0.1;
 
 /// The name of `model.wgsl`'s pipeline-overridable sampling-path selector,
 /// vanilla's `UseRgss`. `the_model_shader_declares_the_use_rgss_override_this_
 /// file_binds` keeps this from drifting away from the shader.
-const USE_RGSS_OVERRIDE: &str = "use_rgss";
+pub(crate) const USE_RGSS_OVERRIDE: &str = "use_rgss";
 
 /// Which of `terrain.fsh`'s sampling paths the terrain pipelines take, i.e.
 /// Vanilla's texture-filtering method reduced to the part this renderer
@@ -280,6 +280,38 @@ impl MapDepthDiagnostic {
     pub const fn is_diagnostic(self) -> bool {
         !(self.compare && self.write && self.bias)
     }
+}
+
+/// Group 0 of every model and fluid pipeline: binding 0 is the shared camera
+/// and fog uniform (vertex reads the view-projection, fragment the fog), binding
+/// 1 the section origin addressed by a dynamic offset (legacy vertices read the
+/// translation and fade time here). Order-independent transparency extends this
+/// group with texture bindings from 2 up, so both layouts start from these two.
+pub(crate) fn camera_layout_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
+    [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: true,
+                min_binding_size: wgpu::BufferSize::new(
+                    core::mem::size_of::<SectionOriginUniform>() as u64,
+                ),
+            },
+            count: None,
+        },
+    ]
 }
 
 impl ModelPipeline {
@@ -512,34 +544,7 @@ impl ModelPipeline {
         // its vertex entry point reads origin data from the instance stream.
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lodestone-model-camera-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    // Vertex reads the view-projection; fragment reads the folded
-                    // fog block (eye, colour, range), so the group must be
-                    // visible to both.
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    // Legacy vertices read translation and fade time here.
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(
-                            core::mem::size_of::<SectionOriginUniform>() as u64,
-                        ),
-                    },
-                    count: None,
-                },
-            ],
+            entries: &camera_layout_entries(),
         });
 
         let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

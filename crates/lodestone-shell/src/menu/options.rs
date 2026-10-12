@@ -453,6 +453,9 @@ pub enum LiveOption {
     /// consumer — `RenderState::set_entity_shadows_enabled`, which gates
     /// `RenderState::prepare_shadows`.
     EntityShadows,
+    /// `options.improvedTransparency` -> [`crate::config::Options::improved_transparency`].
+    /// A plain boolean.
+    ImprovedTransparency,
     /// `options.weatherRadius` → [`crate::config::Options::weather_radius`].
     ///
     /// An **`IntRange(3, 10)`** like [`Self::RenderDistance`],
@@ -606,6 +609,7 @@ impl LiveOption {
             // returning it here would pin every handle near the far left.
             | LiveOption::MipmapLevels
             | LiveOption::EntityShadows
+            | LiveOption::ImprovedTransparency
             // `WeatherRadius` is the fifth `IntRange`, `RenderDistance`'s
             // reason again: its stored value is 3..=10 blocks, so returning it
             // here would pin every handle to the far right.
@@ -679,6 +683,7 @@ impl LiveOption {
             // returning it here would pin every handle near the far left.
             | LiveOption::MipmapLevels
             | LiveOption::EntityShadows
+            | LiveOption::ImprovedTransparency
             // `WeatherRadius` is the fifth `IntRange`, `RenderDistance`'s
             // reason again: its stored value is 3..=10 blocks, so returning it
             // here would pin every handle to the far right.
@@ -1895,6 +1900,9 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // unlike `Fov`'s "Normal"/"Quake Pro" pair, vanilla's mipmap slider has
         // no named values, so the plain depth is the whole value half.
         LiveOption::MipmapLevels => options.mipmap_levels.to_string(),
+        LiveOption::ImprovedTransparency => {
+            if options.improved_transparency { "ON" } else { "OFF" }.to_string()
+        }
         LiveOption::EntityShadows => {
             if options.entity_shadows { "ON" } else { "OFF" }.to_string()
         }
@@ -2180,7 +2188,11 @@ static VIDEO: &[Entry] = &[
     ),
     pair(
         live_cycle("cutoutLeaves", "See-Through Leaves", LiveOption::CutoutLeaves),
-        cycle("improvedTransparency", "Improved Transparency"),
+        live_cycle(
+            "improvedTransparency",
+            "Improved Transparency",
+            LiveOption::ImprovedTransparency,
+        ),
     ),
     pair(
         cycle("textureFiltering", "Texture Filtering"),
@@ -4224,6 +4236,7 @@ mod tests {
                 // The `(cutoutLeaves, improvedTransparency)` pair's first half —
                 // the leaves-render-pass fix's own row.
                 LiveOption::CutoutLeaves,
+                LiveOption::ImprovedTransparency,
                 // The Quality & Performance grid's last row, a `lone`: the
                 // rain/snow column radius, whose consumer already took one and
                 // was handed `DEFAULT_WEATHER_RADIUS`.
@@ -4373,7 +4386,7 @@ mod tests {
         // and the root's own Online button, live outside a world) + 2 live
         // Friends action rows.
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 84, "outside a world: {live:?}");
+        assert_eq!(live.len(), 85, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4407,8 +4420,8 @@ mod tests {
         // and
         // `menuBackgroundBlurriness`, which is **two** rows (Video and
         // Accessibility) for one option.
-        assert_eq!(outside.len(), 84);
-        assert_eq!(inside.len(), 83, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 85);
+        assert_eq!(inside.len(), 84, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -4442,15 +4455,11 @@ mod tests {
         // An option we hold no value for shows the caption alone — the module
         // docs' departure (1). The control is the live row above, which does
         // carry a value, so this is not simply "labels never have colons".
-        // `improvedTransparency` is still genuinely inactive on this tree —
-        // it needs a screen-shader pass for weather/clouds/particles behind
-        // translucent geometry that this client does not have. `particles`
-        // used to be the example here and `entityShadows` before that; both
-        // went live, which is the hazard this comment exists to flag for
-        // whoever replaces it next.
+        // `textureFiltering` has no consumer on this tree. Rows that went live
+        // stop being valid examples, so replace this one when it does too.
         assert_eq!(
-            cycle("improvedTransparency", "Improved Transparency").label(&options),
-            "Improved Transparency"
+            cycle("textureFiltering", "Texture Filtering").label(&options),
+            "Texture Filtering"
         );
     }
 
@@ -5399,6 +5408,7 @@ mod tests {
         // prepare_shadows`'s own gate — its consumer did not exist at all
         // before this session, not merely an unwired row.
         LiveOption::EntityShadows,
+        LiveOption::ImprovedTransparency,
         // The rain/snow column radius: `extract_columns` and `column_instance`
         // already took one and `weather_columns_for_frame` handed both the
         // frozen `DEFAULT_WEATHER_RADIUS`.
@@ -5489,6 +5499,7 @@ mod tests {
                 | LiveOption::CutoutLeaves
                 | LiveOption::MipmapLevels
                 | LiveOption::EntityShadows
+                | LiveOption::ImprovedTransparency
                 | LiveOption::WeatherRadius
                 | LiveOption::MenuBackgroundBlurriness
                 | LiveOption::AttackIndicator
@@ -5503,8 +5514,8 @@ mod tests {
         // session wired, plus the block-atlas mip-depth row, plus this
         // session's entity-shadows row, plus the weather-radius,
         // menu-background-blur, attack-indicator, particles and biome-blend
-        // rows.
-        assert_eq!(ALL.len(), 55, "fifty-five distinct live options");
+        // rows, plus improved transparency.
+        assert_eq!(ALL.len(), 56, "fifty-six distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one

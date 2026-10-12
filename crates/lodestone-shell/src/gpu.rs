@@ -58,6 +58,7 @@ mod maps;
 mod moving_blocks;
 mod nametag;
 mod occlusion;
+mod oit;
 mod outline;
 mod pack_trace;
 mod plugin_billboards;
@@ -286,6 +287,12 @@ pub struct RenderState {
     /// Defaults to [`lodestone_render::fog::VoidFog::OVERWORLD`], so a renderer
     /// nobody pushes this into draws exactly what it drew before.
     void_fog: lodestone_render::fog::VoidFog,
+    /// Water and translucent blocks composite order-independently instead of
+    /// drawing sorted and blended. See [`Self::set_improved_transparency`].
+    improved_transparency: bool,
+    /// The order-independent path's pipelines and targets, built the first
+    /// frame it is used.
+    oit: std::cell::RefCell<Option<oit::OitState>>,
     pipeline: BlockPipeline,
     atlas: GpuAtlas,
     uv_buffer: wgpu::Buffer,

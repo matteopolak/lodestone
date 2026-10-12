@@ -481,6 +481,7 @@ impl WindowApp {
         // own doc explains one is for a remesh-triggering setter.
         if let Some(render) = self.render.as_mut() {
             render.set_entity_shadows_enabled(self.nav.options().entity_shadows);
+            render.set_improved_transparency(self.nav.options().improved_transparency);
         }
         // Live resource-pack reload. Polled every frame like the options
         // above, but the equality guard here is

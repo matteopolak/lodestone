@@ -841,6 +841,14 @@ impl RenderState {
             collect_visible_model_sections(model, camera, &terrain_cull, &mut stats)
         });
         let mut terrain_draws = Vec::with_capacity(visible_model_sections.len());
+        // Water and translucent blocks composite order-independently in their
+        // own passes, which splits the world pass around them.
+        let oit_split = self.prepare_oit(
+            device,
+            visible_model_sections
+                .iter()
+                .any(|(section, _)| section.water.is_some() || section.translucent.is_some()),
+        );
         #[cfg(feature = "window")]
         let mut world_pass_begins = 0;
         #[cfg(feature = "window")]
@@ -880,7 +888,7 @@ impl RenderState {
             // Only the final world pass owns the end edge. A full timer ring
             // supplies no timestamp descriptors for this frame.
             timestamp_writes: timer.as_ref().and_then(|t| {
-                if !draw_world_text && !draw_nametags {
+                if !draw_world_text && !draw_nametags && !oit_split {
                     t.writes("world")
                 } else {
                     t.writes_begin("world")
@@ -940,6 +948,7 @@ impl RenderState {
                 emit_terrain_draws(
                     &mut pass,
                     model,
+                    &model.cam_bind_group,
                     &terrain_draws,
                     &mut terrain_cam_group_last,
                     &mut stats,
@@ -1469,7 +1478,7 @@ impl RenderState {
 
             // Exactly one real pass records the world end edge. An incomplete
             // edge mask makes the frame invalid, even if old ticks are positive.
-            let world_span_end = if draw_nametags {
+            let world_span_end = if draw_nametags || oit_split {
                 None
             } else {
                 timer.as_ref().and_then(|t| t.writes_end("world"))
@@ -1882,7 +1891,40 @@ impl RenderState {
                 }
             }
 
-            if let Some(model) = &self.model {
+            if oit_split {
+                drop(pass);
+                self.encode_oit_terrain(encoder, view, &visible_model_sections, &mut stats);
+                let world_span_end = if draw_nametags {
+                    None
+                } else {
+                    timer.as_ref().and_then(|t| t.writes_end("world"))
+                };
+                pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("block pass (after translucent terrain)"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth.view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: world_span_end,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                #[cfg(feature = "window")]
+                { world_pass_begins += 1; }
+            } else if let Some(model) = &self.model {
                 // Translucent water, drawn after all opaque model terrain so the
                 // sea floor already written to depth shows through the surface
                 // (depth test on, depth write off, alpha blend — the fluid
@@ -1907,6 +1949,7 @@ impl RenderState {
                 emit_terrain_draws(
                     &mut pass,
                     model,
+                    &model.cam_bind_group,
                     &terrain_draws,
                     &mut terrain_cam_group_last,
                     &mut stats,
@@ -1953,6 +1996,7 @@ impl RenderState {
                 emit_terrain_draws(
                     &mut pass,
                     model,
+                    &model.cam_bind_group,
                     &terrain_draws,
                     &mut terrain_cam_group_last,
                     &mut stats,
@@ -2270,9 +2314,10 @@ fn collect_visible_model_sections<'a>(
 }
 
 /// Preserves pass order while sharing consecutive arena buffer bindings.
-fn emit_terrain_draws(
+pub(super) fn emit_terrain_draws(
     pass: &mut wgpu::RenderPass<'_>,
     model: &super::terrain::ModelRenderer,
+    camera: &wgpu::BindGroup,
     draws: &[TerrainDraw<'_>],
     terrain_cam_group_last: &mut Option<*const wgpu::BindGroup>,
     stats: &mut RenderStats,
@@ -2284,7 +2329,7 @@ fn emit_terrain_draws(
     let origin_shift = model.origin_arena.stride().trailing_zeros();
     if instance_origins {
         bind_terrain_camera(
-            pass, &model.cam_bind_group, model.origin_arena.zero_offset(),
+            pass, camera, model.origin_arena.zero_offset(),
             terrain_cam_group_last, stats,
         );
         pass.set_vertex_buffer(1, model.origin_arena.buffer().slice(..));
@@ -2322,7 +2367,7 @@ fn emit_terrain_draws(
             draw.origin_offset >> origin_shift
         } else {
             bind_terrain_camera(
-                pass, &model.cam_bind_group, draw.origin_offset,
+                pass, camera, draw.origin_offset,
                 terrain_cam_group_last, stats,
             );
             0

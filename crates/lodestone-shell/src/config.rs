@@ -950,6 +950,11 @@ pub struct Options {
     /// bool write is cheap enough that the equality-guard trick that field's
     /// own doc explains is not needed here.
     pub entity_shadows: bool,
+    /// Vanilla's **Improved Transparency** option (`options.improvedTransparency`),
+    /// default `false`. Selects order-independent compositing for water and
+    /// translucent blocks; reaches `RenderState::set_improved_transparency`
+    /// every presented frame. Set by the `Fabulous` graphics preset.
+    pub improved_transparency: bool,
     /// Vanilla's **Weather Effect Radius** option (`options.weatherRadius`,
     /// vanilla's own persisted-options declarations): a clamped range `3..=10`, default `10`, measured in **blocks**
     /// (`en_us.json`'s `options.blocks` is `"%s Blocks"`, not `"%s Chunks"` —
@@ -1067,6 +1072,7 @@ impl Default for Options {
             cutout_leaves: true,
             mipmap_levels: lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS,
             entity_shadows: true,
+            improved_transparency: false,
             weather_radius: MAX_WEATHER_RADIUS,
             menu_background_blurriness: DEFAULT_MENU_BACKGROUND_BLURRINESS,
             attack_indicator: AttackIndicator::default(),
@@ -1345,6 +1351,10 @@ impl Options {
             .get("entity_shadows")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+        let improved_transparency = obj
+            .get("improved_transparency")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         // Clamped to vanilla's own a clamped range `3..=10` — `mipmap_levels`' reason
         // above. A hand-edited `0` would otherwise reach `extract_columns` and
         // silently stop all precipitation drawing, which reads as a render bug
@@ -1445,6 +1455,7 @@ impl Options {
             cutout_leaves,
             mipmap_levels,
             entity_shadows,
+            improved_transparency,
             weather_radius,
             menu_background_blurriness,
             attack_indicator,
@@ -1650,6 +1661,9 @@ impl Options {
         }
         if !self.entity_shadows {
             obj.insert("entity_shadows".into(), false.into());
+        }
+        if self.improved_transparency {
+            obj.insert("improved_transparency".into(), true.into());
         }
         if self.weather_radius != default.weather_radius {
             obj.insert("weather_radius".into(), self.weather_radius.into());

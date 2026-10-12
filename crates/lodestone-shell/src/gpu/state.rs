@@ -524,6 +524,8 @@ impl RenderState {
             // for them.
             occlusion_mode: super::TerrainOcclusion::On,
             gpu_timer: std::cell::RefCell::new(None),
+            improved_transparency: false,
+            oit: std::cell::RefCell::new(None),
         }
     }
 

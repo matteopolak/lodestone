@@ -101,6 +101,12 @@ impl GpuContext {
         if caps.timestamp_query {
             required_features |= wgpu::Features::TIMESTAMP_QUERY;
         }
+        // `FLOAT32_BLENDABLE` carries the order-independent transparency depth
+        // bounds (a max-blended `Rg32Float` target); without it the renderer
+        // keeps the sorted alpha path. See `crate::oit`.
+        if adapter.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
+            required_features |= wgpu::Features::FLOAT32_BLENDABLE;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("lodestone-render device"),

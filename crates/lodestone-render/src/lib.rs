@@ -83,6 +83,7 @@ pub mod mesher;
 pub mod model_arena;
 pub mod model_pipeline;
 pub mod models;
+pub mod oit;
 pub mod painting;
 pub mod scene;
 pub mod screen_effects;

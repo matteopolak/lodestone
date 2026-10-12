@@ -25,6 +25,8 @@ mod far_grazing_ceiling_floor_holes;
 mod fluid_self_occlusion;
 #[path = "world/ground_plate_z_fight_pixels.rs"]
 mod ground_plate_z_fight_pixels;
+#[path = "world/improved_transparency_pixels.rs"]
+mod improved_transparency_pixels;
 #[path = "world/near_grazing_face_coverage_pixels.rs"]
 mod near_grazing_face_coverage_pixels;
 #[path = "world/partial_connectivity_hall_holes.rs"]

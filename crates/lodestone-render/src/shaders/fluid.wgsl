@@ -253,6 +253,12 @@ fn fluid_vertex(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return shade_fragment(in);
+}
+
+// The straight-alpha surface colour, shared by the ordinary blended entry point
+// and the three order-independent transparency stages in `oit_stages.wgsl`.
+fn shade_fragment(in: VsOut) -> vec4<f32> {
     // Gradients taken here, in uniform control flow, so the animated frames
     // below are mipmapped like everything else: sampled at level 0, distant
     // water sparkles with the surface texture's highlights.

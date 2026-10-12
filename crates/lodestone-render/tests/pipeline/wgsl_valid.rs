@@ -34,6 +34,26 @@ use std::path::{Path, PathBuf};
 /// yields zero files and a green run.
 const MIN_SHADERS: usize = 11;
 
+/// Shaders that are only valid appended to another: they call functions and
+/// types the shader they extend defines. Each is checked in `COMPOSITIONS`, in
+/// the order the pipelines concatenate them.
+const COMPOSED_ONLY: &[&str] = &["oit_stages.wgsl", "oit_composite.wgsl"];
+
+const COMPOSITIONS: &[(&str, &[&str])] = &[
+    (
+        "model.wgsl + oit_common.wgsl + oit_stages.wgsl",
+        &["model.wgsl", "oit_common.wgsl", "oit_stages.wgsl"],
+    ),
+    (
+        "fluid.wgsl + oit_common.wgsl + oit_stages.wgsl",
+        &["fluid.wgsl", "oit_common.wgsl", "oit_stages.wgsl"],
+    ),
+    (
+        "oit_common.wgsl + oit_composite.wgsl",
+        &["oit_common.wgsl", "oit_composite.wgsl"],
+    ),
+];
+
 fn shader_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shaders")
 }
@@ -81,8 +101,24 @@ fn every_shader_file_parses_and_validates() {
     let mut failures = Vec::new();
     for path in &files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if COMPOSED_ONLY.contains(&name.as_str()) {
+            continue;
+        }
         let src = std::fs::read_to_string(path).expect("read shader");
         if let Err(msg) = check(&name, &src) {
+            failures.push(msg);
+        }
+    }
+    for (name, parts) in COMPOSITIONS {
+        let src = parts
+            .iter()
+            .map(|part| {
+                std::fs::read_to_string(shader_dir().join(part))
+                    .unwrap_or_else(|e| panic!("read {part}: {e}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Err(msg) = check(name, &src) {
             failures.push(msg);
         }
     }
