@@ -22,7 +22,7 @@
 // function's own doc) and so is everything they need; gating the imports the
 // same way keeps a wasm32 build from carrying an unused-import warning for
 // types nothing on that target calls.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
 use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,7 +32,7 @@ use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, TargetError};
 use crate::config::Config;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu::RenderState;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
 use crate::net::NetClient;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::platform::Instant;

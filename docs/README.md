@@ -1279,7 +1279,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `overworld_chunk_source_checked`), the single-biome world
   (`Terrain263::with_fixed_biome` via `single_biome_chunk_source`), and the Nether and
   End siblings on the integrated and dedicated servers (`nether_chunk_source`,
-  `end_chunk_source`). `lodestone-shell`'s `preset_chunk_source` picks among them.
+  `end_chunk_source`). `lodestone-shell`'s `WorldPreset::chunk_source` picks among
+  them.
 - [Worldgen engine overview](./worldgen.md) — World generation spans four crates.
   `lodestone-worldgen-core` holds the numeric leaf (RNG, hashing, the `f64` noise
   vegetation samples, counters) and the 26.3 engine (`engine::release26_3`: noise

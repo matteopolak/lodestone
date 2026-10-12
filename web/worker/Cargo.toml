@@ -13,18 +13,17 @@ default = []
 wasm-threads = [
     "dep:rayon",
     "dep:wasm-bindgen-rayon",
-    "lodestone-shell/wasm-threads",
     "lodestone-server/wasm-threads",
 ]
 
 [dependencies]
 lodestone-model = { path = "../../crates/lodestone-model" }
 lodestone-net = { path = "../../crates/lodestone-net", features = ["worker-web"] }
-lodestone-shell = { path = "../../crates/lodestone-shell", default-features = false, features = ["live"] }
+lodestone-registry = { path = "../../crates/lodestone-registry", features = ["v26-2", "v26-3"] }
 lodestone-server = { path = "../../crates/lodestone-server", default-features = false }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["MessagePort"] }
+web-sys = { version = "0.3", features = ["MessagePort", "MessageEvent"] }
 console_error_panic_hook = "0.1"
 console_log = "1"
 log = "0.4"

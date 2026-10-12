@@ -31,7 +31,7 @@
 //!   presets and collects the choice, and all seven reach the served world
 //!   (`Normal`/`LargeBiomes`/`Amplified` through
 //!   `WorldTypePreset::backend_world_type`, the other four through `net.rs`'s
-//!   `preset_chunk_source`). See [`WorldTypePreset`]'s own doc for exactly
+//!   `WorldPreset::chunk_source`). See [`WorldTypePreset`]'s own doc for exactly
 //!   which entry point each uses. [`CUSTOMIZE_ROW`] is vanilla's own
 //!   `selectWorld.customizeType` button — present on this tab always, like
 //!   vanilla's own copy, but only **active** while the selected world type is
@@ -135,7 +135,7 @@
 //!   reaches the served world. `Normal`/`LargeBiomes`/`Amplified` go through
 //!   `WorldTypePreset::backend_world_type`; `SingleBiomeSurface`/`Flat`/
 //!   `FlatAllDimensions`/`DebugAllBlockStates` go through `net.rs`'s
-//!   `preset_chunk_source`, once `crates/lodestone-server/src/lib.rs`
+//!   `WorldPreset::chunk_source`, once `crates/lodestone-server/src/lib.rs`
 //!   re-exported their entry points. `begin_singleplayer` (`app/session.rs`) reads the
 //!   chosen [`WorldTypePreset`] from `WorldCreationConfig` for a
 //!   **`Created`** launch only (same rule as `seed`), threads the preset
@@ -316,7 +316,7 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
 ///   that method's own doc.
 /// - [`Self::SingleBiomeSurface`]/[`Self::Flat`]/[`Self::FlatAllDimensions`]/
 ///   [`Self::DebugAllBlockStates`] go through `net.rs`'s
-///   `preset_chunk_source`, which calls `single_biome_chunk_source`/
+///   `WorldPreset::chunk_source`, which calls `single_biome_chunk_source`/
 ///   `flat_chunk_source`/`debug_chunk_source` directly, once
 ///   `crates/lodestone-server/src/lib.rs` re-exported those
 ///   entry points. `SingleBiomeSurface` always uses
@@ -329,7 +329,7 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
 /// and threads the preset itself (not just a `lodestone_server::WorldType`
 /// projection of it) through `launch_singleplayer`/`launch_open_to_lan_online`
 /// (`app/launch.rs`) into `NetClient::open_singleplayer`/`open_to_lan`, and
-/// `net.rs`'s `Origin::Integrated` carries it to `preset_chunk_source`, which
+/// `net.rs`'s `Origin::Integrated` carries it to `WorldPreset::chunk_source`, which
 /// used to hardcode `overworld_chunk_source(seed)` (i.e. `Self::Normal`)
 /// unconditionally. The `Normal`/`LargeBiomes`/`Amplified` leg is verified end
 /// to end by `tests/singleplayer_terrain_arrives.rs`'s
@@ -352,6 +352,21 @@ pub enum WorldTypePreset {
 }
 
 impl WorldTypePreset {
+    /// The server-side preset this menu choice builds.
+    #[must_use]
+    pub fn server_preset(self) -> lodestone_server::WorldPreset {
+        use lodestone_server::WorldPreset;
+        match self {
+            WorldTypePreset::Normal => WorldPreset::Normal,
+            WorldTypePreset::LargeBiomes => WorldPreset::LargeBiomes,
+            WorldTypePreset::Amplified => WorldPreset::Amplified,
+            WorldTypePreset::SingleBiomeSurface => WorldPreset::SingleBiomeSurface,
+            WorldTypePreset::Flat => WorldPreset::Flat,
+            WorldTypePreset::FlatAllDimensions => WorldPreset::FlatAllDimensions,
+            WorldTypePreset::DebugAllBlockStates => WorldPreset::DebugAllBlockStates,
+        }
+    }
+
     /// `generator.minecraft.<id>`, verbatim from `en_us.json`.
     #[must_use]
     pub fn caption(self) -> &'static str {
@@ -382,11 +397,11 @@ impl WorldTypePreset {
     /// Whether the launch path builds this preset's own generator rather than
     /// silently falling back to [`Self::Normal`] — see this type's own doc.
     ///
-    /// `true` for all seven, now that `net.rs`'s `preset_chunk_source` covers
+    /// `true` for all seven, now that `WorldPreset::chunk_source` covers
     /// every variant (items 1 and 2). Kept as a named predicate
     /// rather than deleted: a caller that wants to warn about a decorative
     /// choice should still ask this rather than assume, so a preset added
-    /// later without its own `preset_chunk_source` arm has somewhere to
+    /// later without its own `WorldPreset::chunk_source` arm has somewhere to
     /// report `false` from instead of silently falling through to `Normal`.
     #[must_use]
     #[cfg(test)]
@@ -395,7 +410,7 @@ impl WorldTypePreset {
     }
 
     /// The `lodestone_server::WorldType` this preset resolves to, for the
-    /// three presets shaped as one — `net.rs`'s `preset_chunk_source` is the
+    /// three presets shaped as one — `WorldPreset::chunk_source` is the
     /// full seven-way mapping now; this is the narrower
     /// three-way piece it delegates to for
     /// [`Self::Normal`]/[`Self::LargeBiomes`]/[`Self::Amplified`].
@@ -405,7 +420,7 @@ impl WorldTypePreset {
     /// `flat_chunk_source`/`debug_chunk_source` directly instead, so this
     /// falls back to [`lodestone_server::WorldType::Overworld`] for them; a
     /// caller building a chunk source from a full [`WorldTypePreset`] should
-    /// call `net.rs`'s `preset_chunk_source`, not this method.
+    /// call `WorldPreset::chunk_source`, not this method.
     #[must_use]
     #[cfg(test)]
     pub fn backend_world_type(self) -> lodestone_server::WorldType {
@@ -3492,7 +3507,7 @@ mod tests {
         // `pub` at that crate's root) reported true and the other four
         // reported false. A later change closed that gap: `lib.rs` now
         // re-exports `single_biome_chunk_source`/`flat_chunk_source`/
-        // `debug_chunk_source` and `net.rs`'s `preset_chunk_source` covers
+        // `debug_chunk_source` and `WorldPreset::chunk_source` covers
         // all seven, so `is_backend_wired` is unconditionally `true` — see
         // its own doc for why the predicate is kept rather than deleted.
         // Collected, not asserted inside the loop, so a regression is still

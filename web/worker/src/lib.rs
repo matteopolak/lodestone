@@ -4,6 +4,9 @@
 //! progress endpoints. The worker then owns the mutable server world and its
 //! ticks for the entire session; no decoded world state crosses the boundary.
 
+mod horizon;
+mod server;
+
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
 use std::cell::{Cell, RefCell};
@@ -58,7 +61,7 @@ pub fn start_worker(
         let _ = lodestone_server::connection_progress::install_sink(post_connection_progress);
     }
     post_progress(&progress_port, epoch, "server-starting");
-    let result = lodestone::net::start_browser_integrated_worker(
+    let result = server::start(
         port,
         horizon_port,
         protocol,

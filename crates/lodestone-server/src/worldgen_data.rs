@@ -733,7 +733,7 @@ impl crate::chunk::ChunkSource for FlatChunkSource {
 /// as [`overworld_chunk_source_of_type`] does for [`WorldType`].
 ///
 /// Called from two places outside this crate: `crates/lodestone-shell/src/net.rs`'s
-/// `preset_chunk_source`, for `WorldTypePreset::Flat`/`FlatAllDimensions`'s
+/// `WorldPreset::chunk_source`, for `WorldTypePreset::Flat`/`FlatAllDimensions`'s
 /// bundled-default arms, and this file's own
 /// [`overworld_chunk_source_override`], for a world whose own
 /// `world_gen_settings.dat` stores a customized layer stack — the choice
@@ -769,7 +769,7 @@ pub fn flat_chunk_source(
 ///
 /// `crates/lodestone-shell/src/net.rs`'s singleplayer/LAN open calls this
 /// first, whenever a `world_dir` is in scope, and only falls back to
-/// `preset_chunk_source`'s bundled-default arms (which still call
+/// `WorldPreset::chunk_source`'s bundled-default arms (which still call
 /// [`world_preset_flat_settings`]/[`world_preset_single_biome_default_biome`]
 /// unconditionally, for the case that reaches them: no stored override, i.e.
 /// `Ok(None)` here) when this returns nothing to override. That makes a
@@ -782,7 +782,7 @@ pub fn flat_chunk_source(
 /// [`WorldgenScopeMismatch`] if `world_dir` stores a Flat or fixed-biome
 /// override but the hosting protocol's declared `scope` does not match what
 /// this crate's embedded worldgen bundle serves — the same refusal
-/// [`overworld_chunk_source_checked`] and `preset_chunk_source`'s own
+/// [`overworld_chunk_source_checked`] and `WorldPreset::chunk_source`'s own
 /// `refuse_unless_served` apply to every other preset.
 ///
 /// Native only, like [`crate::region_source`]: reads a real file, and
@@ -1706,7 +1706,7 @@ mod generation_spawn_reaches_a_real_chunk {
     /// bundled default would still produce plausible-looking terrain instead
     /// of visibly failing — then calls
     /// [`overworld_chunk_source_override`] exactly as `net.rs`'s
-    /// `preset_chunk_source` would, and asserts the **exact block stack**
+    /// `WorldPreset::chunk_source` would, and asserts the **exact block stack**
     /// the generated column reports: the value is predicted (a specific
     /// block per row), not merely "some terrain came back" or "differs from
     /// a baseline".
@@ -1847,7 +1847,7 @@ mod generation_spawn_reaches_a_real_chunk {
     }
 
     /// The same uniform scope refusal every other preset in
-    /// `preset_chunk_source` gets (see [`overworld_chunk_source_override`]'s
+    /// `WorldPreset::chunk_source` gets (see [`overworld_chunk_source_override`]'s
     /// own doc) — a stored Flat override does not bypass it.
     #[test]
     fn overworld_chunk_source_override_refuses_a_mismatched_scope() {

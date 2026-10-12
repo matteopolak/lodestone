@@ -151,7 +151,7 @@ mod events;
 mod state;
 
 #[cfg(target_arch = "wasm32")]
-use browser::{BrowserIntegratedTransport, launch_browser_worker, world_preset_from_wire_id};
+use browser::{BrowserIntegratedTransport, launch_browser_worker};
 pub use state::{
     BiomeClimateCell, BiomeClimateEntry, BiomeNameCell, CommandTreeCell, PackPromptCell,
     PendingResourcePackPrompt, SharedBiomeClimates, SharedBiomeNames, SharedCommandTree,
@@ -295,13 +295,11 @@ impl lodestone_server::CommandSink for EcsCommandSink {
 pub type SharedHandle = Arc<OnceLock<Arc<ClientHandle>>>;
 
 /// The optional distant-horizon client for this session.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "window"))]
 pub(crate) type SharedHorizonSurface = Arc<OnceLock<crate::horizon::HorizonSurfaceQuery>>;
 
-#[cfg(all(target_arch = "wasm32", feature = "window"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) type SharedHorizonSurface = Arc<OnceLock<crate::horizon::BrowserHorizonClient>>;
-#[cfg(all(target_arch = "wasm32", not(feature = "window")))]
-pub(crate) type SharedHorizonSurface = Arc<OnceLock<()>>;
 
 /// The connecting session's local player UUID, published as soon as the
 /// [`LoginProfile`] is built — before the handshake even starts, not just
@@ -624,7 +622,7 @@ pub struct NetClient {
     /// is (no TCP on wasm32), and every construction path — including the two
     /// `#[cfg(test)]` loopbacks — still creates one so the struct has a single
     /// field list; a request into a loopback's receiver is simply never drained.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
     publish_tx: Sender<u16>,
     /// Bounded requests the net task resolves only against the integrated
     /// server it owns; remote sessions return `Unavailable` rather than
@@ -720,7 +718,7 @@ pub struct NetClient {
 /// statically always `None`, so all five sites that construct, debug-print or
 /// destructure it compile unchanged on both targets, and the two that need a real
 /// `Session` are the only ones that carry a `cfg`.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(any(feature = "multiplayer", test), not(target_arch = "wasm32")))]
 type OnlineSession = lodestone_client::Session;
 #[cfg(target_arch = "wasm32")]
 type OnlineSession = std::convert::Infallible;
@@ -758,7 +756,7 @@ enum RemoteAuth {
     SelectedAccount,
     /// A session the caller already resolved — [`NetClient::connect_online`],
     /// for a caller that did its own sign-in and has a live one in hand.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(any(feature = "multiplayer", test), not(target_arch = "wasm32")))]
     Session(OnlineSession),
 }
 
@@ -815,7 +813,7 @@ enum Origin {
         /// `online_mode` below: world generation itself runs identically on
         /// both targets, only persistence and LAN hosting are native-only.
         /// The full Create New World preset, not just the three-way
-        /// `lodestone_server::WorldType` it used to carry — [`preset_chunk_source`]
+        /// `lodestone_server::WorldType` it used to carry — `lodestone_server::WorldPreset::chunk_source`
         /// is what resolves all seven.
         world_type: crate::menu::create_world::WorldTypePreset,
         #[cfg(target_arch = "wasm32")]
@@ -875,7 +873,7 @@ impl std::fmt::Debug for Origin {
                         RemoteAuth::Offline => "offline",
                         #[cfg(not(target_arch = "wasm32"))]
                         RemoteAuth::SelectedAccount => "selected-account",
-                        #[cfg(not(target_arch = "wasm32"))]
+                        #[cfg(all(any(feature = "multiplayer", test), not(target_arch = "wasm32")))]
                         RemoteAuth::Session(_) => "session",
                     },
                 )
@@ -1332,8 +1330,11 @@ impl NetClient {
         let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let relay_drained = Arc::new(Notify::new());
         let (action_tx, action_rx) = action_relay();
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
         let (publish_tx, publish_rx) = mpsc::channel();
+        // Without multiplayer nothing publishes; the sender is dropped at once.
+        #[cfg(all(not(feature = "multiplayer"), not(target_arch = "wasm32")))]
+        let publish_rx = mpsc::channel::<u16>().1;
         #[cfg(not(target_arch = "wasm32"))]
         let (wasm_block_mutation_tx, wasm_block_mutation_request_rx) = mpsc::sync_channel(64);
         #[cfg(not(target_arch = "wasm32"))]
@@ -1347,7 +1348,9 @@ impl NetClient {
         let integrated_tick_monitor = Arc::new(OnceLock::new());
         #[cfg(not(target_arch = "wasm32"))]
         let integrated_tick_monitor_thread = Arc::clone(&integrated_tick_monitor);
+        #[cfg(feature = "window")]
         let horizon_surface: SharedHorizonSurface = Arc::new(OnceLock::new());
+        #[cfg(feature = "window")]
         let horizon_surface_thread = Arc::clone(&horizon_surface);
         let weather: SharedWeather = Arc::new(WeatherCell::default());
         let weather_thread = Arc::clone(&weather);
@@ -1387,6 +1390,7 @@ impl NetClient {
                     stop_thread,
                     handle_thread,
                     integrated_tick_monitor_thread,
+                    #[cfg(feature = "window")]
                     horizon_surface_thread,
                     weather_thread,
                     biome_climates_thread,
@@ -1425,6 +1429,7 @@ impl NetClient {
             action_rx,
             stop_thread,
             handle_thread,
+            #[cfg(feature = "window")]
             horizon_surface_thread,
             weather_thread,
             biome_climates_thread,
@@ -1443,7 +1448,7 @@ impl NetClient {
             rx,
             relay_drained,
             action_tx,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
             publish_tx,
             #[cfg(not(target_arch = "wasm32"))]
             wasm_block_mutation_tx,
@@ -1981,6 +1986,7 @@ impl NetClient {
             action_tx,
             // Its receiver is dropped with `_publish_rx` below, same as `_tx`
             // above: nothing on a loopback ever calls `publish_to_lan`.
+            #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
             publish_tx: mpsc::channel().0,
             wasm_block_mutation_tx: mpsc::sync_channel::<WasmBlockMutationRequest>(1).0,
             wasm_block_mutation_rx: mpsc::sync_channel::<WasmBlockMutationResult>(1).1,
@@ -2064,6 +2070,7 @@ impl NetClient {
             action_tx,
             // See `loopback`'s identical field for why an immediately-dropped
             // receiver is fine here.
+            #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
             publish_tx: mpsc::channel().0,
             wasm_block_mutation_tx: mpsc::sync_channel::<WasmBlockMutationRequest>(1).0,
             wasm_block_mutation_rx: mpsc::sync_channel::<WasmBlockMutationResult>(1).1,
@@ -2354,6 +2361,7 @@ async fn run_async(
     shared_handle: SharedHandle,
     #[cfg(not(target_arch = "wasm32"))]
     integrated_tick_monitor: Arc<OnceLock<lodestone_server::IntegratedTickMonitor>>,
+    #[cfg(feature = "window")]
     horizon_surface: SharedHorizonSurface,
     weather: SharedWeather,
     biome_climates: SharedBiomeClimates,
@@ -2394,8 +2402,11 @@ async fn run_async(
         // held for the whole session below: **dropping `IntegratedServer` aborts
         // the serving task**, so binding it inside a `match` arm would kill the
         // server the instant the arm ended.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(any(feature = "multiplayer", test), not(target_arch = "wasm32")))]
         let mut integrated_server: Option<lodestone_server::IntegratedServer> = None;
+        // Only an integrated origin exists here, and it always assigns the server.
+        #[cfg(all(not(any(feature = "multiplayer", test)), not(target_arch = "wasm32")))]
+        let mut integrated_server: Option<lodestone_server::IntegratedServer>;
         // The Open-to-LAN world's own save handle. `open_to_lan` sets
         // `save: None` and so flushes nothing at shutdown; this is what the
         // teardown below writes through, and it is `None` for every other origin.
@@ -2492,14 +2503,14 @@ async fn run_async(
                 // vegetation composing in and is not the figure to reason from.
                 //
                 // `world_type` (items 1 and 2) picks which of the
-                // seven bundled generators to build — [`preset_chunk_source`]
+                // seven bundled generators to build — `lodestone_server::WorldPreset::chunk_source`
                 // is the full mapping; `Normal` reproduces the old
                 // unconditional call exactly. `(min_y, height)` come back
                 // alongside the erased source because the trait does not
-                // expose them — see `preset_chunk_source`'s own doc.
+                // expose them — see that method's doc.
                 //
                 // The hosting protocol declares which worldgen bundle it
-                // needs (`worldgen_scope`); `preset_chunk_source` refuses
+                // needs (`worldgen_scope`); `WorldPreset::chunk_source` refuses
                 // rather than silently building from this crate's embedded
                 // bundle when that declaration does not match it. `v770` —
                 // today's only production `ServerProtocol` — always declares
@@ -2553,16 +2564,15 @@ async fn run_async(
                 // An override is a source whose local surface semantics we do
                 // not have a query for. Preserve that distinction instead of
                 // drawing a stock Overworld estimate over a custom world.
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(all(not(target_arch = "wasm32"), feature = "window"))]
                 let use_local_horizon_query = stored.is_none();
                 #[cfg(not(target_arch = "wasm32"))]
                 let (source, min_y, height) = match stored {
                     Some(built) => built,
                     None => {
-                        match preset_chunk_source(
+                        match world_type.server_preset().chunk_source(
                             server_protocol.worldgen_scope(),
                             seed,
-                            world_type,
                         ) {
                             Ok(built) => built,
                             Err(mismatch) => {
@@ -2574,7 +2584,7 @@ async fn run_async(
                         }
                     }
                 };
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(all(not(target_arch = "wasm32"), feature = "window"))]
                 if use_local_horizon_query
                     && let Some(query) =
                         crate::horizon::HorizonSurfaceQuery::from_source(Arc::clone(&source))
@@ -2693,7 +2703,7 @@ async fn run_async(
                     // the world-open stall (10.86 s → 75.6 ms,
                     // `docs/world-open-latency.md`) had exactly that shape.
                     //
-                    // `min_y`/`height` come off `preset_chunk_source` rather
+                    // `min_y`/`height` come off `WorldPreset::chunk_source` rather
                     // than being written as `(-64, 384)` here: `region_source`'s
                     // own gotcha is that they must match the world the columns
                     // came from, and a literal at this call site is a copy that
@@ -2871,6 +2881,7 @@ async fn run_async(
         #[cfg(not(target_arch = "wasm32"))]
         let (auth, unavailable_profile) = match auth {
             RemoteAuth::Offline => (AuthenticationIntent::Offline, None),
+            #[cfg(any(feature = "multiplayer", test))]
             RemoteAuth::Session(session) => (AuthenticationIntent::Online(session), None),
             RemoteAuth::SelectedAccount => {
                 // `reqwest::Client::new()` panics with no rustls provider
@@ -3592,6 +3603,7 @@ fn run(
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
     integrated_tick_monitor: Arc<OnceLock<lodestone_server::IntegratedTickMonitor>>,
+    #[cfg(feature = "window")]
     horizon_surface: SharedHorizonSurface,
     weather: SharedWeather,
     biome_climates: SharedBiomeClimates,
@@ -3624,6 +3636,7 @@ fn run(
         stop,
         shared_handle,
         integrated_tick_monitor,
+        #[cfg(feature = "window")]
         horizon_surface,
         weather,
         biome_climates,
@@ -3650,194 +3663,6 @@ fn native_net_runtime(integrated: bool) -> std::io::Result<tokio::runtime::Runti
             .enable_all()
             .build()
     }
-}
-
-/// Builds the chunk source (and its declared `(min_y, height)`) for a freshly
-/// created singleplayer/LAN world, from the Create New World screen's own
-/// [`WorldTypePreset`](crate::menu::create_world::WorldTypePreset), using the
-/// `single_biome_chunk_source`/`flat_chunk_source`/`debug_chunk_source`
-/// constructors re-exported by `crates/lodestone-server/src/lib.rs`.
-///
-/// Not `#[cfg(not(target_arch = "wasm32"))]`: every function this calls lives
-/// in `lodestone-server`'s `worldgen_data` module, which carries no wasm32
-/// gate of its own, and this crate's `Origin::Integrated` construction calls
-/// it unconditionally (both the native LAN/persistent path and the wasm32
-/// `open_in_memory_with_items` path need a source).
-///
-/// # Returns `Arc<dyn ChunkSource>`, not four different concrete types
-///
-/// `Normal`/`LargeBiomes`/`Amplified`/`SingleBiomeSurface` all build a
-/// [`lodestone_server::Terrain263ChunkSource`]; `Flat`/`FlatAllDimensions`
-/// build a `FlatChunkSource`; `DebugAllBlockStates` builds a
-/// `DebugChunkSource` — three different concrete types the rest of this
-/// module's single construction site cannot be generic over per-call (it is
-/// one call site serving whichever preset the player picked, not one per
-/// preset). Erasing to `Arc<dyn ChunkSource>` is what
-/// `lodestone_server::chunk`'s `impl<S: ChunkSource + ?Sized> ChunkSource for
-/// Arc<S>` exists for — the same mechanism `IntegratedServer::publish` already
-/// uses to hand every connection a type-erased source — and every downstream
-/// consumer here (`RegionChunkSource::new`, `open_persistent_with_mobs`,
-/// `open_in_memory_with_mobs`, `open_in_memory_with_items`, `open_to_lan`) is
-/// generic over `S: ChunkSource`, so `Arc<dyn ChunkSource>` satisfies every
-/// one of those bounds with no further changes.
-///
-/// # Why `(min_y, height)` come back as plain values, not a method call
-///
-/// The trait declares neither bound, so a caller holding only
-/// `Arc<dyn ChunkSource>` cannot ask. The noise presets read them off the
-/// source they built; flat and debug take the Overworld's own build range from
-/// `lodestone_server::dimension::Dimension::Overworld`, the same range their
-/// generators use, rather than a hard-coded `(-64, 384)`.
-///
-/// # The `scope` gate
-///
-/// `scope` is the hosting protocol's own declared worldgen scope
-/// (`ServerProtocol::worldgen_scope`) — every preset here builds from the
-/// same embedded bundle, so every one is refused uniformly when `scope`
-/// does not match what that bundle serves, rather than only the `Normal`
-/// preset (the one path with a checked constructor of its own) silently
-/// gating while the other five kept building from a bundle the hosting
-/// family never declared it wanted. Today's only production caller reports
-/// the scope this bundle serves, so the refusal branch is unreachable in
-/// practice; it exists for the day a second hosting family does not.
-///
-/// # Errors
-///
-/// The hosting protocol's declared scope, echoed back, when it does not
-/// match what this crate's embedded worldgen bundle serves.
-fn preset_chunk_source(
-    scope: lodestone_server::WorldgenScope,
-    seed: i64,
-    preset: crate::menu::create_world::WorldTypePreset,
-) -> Result<(Arc<dyn lodestone_server::ChunkSource>, i32, i32), lodestone_server::WorldgenScopeMismatch>
-{
-    use crate::menu::create_world::WorldTypePreset;
-    // The four presets with no checked constructor of their own share this
-    // one gate — see this function's own doc on why every preset is refused
-    // uniformly rather than only `Normal`.
-    let refuse_unless_served = || {
-        if lodestone_server::bundled_worldgen_serves(scope) {
-            Ok(())
-        } else {
-            Err(lodestone_server::WorldgenScopeMismatch { requested: scope })
-        }
-    };
-    match preset {
-        WorldTypePreset::Normal | WorldTypePreset::LargeBiomes | WorldTypePreset::Amplified => {
-            refuse_unless_served()?;
-            let world_type = match preset {
-                WorldTypePreset::LargeBiomes => lodestone_server::WorldType::LargeBiomes,
-                WorldTypePreset::Amplified => lodestone_server::WorldType::Amplified,
-                _ => lodestone_server::WorldType::Overworld,
-            };
-            let s = lodestone_server::overworld_chunk_source_of_type(seed, world_type);
-            let (min_y, height) = (s.min_y(), s.height());
-            Ok((Arc::new(s), min_y, height))
-        }
-        WorldTypePreset::SingleBiomeSurface => {
-            refuse_unless_served()?;
-            // No UI for choosing the biome yet — see this function's own doc
-            // and `WorldTypePreset`'s module doc for why the bundled default
-            // is used rather than guessing at a picker.
-            let biome = lodestone_server::world_preset_single_biome_default_biome();
-            let s = lodestone_server::single_biome_chunk_source(seed, &biome);
-            let (min_y, height) = (s.min_y(), s.height());
-            Ok((Arc::new(s), min_y, height))
-        }
-        WorldTypePreset::Flat | WorldTypePreset::FlatAllDimensions => {
-            let all_dimensions = matches!(preset, WorldTypePreset::FlatAllDimensions);
-            let settings = lodestone_server::world_preset_flat_settings(all_dimensions);
-            refuse_unless_served()?;
-            let s = lodestone_server::flat_chunk_source(settings);
-            let overworld = lodestone_server::dimension::Dimension::Overworld;
-            Ok((Arc::new(s), overworld.min_y(), overworld.height()))
-        }
-        WorldTypePreset::DebugAllBlockStates => {
-            refuse_unless_served()?;
-            let s = lodestone_server::debug_chunk_source();
-            let overworld = lodestone_server::dimension::Dimension::Overworld;
-            Ok((Arc::new(s), overworld.min_y(), overworld.height()))
-        }
-    }
-}
-
-/// The page's plugin registry is deliberately not copied into the server
-/// worker. A command that needs that synchronous page-side ECS dispatch is
-/// refused with a visible reply instead of being accepted and silently dropped.
-#[cfg(target_arch = "wasm32")]
-struct WorkerCommandSink;
-
-#[cfg(target_arch = "wasm32")]
-impl lodestone_server::CommandSink for WorkerCommandSink {
-    fn run(
-        &self,
-        _caller: &lodestone_server::CommandCaller,
-        command: &str,
-    ) -> lodestone_server::CommandResponse {
-        lodestone_server::CommandResponse::unknown_command(command)
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static HORIZON_WORKER_SERVICE:
-        std::cell::RefCell<Option<crate::horizon::HorizonWorkerService>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Starts an authoritative browser integrated server on a supplied worker port.
-///
-/// This is called by `web/worker`, never by the page. The world source, server,
-/// tick tasks, and the duplex-to-port bridge therefore all live in one Worker;
-/// the page retains only its client, rendering and input state. The bridge is
-/// protocol-blind and owns no world state.
-#[cfg(target_arch = "wasm32")]
-pub fn start_browser_integrated_worker(
-    port: web_sys::MessagePort,
-    horizon_port: web_sys::MessagePort,
-    protocol: i32,
-    seed: i64,
-    preset: u8,
-    epoch: u32,
-    view_radius: Option<i32>,
-    transport_diagnostics: Option<fn(lodestone_net::MessagePortProgress)>,
-    game_mode: lodestone_model::GameMode,
-) -> Result<Option<lodestone_server::IntegratedTickMonitor>, String> {
-    let view_radius = browser::browser_worker_view_radius(view_radius)?;
-    let preset = world_preset_from_wire_id(preset)
-        .ok_or_else(|| format!("unknown browser worker world preset {preset}"))?;
-    let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
-        .ok_or_else(|| format!("no server protocol compiled for protocol {protocol}"))?;
-    let (source, _min_y, _height) = preset_chunk_source(server_protocol.worldgen_scope(), seed, preset)
-        .map_err(|error| format!("cannot build browser worker world: {error}"))?;
-    HORIZON_WORKER_SERVICE.with(|service| {
-        service.borrow_mut().take();
-    });
-    if source.horizon_sample(0, 0).is_some() {
-        HORIZON_WORKER_SERVICE.with(|service| {
-            *service.borrow_mut() = Some(crate::horizon::HorizonWorkerService::new(
-                Arc::clone(&source),
-                epoch,
-                horizon_port,
-            ));
-        });
-    } else {
-        horizon_port.close();
-    }
-    let commands = lodestone_server::CommandDispatch::installed(Arc::new(WorkerCommandSink));
-    let mut worker_io = lodestone_net::MessagePortTransport::new(port);
-    if let Some(sink) = transport_diagnostics {
-        worker_io.set_diagnostics_sink(sink);
-    }
-    let monitor = lodestone_server::IntegratedServer::serve_with_transport_in_mode(
-        server_protocol,
-        source,
-        view_radius,
-        commands,
-        worker_io,
-        game_mode,
-    );
-    Ok(monitor)
 }
 
 /// The world name a LAN ping advertises — the world directory's own final
@@ -3926,7 +3751,7 @@ async fn open_lan_world(
     };
     let motd = lan_motd(world_dir.as_deref());
     let (server, save) = match world_dir {
-        // `min_y`/`height` come from the caller's `preset_chunk_source`, never
+        // `min_y`/`height` come from the caller's `WorldPreset::chunk_source`, never
         // a `(-64, 384)` literal here — the same gotcha
         // `open_persistent_with_mobs`' call site carries.
         Some(dir) => {
@@ -5109,62 +4934,6 @@ mod tests {
             1,
             "a subsequent level-zero call must revoke the default-op node"
         );
-    }
-
-    /// Every preset must refuse uniformly once the hosting protocol's
-    /// declared worldgen scope stops matching what this crate's embedded
-    /// bundle serves — not just `Normal`, the one preset with a checked
-    /// constructor of its own. Without this, the five other presets would
-    /// keep silently building from the embedded bundle regardless of what
-    /// the hosting protocol actually declared, exactly the silent-default
-    /// hazard the scope gate exists to close.
-    #[test]
-    fn preset_chunk_source_refuses_every_preset_on_a_scope_mismatch() {
-        use crate::menu::create_world::WorldTypePreset;
-        let mismatched = lodestone_server::WorldgenScope::None;
-        for preset in [
-            WorldTypePreset::Normal,
-            WorldTypePreset::LargeBiomes,
-            WorldTypePreset::Amplified,
-            WorldTypePreset::SingleBiomeSurface,
-            WorldTypePreset::Flat,
-            WorldTypePreset::FlatAllDimensions,
-            WorldTypePreset::DebugAllBlockStates,
-        ] {
-            let Err(err) = preset_chunk_source(mismatched, 1, preset) else {
-                panic!("{preset:?} built a chunk source despite a hosting scope mismatch");
-            };
-            assert_eq!(
-                err,
-                lodestone_server::WorldgenScopeMismatch {
-                    requested: mismatched
-                },
-                "{preset:?} must refuse and name the requested scope, not build anyway"
-            );
-        }
-    }
-
-    /// The control for the gate above: every preset must still build when
-    /// the hosting protocol's declared scope really is the one this crate's
-    /// embedded bundle serves — a detector that refused unconditionally
-    /// would pass the test above for the wrong reason.
-    #[test]
-    fn preset_chunk_source_builds_every_preset_when_the_scope_matches() {
-        use crate::menu::create_world::WorldTypePreset;
-        for preset in [
-            WorldTypePreset::Normal,
-            WorldTypePreset::LargeBiomes,
-            WorldTypePreset::Amplified,
-            WorldTypePreset::SingleBiomeSurface,
-            WorldTypePreset::Flat,
-            WorldTypePreset::FlatAllDimensions,
-            WorldTypePreset::DebugAllBlockStates,
-        ] {
-            assert!(
-                preset_chunk_source(lodestone_server::BUNDLED_WORLDGEN_SCOPE, 1, preset).is_ok(),
-                "{preset:?} must still build when the hosting scope matches the embedded bundle"
-            );
-        }
     }
 
     /// The push-accept condition, reproduced as a truth table over the three

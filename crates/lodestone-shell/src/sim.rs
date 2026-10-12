@@ -1760,7 +1760,6 @@ use meshing::dirty_sections_for_blocks;
 // `sim/camera.rs`'s doc explains) would not reach it — needs `pub(crate)`,
 // matching the item's own visibility before it moved. Not `pub use`: nothing
 // outside this crate names it.
-#[cfg(any(feature = "window", not(target_arch = "wasm32")))]
 pub(crate) use camera::fog_for_render_distance;
 
 // Same reasoning as `fog_for_render_distance` just above: `crate::interact::

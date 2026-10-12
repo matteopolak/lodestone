@@ -314,7 +314,7 @@ fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
 }
 
 /// The four world presets exposed by the singleplayer entry point must reach the
-/// wire through `net.rs`'s `preset_chunk_source`, not merely compile.
+/// wire through `WorldPreset::chunk_source`, not merely compile.
 ///
 /// `Flat`/`DebugAllBlockStates` get a **strong**, externally-sourced check —
 /// the exact block states `crates/lodestone-server/src/worldgen_data.rs`'s

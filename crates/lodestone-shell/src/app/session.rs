@@ -1815,7 +1815,7 @@ impl WindowApp {
         //
         // The full `WorldTypePreset` is threaded now, not just its
         // `lodestone_server::WorldType` projection (item 1) —
-        // `net.rs`'s `preset_chunk_source` is what resolves the other four
+        // `WorldPreset::chunk_source` is what resolves the other four
         // presets (`SingleBiomeSurface`/`Flat`/`FlatAllDimensions`/
         // `DebugAllBlockStates`) once `lodestone-server`'s `lib.rs` re-exports
         // their entry points (item 2, already landed), and it

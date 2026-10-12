@@ -40,7 +40,7 @@ The packaged worker forwards `onProgress` as `{ kind: "progress", event }`. Phas
 
 ### Server radius
 
-The integrated-server worker takes the shell's `integrated_stream_radius` for the render distance, including mesh-neighbour and lookahead halo: render distance nine requests server radius eleven, as native does. Initial playable loading stays capped at radius six and the rest streams. Benchmark mounts seed configuration from their declaration; direct legacy server-worker callers omitting `viewRadius` keep radius eight.
+The integrated-server worker (`web/worker`, which does not link the shell) takes the shell's `integrated_stream_radius` for the render distance, including mesh-neighbour and lookahead halo: render distance nine requests server radius eleven, as native does. Initial playable loading stays capped at radius six and the rest streams. Benchmark mounts seed configuration from their declaration; direct legacy server-worker callers omitting `viewRadius` keep radius eight.
 
 The standalone page accepts `?log=debug` (or another level), which forwards sampled worldgen stage counters and server tick health to the page console alongside join timings, with session and target coordinates. Verbose levels are opt-in because traces cost console and scheduling time.
 

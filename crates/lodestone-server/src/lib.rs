@@ -580,6 +580,9 @@ pub use world_spawn::{SpawnSearchMetrics, spawn_search_metrics};
 /// the gates both read it.
 pub mod world_state;
 mod worldgen_data;
+mod world_preset;
+pub mod horizon_tile;
+pub use world_preset::WorldPreset;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use access::{AccessHandle, AccessLists, BanEntry, JoinRefusal, OpEntry, WhitelistEntry};

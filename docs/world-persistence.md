@@ -16,7 +16,7 @@ Everything that lets a world survive quitting: the on-disk container formats (An
 
 `world_gen_settings.dat` also holds an optional `dimensions.minecraft:overworld.generator` compound recording a non-default world type so reopening regenerates unexplored chunks the same way. The create-world screen writes it (`WorldGenSettings::with_overworld_flat_generator`/`with_overworld_fixed_biome_generator`) and `WorldGenSettings::overworld_generator()` reads it back as `Flat { layers, biome, features, lakes }`, `FixedBiome { biome }` or `Other` (Normal, Large Biomes, Amplified: reconstructed from the seed alone). `lodestone_server::worldgen_data::overworld_chunk_source_override` turns that into the real `ChunkSource` (`Ok(None)` when nothing overrides).
 
-The singleplayer/LAN path (`net.rs`, `Origin::Integrated`) calls it first whenever a world directory exists and falls back to `preset_chunk_source`'s bundled default only on `Ok(None)`, so a customized world generates as chosen from first play. Native only: the browser has no world directory and always takes the default.
+The singleplayer/LAN path (`net.rs`, `Origin::Integrated`) calls it first whenever a world directory exists and falls back to `WorldPreset::chunk_source`'s bundled default only on `Ok(None)`, so a customized world generates as chosen from first play. Native only: the browser has no world directory and always takes the default.
 
 ### The persistence layer in the source stack
 
