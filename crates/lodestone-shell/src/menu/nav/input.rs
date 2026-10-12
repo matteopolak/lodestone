@@ -209,16 +209,10 @@ impl MenuNav {
     pub fn click(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         // The gate reconcile — [`Self::key`]'s, for the other of the two paths
         // every input takes. A click that arrives while the gate is closed must
-        // land on the gate, not on whatever row the screen behind it had there.
+        // land on the gate, which is what was drawn, not on whatever row the
+        // screen behind it had there.
         if self.ownership_gate_blocks(ui) {
-            let was = ui.screen();
             ui.open_ownership_gate();
-            // [`Self::key`]'s reasoning: a click aimed at the screen the gate
-            // just replaced must not activate a gate button under the cursor.
-            if ui.screen() != was {
-                self.ownership = 0;
-                return MenuAction::None;
-            }
         }
         if ui.screen() == Screen::Ownership {
             return self.click_ownership(ui, row);

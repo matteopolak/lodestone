@@ -384,6 +384,9 @@ fn schedule_first_frame(
     poll_first_frame(progress, active, frame_signal, raf_slot, 0);
 }
 
+/// Animation frames to wait before reporting a slow first frame.
+const FIRST_FRAME_PATIENCE: u16 = 240;
+
 fn poll_first_frame(
     progress: Option<Rc<Function>>,
     active: Rc<Cell<bool>>,
@@ -402,17 +405,20 @@ fn poll_first_frame(
         callback_raf_slot.set(None);
         if frame_signal.is_set() {
             emit_callback(&listener, "first-frame", 1.0, "first frame submitted");
-        } else if attempt < 240 {
-            poll_first_frame(
-                Some(listener),
-                active,
-                frame_signal,
-                callback_raf_slot,
-                attempt + 1,
-            );
-        } else {
-            emit_callback(&listener, "first-frame-timeout", 0.0, "renderer did not submit a frame");
+            return;
         }
+        // A slow first frame is reported once, but polling continues so the
+        // frame that does arrive still clears the boot overlay.
+        if attempt == FIRST_FRAME_PATIENCE {
+            emit_callback(&listener, "first-frame-timeout", 0.0, "renderer has not submitted a frame yet");
+        }
+        poll_first_frame(
+            Some(listener),
+            active,
+            frame_signal,
+            callback_raf_slot,
+            attempt.saturating_add(1),
+        );
     });
     let scheduled = window()
         .map(|window| window.request_animation_frame(closure.as_ref().unchecked_ref()))

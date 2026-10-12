@@ -6,21 +6,10 @@ impl MenuNav {
     pub fn key(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         // **The gate reconcile**, and it is here rather than at each play verb
         // because this is one of the two places every keystroke passes through.
-        // Sampled before the dispatch below, so a key pressed on a screen the
-        // gate blocks lands on the gate rather than on the screen it was aimed
-        // at. See `ownership_gate_blocks` for the two exempt screens.
+        // `frame_for` draws the gate under this same predicate, so a key pressed
+        // while it holds was aimed at the gate and is dispatched to it.
         if self.ownership_gate_blocks(ui) {
-            let was = ui.screen();
             ui.open_ownership_gate();
-            // **Swallow the keystroke that moved the screen.** It was aimed at
-            // whatever was showing before, and letting it through would make the
-            // very first Enter after launch both reveal the gate and press its
-            // first button — a screen the player never saw and never chose.
-            // A key pressed while the gate is *already* up falls through.
-            if ui.screen() != was {
-                self.ownership = 0;
-                return MenuAction::None;
-            }
         }
         match ui.screen() {
             Screen::Ownership => self.key_ownership(ui, key),

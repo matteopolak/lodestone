@@ -1193,6 +1193,27 @@ mod tests {
         );
     }
 
+    /// The gate is drawn from the first frame, before any input moves
+    /// `UiState` onto it, so the first click or key the player aims at it must
+    /// act on it rather than only reconcile the screen.
+    #[cfg(feature = "multiplayer")]
+    #[test]
+    fn the_first_input_on_the_drawn_gate_acts_on_it() {
+        let (mut nav, _) = unowned_nav("gate-first-click");
+        let mut ui = UiState::new();
+        assert!(nav.ownership_gate_blocks(&ui), "control: an account-less launch draws the gate");
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        nav.hover(&ui, 0);
+        assert_eq!(nav.ownership_button(), OwnershipButton::AddAccount);
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Accounts, "the first click presses Add Account");
+
+        let (mut nav, _) = unowned_nav("gate-first-key");
+        let mut ui = UiState::new();
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Accounts, "the first Enter presses the highlighted gate button");
+    }
+
     #[cfg(not(feature = "multiplayer"))]
     #[test]
     fn singleplayer_only_build_keeps_multiplayer_visible_but_disabled_with_an_explanation() {
