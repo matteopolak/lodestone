@@ -1,5 +1,6 @@
 //! Online-mode configuration: session-server verification, key pair and profile-key checks for a server that authenticates its players.
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::*;
 
 /// The session-server check a login performs once encryption is up: given the

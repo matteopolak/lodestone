@@ -84,8 +84,10 @@ use uuid::Uuid;
 /// signature against `next_index`, it never produces one.
 #[derive(Debug, Clone)]
 pub struct ServerChatSession {
+    #[cfg(not(target_arch = "wasm32"))]
     session_id: Uuid,
     expires_at_millis: i64,
+    #[cfg(not(target_arch = "wasm32"))]
     public_key_der: Vec<u8>,
     /// Next expected `SignedMessageLink.index`. `None` once the chain is
     /// broken (an invalid or out-of-order signature), mirroring
@@ -107,9 +109,14 @@ impl ServerChatSession {
     /// (`SignedMessageLink.root`).
     #[must_use]
     pub fn new(session_id: Uuid, expires_at_millis: i64, public_key_der: Vec<u8>) -> Self {
+        // Only native builds can verify a signature, so only they keep the key.
+        #[cfg(target_arch = "wasm32")]
+        let _ = (session_id, public_key_der);
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
             session_id,
             expires_at_millis,
+            #[cfg(not(target_arch = "wasm32"))]
             public_key_der,
             next_index: Some(0),
             last_timestamp_millis: 0,

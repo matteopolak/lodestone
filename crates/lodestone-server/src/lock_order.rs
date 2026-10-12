@@ -20,6 +20,7 @@ pub(crate) enum LockClass {
     Border,
     GameRules,
     WorldState,
+    #[cfg(not(target_arch = "wasm32"))]
     AccessLists,
 }
 

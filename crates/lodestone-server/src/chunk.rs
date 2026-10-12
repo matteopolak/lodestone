@@ -881,6 +881,7 @@ impl ChunkColumn {
         self.generation_spawns.as_ref()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn reuse_generation_population(&mut self, previous: &Self) {
         if previous.generation_spawns.is_some() {
             self.generation_spawns = previous.generation_spawns.clone();
@@ -898,6 +899,7 @@ impl ChunkColumn {
     /// these candidates: doing so changes the first-load population decision.
     /// The native record adapter uses this read-only check to decline such a
     /// column until its schema has a representation for the candidates.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub(crate) fn has_pending_generation_spawns(&self) -> bool {
         self.generation_spawns.as_ref().is_some_and(|batch| batch.is_pending())

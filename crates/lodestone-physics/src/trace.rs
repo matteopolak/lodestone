@@ -8,6 +8,7 @@
 //! swept collision order, clipped distances and step candidates.
 
 use std::cell::Cell;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,6 +16,7 @@ use crate::geometry::{Aabb, Axis, Vec3d};
 use crate::player::{MovementInput, PlayerState};
 
 static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(not(target_arch = "wasm32"))]
 static TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 thread_local! {

@@ -704,6 +704,7 @@ impl BlockTickFeed {
     /// that must re-publish rather than send — `IntegratedServer::bind`'s relay,
     /// which copies the hub's effects into each connection's own queue and
     /// cannot decide the exclusion on the hub's behalf.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn drain_effects_tagged(
         &self,
     ) -> Vec<(Option<uuid::Uuid>, crate::effects::WorldEffect)> {
@@ -720,6 +721,7 @@ impl BlockTickFeed {
     /// single-connection `publish`/`publish_with_config` path and the
     /// multi-connection `open_to_lan` relay), and exercised directly by
     /// `a_subscriber_shares_the_inbound_queue_and_splits_the_outbound_one`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn subscriber(&self) -> Self {
         Self(
             Arc::default(),

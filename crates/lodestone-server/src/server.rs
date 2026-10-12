@@ -55,6 +55,7 @@ use self::lighting::*;
 mod map_tick;
 use self::map_tick::*;
 mod online_mode;
+#[cfg(not(target_arch = "wasm32"))]
 pub use self::online_mode::*;
 mod open_containers;
 use self::open_containers::*;

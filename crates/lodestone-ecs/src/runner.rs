@@ -1,8 +1,10 @@
 //! How the four schedules get driven — the seam named in `docs/bevy-migration.md`
 //! Stage 0: "winit-driven in the shell, timer-driven headless".
 
+#[cfg(not(target_arch = "wasm32"))]
 use bevy_app::App;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::schedules::{Extract, GameTick};
 
 /// One thread, fixed order, per §4.1(b) — `lodestone-physics` is bit-exact

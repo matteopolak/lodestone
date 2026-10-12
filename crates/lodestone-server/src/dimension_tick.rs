@@ -7,13 +7,20 @@
 
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::block_entities::BlockEntityHandle;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::chunk::ChunkSource;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::dimension::Dimension;
 // The shared context must not depend on filesystem-backed terrain modules.
+#[cfg(not(target_arch = "wasm32"))]
 use crate::scheduled_tick::ScheduledTickHandle;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::tick_area::TickFollow;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::weather::{WeatherFeed, WeatherState};
 use crate::world_state::WorldStateHandle;
 

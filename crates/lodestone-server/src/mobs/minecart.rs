@@ -424,6 +424,7 @@ const TNT_EXPLOSION_POWER_BASE: f32 = 4.0;
 const TNT_EXPLOSION_SPEED_FACTOR: f64 = 1.0;
 
 /// Dense-scene cutoff measured by `measure_dense_minecart_owner_workers`.
+#[cfg(not(target_arch = "wasm32"))]
 const MINECART_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
 /// Minecart's hitbox, `0.98 x 0.7`

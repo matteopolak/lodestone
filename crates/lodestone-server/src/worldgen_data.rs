@@ -19,6 +19,7 @@
 
 use std::sync::OnceLock;
 
+#[cfg(not(target_arch = "wasm32"))]
 use lodestone_data::block::Block;
 use lodestone_data::block_states::air_state;
 use lodestone_worldgen::resolver::Resolver;

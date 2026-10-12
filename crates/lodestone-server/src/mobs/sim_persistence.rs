@@ -403,6 +403,7 @@ impl<'w> MobSim<'w> {
 /// Whether `id` is a vehicle whose whole saved form is its pose: an empty
 /// boat or raft. Its record has no state fields, which elsewhere marks an
 /// older pose-only record that cannot be restored.
+#[cfg(not(target_arch = "wasm32"))]
 fn is_stateless_vehicle(id: &ResourceKey) -> bool {
     crate::boat::is_boat_type_path(id.path())
 }

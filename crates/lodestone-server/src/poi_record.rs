@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(not(target_arch = "wasm32"))]
 use lodestone_core::{Nbt, NbtTag};
 use lodestone_model::{BlockPos, ResourceKey};
 
@@ -82,6 +83,7 @@ impl PoiRecord {
     }
 
     /// Encodes the record fields used by the POI interchange format.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn to_nbt(&self) -> Nbt {
         let mut fields = vec![
             (
@@ -100,6 +102,7 @@ impl PoiRecord {
 
     /// Decodes the record fields. `None` if `pos` or `type` do not parse; a
     /// single bad record must not discard the rest of the section.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn from_nbt(nbt: &Nbt) -> Option<Self> {
         let pos = match field(nbt, "pos") {
             Some(Nbt::IntArray(parts)) if parts.len() == 3 => {
@@ -216,6 +219,7 @@ impl PoiSection {
             .filter(move |r| occupancy.test(r))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn to_nbt(&self) -> Nbt {
         Nbt::Compound(vec![
             ("Valid".to_owned(), Nbt::Byte(i8::from(self.valid))),
@@ -231,6 +235,7 @@ impl PoiSection {
 
     /// Reads the optional `Valid` flag; omission decodes to `false`, while
     /// [`Self::new`] creates an in-memory section with `valid = true`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn from_nbt(nbt: &Nbt) -> Self {
         let valid = matches!(field(nbt, "Valid"), Some(Nbt::Byte(b)) if *b != 0);
         let records = match field(nbt, "Records") {
@@ -273,6 +278,7 @@ pub struct PoiChunk {
 }
 
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn field<'a>(nbt: &'a Nbt, key: &str) -> Option<&'a Nbt> {
     match nbt {
         Nbt::Compound(fields) => fields

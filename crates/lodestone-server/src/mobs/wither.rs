@@ -157,6 +157,7 @@ const SKULL_COOLDOWN_TICKS: i32 = 30;
 const IDLE_SKULL_COOLDOWN_TICKS: i32 = 220;
 
 /// Dense-scene cutoff measured by `measure_dense_wither_owner_workers`.
+#[cfg(not(target_arch = "wasm32"))]
 const WITHER_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
 /// The entity-type key every wither streams as.

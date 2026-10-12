@@ -128,6 +128,7 @@
 //! [`handle_request`] has no socket and compiles everywhere.
 
 use crate::mob_spawn::SpawnRng;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::players::PlayerRegistry;
 use crate::server::{STATUS_MAX_PLAYERS, STATUS_MOTD};
 

@@ -1220,7 +1220,9 @@ impl<T: Transport> Driver<T> {
     /// query and `wait_for_chunk` methods instead.
     ///
     /// [`ChunkColumn`]: lodestone_world::ChunkColumn
-    async fn emit(&mut self, mut event: ClientEvent) -> Step {
+    async fn emit(&mut self, event: ClientEvent) -> Step {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut event = event;
         // Automatic protocol responses the driver injects in reaction to an
         // event, written in order before the event is surfaced. A single event
         // can produce more than one: a keep-alive both answers the heartbeat and

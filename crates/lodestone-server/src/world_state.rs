@@ -65,8 +65,10 @@
 //! error. No packet IDs live here.
 
 use std::future::Future;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering},
     Arc,
     Mutex,
     OnceLock,
@@ -239,6 +241,7 @@ pub struct WorldStateHandle {
     tick_budget: Arc<TickBudget>,
     initial_seed_failure: Arc<OnceLock<crate::protocol::ChunkEncodeError>>,
     initial_seed_failure_wake: Arc<tokio::sync::Notify>,
+    #[cfg(not(target_arch = "wasm32"))]
     active_connections: Arc<AtomicUsize>,
     /// The configured simulation distance in chunks, `0` while nothing has
     /// configured one. Read through [`Self::simulation_distance`].
@@ -373,6 +376,7 @@ impl WorldStateHandle {
         self.join_ready.store(true, Ordering::Release);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn is_join_ready(&self) -> bool {
         self.join_ready.load(Ordering::Acquire)
     }
@@ -381,6 +385,7 @@ impl WorldStateHandle {
         self.initial_view_drained.store(true, Ordering::Release);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn is_initial_view_drained(&self) -> bool {
         self.initial_view_drained.load(Ordering::Acquire)
     }
@@ -390,6 +395,7 @@ impl WorldStateHandle {
             .fetch_or(INITIAL_CLIENT_PENDING, Ordering::AcqRel);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn require_initial_seed(&self) {
         self.initial_tick_holds
             .fetch_or(INITIAL_SEED_PENDING, Ordering::AcqRel);
@@ -455,6 +461,7 @@ impl WorldStateHandle {
             .is_ok()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn mark_initial_seed_ready(&self) {
         self.initial_tick_holds
             .fetch_and(!INITIAL_SEED_PENDING, Ordering::AcqRel);
@@ -475,6 +482,7 @@ impl WorldStateHandle {
             || self.initial_seed_failure.get().is_some()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn fail_initial_seed(&self, error: crate::protocol::ChunkEncodeError) {
         if self.initial_seed_failure.set(error).is_ok() {
             self.initial_seed_failure_wake.notify_waiters();
@@ -497,10 +505,12 @@ impl WorldStateHandle {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn connection_started(&self) {
         self.active_connections.fetch_add(1, Ordering::AcqRel);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn connection_ended(&self) {
         let _ = self.active_connections.try_update(
             Ordering::AcqRel,
@@ -509,6 +519,7 @@ impl WorldStateHandle {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn has_active_connections(&self) -> bool {
         self.active_connections.load(Ordering::Acquire) != 0
     }
@@ -972,6 +983,7 @@ impl WorldStateHandle {
     /// terrain to consult), and loading that placeholder back would suppress the
     /// spiral search forever. Clearing it after the load is what keeps a fresh
     /// world's first join the thing that actually finds the spawn.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn clear_world_spawn(&self) {
         self.with(|state| state.spawn = None);
     }

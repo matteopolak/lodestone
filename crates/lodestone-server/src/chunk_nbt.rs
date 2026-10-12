@@ -835,6 +835,7 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
 /// playable terrain. The import path has already reviewed the source payload
 /// and stores the resulting column as a native record, where its generation
 /// status is not persisted.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn column_from_nbt_for_import(
     nbt: &Nbt,
     min_y: i32,

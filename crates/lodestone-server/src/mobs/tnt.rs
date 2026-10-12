@@ -153,6 +153,7 @@ pub const EXPLOSION_POWER: f32 = 4.0;
 /// Dense-scene cutoff measured by `measure_dense_tnt_owner_workers`: four
 /// native lanes amortize their hand-off at 128 live explosives. Browser builds
 /// retain the serial arm because their executor has no native worker lanes.
+#[cfg(not(target_arch = "wasm32"))]
 const TNT_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
 /// Primed TNT's gravity — `0.04`, the same per-tick downward

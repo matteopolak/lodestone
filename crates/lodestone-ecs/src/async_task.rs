@@ -247,16 +247,20 @@ impl<T: Send + Sync + 'static> PendingTask<T> {
 struct Shared {
     /// Work not yet picked up. `Mutex<Vec<_>>` + a condvar rather than a channel
     /// so `Drop` can wake every worker without needing one sender per thread.
+    #[cfg(not(target_arch = "wasm32"))]
     queue: Mutex<Vec<Job>>,
+    #[cfg(not(target_arch = "wasm32"))]
     ready: parking_lot::Condvar,
     /// Finished hand-backs waiting for a tick boundary.
     completions: Mutex<Vec<HandBack>>,
+    #[cfg(not(target_arch = "wasm32"))]
     shutdown: AtomicBool,
     spawned: AtomicU64,
     completed: AtomicU64,
     handed_back: AtomicU64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Shared {
     fn push_job(&self, job: Job) {
         self.queue.lock().push(job);
@@ -331,9 +335,12 @@ impl AsyncTaskPool {
     #[must_use]
     pub fn with_threads(threads: usize) -> Self {
         let shared = Arc::new(Shared {
+            #[cfg(not(target_arch = "wasm32"))]
             queue: Mutex::new(Vec::new()),
+            #[cfg(not(target_arch = "wasm32"))]
             ready: parking_lot::Condvar::new(),
             completions: Mutex::new(Vec::new()),
+            #[cfg(not(target_arch = "wasm32"))]
             shutdown: AtomicBool::new(false),
             spawned: AtomicU64::new(0),
             completed: AtomicU64::new(0),

@@ -56,8 +56,12 @@ use crate::chunk_store::ChunkStore;
 use crate::dimension::{Dimension, DimensionalSource};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mobs::ChunkWorld;
-use crate::mobs::{LiveMobSource, MobHandle};
-use crate::players::{PlayerAwareSource, PlayerRegistry};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::mobs::LiveMobSource;
+use crate::mobs::MobHandle;
+use crate::players::PlayerAwareSource;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::players::PlayerRegistry;
 use crate::protocol::ServerProtocol;
 use crate::server::{
     EntitySource, NoEntities, serve_connection_shared,
@@ -77,6 +81,7 @@ use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 // `open_in_memory`/`open_in_memory_with_mobs_using`/`open_to_lan`'s own
 // `source.primary().tickets()` into every real join path this file spawns —
 // see each call site's own comment for why that handle, not a fresh default.
+#[cfg(not(target_arch = "wasm32"))]
 use crate::ticket::TicketStoreHandle;
 use crate::tick::run_primary_tick_loop_with_weather;
 use crate::weather::{WeatherFeed, WeatherState};
@@ -574,7 +579,7 @@ where
         }
     }
     #[cfg(target_arch = "wasm32")]
-    let _ = world_dir;
+    let _ = (world_dir, dimension_saves);
     let store = if uncapped {
         ChunkStore::for_integrated_view_radius(make_terrain(), view_radius)
     } else {
@@ -1775,7 +1780,7 @@ impl IntegratedServer {
         #[cfg(target_arch = "wasm32")]
         let server_tick = server_app.witness();
         #[cfg(target_arch = "wasm32")]
-        let mut server_world = server_app.into_world();
+        let server_world = server_app.into_world();
         #[cfg(target_arch = "wasm32")]
         let tick_clock = Arc::clone(&clock);
         #[cfg(target_arch = "wasm32")]

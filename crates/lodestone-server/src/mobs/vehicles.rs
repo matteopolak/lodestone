@@ -71,6 +71,7 @@ struct VehicleTickInput {
 }
 
 /// Dense-scene cutoff measured by `measure_dense_vehicle_owner_workers`.
+#[cfg(not(target_arch = "wasm32"))]
 const VEHICLE_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
 impl<'w> MobSim<'w> {

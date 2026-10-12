@@ -81,10 +81,7 @@ where
 /// Native callers use the process-wide world-generation dispatcher rather than
 /// Tokio's blocking pool. The dispatcher keeps generation within the shared
 /// Rayon budget and returns its result through a Tokio oneshot, which also wakes
-/// a current-thread runtime reliably after the worker has returned. Browser
-/// callers have no native worker pool, so the same operation runs inline; the
-/// browser-facing generation paths that can process several columns use their
-/// own per-column task yield instead.
+/// a current-thread runtime reliably after the worker has returned.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn spawn_worldgen<F, T>(job: F) -> T
 where
@@ -95,17 +92,6 @@ where
         .await
         .await
         .expect("worldgen worker panicked")
-}
-
-/// Browser counterpart of [`spawn_worldgen`]. There is no native worker pool
-/// on `wasm32`; callers that need to remain responsive must yield between
-/// separate operations rather than trying to create a blocking task here.
-#[cfg(target_arch = "wasm32")]
-pub(crate) async fn spawn_worldgen<F, T>(job: F) -> T
-where
-    F: FnOnce() -> T,
-{
-    job()
 }
 
 /// A handle to a spawned server task, owned by

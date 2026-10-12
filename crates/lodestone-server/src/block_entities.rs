@@ -1816,6 +1816,7 @@ impl BlockEntityRegistry {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn non_hopper_count(&self) -> usize {
         self.entities
             .values()

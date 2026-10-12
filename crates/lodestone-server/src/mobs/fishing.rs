@@ -24,6 +24,7 @@ pub(super) const FISHING_ROLL_SEED: u64 = 0x4649_5348_5F52_4F44;
 const MAX_OUT_OF_WATER_TIME: i32 = 10;
 
 /// Dense-scene cutoff measured by `measure_dense_fishing_owner_workers`.
+#[cfg(not(target_arch = "wasm32"))]
 const FISHING_OWNER_PARALLEL_THRESHOLD: usize = 2_048;
 
 /// `life >= 1200` — twenty seconds resting on solid ground
