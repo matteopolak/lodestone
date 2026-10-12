@@ -66,6 +66,9 @@ pub struct RenderStats {
     /// Translucent-block sections culled this frame (view-distance + frustum
     /// combined, matching [`water_sections_culled`](Self::water_sections_culled)).
     pub translucent_sections_culled: usize,
+    /// Translucent meshes (water or translucent blocks, per section) whose
+    /// index span was re-sorted back-to-front and rewritten this frame.
+    pub translucent_resorts: usize,
     /// Total merged quads across all drawn sections.
     pub total_quads: usize,
     /// Draw calls issued (one per non-empty section).

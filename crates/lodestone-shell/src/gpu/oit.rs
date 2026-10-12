@@ -28,6 +28,105 @@ impl RenderState {
         self.improved_transparency = enabled;
     }
 
+    /// Turn per-section back-to-front re-sorting of translucent quads on the
+    /// sorted path on or off. On by default; off leaves quads in mesh emission
+    /// order, which is the A/B control for gates and frame-time measurements.
+    pub fn set_translucent_sorting(&mut self, enabled: bool) {
+        self.translucent_sorting = enabled;
+    }
+
+    /// Whether [`Self::set_translucent_sorting`] is on.
+    #[must_use]
+    pub fn translucent_sorting(&self) -> bool {
+        self.translucent_sorting
+    }
+
+    /// Re-sort the visible sections' translucent quads and rewrite their index
+    /// spans, following the reference rule: every nearby section is checked each
+    /// frame, the rest round-robin at `max(len / 8, 15)` per frame, and a section
+    /// re-sorts when its camera octant changed or the camera crossed a block
+    /// while the section is nearby or axis-aligned. A section never sorted
+    /// sorts at once so it is never drawn in mesh order. Returns the number of
+    /// meshes rewritten.
+    pub(super) fn resort_translucent(
+        &self,
+        queue: &wgpu::Queue,
+        visible: &[(&super::terrain::ModelSectionGpu, f32)],
+        camera: glam::Vec3,
+    ) -> usize {
+        use lodestone_render::{SortViewpoint, should_resort};
+        /// Squared centre distance under which a section is nearby (32 blocks
+        /// reach, matching the reference's nearby list).
+        const NEARBY_DISTANCE_SQ: f32 = 32.0 * 32.0;
+        let sortable: Vec<&(&super::terrain::ModelSectionGpu, f32)> = visible
+            .iter()
+            .filter(|(s, _)| s.water_sort.borrow().is_some() || s.translucent_sort.borrow().is_some())
+            .collect();
+        let block = [
+            camera.x.floor() as i32,
+            camera.y.floor() as i32,
+            camera.z.floor() as i32,
+        ];
+        let block_changed = self.last_sort_camera_block.replace(Some(block)) != Some(block);
+        let cam = [f64::from(camera.x), f64::from(camera.y), f64::from(camera.z)];
+        let mut resorted = 0;
+        let mut visit = |&(section, _): &(&super::terrain::ModelSectionGpu, f32), nearby: bool| {
+            let o = section.origin;
+            let coord = [o[0].div_euclid(16), o[1].div_euclid(16), o[2].div_euclid(16)];
+            let viewpoint = SortViewpoint::new(cam, coord);
+            let local = [
+                camera.x - o[0] as f32,
+                camera.y - o[1] as f32,
+                camera.z - o[2] as f32,
+            ];
+            for (sort, mesh) in [
+                (&section.water_sort, section.water.as_ref()),
+                (&section.translucent_sort, section.translucent.as_ref()),
+            ] {
+                let mut sort = sort.borrow_mut();
+                let (Some(sort), Some(mesh)) = (sort.as_mut(), mesh) else {
+                    continue;
+                };
+                if !should_resort(sort.last_viewpoint(), viewpoint, block_changed, nearby) {
+                    continue;
+                }
+                let indices = sort.resort(local, viewpoint);
+                match (mesh, self.model.as_ref()) {
+                    (super::terrain::ResidentMesh::Arena(a), Some(model)) => {
+                        model.mesh_arena.write_indices(queue, a, indices);
+                    }
+                    (super::terrain::ResidentMesh::Dedicated(m), _) => {
+                        m.write_indices(queue, indices);
+                    }
+                    _ => {}
+                }
+                resorted += 1;
+            }
+        };
+        let mut far = Vec::new();
+        for entry in &sortable {
+            // Never-sorted meshes sort immediately; the rest wait for the scan.
+            let unsorted = [(&entry.0.water_sort, entry.0.water.is_some()), (&entry.0.translucent_sort, entry.0.translucent.is_some())]
+                .iter()
+                .any(|(s, present)| *present && s.borrow().as_ref().is_some_and(|q| q.last_viewpoint().is_none()));
+            if unsorted || entry.1 < NEARBY_DISTANCE_SQ {
+                visit(*entry, true);
+            } else {
+                far.push(*entry);
+            }
+        }
+        if !far.is_empty() {
+            let budget = (far.len() / 8).max(15);
+            let mut cursor = self.sort_cursor.get() % far.len();
+            for _ in 0..budget.min(far.len()) {
+                visit(far[cursor], false);
+                cursor = (cursor + 1) % far.len();
+            }
+            self.sort_cursor.set(cursor);
+        }
+        resorted
+    }
+
     /// Whether [`Self::set_improved_transparency`] is on.
     #[must_use]
     pub fn improved_transparency(&self) -> bool {

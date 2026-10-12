@@ -62,6 +62,13 @@ pub(super) struct ModelSectionGpu {
     /// upload. Freed (via [`SectionOriginArena::free`]) when the section is
     /// removed or remeshed away to nothing.
     pub(super) origin_alloc: ArenaAllocation,
+    /// The section's world origin in blocks.
+    pub(super) origin: [i32; 3],
+    /// Back-to-front order state for [`Self::water`] and [`Self::translucent`];
+    /// `None` when the mesh has fewer than two quads. Behind a `RefCell`
+    /// because the frame re-sorts through a shared borrow.
+    pub(super) water_sort: std::cell::RefCell<Option<lodestone_render::QuadSort>>,
+    pub(super) translucent_sort: std::cell::RefCell<Option<lodestone_render::QuadSort>>,
 }
 
 /// Where one section's uploaded geometry actually lives.

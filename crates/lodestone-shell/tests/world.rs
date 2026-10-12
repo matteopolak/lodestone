@@ -27,6 +27,8 @@ mod fluid_self_occlusion;
 mod ground_plate_z_fight_pixels;
 #[path = "world/improved_transparency_pixels.rs"]
 mod improved_transparency_pixels;
+#[path = "world/translucent_sort_cost.rs"]
+mod translucent_sort_cost;
 #[path = "world/near_grazing_face_coverage_pixels.rs"]
 mod near_grazing_face_coverage_pixels;
 #[path = "world/partial_connectivity_hall_holes.rs"]

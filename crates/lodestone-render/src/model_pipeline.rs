@@ -70,13 +70,21 @@ impl GpuModelMesh {
         let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lodestone-model-indices"),
             contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         });
         Some(GpuModelMesh {
             vertices,
             indices,
             index_count: mesh.indices.len() as u32,
         })
+    }
+}
+
+impl GpuModelMesh {
+    /// Overwrite the index buffer with `indices` (same count as at upload).
+    pub fn write_indices(&self, queue: &wgpu::Queue, indices: &[u32]) {
+        debug_assert_eq!(indices.len() as u32, self.index_count);
+        queue.write_buffer(&self.indices, 0, bytemuck::cast_slice(indices));
     }
 }
 

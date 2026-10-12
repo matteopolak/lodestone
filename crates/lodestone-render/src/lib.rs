@@ -326,7 +326,7 @@ pub use texture::{
     MEASURED_MAX_ARRAY_LAYERS, MipLevel, SpriteRect, TextureLayout, atlas_mip_levels,
     atlas_occupancy, generate_isolated_mips, recommend_layout, select_binding_model,
 };
-pub use translucency::{RenderLayer, SortViewpoint, TranslucentMesh};
+pub use translucency::{QuadSort, RenderLayer, SortViewpoint, should_resort};
 pub use vertex::{BYTES_PER_VERTEX, PackedVertex, VertexFields};
 pub use visibility::{
     SectionCoord, SectionVisibility, VisibilityGraph, compute_visibility, compute_visibility_from,

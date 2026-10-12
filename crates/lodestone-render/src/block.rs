@@ -212,7 +212,7 @@ impl BlockPipeline {
     ///   **write off** (so translucent quads don't occlude each other), and no
     ///   back-face culling (glass/water panes are seen from both sides). The
     ///   caller supplies quads already sorted back-to-front via
-    ///   [`TranslucentMesh`](crate::translucency::TranslucentMesh).
+    ///   [`QuadSort`](crate::translucency::QuadSort).
     #[must_use]
     pub fn for_layer(
         device: &wgpu::Device,

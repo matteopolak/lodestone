@@ -290,6 +290,14 @@ pub struct RenderState {
     /// Water and translucent blocks composite order-independently instead of
     /// drawing sorted and blended. See [`Self::set_improved_transparency`].
     improved_transparency: bool,
+    /// Whether the sorted path re-sorts each section's translucent quads
+    /// back-to-front. On by default; see [`Self::set_translucent_sorting`].
+    translucent_sorting: bool,
+    /// The camera block at the last translucent re-sort pass, for the
+    /// "camera crossed a block" half of the re-sort rule.
+    last_sort_camera_block: std::cell::Cell<Option<[i32; 3]>>,
+    /// Round-robin position of the budgeted re-sort scan over far sections.
+    sort_cursor: std::cell::Cell<usize>,
     /// The order-independent path's pipelines and targets, built the first
     /// frame it is used.
     oit: std::cell::RefCell<Option<oit::OitState>>,

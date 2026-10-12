@@ -525,6 +525,9 @@ impl RenderState {
             occlusion_mode: super::TerrainOcclusion::On,
             gpu_timer: std::cell::RefCell::new(None),
             improved_transparency: false,
+            translucent_sorting: true,
+            last_sort_camera_block: std::cell::Cell::new(None),
+            sort_cursor: std::cell::Cell::new(0),
             oit: std::cell::RefCell::new(None),
         }
     }

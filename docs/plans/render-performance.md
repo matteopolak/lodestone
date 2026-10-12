@@ -26,7 +26,6 @@ The boundary column `(9,0)` at rd 8 pins the strict inequality (`64 < 64` is fal
 
 - **U4, draw-submission reduction.** Suballocate every `ModelSectionGpu` mesh from shared vertex and index arenas per pass, following the `section_arena.rs` pattern. Target: encoder calls from about `4 x drawn` to `2 x drawn + 4`, and buffer objects from `2 x sections` to 4, with `draw_calls` unchanged. Gate it with a pixel-identical A/B against the per-buffer path; no production code uses `SectionArena` yet.
   - Optional second step, only if the origin bind measures hot: an origin array indexed by `instance_index`. Check non-zero `first_instance` on the wgpu Metal backend first.
-- **U5 remainder, intra-section water resort.** `SortViewpoint` and `TranslucentMesh` exist but production water keeps mesh-time index order within a section. Resort on octant change and re-upload the section's index buffer. Cadence: nearby sections when the camera block changes, plus a round-robin `max(visible/8, 15)` per frame. A gate must cross an octant boundary and see exactly one resort.
 
 ## Constraints
 

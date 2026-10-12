@@ -11,8 +11,9 @@
 //! ray (its near face and the far face's inward copy), the glass wall one (its
 //! back face is culled). The sorted pipeline draws all water before all
 //! translucent blocks, so it paints the glass **over** the water (glass is
-//! behind it, but water writes no depth), and it draws the two water faces in
-//! mesh order, not depth order. The reference rule is depth order.
+//! behind it, but water writes no depth); within the water it re-sorts the
+//! section's quads back to front, which is depth order. With sorting off
+//! it draws them in mesh order instead, and that is the control.
 //!
 //! # The expectation
 //!
@@ -34,9 +35,10 @@
 //!
 //! # Three predictions, one per claim
 //!
-//! * **Draw order** (`fold` in the sorted pipeline's order) must match the
-//!   sorted frames. That validates the fold: it reproduces a blend sequence
-//!   whose answer is known.
+//! * **Draw order** (`fold` in the sorted pipeline's order: water far face then
+//!   near face, then glass) must match the sorted frames. That validates the
+//!   fold: it reproduces a blend sequence whose answer is known. With sorting
+//!   off the same fold in mesh order must match the unsorted frame.
 //! * **Depth order** (`fold` front to back) is what the order-independent
 //!   frames must match, to a per-pixel tolerance built from three sources, each
 //!   computed from the representation's own arithmetic and none from the run:
@@ -179,9 +181,19 @@ struct Ids {
     white: u32,
     water: u32,
     glass: u32,
+    blue_glass: u32,
 }
 
 fn build_world(ids: &Ids, backdrop: u32) -> World {
+    let mut world = empty_world(ids);
+    assert!(world.fill_region(BACKDROP.0, BACKDROP.1, backdrop) > 0, "fixture: backdrop");
+    assert!(world.fill_region(WATER.0, WATER.1, ids.water) > 0, "fixture: water wall");
+    assert!(world.fill_region(GLASS.0, GLASS.1, ids.glass) > 0, "fixture: glass wall");
+    world
+}
+
+/// Air over a stone floor, loaded out to the render distance.
+fn empty_world(ids: &Ids) -> World {
     let mut world = World::new();
     for cx in -RD_CHUNKS..=RD_CHUNKS {
         for cz in -RD_CHUNKS..=RD_CHUNKS {
@@ -209,9 +221,6 @@ fn build_world(ids: &Ids, backdrop: u32) -> World {
         world.fill_region([-extent, MIN_Y, -extent], [extent + 15, FLOOR_TOP - 1, extent + 15], ids.stone) > 0,
         "fixture: the floor must write blocks"
     );
-    assert!(world.fill_region(BACKDROP.0, BACKDROP.1, backdrop) > 0, "fixture: backdrop");
-    assert!(world.fill_region(WATER.0, WATER.1, ids.water) > 0, "fixture: water wall");
-    assert!(world.fill_region(GLASS.0, GLASS.1, ids.glass) > 0, "fixture: glass wall");
     world
 }
 
@@ -294,11 +303,11 @@ fn select(
         .collect()
 }
 
-/// Where each water quad sits and when the sorted pipeline draws it.
+/// Where each water quad sits and when an unsorted draw paints it.
 ///
-/// The sorted pipeline draws a section's water in mesh index order, not depth
-/// order, and the mesher emits a block's faces together, so which of a pixel's
-/// two water faces is drawn last depends on the two blocks the ray crosses.
+/// With sorting off a section's water is drawn in mesh index order, and the
+/// mesher emits a block's faces together, so which of a pixel's two water faces
+/// is drawn last depends on the two blocks the ray crosses.
 struct WaterDrawOrder {
     /// `(plane, x range, y range, first index)` per quad, in world blocks.
     quads: Vec<(Plane, [f32; 2], [f32; 2], usize)>,
@@ -370,11 +379,13 @@ fn render_frame(
     geometry: &[(SectionKey, SectionGeometry)],
     camera: &Camera,
     improved: bool,
+    sorting: bool,
 ) -> Frame {
     let mut state = RenderState::new(device, queue, format, W, H, Some(atlas));
     suppress_first_person_arm(&mut state);
     state.set_fog(FogSettings::for_render_distance(SKY_COLOR, RD_CHUNKS as u32), RD_CHUNKS as u32);
     state.set_improved_transparency(improved);
+    state.set_translucent_sorting(sorting);
     for (key, mesh) in geometry {
         state.upload_section(device, queue, *key, mesh);
     }
@@ -945,6 +956,7 @@ fn glass_behind_water_composites_water_over_glass_whatever_the_draw_order() {
         white: first_state_named("minecraft:white_concrete"),
         water: first_state_named("minecraft:water"),
         glass: first_state_named("minecraft:red_stained_glass"),
+        blue_glass: first_state_named("minecraft:blue_stained_glass"),
     };
     let full_stone = mesh_world(&build_world(&ids, ids.stone), models);
     let full_white = mesh_world(&build_world(&ids, ids.white), models);
@@ -962,8 +974,8 @@ fn glass_behind_water_composites_water_over_glass_whatever_the_draw_order() {
         near: 0.05,
         far: Camera::far_for_render_distance(RD_CHUNKS as u32, 0),
     };
-    let mut render = |geometry: &[(SectionKey, SectionGeometry)], improved: bool| {
-        render_frame(device, queue, format, &mut target, &atlas, geometry, &camera, improved)
+    let mut render = |geometry: &[(SectionKey, SectionGeometry)], improved: bool, sorting: bool| {
+        render_frame(device, queue, format, &mut target, &atlas, geometry, &camera, improved, sorting)
     };
 
     // Every frame, over the stone backdrop and over the white one.
@@ -990,17 +1002,24 @@ fn glass_behind_water_composites_water_over_glass_whatever_the_draw_order() {
     }
     let planes = [Plane::WaterNear, Plane::WaterFar, Plane::GlassFront, Plane::GlassBack];
     let mut backdrop = |full: &[(SectionKey, SectionGeometry)]| Backdrop {
-        none: render(&nothing(full), false),
-        surface: planes.map(|p| render(&only(full, p), false)),
-        sorted_water: render(&water_scene(full), false),
-        sorted_glass: render(&glass_scene(full), false),
-        improved_water: render(&water_scene(full), true),
-        improved_glass: render(&glass_scene(full), true),
+        none: render(&nothing(full), false, true),
+        surface: planes.map(|p| render(&only(full, p), false, true)),
+        sorted_water: render(&water_scene(full), false, true),
+        sorted_glass: render(&glass_scene(full), false, true),
+        improved_water: render(&water_scene(full), true, true),
+        improved_glass: render(&glass_scene(full), true, true),
     };
     let stone = backdrop(&full_stone);
     let white = backdrop(&full_white);
-    let sorted_both = render(&both_scene(&full_stone), false);
-    let improved_both = render(&both_scene(&full_stone), true);
+    let sorted_both = render(&both_scene(&full_stone), false, true);
+    let improved_both = render(&both_scene(&full_stone), true, true);
+    let unsorted_water = render(&water_scene(&full_stone), false, false);
+    assert!(
+        stone.sorted_water.stats.translucent_resorts > 0 && unsorted_water.stats.translucent_resorts == 0,
+        "sorted water re-sorted {} meshes and unsorted {}; the sorting switch must decide",
+        stone.sorted_water.stats.translucent_resorts,
+        unsorted_water.stats.translucent_resorts
+    );
 
     for (name, frame, composites) in [
         ("sorted stone", &stone.none, 0),
@@ -1127,22 +1146,30 @@ fn glass_behind_water_composites_water_over_glass_whatever_the_draw_order() {
         sorted: &'a Frame,
         improved: &'a Frame,
     }
-    // Water is painted before any glass; within the water, in mesh order.
+    // Water is painted before any glass; within the water, far face first.
     let water_draw = |px: &[(u32, u32)], glass_on_top: bool| -> Vec<Vec<Plane>> {
         px.iter()
-            .map(|&(x, y)| {
-                let near_first = water_order.rank(&camera, x, y, Plane::WaterNear)
-                    < water_order.rank(&camera, x, y, Plane::WaterFar);
+            .map(|_| {
                 let mut order = Vec::new();
                 if glass_on_top {
                     order.push(Plane::GlassFront);
                 }
-                order.extend(if near_first {
-                    [Plane::WaterFar, Plane::WaterNear]
-                } else {
-                    [Plane::WaterNear, Plane::WaterFar]
-                });
+                order.extend([Plane::WaterNear, Plane::WaterFar]);
                 order
+            })
+            .collect()
+    };
+    // The unsorted draw: mesh order within the water.
+    let water_mesh_order = |px: &[(u32, u32)]| -> Vec<Vec<Plane>> {
+        px.iter()
+            .map(|&(x, y)| {
+                let near_first = water_order.rank(&camera, x, y, Plane::WaterNear)
+                    < water_order.rank(&camera, x, y, Plane::WaterFar);
+                if near_first {
+                    vec![Plane::WaterFar, Plane::WaterNear]
+                } else {
+                    vec![Plane::WaterNear, Plane::WaterFar]
+                }
             })
             .collect()
     };
@@ -1277,6 +1304,41 @@ fn glass_behind_water_composites_water_over_glass_whatever_the_draw_order() {
         apart.count
     );
 
+    // The sorting control: with sorting off the water is drawn in mesh order, so
+    // the frame matches the fold in that order and, on the pixels where mesh
+    // order is not depth order, misses the depth-order prediction.
+    {
+        let (nl, fl) = (near(&water_px), far(&water_px));
+        let mesh_order = water_mesh_order(&water_px);
+        let by_plane = |p: Plane| if p == Plane::WaterNear { &nl } else { &fl };
+        let layers: Vec<Vec<&Layer>> =
+            mesh_order.iter().map(|o| o.iter().map(|&p| by_plane(p)).collect()).collect();
+        let stone_px = stone_linear(&water_px);
+        let drawn = fold(&stone_px, &layers);
+        let tolerance = total(&[&drawn.error, &drawn.draw_rounding]);
+        let check = compare(&unsorted_water, &water_px, &drawn.value, &tolerance, 2);
+        assert_clean("water alone, sorting off: vs mesh-order prediction", &check, "quantisation");
+        let in_depth_order = fold(&stone_px, &vec![vec![&nl, &fl]; water_px.len()]);
+        let wrong = mesh_order.iter().filter(|o| o[0] == Plane::WaterFar).count();
+        let mut apart = Box2::new();
+        let mut worst = 0.0f64;
+        for (i, &(x, y)) in water_px.iter().enumerate() {
+            let got = encoded(&unsorted_water, x, y);
+            let deviation = (0..3)
+                .map(|c| (got[c] - to_byte(in_depth_order.value[i][c])).abs())
+                .fold(0.0, f64::max);
+            worst = worst.max(deviation);
+            if deviation > f64::from(CONTROL_MIN_DEVIATION) {
+                apart.add(x, y);
+            }
+        }
+        eprintln!(
+            "  water alone, sorting off vs depth order: worst {worst:.1} levels; {wrong} of {} pixels \
+             are drawn near-face last; beyond {CONTROL_MIN_DEVIATION}: {apart}",
+            water_px.len()
+        );
+    }
+
     // Single layers agree with the sorted pipeline's frame wherever the layer
     // is not drawn, and the glass, which has no order to disagree about, agrees
     // within the series' own tolerance everywhere it is drawn.
@@ -1317,4 +1379,249 @@ fn glass_behind_water_composites_water_over_glass_whatever_the_draw_order() {
          frames differ by {sorted_vs_improved} levels, beyond the {glass_tolerance:.2} their two \
          predictions allow"
     );
+}
+
+/// Largest per-channel difference between two frames over `px`, in levels, and
+/// the pixels beyond `beyond` levels.
+fn frame_distance(a: &Frame, b: &Frame, px: &[(u32, u32)], beyond: f64) -> (f64, Box2) {
+    let mut worst = 0.0f64;
+    let mut apart = Box2::new();
+    for &(x, y) in px {
+        let (p, q) = (encoded(a, x, y), encoded(b, x, y));
+        let d = (0..3).map(|c| (p[c] - q[c]).abs()).fold(0.0, f64::max);
+        worst = worst.max(d);
+        if d > beyond {
+            apart.add(x, y);
+        }
+    }
+    (worst, apart)
+}
+
+/// How far the sorted frame may sit from the order-independent one, in levels:
+/// the depth binning, half floats and quantisation the other gate in this file
+/// bounds at a few levels for two surfaces. The unsorted frame must miss it by
+/// more than [`CONTROL_MIN_DEVIATION`].
+const SORTED_VS_ORDER_INDEPENDENT_LEVELS: f64 = 8.0;
+/// Pixels (as a share of the checked ones, in percent) on which an unsorted draw
+/// must miss the reference by more than a scene's `control_beyond` levels for it
+/// to count as telling sorting from no sorting.
+const MIN_UNSORTED_PERCENT: usize = 1;
+
+/// Two surfaces of different shade or colour in one section, seen through each
+/// other, are drawn in depth order: the sorted frame matches the
+/// order-independent one, and the frame with sorting off does not.
+///
+/// Two scenes, one per translucent mesh: a near red and a far blue stained
+/// glass wall (translucent blocks), and a floating water slab seen from below,
+/// whose dark underside is nearer than its bright top.
+#[test]
+#[ignore = "requires a GPU adapter with FLOAT32_BLENDABLE and the vanilla client.jar"]
+fn translucent_quads_in_one_section_are_drawn_back_to_front() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    assert!(
+        lodestone_render::oit::supported(device),
+        "the device lacks FLOAT32_BLENDABLE, so the order-independent reference cannot run here"
+    );
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!("vanilla assets did not load (banner: {:?})", resources.banner)
+    });
+    let models = atlas.models().expect("vanilla atlas must carry baked models");
+    let ids = Ids {
+        air: first_state_named("minecraft:air"),
+        stone: first_state_named("minecraft:stone"),
+        white: first_state_named("minecraft:white_concrete"),
+        water: first_state_named("minecraft:water"),
+        glass: first_state_named("minecraft:red_stained_glass"),
+        blue_glass: first_state_named("minecraft:blue_stained_glass"),
+    };
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let camera_at = |pitch: f32| Camera {
+        position: EYE,
+        yaw: 0.0,
+        pitch,
+        fov_y_degrees: 70.0,
+        aspect: W as f32 / H as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(RD_CHUNKS as u32, 0),
+    };
+
+    struct Scene {
+        name: &'static str,
+        world: World,
+        camera: Camera,
+        /// Pixels whose ray crosses both surfaces well inside them.
+        px: Vec<(u32, u32)>,
+        /// Levels beyond which an unsorted pixel counts as out of depth order.
+        /// Water's two faces differ only in shade, so its misorder is smaller
+        /// than two glass colours', but still several times the sorted frame's.
+        control_beyond: f64,
+    }
+    let all_pixels = || (0..H).flat_map(|y| (0..W).map(move |x| (x, y)));
+
+    // Scene A: red glass at z = 16, blue glass behind it at z = 24.
+    let mut glass_world = empty_world(&ids);
+    let red: Wall = ([-10, 64, 16], [-1, 69, 16]);
+    let blue: Wall = ([-14, 64, 24], [3, 69, 24]);
+    assert!(glass_world.fill_region(red.0, red.1, ids.glass) > 0);
+    assert!(glass_world.fill_region(blue.0, blue.1, ids.blue_glass) > 0);
+    let glass_camera = camera_at(0.0);
+    let glass_patches = [Patch::front_of(red), Patch::front_of(blue)];
+    let glass_px: Vec<(u32, u32)> = all_pixels()
+        .filter(|&(x, y)| glass_patches.iter().all(|p| p.crossed_by(&glass_camera, x, y)))
+        .filter(|&(x, y)| glass_patches.iter().all(|p| clear_of_block_edges(&glass_camera, x, y, p.z)))
+        .collect();
+
+    // Scene B: a slab of water at y = 70 over the eye, looked at from below.
+    let mut water_world = empty_world(&ids);
+    let slab: Wall = ([-4, 70, 6], [3, 70, 13]);
+    assert!(water_world.fill_region(slab.0, slab.1, ids.water) > 0);
+    let water_camera = camera_at(-40.0);
+    let water_px: Vec<(u32, u32)> = all_pixels()
+        .filter(|&(x, y)| {
+            let dir = ray_dir(&water_camera, x as f32 + 0.5, y as f32 + 0.5);
+            [70.0f32, 70.5].iter().all(|&plane| {
+                if dir.y <= 0.0 {
+                    return false;
+                }
+                let hit = water_camera.position + dir * ((plane - water_camera.position.y) / dir.y);
+                let inside = hit.x >= -4.0 + EDGE_MARGIN
+                    && hit.x <= 4.0 - EDGE_MARGIN
+                    && hit.z >= 6.0 + EDGE_MARGIN
+                    && hit.z <= 14.0 - EDGE_MARGIN;
+                inside && [hit.x, hit.z].iter().all(|v| {
+                    let f = v.rem_euclid(1.0);
+                    f > BLOCK_EDGE_CLEARANCE && f < 1.0 - BLOCK_EDGE_CLEARANCE
+                })
+            })
+        })
+        .collect();
+
+    let scenes = [
+        Scene { name: "translucent blocks (red glass over blue glass)", world: glass_world, camera: glass_camera, px: glass_px, control_beyond: 16.0 },
+        Scene { name: "water (dark underside over bright top)", world: water_world, camera: water_camera, px: water_px, control_beyond: 6.0 },
+    ];
+    for scene in &scenes {
+        assert!(scene.px.len() > 2_000, "{}: only {} checkable pixels", scene.name, scene.px.len());
+        let geometry = mesh_world(&scene.world, models);
+        let mut render = |improved: bool, sorting: bool| {
+            render_frame(device, queue, format, &mut target, &atlas, &geometry, &scene.camera, improved, sorting)
+        };
+        let sorted = render(false, true);
+        let unsorted = render(false, false);
+        let reference = render(true, true);
+        assert!(reference.stats.oit_composites == 1, "{}: no order-independent reference", scene.name);
+        assert!(
+            sorted.stats.translucent_resorts > 0 && unsorted.stats.translucent_resorts == 0,
+            "{}: the sorting switch must decide whether quads re-sort ({} vs {})",
+            scene.name,
+            sorted.stats.translucent_resorts,
+            unsorted.stats.translucent_resorts
+        );
+        let (sorted_worst, _) = frame_distance(&sorted, &reference, &scene.px, f64::MAX);
+        let (unsorted_worst, wrong) =
+            frame_distance(&unsorted, &reference, &scene.px, scene.control_beyond);
+        eprintln!(
+            "  {}: {} px; sorted vs order-independent worst {sorted_worst:.1} levels; sorting off \
+             worst {unsorted_worst:.1}, beyond {}: {wrong}",
+            scene.name,
+            scene.px.len(),
+            scene.control_beyond
+        );
+        assert!(
+            sorted_worst <= SORTED_VS_ORDER_INDEPENDENT_LEVELS,
+            "{}: the sorted frame is {sorted_worst} levels from the depth-order one, beyond \
+             {SORTED_VS_ORDER_INDEPENDENT_LEVELS}",
+            scene.name
+        );
+        assert!(
+            wrong.count * 100 >= scene.px.len() * MIN_UNSORTED_PERCENT,
+            "control failed: with sorting off only {} of {} pixels are more than {} levels out of \
+             depth order ({wrong}); the scene cannot tell sorting from no sorting",
+            wrong.count,
+            scene.px.len(),
+            scene.control_beyond
+        );
+    }
+}
+
+/// The re-sort rule on a moving camera: a section re-sorts once when first
+/// drawn, not while the camera stays in its block, and once more per nearby
+/// section when the camera crosses a block.
+///
+/// The fixture's two translucent meshes are the red wall's section and the one
+/// holding only the blue wall's east end, both nearby, so each crossing is
+/// predicted to rewrite exactly two index spans.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn translucent_quads_resort_when_the_camera_crosses_a_block() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!("vanilla assets did not load (banner: {:?})", resources.banner)
+    });
+    let models = atlas.models().expect("vanilla atlas must carry baked models");
+    let ids = Ids {
+        air: first_state_named("minecraft:air"),
+        stone: first_state_named("minecraft:stone"),
+        white: first_state_named("minecraft:white_concrete"),
+        water: first_state_named("minecraft:water"),
+        glass: first_state_named("minecraft:red_stained_glass"),
+        blue_glass: first_state_named("minecraft:blue_stained_glass"),
+    };
+    let mut world = empty_world(&ids);
+    assert!(world.fill_region([-10, 64, 16], [-1, 69, 16], ids.glass) > 0);
+    assert!(world.fill_region([-14, 64, 24], [3, 69, 24], ids.blue_glass) > 0);
+    let geometry = mesh_world(&world, models);
+    let translucent_meshes = geometry
+        .iter()
+        .filter(|(_, g)| matches!(g, SectionGeometry::Model { translucent_blocks, .. } if translucent_blocks.quad_count() > 1))
+        .count();
+    assert_eq!(translucent_meshes, 2, "fixture: two sections hold translucent blocks");
+
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let mut state = RenderState::new(device, queue, format, W, H, Some(&atlas));
+    suppress_first_person_arm(&mut state);
+    state.set_fog(FogSettings::for_render_distance(SKY_COLOR, RD_CHUNKS as u32), RD_CHUNKS as u32);
+    for (key, mesh) in &geometry {
+        state.upload_section(device, queue, *key, mesh);
+    }
+    state.update_animation(queue, FADE_COMPLETE_TICK);
+    let mut resorts_at = |position: glam::Vec3| -> usize {
+        let camera = Camera {
+            position,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 70.0,
+            aspect: W as f32 / H as f32,
+            near: 0.05,
+            far: Camera::far_for_render_distance(RD_CHUNKS as u32, 0),
+        };
+        let frame = target.acquire().expect("headless acquire");
+        state.render(device, queue, frame.view(), &camera, None, &[]).translucent_resorts
+    };
+    let steps = [
+        ("first frame", EYE, 2),
+        ("same position", EYE, 0),
+        ("moved within the block", EYE + glam::Vec3::new(0.2, 0.0, 0.1), 0),
+        ("crossed one block in x", EYE + glam::Vec3::new(1.2, 0.0, 0.1), 2),
+        ("still in that block", EYE + glam::Vec3::new(1.3, 0.0, 0.1), 0),
+    ];
+    for (name, position, expected) in steps {
+        let got = resorts_at(position);
+        eprintln!("  {name}: {got} resorts (expected {expected})");
+        assert_eq!(got, expected, "{name}");
+    }
 }

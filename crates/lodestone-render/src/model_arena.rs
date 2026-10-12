@@ -274,6 +274,18 @@ impl ModelMeshArena {
         })
     }
 
+    /// Overwrite a resident mesh's index span with `indices` (same count as at
+    /// upload), leaving its vertices in place. This is how a re-sort reorders
+    /// quads without a re-upload of the vertex data.
+    pub fn write_indices(&self, queue: &wgpu::Queue, mesh: &ArenaMesh, indices: &[u32]) {
+        debug_assert_eq!(indices.len() as u32, mesh.index_count);
+        if let Some(block) = self.blocks.get(mesh.block as usize) {
+            let _ = block
+                .indices
+                .write(queue, &mesh.index_span, bytemuck::cast_slice(indices));
+        }
+    }
+
     /// Return a mesh's spans to the free pool (coalescing neighbours). Blocks are
     /// never released: a freed block would invalidate every later block index
     /// still held by a resident section, and the stream-in/stream-out churn of

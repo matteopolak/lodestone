@@ -267,6 +267,13 @@ impl RenderState {
                         translucent: translucent_gpu,
                         translucent_quad_count: translucent_blocks.quad_count(),
                         origin_alloc,
+                        origin,
+                        water_sort: std::cell::RefCell::new(
+                            lodestone_render::QuadSort::from_model_mesh(water),
+                        ),
+                        translucent_sort: std::cell::RefCell::new(
+                            lodestone_render::QuadSort::from_model_mesh(translucent_blocks),
+                        ),
                     },
                 );
             }

@@ -27,15 +27,12 @@
 //!
 //! # Re-sort trigger
 //!
-//! Sorting every section every frame is unaffordable. Vanilla
-//! (the translucency point of view) quantizes the camera to **section granularity per
-//! axis, clamped to `{-1, 0, 1}`** relative to the section being drawn, and only
-//! re-sorts a section when that triple changes. Moving within the same octant
-//! leaves the back-to-front order unchanged (the relative geometry hasn't
-//! flipped), so the sort is skipped. [`SortViewpoint`] reproduces this exactly.
-
-use crate::mesh::Mesh;
-use crate::vertex::PackedVertex;
+//! Sorting every section every frame is unaffordable. The reference
+//! quantizes the camera to **section granularity per axis, clamped to
+//! `{-1, 0, 1}`** relative to the section being drawn, and re-sorts when that
+//! triple changes, or when the camera crosses a block boundary and the section
+//! is nearby or axis-aligned with it. [`SortViewpoint`] and [`should_resort`]
+//! reproduce that.
 
 /// Which pass a quad is drawn in. Ordering of the variants is the draw order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -46,7 +43,7 @@ pub enum RenderLayer {
     /// opaque or fully transparent, so it is still order-independent.
     Cutout,
     /// Partially transparent geometry (water, stained glass): order-dependent,
-    /// drawn back-to-front after being [sorted](TranslucentMesh::update).
+    /// drawn back-to-front after being [sorted](QuadSort::resort).
     Translucent,
 }
 
@@ -151,137 +148,125 @@ impl SortViewpoint {
     pub fn needs_resort(self, previous: Option<SortViewpoint>) -> bool {
         previous != Some(self)
     }
+
+    /// Whether the camera shares a section slab with this section on at least
+    /// one axis.
+    #[must_use]
+    pub fn is_axis_aligned(self) -> bool {
+        self.octant.contains(&0)
+    }
 }
 
-/// A translucent section mesh that can be re-sorted back-to-front on demand.
+/// Whether a section's translucent quads must be re-sorted this frame.
 ///
-/// Holds the vertices plus, per quad, its six indices and centroid (in
-/// section-local space). [`update`](Self::update) checks the [`SortViewpoint`]
-/// and re-sorts only when the octant changed, then [`indices`](Self::indices)
-/// yields the current draw order.
-#[derive(Debug, Clone)]
-pub struct TranslucentMesh {
-    vertices: Vec<PackedVertex>,
-    quads: Vec<QuadRef>,
-    order: Vec<usize>,
+/// The rule is the reference client's: re-sort when the camera's octant
+/// relative to the section changed, or when the camera crossed a block
+/// boundary and the section is either axis-aligned with the camera (one octant
+/// component is `0`) or nearby. A section never sorted always re-sorts.
+#[must_use]
+pub fn should_resort(
     last: Option<SortViewpoint>,
-    section_coord: [i32; 3],
+    now: SortViewpoint,
+    camera_block_changed: bool,
+    nearby: bool,
+) -> bool {
+    now.needs_resort(last) || (camera_block_changed && (now.is_axis_aligned() || nearby))
 }
 
-#[derive(Debug, Clone, Copy)]
-struct QuadRef {
-    indices: [u32; 6],
-    centroid: [f32; 3],
+/// One section's translucent quads and the order they are drawn in.
+///
+/// Holds each quad's six mesh-local indices and its centroid (section-local).
+/// [`resort`](Self::resort) orders the quads farthest-first from a camera and
+/// returns the index buffer to upload in that order. Vertices never move, so
+/// only the index span of the resident mesh is rewritten.
+#[derive(Debug, Clone)]
+pub struct QuadSort {
+    quads: Vec<[u32; 6]>,
+    centroids: Vec<[f32; 3]>,
+    order: Vec<u32>,
+    keys: Vec<f32>,
+    out: Vec<u32>,
+    last: Option<SortViewpoint>,
 }
 
-impl TranslucentMesh {
-    /// Build from a [`Mesh`] whose indices are consecutive 6-index quads (the
-    /// form both [`mesh_simple`](crate::mesh::mesh_simple) and
-    /// [`mesh_greedy`](crate::mesh::mesh_greedy) produce). `section_coord` is the
-    /// section's grid coordinate, used by [`update`](Self::update).
+impl QuadSort {
+    /// Build from consecutive 6-index quads. `position` maps a mesh-local
+    /// vertex index to its section-local position. `None` when there are fewer
+    /// than two quads, since one quad has no order to get wrong.
     #[must_use]
-    pub fn from_mesh(mesh: &Mesh, section_coord: [i32; 3]) -> Self {
-        let mut quads = Vec::with_capacity(mesh.indices.len() / 6);
-        for chunk in mesh.indices.chunks_exact(6) {
-            let idx: [u32; 6] = [chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5]];
-            // The two triangles of a quad share four distinct vertices; the
-            // first triangle's three plus the one unique vertex of the second
-            // cover all four. Averaging the six positions (with the shared two
-            // double-counted) still yields a point on the quad, but we take the
-            // four distinct corners for a true centroid.
-            let mut seen: Vec<u32> = Vec::with_capacity(4);
-            for &i in &idx {
-                if !seen.contains(&i) {
-                    seen.push(i);
+    pub fn new(indices: &[u32], position: impl Fn(u32) -> [f32; 3]) -> Option<Self> {
+        let quads: Vec<[u32; 6]> = indices
+            .chunks_exact(6)
+            .map(|c| [c[0], c[1], c[2], c[3], c[4], c[5]])
+            .collect();
+        if quads.len() < 2 {
+            return None;
+        }
+        let centroids = quads
+            .iter()
+            .map(|idx| {
+                let mut seen = [0u32; 6];
+                let mut n = 0;
+                for &i in idx {
+                    if !seen[..n].contains(&i) {
+                        seen[n] = i;
+                        n += 1;
+                    }
                 }
-            }
-            let mut c = [0.0f32; 3];
-            for &i in &seen {
-                let p = mesh.vertices[i as usize].unpack().pos;
-                c[0] += p[0] as f32;
-                c[1] += p[1] as f32;
-                c[2] += p[2] as f32;
-            }
-            let n = seen.len() as f32;
-            quads.push(QuadRef {
-                indices: idx,
-                centroid: [c[0] / n, c[1] / n, c[2] / n],
-            });
-        }
-        let order = (0..quads.len()).collect();
-        Self {
-            vertices: mesh.vertices.clone(),
+                let mut c = [0.0f32; 3];
+                for &i in &seen[..n] {
+                    let p = position(i);
+                    c[0] += p[0];
+                    c[1] += p[1];
+                    c[2] += p[2];
+                }
+                let n = n as f32;
+                [c[0] / n, c[1] / n, c[2] / n]
+            })
+            .collect();
+        Some(Self {
+            order: (0..quads.len() as u32).collect(),
+            keys: vec![0.0; quads.len()],
+            out: Vec::with_capacity(quads.len() * 6),
             quads,
-            order,
+            centroids,
             last: None,
-            section_coord,
+        })
+    }
+
+    /// Build from a [`ModelMesh`](crate::models::ModelMesh).
+    #[must_use]
+    pub fn from_model_mesh(mesh: &crate::models::ModelMesh) -> Option<Self> {
+        Self::new(&mesh.indices, |i| mesh.vertices[i as usize].position)
+    }
+
+    /// The viewpoint of the last [`resort`](Self::resort), if any.
+    #[must_use]
+    pub fn last_viewpoint(&self) -> Option<SortViewpoint> {
+        self.last
+    }
+
+    /// Order the quads farthest-first from `camera_local` (section-local
+    /// blocks) and return the index buffer in that order. `viewpoint` is stored
+    /// for [`should_resort`].
+    pub fn resort(&mut self, camera_local: [f32; 3], viewpoint: SortViewpoint) -> &[u32] {
+        self.last = Some(viewpoint);
+        for (key, c) in self.keys.iter_mut().zip(&self.centroids) {
+            let d = [
+                c[0] - camera_local[0],
+                c[1] - camera_local[1],
+                c[2] - camera_local[2],
+            ];
+            *key = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
         }
-    }
-
-    /// The vertex buffer (draw-order independent).
-    #[must_use]
-    pub fn vertices(&self) -> &[PackedVertex] {
-        &self.vertices
-    }
-
-    /// The index buffer in the current back-to-front order.
-    #[must_use]
-    pub fn indices(&self) -> Vec<u32> {
-        let mut out = Vec::with_capacity(self.quads.len() * 6);
+        let keys = &self.keys;
+        self.order
+            .sort_by(|&a, &b| keys[b as usize].total_cmp(&keys[a as usize]));
+        self.out.clear();
         for &q in &self.order {
-            out.extend_from_slice(&self.quads[q].indices);
+            self.out.extend_from_slice(&self.quads[q as usize]);
         }
-        out
-    }
-
-    /// Number of quads.
-    #[must_use]
-    pub fn quad_count(&self) -> usize {
-        self.quads.len()
-    }
-
-    /// Re-sort iff the camera crossed into a new octant relative to this
-    /// section. Returns `true` when a re-sort actually happened.
-    ///
-    /// `camera_world` is in block coordinates; it is converted to section-local
-    /// space (subtracting the section origin) for the distance comparison, so
-    /// the ordering is exact regardless of how far the section is from the
-    /// origin.
-    pub fn update(&mut self, camera_world: [f64; 3]) -> bool {
-        let vp = SortViewpoint::new(camera_world, self.section_coord);
-        if !vp.needs_resort(self.last) {
-            return false;
-        }
-        self.last = Some(vp);
-        let origin = [
-            self.section_coord[0] as f64 * SECTION,
-            self.section_coord[1] as f64 * SECTION,
-            self.section_coord[2] as f64 * SECTION,
-        ];
-        let cam_local = [
-            (camera_world[0] - origin[0]) as f32,
-            (camera_world[1] - origin[1]) as f32,
-            (camera_world[2] - origin[2]) as f32,
-        ];
-        self.resort(cam_local);
-        true
-    }
-
-    /// Sort quads farthest-first from `camera_local` (section-local space).
-    /// Exposed for the GPU test, which drives the order directly.
-    pub fn resort(&mut self, camera_local: [f32; 3]) {
-        let dist2 = |c: [f32; 3]| {
-            let dx = c[0] - camera_local[0];
-            let dy = c[1] - camera_local[1];
-            let dz = c[2] - camera_local[2];
-            dx * dx + dy * dy + dz * dz
-        };
-        let quads = &self.quads;
-        self.order.sort_by(|&a, &b| {
-            dist2(quads[b].centroid)
-                .partial_cmp(&dist2(quads[a].centroid))
-                .unwrap_or(core::cmp::Ordering::Equal)
-        });
+        &self.out
     }
 }
 
@@ -324,44 +309,47 @@ mod tests {
     }
 
     #[test]
-    fn first_update_always_resorts_then_stabilises() {
-        let mesh = two_quad_mesh();
-        let mut tm = TranslucentMesh::from_mesh(&mesh, [0, 0, 0]);
-        assert!(tm.update([8.0, 8.0, -5.0]), "first update must sort");
-        assert!(
-            !tm.update([8.0, 9.0, -4.0]),
-            "second update in same octant must not re-sort"
-        );
-        assert!(
-            tm.update([8.0, 8.0, 40.0]),
-            "crossing to the far side must re-sort"
-        );
+    fn rule_resorts_on_octant_change_or_block_move_near_or_aligned() {
+        let inside = SortViewpoint::new([8.0, 8.0, 8.0], [0, 0, 0]);
+        let diagonal = SortViewpoint::new([100.0, 100.0, 100.0], [0, 0, 0]);
+        assert!(should_resort(None, inside, false, false), "never sorted");
+        assert!(!should_resort(Some(inside), inside, false, false));
+        assert!(should_resort(Some(inside), diagonal, false, false), "octant changed");
+        assert!(should_resort(Some(inside), inside, true, false), "axis aligned");
+        assert!(!should_resort(Some(diagonal), diagonal, true, false), "far diagonal");
+        assert!(should_resort(Some(diagonal), diagonal, true, true), "nearby");
+    }
+
+    /// Two quads facing -Z at z=2 and z=14 (quad 0 and quad 1).
+    fn two_quads() -> (Vec<u32>, Vec<[f32; 3]>) {
+        let mut indices = Vec::new();
+        let mut positions = Vec::new();
+        for (qi, z) in [2.0f32, 14.0].into_iter().enumerate() {
+            let base = (qi * 4) as u32;
+            for (x, y) in [(4.0f32, 4.0f32), (12.0, 4.0), (12.0, 12.0), (4.0, 12.0)] {
+                positions.push([x, y, z]);
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+        }
+        (indices, positions)
     }
 
     #[test]
-    fn order_is_back_to_front() {
-        // Two quads at z=2 (near) and z=14 (far-ish); camera at z=-10 sees the
-        // z=2 quad as nearer, so back-to-front puts z=14 first.
-        let mesh = two_quad_mesh();
-        let mut tm = TranslucentMesh::from_mesh(&mesh, [0, 0, 0]);
-        tm.resort([8.0, 8.0, -10.0]);
-        let far_first = tm.order;
-        // Quad 0 is at z=2, quad 1 at z=14 (see two_quad_mesh).
-        assert_eq!(far_first, vec![1, 0], "farther quad (z=14) drawn first");
-
-        // Camera on the far side: order flips.
-        let mut tm = TranslucentMesh::from_mesh(&mesh, [0, 0, 0]);
-        tm.resort([8.0, 8.0, 30.0]);
-        assert_eq!(tm.order, vec![0, 1], "now z=2 quad is farther, drawn first");
+    fn order_is_back_to_front_and_indices_follow() {
+        let (indices, positions) = two_quads();
+        let mut qs = QuadSort::new(&indices, |i| positions[i as usize]).unwrap();
+        let vp = SortViewpoint::new([8.0, 8.0, -10.0], [0, 0, 0]);
+        // z=14 is the farther quad, so its indices (4..8) come first.
+        assert_eq!(qs.resort([8.0, 8.0, -10.0], vp), [4, 5, 6, 6, 7, 4, 0, 1, 2, 2, 3, 0]);
+        assert_eq!(qs.last_viewpoint(), Some(vp));
+        // Camera past the far quad: the order flips.
+        assert_eq!(qs.resort([8.0, 8.0, 30.0], vp), [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]);
     }
 
     #[test]
-    fn indices_follow_the_sorted_order() {
-        let mesh = two_quad_mesh();
-        let mut tm = TranslucentMesh::from_mesh(&mesh, [0, 0, 0]);
-        tm.resort([8.0, 8.0, -10.0]);
-        // order [1,0] → quad 1's six indices (vertices 4..8) then quad 0's.
-        assert_eq!(tm.indices(), vec![4, 5, 6, 6, 7, 4, 0, 1, 2, 2, 3, 0]);
+    fn a_single_quad_needs_no_sort() {
+        let (indices, positions) = two_quads();
+        assert!(QuadSort::new(&indices[..6], |i| positions[i as usize]).is_none());
     }
 
     #[test]
@@ -410,32 +398,5 @@ mod tests {
         );
         // Degenerate empty sprite → Solid (no coverage information).
         assert_eq!(RenderLayer::from_sprite_alpha(&[]), RenderLayer::Solid);
-    }
-
-    /// Two axis-aligned quads facing -Z, one at z=2 and one at z=14, each four
-    /// distinct vertices, six indices. Centroids differ only in z.
-    fn two_quad_mesh() -> Mesh {
-        use crate::section::Face;
-        use crate::vertex::VertexFields;
-
-        let mut mesh = Mesh::default();
-        for (qi, z) in [2u32, 14u32].into_iter().enumerate() {
-            let base = (qi * 4) as u32;
-            for (x, y) in [(4u32, 4u32), (12, 4), (12, 12), (4, 12)] {
-                mesh.vertices.push(PackedVertex::pack(VertexFields {
-                    pos: [x, y, z],
-                    normal: Face::NegZ,
-                    ao: 255,
-                    sky_light: 255,
-                    block_light: 0,
-                    sprite: 0,
-                    u: 0,
-                    v: 0,
-                }));
-            }
-            mesh.indices
-                .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
-        }
-        mesh
     }
 }

@@ -771,7 +771,7 @@ fn real_chunk_section_renders_terrain() {
 /// z=14 (far) — are drawn through the translucent pipeline (alpha blend on,
 /// depth-write off). Drawn back-to-front (blue then red) the centre blends to a
 /// red-dominant colour; drawn front-to-back (red then blue) it blends
-/// blue-dominant. We sort with [`TranslucentMesh`] and assert the readback is
+/// blue-dominant. We sort with [`QuadSort`] and assert the readback is
 /// red-dominant, then render the reversed order and assert it genuinely differs
 /// — so the test fails if the sort is wrong *or* if blending is broken.
 #[test]
@@ -781,7 +781,7 @@ fn translucent_quads_blend_in_sorted_order() {
     use lodestone_render::vertex::VertexFields;
     use lodestone_render::{
         BlockPipeline, Camera, DepthBuffer, Face, GpuAtlas, GpuMesh, Mesh,
-        PackedVertex, RenderLayer, TranslucentMesh,
+        PackedVertex, QuadSort, RenderLayer, SortViewpoint,
     };
 
     let Some(ctx) = ctx() else { return };
@@ -888,12 +888,15 @@ fn translucent_quads_blend_in_sorted_order() {
     };
 
     // Sort back-to-front for the real camera: farther (blue, z=14) drawn first.
-    let mut tm = TranslucentMesh::from_mesh(&mesh, [0, 0, 0]);
-    assert!(
-        tm.update([8.0, 8.0, -10.0]),
-        "camera drives an initial sort"
+    let mut qs = QuadSort::new(&mesh.indices, |i| {
+        let p = mesh.vertices[i as usize].unpack().pos;
+        [p[0] as f32, p[1] as f32, p[2] as f32]
+    })
+    .expect("two quads");
+    let sorted = render_centre(
+        qs.resort([8.0, 8.0, -10.0], SortViewpoint::new([8.0, 8.0, -10.0], [0, 0, 0]))
+            .to_vec(),
     );
-    let sorted = render_centre(tm.indices());
 
     // The naive (submission-order) draw would be front-to-back: red then blue.
     let unsorted = render_centre(vec![0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]);

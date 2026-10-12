@@ -849,6 +849,10 @@ impl RenderState {
                 .iter()
                 .any(|(section, _)| section.water.is_some() || section.translucent.is_some()),
         );
+        if self.translucent_sorting && !oit_split {
+            stats.translucent_resorts =
+                self.resort_translucent(queue, &visible_model_sections, camera.position);
+        }
         #[cfg(feature = "window")]
         let mut world_pass_begins = 0;
         #[cfg(feature = "window")]
