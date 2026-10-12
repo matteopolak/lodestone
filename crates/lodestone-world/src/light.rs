@@ -549,12 +549,8 @@ impl ColumnLight {
     /// Writes the column in the light-update wire format: four section bitsets
     /// (present-sky, present-block, empty-sky, empty-block) followed by the sky
     /// and block arrays for each present section, in ascending section order.
-    pub fn encode(&self, w: &mut Writer) {
-        self.encode_with(BitSetWire::Longs, w);
-    }
-
-    /// [`Self::encode`] with an explicit section-mask encoding.
-    pub fn encode_with(&self, wire: BitSetWire, w: &mut Writer) {
+    /// The bitset framing is release-specific, so the caller names it.
+    pub fn encode(&self, wire: BitSetWire, w: &mut Writer) {
         let (sky_mask, empty_sky) = self.masks(&self.sky);
         let (block_mask, empty_block) = self.masks(&self.block);
         for mask in [&sky_mask, &block_mask, &empty_sky, &empty_block] {
@@ -584,15 +580,7 @@ impl ColumnLight {
     /// Returns [`WorldError`] if a mask flags a section outside the light range,
     /// if an update list does not supply exactly one array per present section,
     /// or if any array is not 2048 bytes.
-    pub fn decode(section_count: usize, r: &mut Reader<'_>) -> Result<Self> {
-        Self::decode_with(section_count, BitSetWire::Longs, r)
-    }
-
-    /// [`Self::decode`] with an explicit section-mask encoding.
-    ///
-    /// # Errors
-    /// As [`Self::decode`].
-    pub fn decode_with(section_count: usize, wire: BitSetWire, r: &mut Reader<'_>) -> Result<Self> {
+    pub fn decode(section_count: usize, wire: BitSetWire, r: &mut Reader<'_>) -> Result<Self> {
         let count = section_count + 2;
         let sky_mask = read_bitset(r, wire, count)?;
         let block_mask = read_bitset(r, wire, count)?;
@@ -909,11 +897,11 @@ mod tests {
     fn wire_round_trip_preserves_every_section() {
         let light = sample_column();
         let mut w = Writer::default();
-        light.encode(&mut w);
+        light.encode(BitSetWire::Longs, &mut w);
         let bytes = w.into_vec();
 
         let mut r = Reader::new(&bytes);
-        let decoded = ColumnLight::decode(4, &mut r).expect("decode");
+        let decoded = ColumnLight::decode(4, BitSetWire::Longs, &mut r).expect("decode");
         assert!(r.is_empty(), "light decode left trailing bytes");
 
         for i in 0..light.light_section_count() {
@@ -957,8 +945,8 @@ mod tests {
         let mut light = ColumnLight::new(1); // 3 light sections
         *light.sky_mut(0) = LightData::Values(NibbleArray::filled(15));
         let mut w = Writer::default();
-        light.encode(&mut w);
-        let decoded = ColumnLight::decode(1, &mut Reader::new(&w.into_vec())).unwrap();
+        light.encode(BitSetWire::Longs, &mut w);
+        let decoded = ColumnLight::decode(1, BitSetWire::Longs, &mut Reader::new(&w.into_vec())).unwrap();
         assert_eq!(*decoded.sky(0), LightData::Uniform(15));
         assert_eq!(decoded.sky(0).heap_bytes(), 0);
     }
@@ -967,8 +955,8 @@ mod tests {
     fn missing_sections_stay_missing() {
         let light = ColumnLight::new(2); // 4 light sections, all Missing
         let mut w = Writer::default();
-        light.encode(&mut w);
-        let decoded = ColumnLight::decode(2, &mut Reader::new(&w.into_vec())).unwrap();
+        light.encode(BitSetWire::Longs, &mut w);
+        let decoded = ColumnLight::decode(2, BitSetWire::Longs, &mut Reader::new(&w.into_vec())).unwrap();
         for i in 0..decoded.light_section_count() {
             assert_eq!(*decoded.sky(i), LightData::Missing);
             assert_eq!(*decoded.block(i), LightData::Missing);
@@ -982,7 +970,7 @@ mod tests {
         w.var_i32(1); // one word
         w.i64(1 << 10);
         // remaining masks + lists never reached
-        let err = ColumnLight::decode(1, &mut Reader::new(&w.into_vec())).unwrap_err();
+        let err = ColumnLight::decode(1, BitSetWire::Longs, &mut Reader::new(&w.into_vec())).unwrap_err();
         assert!(matches!(err, WorldError::LightSectionOutOfRange { .. }));
     }
 
@@ -996,7 +984,7 @@ mod tests {
         write_bitset(&mut w, BitSetWire::Longs, &[false, false, false]); // empty block
         w.var_i32(0); // sky list: empty (mismatch!)
         w.var_i32(0); // block list
-        let err = ColumnLight::decode(1, &mut Reader::new(&w.into_vec())).unwrap_err();
+        let err = ColumnLight::decode(1, BitSetWire::Longs, &mut Reader::new(&w.into_vec())).unwrap_err();
         assert!(matches!(
             err,
             WorldError::LightUpdateCountMismatch {
@@ -1016,7 +1004,7 @@ mod tests {
         w.var_i32(1); // one sky array...
         w.var_i32(100); // ...but only 100 bytes
         w.bytes(&[0u8; 100]);
-        let err = ColumnLight::decode(1, &mut Reader::new(&w.into_vec())).unwrap_err();
+        let err = ColumnLight::decode(1, BitSetWire::Longs, &mut Reader::new(&w.into_vec())).unwrap_err();
         assert!(matches!(err, WorldError::InvalidLightArrayLength(100)));
     }
 }

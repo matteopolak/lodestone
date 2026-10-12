@@ -355,7 +355,7 @@ impl MapChunk {
 
         // The light payload, in exactly the shape `update_light` carries it —
         // and with no `trust_edges` byte ahead of it at this protocol.
-        let light = ColumnLight::decode(shape.section_count, r)?;
+        let light = ColumnLight::decode(shape.section_count, lodestone_world::BitSetWire::Longs, r)?;
 
         report(x, z, shape, fallback);
         Ok(ChunkData {

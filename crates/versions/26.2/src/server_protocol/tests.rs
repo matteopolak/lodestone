@@ -1037,7 +1037,7 @@ mod block_edit_tests {
             let mut update_reader = Reader::new(&payload);
             assert_eq!(update_reader.var_i32().expect("update chunk x"), 0);
             assert_eq!(update_reader.var_i32().expect("update chunk z"), 0);
-            let update = ColumnLight::decode(16, &mut update_reader).expect("decode light update");
+            let update = ColumnLight::decode(16, lodestone_world::BitSetWire::Longs, &mut update_reader).expect("decode light update");
             update_reader.ensure_empty().expect("no update trailing bytes");
             for section in 0..18 {
                 assert_eq!(
@@ -1899,7 +1899,7 @@ mod block_edit_tests {
         let mut reader = Reader::new(&payload);
         assert_eq!(reader.var_i32().expect("chunk x"), 7);
         assert_eq!(reader.var_i32().expect("chunk z"), -3);
-        let decoded = ColumnLight::decode(1, &mut reader).expect("decode light update");
+        let decoded = ColumnLight::decode(1, lodestone_world::BitSetWire::Longs, &mut reader).expect("decode light update");
         reader.ensure_empty().expect("no trailing bytes");
 
         assert_eq!(

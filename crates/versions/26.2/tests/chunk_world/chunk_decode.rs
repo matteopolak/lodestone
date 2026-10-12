@@ -47,7 +47,7 @@ fn encode_packet(x: i32, z: i32, shape: &ChunkShape, bottom_blocks: &[u32]) -> V
 
     // Light: an all-absent column is a valid payload (four empty masks, two
     // empty update lists).
-    ColumnLight::new(shape.section_count).encode(&mut w);
+    ColumnLight::new(shape.section_count).encode(lodestone_world::BitSetWire::Longs, &mut w);
 
     w.into_vec()
 }

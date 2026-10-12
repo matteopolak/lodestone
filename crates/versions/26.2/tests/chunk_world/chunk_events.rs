@@ -47,7 +47,7 @@ fn encode_chunk_packet(x: i32, z: i32, shape: &ChunkShape, bottom_blocks: &[u32]
     w.bytes(&blob);
 
     w.var_i32(0); // block entities
-    ColumnLight::new(shape.section_count).encode(&mut w);
+    ColumnLight::new(shape.section_count).encode(lodestone_world::BitSetWire::Longs, &mut w);
     w.into_vec()
 }
 

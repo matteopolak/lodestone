@@ -104,7 +104,7 @@ fn encode_realistic_packet(x: i32, z: i32, shape: &ChunkShape) -> Vec<u8> {
             }
         }
     }
-    light.encode(&mut w);
+    light.encode(lodestone_world::BitSetWire::Longs, &mut w);
 
     w.into_vec()
 }

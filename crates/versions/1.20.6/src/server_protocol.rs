@@ -354,7 +354,7 @@ fn encode_chunk_body(
         .var_bytes(&sections.into_vec())
         .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
     packet.var_i32(0);
-    light.encode(&mut packet);
+    light.encode(lodestone_world::BitSetWire::Longs, &mut packet);
     Ok(packet.into_vec())
 }
 
@@ -791,7 +791,7 @@ impl ServerProtocol for V766ServerProtocol {
         let mut payload = Writer::default();
         payload.var_i32(cx);
         payload.var_i32(cz);
-        light.encode(&mut payload);
+        light.encode(lodestone_world::BitSetWire::Longs, &mut payload);
         ServerDirective::Send {
             packet_id: play::clientbound::UPDATE_LIGHT,
             payload: payload.into_vec(),

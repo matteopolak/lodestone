@@ -568,7 +568,7 @@ pub(super) fn encode_column_body(
         shape.section_count + 2,
         "light must span the shape's `section_count + 2` light sections"
     );
-    light.encode_with(wire.bit_set_wire(), &mut w);
+    light.encode(wire.bit_set_wire(), &mut w);
 
     w.into_vec()
 }

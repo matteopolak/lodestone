@@ -245,7 +245,7 @@ fn decode_light(
     _ctx: Ctx,
     context: &ChunkDecodeContext<'_>,
 ) -> lodestone_core::Result<ColumnLight> {
-    Ok(ColumnLight::decode_with(context.shape.section_count, bit_set_wire(context.game_data), r)?)
+    Ok(ColumnLight::decode(context.shape.section_count, bit_set_wire(context.game_data), r)?)
 }
 
 /// The `BitSet` framing a release uses on the wire (light masks, chat filter masks).

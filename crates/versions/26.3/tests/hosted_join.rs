@@ -63,3 +63,46 @@ async fn a_26_3_client_joins_the_integrated_server_and_receives_terrain() {
     assert!(errors.is_empty(), "the client logged errors: {errors:#?}");
     server.shutdown().await;
 }
+
+/// The packets a still floor never sends: a mob's `add_entity` and the
+/// standalone `light_update` a placed light source produces. Both have to
+/// decode through the 26.3 adapter, whose bitsets are byte-framed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_26_3_client_decodes_spawned_mobs_and_light_updates() {
+    use lodestone_data::block_states::StateId;
+    use lodestone_model::{BlockPos, ResourceKey, Vec3};
+
+    let errors = ErrorLog::default();
+    let _ = tracing_subscriber::registry().with(errors.clone()).try_init();
+
+    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
+        lodestone_v26_3::server_protocol(),
+        lodestone_server::flat_chunk_source(lodestone_server::world_preset_flat_settings(false)),
+        (-1..=1, -1..=1),
+        (8, 8),
+        1,
+    );
+    let profile = LoginProfile { username: "Hosted263".into(), uuid: uuid::Uuid::new_v4() };
+    let address = ServerAddress { host: "memory".into(), port: 0 };
+    let (handle, _events) =
+        ClientBuilder::new(address, profile, Box::new(lodestone_v26_3::adapter()))
+            .connect_with(client_io);
+    handle.wait_for_spawn(Duration::from_secs(30)).await.expect("never spawned");
+    handle.wait_for_chunks(1, Duration::from_secs(60)).await.expect("no terrain");
+
+    for species in ["minecraft:pig", "minecraft:zombie", "minecraft:chicken"] {
+        let species = species.parse::<ResourceKey>().unwrap();
+        server.spawn_mob(species, Vec3::new(4.5, -60.0, 4.5)).expect("mob simulation");
+    }
+    let glowstone = StateId::from_state_str("minecraft:glowstone").unwrap();
+    server
+        .set_resident_block_state_proposed(BlockPos::new(2, -59, 2), glowstone)
+        .await
+        .expect("glowstone placed");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert!(!handle.is_finished(), "the session ended");
+    let errors = errors.0.lock().unwrap().clone();
+    assert!(errors.is_empty(), "the client logged errors: {errors:#?}");
+    server.shutdown().await;
+}

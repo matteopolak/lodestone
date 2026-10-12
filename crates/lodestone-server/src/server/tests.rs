@@ -820,7 +820,7 @@ impl ServerProtocol for RetainedLifecycleProtocol {
             .retained_light()
             .expect("the production initial consumer must attach retained light first");
         let mut writer = lodestone_core::Writer::default();
-        light.encode(&mut writer);
+        light.encode(lodestone_world::BitSetWire::Longs, &mut writer);
         Ok(ServerDirective::Send {
             packet_id: 1,
             payload: writer.as_slice().to_vec(),
@@ -1119,7 +1119,7 @@ fn retained_dependency_requires_later_centre_admission() {
         .cloned()
         .expect("later centre admission must promote the snapshot");
     let mut expected = lodestone_core::Writer::default();
-    settled.encode(&mut expected);
+    settled.encode(lodestone_world::BitSetWire::Longs, &mut expected);
     assert_eq!(payload, expected.as_slice());
     assert_eq!(
         computes.load(Ordering::Acquire),

@@ -1126,7 +1126,7 @@ fn encode_recipe_book_add_body(wire: Wire, entries: &[ServerRecipeBookEntry], re
 
 /// Body of the update-advancements packet (see the trait method for the
 /// field-by-field wire notes).
-fn encode_update_advancements_body(update: &AdvancementUpdate) -> Vec<u8> {
+fn encode_update_advancements_body(wire: Wire, update: &AdvancementUpdate) -> Vec<u8> {
     let mut w = Writer::default();
     w.bool(update.reset);
     w.var_i32(i32::try_from(update.added.len()).unwrap_or(i32::MAX));
@@ -1153,6 +1153,12 @@ fn encode_update_advancements_body(update: &AdvancementUpdate) -> Vec<u8> {
             }
         }
         w.bool(advancement.sends_telemetry_event);
+        // 26.3 moved the tree position out of the display and onto each added
+        // entry. With no display there is no node to place, so the origin.
+        if wire.is_latest() {
+            w.f32(0.0);
+            w.f32(0.0);
+        }
     }
     w.var_i32(i32::try_from(update.removed.len()).unwrap_or(i32::MAX));
     for id in &update.removed {
@@ -3972,7 +3978,7 @@ impl ServerProtocol for V770ServerProtocol {
         let mut w = Writer::default();
         w.var_i32(cx);
         w.var_i32(cz);
-        light.encode(&mut w);
+        light.encode(self.wire.bit_set_wire(), &mut w);
         ServerDirective::Send {
             packet_id: play::clientbound::LIGHT_UPDATE,
             payload: w.as_slice().to_vec(),
@@ -6061,7 +6067,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn encode_update_advancements(&self, update: &AdvancementUpdate) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::UPDATE_ADVANCEMENTS,
-            payload: encode_update_advancements_body(update),
+            payload: encode_update_advancements_body(self.wire, update),
         }
     }
 
