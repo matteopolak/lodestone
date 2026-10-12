@@ -50,9 +50,7 @@ use lodestone_v26_2::packet_ids::play;
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-#[path = "../common/mod.rs"]
-mod common;
-use common::unique_username;
+use lodestone_testsupport::unique_username;
 
 /// A `WorldSink` that discards chunk state. This gate measures *delivery
 /// cadence*, not decoded contents, so the adapter's world-application seam is

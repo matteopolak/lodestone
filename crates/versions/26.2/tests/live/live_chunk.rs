@@ -53,9 +53,7 @@ use lodestone_world::{
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-#[path = "../common/mod.rs"]
-mod common;
-use common::unique_username;
+use lodestone_testsupport::unique_username;
 
 #[derive(Default, Debug, Clone, Copy)]
 struct PaletteStats {

@@ -93,9 +93,7 @@ use lodestone_world::{
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-#[path = "../common/mod.rs"]
-mod common;
-use common::unique_username;
+use lodestone_testsupport::unique_username;
 
 /// The normal-terrain 26.2 oracle: game on `:25580`.
 const GAME_ADDR: &str = "127.0.0.1:25580";

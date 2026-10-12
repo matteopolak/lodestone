@@ -46,9 +46,7 @@ use lodestone_world::World;
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-#[path = "../common/mod.rs"]
-mod common;
-use common::unique_username;
+use lodestone_testsupport::unique_username;
 
 /// A tiny RCON client run inside the server container (the RCON port is not
 /// published to the host, so we reach it via `container exec`). Reads password

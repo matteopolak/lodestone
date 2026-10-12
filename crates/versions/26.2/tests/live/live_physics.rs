@@ -78,9 +78,7 @@ use lodestone_v26_2::packet_ids::play;
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-#[path = "../common/mod.rs"]
-mod common;
-use common::unique_username;
+use lodestone_testsupport::unique_username;
 
 /// A `WorldSink` that discards chunk state. The physics gate never inspects
 /// decoded chunks (it walks on a synthetic flat ground), so the adapter's

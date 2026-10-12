@@ -65,9 +65,7 @@ use lodestone_world::World;
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-#[path = "../common/mod.rs"]
-mod common;
-use common::unique_username;
+use lodestone_testsupport::unique_username;
 
 /// The flat creative 26.2 oracle: game on `:25570`, RCON on `:25571`.
 const GAME_ADDR: &str = "127.0.0.1:25570";
