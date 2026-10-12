@@ -197,6 +197,10 @@ pub struct ModelVertex {
     /// new one. It still costs nothing against the render crate's four-bind-
     /// group floor for the same reason [`Self::tint_rgb_override`] does not:
     /// a vertex attribute, not a bind group.
+    ///
+    /// Also the surface kind: [`FLUID_SURFACE`] marks a water quad, which the
+    /// model shader shades as a smooth mipmapped fluid (default water colour,
+    /// no cutout test) so water and translucent blocks share one sorted mesh.
     pub cutout_bypass: u8,
     /// A **real, position-resolved** biome tint colour, or an untinted/inert
     /// sentinel — see [`Self::tint_rgb_override`]. `tint` above still indexes
@@ -323,6 +327,10 @@ impl ModelVertex {
         }
     }
 }
+
+/// [`ModelVertex::cutout_bypass`] value of a water vertex. The model shader
+/// reads the same byte as `FLUID_SURFACE`.
+pub const FLUID_SURFACE: u8 = 2;
 
 /// A CPU mesh of arbitrary model geometry.
 #[derive(Debug, Default, Clone)]
@@ -1717,12 +1725,10 @@ pub trait FluidSectionView {
     }
 
     /// The **real**, position-resolved water colour at `(x, y, z)`, or `None`
-    /// to fall back to `fluid.wgsl`'s hardcoded `#3F76E4` default — exactly
+    /// to fall back to the model shader's hardcoded `#3F76E4` water default — exactly
     /// today's behaviour. Only ever consulted for a water cell (lava is never
     /// tinted); see [`ModelSectionView::biome_tint_at`]'s doc for why this is
-    /// a vertex override rather than a palette lookup — the fluid pipeline
-    /// has no palette bind group at all (`ModelPipeline::for_fluid`), so it
-    /// was always going to need its own colour path.
+    /// a vertex override rather than a palette lookup.
     ///
     /// Defaults to `None`, so every existing view (headless tests, a demo
     /// world with no biome grid) keeps rendering the exact fixed water colour
@@ -2115,6 +2121,9 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                 }
             }
         }
+    }
+    for vertex in &mut out.water.vertices {
+        vertex.cutout_bypass = FLUID_SURFACE;
     }
     out
 }

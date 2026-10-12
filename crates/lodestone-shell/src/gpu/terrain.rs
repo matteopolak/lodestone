@@ -47,16 +47,16 @@ pub(super) struct ModelSectionGpu {
     /// Opaque block geometry (with lava merged in), if any.
     pub(super) mesh: Option<ResidentMesh>,
     pub(super) quad_count: usize,
-    /// Translucent water surface geometry for this section, if any. Drawn on the
-    /// fluid pass after all opaque geometry so the sea floor shows through.
-    pub(super) water: Option<ResidentMesh>,
-    pub(super) water_quad_count: usize,
-    /// Translucent **block** geometry for this section, if any — stained
-    /// glass, ice, the nether portal swirl, anything `BlockModels::layer`
-    /// classifies `Translucent` from real per-texel alpha. Drawn on its own
-    /// pass (`ModelRenderer::translucent_pipeline`), after opaque geometry and
-    /// alongside water, each independently sorted back-to-front.
+    /// The section's translucent geometry, if any: water quads (marked
+    /// `FLUID_SURFACE`) and translucent **block** quads (stained glass, ice,
+    /// the nether portal swirl, anything `BlockModels::layer` classifies
+    /// `Translucent` from real per-texel alpha) in one mesh, so one
+    /// back-to-front sort orders both kinds against each other. Drawn after
+    /// all opaque geometry through `ModelRenderer::translucent_pipeline`.
     pub(super) translucent: Option<ResidentMesh>,
+    /// Quads of [`Self::translucent`] that are water.
+    pub(super) water_quad_count: usize,
+    /// Quads of [`Self::translucent`] that are blocks.
     pub(super) translucent_quad_count: usize,
     /// This section's slot in [`ModelRenderer::origin_arena`], written once at
     /// upload. Freed (via [`SectionOriginArena::free`]) when the section is
@@ -64,10 +64,9 @@ pub(super) struct ModelSectionGpu {
     pub(super) origin_alloc: ArenaAllocation,
     /// The section's world origin in blocks.
     pub(super) origin: [i32; 3],
-    /// Back-to-front order state for [`Self::water`] and [`Self::translucent`];
-    /// `None` when the mesh has fewer than two quads. Behind a `RefCell`
-    /// because the frame re-sorts through a shared borrow.
-    pub(super) water_sort: std::cell::RefCell<Option<lodestone_render::QuadSort>>,
+    /// Back-to-front order state for [`Self::translucent`]; `None` when the
+    /// mesh has fewer than two quads. Behind a `RefCell` because the frame
+    /// re-sorts through a shared borrow.
     pub(super) translucent_sort: std::cell::RefCell<Option<lodestone_render::QuadSort>>,
 }
 
@@ -309,7 +308,6 @@ impl SectionOriginArena {
 #[derive(Debug)]
 pub(super) struct TerrainPipelines {
     pub(super) opaque: ModelPipeline,
-    pub(super) water: ModelPipeline,
     pub(super) translucent: ModelPipeline,
 }
 
@@ -323,7 +321,6 @@ impl TerrainPipelines {
             opaque: ModelPipeline::for_terrain(
                 device, format, lodestone_render::RenderLayer::Solid, stride,
             )?,
-            water: ModelPipeline::for_terrain_fluid(device, format, stride)?,
             translucent: ModelPipeline::for_terrain(
                 device, format, lodestone_render::RenderLayer::Translucent, stride,
             )?,
@@ -356,23 +353,13 @@ pub(super) struct ModelRenderer {
     /// Combined map diagnostic for both GPU switches. Never selected by the
     /// normal renderer.
     pub(super) map_surface_no_cull_no_depth_pipeline: ModelPipeline,
-    /// The translucent fluid pipeline (no cutout discard, water tint, alpha
-    /// blend, depth-test on / depth-write off). Shares the model camera and
-    /// atlas bind groups.
-    pub(super) water_pipeline: ModelPipeline,
-    /// The translucent **block** pipeline
-    /// (`ModelPipeline::for_layer(.., RenderLayer::Translucent)`): the same
-    /// `MODEL_WGSL` shader and palette/tint machinery as [`Self::pipeline`]
-    /// (the opaque/cutout pass), just built with alpha blending, no depth
-    /// write and no back-face culling. Distinct from [`Self::water_pipeline`]
-    /// on purpose — the fluid shader has no palette bind group and always
-    /// applies the water tint to an untinted quad, which is wrong for a
-    /// palette-tinted translucent block. Shares the opaque pass's camera,
-    /// atlas, palette and animation bind groups (their bind-group *layouts*
-    /// are built identically — both pipelines come from the same
-    /// `ModelPipeline::build` with `with_palette: true` — so the objects are
-    /// interchangeable across the two pipelines, exactly like
-    /// `water_pipeline` already reuses `atlas_bind_group`).
+    /// The translucent pipeline
+    /// (`ModelPipeline::for_layer(.., RenderLayer::Translucent)`) for water and
+    /// translucent blocks alike: the same `MODEL_WGSL` shader as
+    /// [`Self::pipeline`], built with alpha blending and depth write; water
+    /// vertices carry `FLUID_SURFACE` and take the shader's fluid shading.
+    /// Shares the opaque pass's camera, atlas, palette and animation bind
+    /// groups (identical layouts, so the objects are interchangeable).
     pub(super) translucent_pipeline: ModelPipeline,
     pub(super) atlas: GpuAtlas,
     pub(super) atlas_bind_group: wgpu::BindGroup,
@@ -397,11 +384,8 @@ pub(super) struct ModelRenderer {
     /// slot 0 static). Rewritten each frame from the game tick; both shaders
     /// sample it to offset an animated quad's V into its current frame.
     pub(super) anim_buffer: wgpu::Buffer,
-    /// The animation bind group for the opaque model pipeline (its group 3).
+    /// The animation bind group (group 3) over [`Self::anim_buffer`].
     pub(super) anim_bind_group: wgpu::BindGroup,
-    /// The animation bind group for the fluid pipeline (its group 2). Wraps the
-    /// same [`Self::anim_buffer`]; only the group index differs.
-    pub(super) water_anim_bind_group: wgpu::BindGroup,
     /// The mining-crack overlay pipeline (alpha-blended, depth-test only, pulled
     /// toward the camera by a negative depth bias so the `destroy_stage` texels
     /// win the depth test against the coplanar block face without z-fighting).

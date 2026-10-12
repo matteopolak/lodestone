@@ -4,7 +4,7 @@
 //! them separately because fixing either alone leaves the player's complaint
 //! partly standing:
 //!
-//! 1. **The entity shader applied no fog.** Only the model and fluid shaders
+//! 1. **The entity shader applied no fog.** Only the model shader
 //!    read the fog block, so a mob at any depth (or at the render-distance edge)
 //!    rendered at full contrast against terrain that had already faded. When the
 //!    eye is submerged the shell swaps in a short, biome-coloured water fog;
@@ -455,9 +455,10 @@ fn disabled_fog_leaves_the_two_depths_identical() {
 
 // ---------------------------------------------------------------- draw order
 
+use lodestone_render::models::FLUID_SURFACE;
 use lodestone_render::{
-    GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex, model_anim_buffer,
-    model_shared_camera_buffer_with_fog, section_origin_buffer,
+    GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex, RenderLayer, model_anim_buffer,
+    model_palette_buffer, model_shared_camera_buffer_with_fog, section_origin_buffer,
 };
 
 /// Where the water plane sits between the eye and the mob.
@@ -468,7 +469,7 @@ const WATER_Z: f32 = -1.0;
 /// over the already-written mob, so the mob's pixels pick up the water's blue.
 ///
 /// Predicted value when the mob is drawn **after** the water (the shipped bug):
-/// the fluid pipeline has `depth_write_enabled: false`, so the water leaves
+/// the translucent pipeline has `depth_write_enabled: false`, so the water leaves
 /// nothing in the depth buffer; the mob then passes the depth test and writes
 /// **opaque** colour straight over the surface. Its pixels are then exactly the
 /// no-water rendering — the mob is painted on top of the water however deep it
@@ -487,7 +488,7 @@ fn plane_mesh(z: f32, half: f32, y_centre: f32, tint: u8) -> ModelMesh {
         light: 15 << 4,
         tint,
         anim: 0,
-        cutout_bypass: 0,
+        cutout_bypass: FLUID_SURFACE,
         tint_rgb_override: [0, 0, 0, 0],
     };
     ModelMesh {
@@ -498,7 +499,7 @@ fn plane_mesh(z: f32, half: f32, y_centre: f32, tint: u8) -> ModelMesh {
             v(-half, y_centre + half),
         ],
         // Wound to face a camera looking down +z (x runs leftward on screen), so the
-        // fluid pipeline's back-face culling keeps the quad.
+        // translucent pipeline's back-face culling keeps the quad.
         indices: vec![0, 2, 1, 0, 3, 2],
     }
 }
@@ -545,14 +546,16 @@ fn mob_blue_with_water(gpu: &Gpu, entities_first: bool, with_water: bool) -> f32
         }
     }
 
-    // --- the water plane (the real fluid pipeline: alpha blend, no depth write)
-    let fluid = ModelPipeline::for_fluid(device, FORMAT);
+    // --- the water plane (the translucent model pipeline: alpha blend, no depth write)
+    let fluid = ModelPipeline::for_layer(device, FORMAT, RenderLayer::Translucent);
     // A half-transparent white texel; the shader's own water tint (#3F76E4)
     // supplies the colour, exactly as it does for real water.
     let water_atlas = GpuAtlas::from_rgba(device, queue, 4, 4, &[255, 255, 255, 140].repeat(16), &[]);
     let water_atlas_bg = fluid.atlas_bind_group(device, &water_atlas);
     let water_anim = model_anim_buffer(device, &[]);
     let water_anim_bg = fluid.anim_bind_group(device, &water_anim);
+    let water_palette = model_palette_buffer(device, &[[1.0; 4]; 256]);
+    let water_palette_bg = fluid.palette_bind_group(device, &water_palette);
     let water_cam = model_shared_camera_buffer_with_fog(
         device,
         camera.view_projection().to_cols_array_2d(),
@@ -610,7 +613,8 @@ fn mob_blue_with_water(gpu: &Gpu, entities_first: bool, with_water: bool) -> f32
             pass.set_pipeline(&fluid.pipeline);
             pass.set_bind_group(0, &water_cam_bg, &[0]);
             pass.set_bind_group(1, &water_atlas_bg, &[]);
-            pass.set_bind_group(2, &water_anim_bg, &[]);
+            pass.set_bind_group(2, &water_palette_bg, &[]);
+            pass.set_bind_group(3, &water_anim_bg, &[]);
             pass.set_vertex_buffer(0, water_gpu.vertices.slice(..));
             pass.set_index_buffer(water_gpu.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..water_gpu.index_count, 0, 0..1);
@@ -655,7 +659,7 @@ fn mob_blue_with_water(gpu: &Gpu, entities_first: bool, with_water: bool) -> f32
 ///
 /// # Both predictions, and why a naive assertion would pass under the bug
 ///
-/// The fluid pipeline runs with `depth_write_enabled: false`. Drawing the mob
+/// The translucent pipeline runs with `depth_write_enabled: false`. Drawing the mob
 /// after it therefore reproduces the **no-water render exactly**: the mob passes
 /// the depth test (nothing wrote depth in front of it) and writes opaque colour
 /// over the surface. So:
@@ -686,7 +690,7 @@ fn water_surface_covers_a_mob_behind_it() {
     println!("required shift from the reference  >= {MIN_WATER_BLUE_SHIFT:.1}");
     println!(
         "negative control (run above, not described): drawing the mob after the water — the \
-         shipped order — reproduces the no-water reference exactly, because the fluid pipeline \
+         shipped order — reproduces the no-water reference exactly, because the translucent pipeline \
          writes no depth and the opaque mob simply overwrites the surface."
     );
 

@@ -29,7 +29,7 @@
 //!
 //! This renderer used to project **forward** `[0,1]`, and under that projection
 //! the same inset was worth 210 ULP at 2 blocks, 4 at 16, 1 at 32, **0 at 64 and
-//! -1 at 128** — it collapsed and then inverted. `shaders/fluid.wgsl` carried a
+//! -1 at 128** — it collapsed and then inverted. the fluid shader carried a
 //! constant `2^-21` window-depth nudge to pay that back, and this file was its
 //! gate.
 //!

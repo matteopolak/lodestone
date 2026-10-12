@@ -54,12 +54,11 @@
 //!
 //! # How to change it
 //!
-//! The three WGSL copies (`shaders/model.wgsl`, `shaders/entity.wgsl`,
-//! `shaders/fluid.wgsl`) duplicate these functions verbatim — WGSL has no
-//! `#include` and this crate's convention is to duplicate small helpers (see
-//! `srgb_to_linear`, already three-way duplicated). **Change all three plus this
-//! file together**, and note that `shaders/block.wgsl` is the demo-only packed
-//! path with its own hand-kept copy of the same terms, not one of these three.
+//! The WGSL copies (`shaders/model.wgsl`, `shaders/entity.wgsl`) duplicate
+//! these functions verbatim — WGSL has no `#include` and this crate's
+//! convention is to duplicate small helpers. **Change both plus this file
+//! together**, and note that `shaders/block.wgsl` is the demo-only packed path
+//! with its own hand-kept copy of the same terms, not one of these.
 //!
 //! The gates must *not* call into this module: per `CLAUDE.md`, an expected value
 //! has to originate outside the code under test, so each one writes

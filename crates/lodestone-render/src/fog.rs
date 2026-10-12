@@ -523,7 +523,7 @@ pub fn fog_factor(distance: f32, start: f32, end: f32) -> f32 {
 /// `max(length(pos.xz), abs(pos.y))`). This is the CPU twin
 /// of every fogged shader's `fog_amount`, so the headless gates describe the
 /// shader rather than a separate model of it — see `model.wgsl`,
-/// `entity.wgsl`, `fluid.wgsl`.
+/// `entity.wgsl`.
 ///
 /// `eye`/`world` are both world-space; `world - eye` is the fragment-relative
 /// vector each metric is measured over, exactly as the shaders compute it.
@@ -544,7 +544,7 @@ pub fn total_fog_factor(settings: &FogSettings, eye: [f32; 3], world: [f32; 3]) 
 ///
 /// This is the CPU twin of `sky_disc.wgsl`'s fragment stage, which mixes its two
 /// linear-light vertex colours directly. It is **not** the twin of the world
-/// shaders any more: `model.wgsl`, `fluid.wgsl` and `entity.wgsl` mix in gamma
+/// shaders any more: `model.wgsl` and `entity.wgsl` mix in gamma
 /// space, per vanilla — use [`apply_fog_gamma`] for those.
 #[must_use]
 pub fn apply_fog(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f32; 3] {
@@ -557,7 +557,7 @@ pub fn apply_fog(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f32; 3] 
 
 /// Blend a **linear** fragment colour toward a **linear** `fog_color` by
 /// `factor` the way vanilla does — in gamma space — and return linear light.
-/// The CPU twin of the fog mix in `model.wgsl`, `fluid.wgsl` and `entity.wgsl`.
+/// The CPU twin of the fog mix in `model.wgsl` and `entity.wgsl`.
 ///
 /// # Why gamma, and how much it mattered
 ///
@@ -627,7 +627,7 @@ pub struct FogUniform {
     /// `crate::light::OVERWORLD_AMBIENT_LIGHT` and `rgb24_to_channels`. `w` =
     /// this frame's clock, in the same seconds a section's `build_time` uses
     /// (see `model_pipeline::section_visibility`) — the only consumer of this
-    /// lane is the per-section fade-in mix in `model.wgsl`/`fluid.wgsl`, which
+    /// lane is the per-section fade-in mix in `model.wgsl`, which
     /// never reads `rgb` from it. Set by callers after [`new`](Self::new),
     /// exactly like `end_enabled`'s sky-darken lane — `new` has no dimension
     /// or clock to ask, so it defaults `rgb` to the overworld's own value (see
@@ -725,7 +725,7 @@ mod ramp_gate {
     }
 
     /// What the shaders measure: `length(world - eye)`. Spherical, per
-    /// `model.wgsl`/`entity.wgsl`/`fluid.wgsl`'s `fog_amount(length(in.world -
+    /// `model.wgsl`/`entity.wgsl`'s `fog_amount(length(in.world -
     /// camera.fog_eye.xyz))`.
     fn spherical(eye: [f32; 3], p: [f32; 3]) -> f32 {
         let d = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];

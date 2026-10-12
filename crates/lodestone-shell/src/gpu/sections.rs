@@ -158,9 +158,7 @@ impl RenderState {
             } => self.model.as_ref().is_some_and(|model| {
                 let resident = model.sections.get(&key);
                 (opaque.indices.is_empty() || resident.is_some_and(|section| section.mesh.is_some()))
-                    && (water.indices.is_empty()
-                        || resident.is_some_and(|section| section.water.is_some()))
-                    && (translucent_blocks.indices.is_empty()
+                    && ((water.indices.is_empty() && translucent_blocks.indices.is_empty())
                         || resident.is_some_and(|section| section.translucent.is_some()))
             }),
         };
@@ -209,17 +207,26 @@ impl RenderState {
                 let origin = key.origin();
                 let origin_f = [origin[0] as f32, origin[1] as f32, origin[2] as f32];
                 let opaque_gpu = upload_resident(&mut model.mesh_arena, device, queue, opaque);
-                let water_gpu = upload_resident(&mut model.mesh_arena, device, queue, water);
+                // Water and translucent blocks are one mesh, so they sort and
+                // draw together.
+                let translucent_mesh = if water.indices.is_empty() {
+                    std::borrow::Cow::Borrowed(translucent_blocks)
+                } else if translucent_blocks.indices.is_empty() {
+                    std::borrow::Cow::Borrowed(water)
+                } else {
+                    let mut merged = water.clone();
+                    merged.merge(translucent_blocks);
+                    std::borrow::Cow::Owned(merged)
+                };
                 let translucent_gpu =
-                    upload_resident(&mut model.mesh_arena, device, queue, translucent_blocks);
+                    upload_resident(&mut model.mesh_arena, device, queue, &translucent_mesh);
                 // Replacements reuse the origin slot but release the old geometry spans.
                 let existing = model.sections.remove(&key);
                 if let Some(old) = &existing {
                     free_resident(&mut model.mesh_arena, old.mesh.as_ref());
-                    free_resident(&mut model.mesh_arena, old.water.as_ref());
                     free_resident(&mut model.mesh_arena, old.translucent.as_ref());
                 }
-                if opaque_gpu.is_none() && water_gpu.is_none() && translucent_gpu.is_none() {
+                if opaque_gpu.is_none() && translucent_gpu.is_none() {
                     if let Some(old) = existing {
                         model.origin_arena.free(old.origin_alloc);
                     }
@@ -245,7 +252,6 @@ impl RenderState {
                             Some((alloc, _offset)) => alloc,
                             None => {
                                 free_resident(&mut model.mesh_arena, opaque_gpu.as_ref());
-                                free_resident(&mut model.mesh_arena, water_gpu.as_ref());
                                 free_resident(&mut model.mesh_arena, translucent_gpu.as_ref());
                                 tracing::warn!(
                                     "section-origin arena exhausted at {key:?}; \
@@ -262,17 +268,13 @@ impl RenderState {
                     ModelSectionGpu {
                         mesh: opaque_gpu,
                         quad_count: opaque.quad_count(),
-                        water: water_gpu,
                         water_quad_count: water.quad_count(),
                         translucent: translucent_gpu,
                         translucent_quad_count: translucent_blocks.quad_count(),
                         origin_alloc,
                         origin,
-                        water_sort: std::cell::RefCell::new(
-                            lodestone_render::QuadSort::from_model_mesh(water),
-                        ),
                         translucent_sort: std::cell::RefCell::new(
-                            lodestone_render::QuadSort::from_model_mesh(translucent_blocks),
+                            lodestone_render::QuadSort::from_model_mesh(&translucent_mesh),
                         ),
                     },
                 );
@@ -363,7 +365,6 @@ impl RenderState {
             model.seen.remove(key);
             if let Some(old) = model.sections.remove(key) {
                 free_resident(&mut model.mesh_arena, old.mesh.as_ref());
-                free_resident(&mut model.mesh_arena, old.water.as_ref());
                 free_resident(&mut model.mesh_arena, old.translucent.as_ref());
                 model.origin_arena.free(old.origin_alloc);
             }
@@ -475,7 +476,7 @@ impl RenderState {
             let dedicated: u64 = m
                 .sections
                 .values()
-                .flat_map(|s| [s.mesh.as_ref(), s.water.as_ref(), s.translucent.as_ref()])
+                .flat_map(|s| [s.mesh.as_ref(), s.translucent.as_ref()])
                 .flatten()
                 .map(dedicated_bytes)
                 .sum();

@@ -158,8 +158,8 @@ pub enum SectionGeometry {
     /// Packed full-cube geometry (demo world).
     Packed(Mesh),
     /// Wide baked-model geometry (live vanilla world): opaque terrain (blocks +
-    /// lava, drawn on the opaque model pass) plus translucent water (drawn on the
-    /// fluid pass after opaque geometry, so the sea floor shows through).
+    /// lava, drawn on the opaque model pass) plus translucent water (drawn with
+    /// the translucent blocks after opaque geometry, so the sea floor shows through).
     Model {
         /// Opaque block geometry, with lava merged in.
         opaque: ModelMesh,
@@ -168,12 +168,8 @@ pub enum SectionGeometry {
         /// Translucent **block** geometry — stained glass, ice, the nether
         /// portal swirl and anything else `BlockModels::layer` classifies as
         /// [`RenderLayer::Translucent`](lodestone_render::RenderLayer::Translucent)
-        /// from real per-texel alpha. Kept separate from `water` (a different
-        /// pipeline: `FLUID_WGSL` tints untinted quads with the water colour
-        /// and carries no palette bind group, wrong for a palette-tinted
-        /// translucent block) and drawn through its own
-        /// `ModelPipeline::for_layer(.., RenderLayer::Translucent)` pass — see
-        /// `gpu/frame.rs`.
+        /// from real per-texel alpha. Uploaded together with `water` as one
+        /// mesh so the two sort against each other — see `gpu/frame.rs`.
         translucent_blocks: ModelMesh,
         /// This section's face connectivity for the occlusion graph (U3), from
         /// [`snapshot_visibility`].
@@ -444,7 +440,7 @@ fn mesh_one_measured(
             );
             // Lava is opaque and full-bright: fold it into the opaque pass. Water
             // and translucent blocks (glass, ice, the nether portal swirl) are
-            // translucent and drawn separately, each through its own pipeline.
+            // translucent and drawn together after the opaque pass.
             let fluids = measurement::phase(measure, &mut passes.fluids, || {
                 let fluids = fluid::mesh_snapshot_fluids_with_light(&snap, models, blend_radius, &light);
                 opaque.merge(&fluids.lava);

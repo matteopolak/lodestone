@@ -18,7 +18,7 @@
 //!    coverage, blends premultiplied over the scene.
 //!
 //! The math is in `shaders/oit_common.wgsl`; the per-surface stages are
-//! `shaders/oit_stages.wgsl`, appended to the model and fluid shaders, and the
+//! `shaders/oit_stages.wgsl`, appended to the model shader, and the
 //! resolve is `shaders/oit_composite.wgsl`.
 //!
 //! # How to change it
@@ -76,13 +76,13 @@ const MODEL_OIT_WGSL: &str = concat!(
     "\n",
     include_str!("shaders/oit_stages.wgsl"),
 );
-const FLUID_OIT_WGSL: &str = concat!(
-    include_str!("shaders/fluid.wgsl"),
-    "\n",
-    include_str!("shaders/oit_common.wgsl"),
-    "\n",
-    include_str!("shaders/oit_stages.wgsl"),
-);
+
+/// The model shader's override choosing which surface kind of a mixed mesh a
+/// pipeline draws, and its two non-default values.
+const SURFACE_FILTER_OVERRIDE: &str = "surface_filter";
+const SURFACE_FILTER_BLOCKS: f64 = 1.0;
+const SURFACE_FILTER_FLUID: f64 = 2.0;
+
 const COMPOSITE_WGSL: &str = concat!(
     include_str!("shaders/oit_common.wgsl"),
     "\n",
@@ -188,8 +188,7 @@ struct Surface<'a> {
     label: &'static str,
     source: &'static str,
     template: &'a ModelPipeline,
-    /// The model shader's pipeline-overridable constants; the fluid shader has
-    /// none.
+    /// The model shader's pipeline-overridable constants.
     constants: Vec<(&'static str, f64)>,
     /// Water keeps the strict comparison so coplanar faces cannot both
     /// contribute; blocks admit ties.
@@ -292,16 +291,15 @@ impl Surface<'_> {
 }
 
 impl OitPipelines {
-    /// Build every pipeline. `block` and `fluid` are the ordinary translucent
-    /// pipelines whose atlas, palette and animation layouts the stages reuse;
+    /// Build every pipeline. `translucent` is the ordinary translucent
+    /// pipeline whose atlas, palette and animation layouts the stages reuse;
     /// `origin_stride` is the terrain origin stream's stride, or `None` for the
     /// legacy dynamic-offset origin.
     #[must_use]
     pub fn new(
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
-        block: &ModelPipeline,
-        fluid: &ModelPipeline,
+        translucent: &ModelPipeline,
         origin_stride: Option<wgpu::BufferAddress>,
     ) -> Self {
         let transmittance_camera_layout = camera_layout(device, "lodestone-oit-bounds-camera", &[2]);
@@ -312,25 +310,30 @@ impl OitPipelines {
             entries: &[texture_entry(3), texture_entry(4), texture_entry(5)],
         });
         let layouts = [
-            &block.camera_layout,
+            &translucent.camera_layout,
             &transmittance_camera_layout,
             &accumulate_camera_layout,
         ];
         let block_surface = Surface {
             label: "lodestone-oit-block",
             source: MODEL_OIT_WGSL,
-            template: block,
+            template: translucent,
             constants: vec![
                 (ALPHA_CUTOUT_OVERRIDE, f64::from(ALPHA_CUTOUT_TRANSLUCENT)),
                 (USE_RGSS_OVERRIDE, f64::from(TextureFiltering::selected().use_rgss())),
+                (SURFACE_FILTER_OVERRIDE, SURFACE_FILTER_BLOCKS),
             ],
             compare: DEPTH_COMPARE_NEARER_OR_EQUAL,
         };
         let fluid_surface = Surface {
             label: "lodestone-oit-fluid",
-            source: FLUID_OIT_WGSL,
-            template: fluid,
-            constants: Vec::new(),
+            source: MODEL_OIT_WGSL,
+            template: translucent,
+            constants: vec![
+                (ALPHA_CUTOUT_OVERRIDE, f64::from(ALPHA_CUTOUT_TRANSLUCENT)),
+                (USE_RGSS_OVERRIDE, f64::from(TextureFiltering::selected().use_rgss())),
+                (SURFACE_FILTER_OVERRIDE, SURFACE_FILTER_FLUID),
+            ],
             compare: DEPTH_COMPARE_NEARER,
         };
 

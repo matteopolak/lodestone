@@ -186,12 +186,11 @@ impl RenderState {
             let origin_arena = SectionOriginArena::new(
                 device, queue, "lodestone-model-section-origin-arena", MODEL_ORIGIN_ARENA_SLOTS,
             );
-            let (terrain_pipeline, water_pipeline, translucent_pipeline) =
+            let (terrain_pipeline, translucent_pipeline) =
                 match TerrainPipelines::new(device, color_format, origin_arena.stride()) {
-                    Some(pipelines) => (Some(pipelines.opaque), pipelines.water, pipelines.translucent),
+                    Some(pipelines) => (Some(pipelines.opaque), pipelines.translucent),
                     None => (
                         None,
-                        ModelPipeline::for_fluid(device, color_format),
                         ModelPipeline::for_layer(
                             device, color_format, lodestone_render::RenderLayer::Translucent,
                         ),
@@ -229,11 +228,8 @@ impl RenderState {
                 .zip(models.anim_frame_v().iter().copied())
                 .collect();
             // Build the uniform (slot 0 static) at tick 0; rewritten each frame.
-            // Two bind groups wrap the one buffer because the pipelines number
-            // the animation group differently (model = 3, fluid = 2).
             let anim_buffer = model_anim_buffer(device, &anim_slots_at(&animations, 0));
             let anim_bind_group = pipeline.anim_bind_group(device, &anim_buffer);
-            let water_anim_bind_group = water_pipeline.anim_bind_group(device, &anim_buffer);
             // Mining-crack overlay: capture the per-state quads + stage rects now,
             // while `models` is still borrowable, and build the pass's own atlas
             // and camera bind groups (its layouts differ from the model pass's).
@@ -278,7 +274,6 @@ impl RenderState {
                 map_surface_no_cull_pipeline,
                 map_surface_no_depth_pipeline,
                 map_surface_no_cull_no_depth_pipeline,
-                water_pipeline,
                 translucent_pipeline,
                 atlas,
                 atlas_bind_group,
@@ -288,7 +283,6 @@ impl RenderState {
                 animation_tick: std::cell::Cell::new(0),
                 anim_buffer,
                 anim_bind_group,
-                water_anim_bind_group,
                 crack_pipeline,
                 crack_resolver,
                 crack_atlas_bind_group,
@@ -1407,7 +1401,7 @@ impl RenderState {
     /// The model shader is at wgpu's 4-bind-group floor (camera / atlas /
     /// palette / anim — see `CLAUDE.md`'s rendering-constraints section), so
     /// this must never grow the pipeline layout. It does not: every pipeline
-    /// (`self.pipeline`, and `model.pipeline`/`water_pipeline`/
+    /// (`self.pipeline`, and `model.pipeline`/
     /// `crack_pipeline` inside [`ModelRenderer`]) is untouched — only the
     /// *contents* of the atlas/palette/anim bind groups change, following the
     /// exact "rebuild the GPU object, overwrite the field" shape
@@ -1464,8 +1458,6 @@ impl RenderState {
                     .collect();
                 let new_anim_buffer = model_anim_buffer(device, &anim_slots_at(&new_animations, 0));
                 let new_anim_bind_group = model.pipeline.anim_bind_group(device, &new_anim_buffer);
-                let new_water_anim_bind_group =
-                    model.water_pipeline.anim_bind_group(device, &new_anim_buffer);
                 let new_crack_resolver = CrackResolver::from_models(models);
                 let new_items: HashMap<ResourceLocation, ItemVariants> = models
                     .item_forms_iter()
@@ -1481,7 +1473,6 @@ impl RenderState {
                 model.animation_tick.set(0);
                 model.anim_buffer = new_anim_buffer;
                 model.anim_bind_group = new_anim_bind_group;
-                model.water_anim_bind_group = new_water_anim_bind_group;
                 model.crack_resolver = new_crack_resolver;
                 model.items = new_items;
                 model.sections.clear();

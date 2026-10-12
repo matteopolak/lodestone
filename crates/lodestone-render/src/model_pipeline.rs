@@ -331,8 +331,8 @@ impl ModelPipeline {
 
     /// Build the pipeline for a specific [`RenderLayer`]. `Solid`/`Cutout` use
     /// an opaque target with depth writes and back-face culling; `Translucent`
-    /// enables alpha blending, keeps depth writes and the nearer-or-equal
-    /// depth comparison, and keeps back-face culling on. Two-sided models
+    /// enables alpha blending, drops depth writes, compares strictly nearer
+    /// and keeps back-face culling on. Two-sided models
     /// carry explicit reverse-winding faces.
     #[must_use]
     pub fn for_layer(
@@ -372,7 +372,6 @@ impl ModelPipeline {
             color_format,
             MODEL_WGSL,
             translucent,
-            translucent,
             true,
             true,
             Some(if translucent { ALPHA_CUTOUT_TRANSLUCENT } else { ALPHA_CUTOUT_CUTOUT }),
@@ -391,7 +390,6 @@ impl ModelPipeline {
             device,
             color_format,
             MODEL_WGSL,
-            false,
             false,
             true,
             true,
@@ -435,7 +433,6 @@ impl ModelPipeline {
             color_format,
             MODEL_WGSL,
             false,
-            false,
             true,
             cull_back_face,
             Some(ALPHA_CUTOUT_CUTOUT),
@@ -445,69 +442,14 @@ impl ModelPipeline {
         )
     }
 
-    /// Build the translucent **fluid** pipeline: like a `Translucent` model
-    /// pipeline (alpha blending, no depth writes) but with a shader that does
-    /// **not** cutout-discard (water is a smooth alpha, not a mask) and tints
-    /// `tint_index` quads with the water colour instead of foliage green.
-    /// Drawn after opaque terrain so the sea floor already in the depth
-    /// buffer shows through.
-    ///
-    /// Back-face culling stays **on** here, as it does for
-    /// [`for_layer`](Self::for_layer)'s `Translucent` pipeline. The fluid baker
-    /// emits an explicit reverse-winding copy for each two-sided surface; with
-    /// culling disabled, both copies pass and a water surface is composited
-    /// twice. That turns the source alpha `180/255` into an effective
-    /// `1 - (1 - 180/255)^2`, making water look markedly too opaque from
-    /// outside. Culling keeps the two copies' roles distinct: one is visible
-    /// from each side, while only one contributes along a view ray.
-    #[must_use]
-    pub fn for_fluid(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        Self::for_fluid_with_origin_stream(device, color_format, None)
-    }
-
-    /// Build a fluid terrain variant with the same instance-origin contract
-    /// as [`Self::for_terrain`]. Returns `None` when the vertex limits cannot
-    /// accommodate the existing origin-buffer stride.
-    #[must_use]
-    pub fn for_terrain_fluid(
-        device: &wgpu::Device,
-        color_format: wgpu::TextureFormat,
-        origin_stride: wgpu::BufferAddress,
-    ) -> Option<Self> {
-        terrain_origin_stride_supported(&device.limits(), origin_stride).then(|| {
-            Self::for_fluid_with_origin_stream(device, color_format, Some(origin_stride))
-        })
-    }
-
-    fn for_fluid_with_origin_stream(
-        device: &wgpu::Device,
-        color_format: wgpu::TextureFormat,
-        origin_stride: Option<wgpu::BufferAddress>,
-    ) -> Self {
-        Self::build(
-            device,
-            color_format,
-            FLUID_WGSL,
-            true,
-            false,
-            false,
-            true,
-            None,
-            wgpu::DepthBiasState::default(),
-            origin_stride,
-        )
-    }
-
-    /// Model translucency writes depth; fluids blend without writing it.
-    /// Both cull reverse faces because two-sided geometry carries both
-    /// windings. The fluid shader has no alpha-cutout override.
+    /// Translucent pipelines blend without writing depth; every pipeline culls
+    /// reverse faces because two-sided geometry carries both windings.
     #[allow(clippy::too_many_arguments)]
     fn build(
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
         shader_src: &str,
         translucent: bool,
-        translucent_depth_write: bool,
         with_palette: bool,
         cull_back_face: bool,
         alpha_cutout: Option<f32>,
@@ -519,7 +461,6 @@ impl ModelPipeline {
             color_format,
             shader_src,
             translucent,
-            translucent_depth_write,
             with_palette,
             cull_back_face,
             alpha_cutout,
@@ -535,7 +476,6 @@ impl ModelPipeline {
         color_format: wgpu::TextureFormat,
         shader_src: &str,
         translucent: bool,
-        translucent_depth_write: bool,
         with_palette: bool,
         cull_back_face: bool,
         alpha_cutout: Option<f32>,
@@ -623,10 +563,6 @@ impl ModelPipeline {
         // A slice rather than an `Option` at the use site: an empty slice is
         // exactly "leave every override at its declared default", which is what
         // a shader with no override wants.
-        // Both overrides live in `model.wgsl` and neither in `fluid.wgsl`, so
-        // one `is_some()` gates both: wgpu rejects a constant the module does
-        // not declare, and `alpha_cutout` being `Some` *is* "this is the model
-        // shader" at every call site.
         let constants: Vec<(&str, f64)> = alpha_cutout
             .map(|v| {
                 vec![
@@ -696,9 +632,7 @@ impl ModelPipeline {
             // switch is named for and the only form the pass will accept.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(
-                    depth.write && (!translucent || translucent_depth_write),
-                ),
+                depth_write_enabled: Some(depth.write && !translucent),
                 // Vanilla's terrain pipelines all inherit
                 // the default depth-stencil state `(GREATER_THAN_OR_EQUAL, true)`
                 // (26.2's terrain snippet, built on the generic-blocks snippet
@@ -716,20 +650,15 @@ impl ModelPipeline {
                 // `grass_block` bakes 10 quads, 4 of which are tinted overlays
                 // coplanar with the base cube's sides.
                 //
-                // Model translucent terrain writes depth, so it uses the same
-                // tie-admitting comparison as opaque terrain. Fluid keeps the
-                // strict comparison because it intentionally does not write
-                // depth: admitting ties would let coplanar water faces both
-                // blend and double-darken a surface.
-                depth_compare: Some(match (
-                    depth.compare,
-                    translucent,
-                    translucent_depth_write,
-                ) {
-                    (false, _, _) => wgpu::CompareFunction::Always,
-                    (true, true, true) => DEPTH_COMPARE_NEARER_OR_EQUAL,
-                    (true, true, false) => DEPTH_COMPARE_NEARER,
-                    (true, false, _) => DEPTH_COMPARE_NEARER_OR_EQUAL,
+                // Translucent terrain blends without writing depth, and keeps
+                // the strict comparison: a boat's interior water mask is
+                // coplanar with the surface it hides, which must lose.
+                depth_compare: Some(if !depth.compare {
+                    wgpu::CompareFunction::Always
+                } else if translucent {
+                    DEPTH_COMPARE_NEARER
+                } else {
+                    DEPTH_COMPARE_NEARER_OR_EQUAL
                 }),
                 stencil: wgpu::StencilState::default(),
                 // The bias is its **own** axis. It used to be dropped whenever
@@ -1009,7 +938,7 @@ pub const SECTION_FADE_DURATION_SECS: f32 = 0.75;
 /// did before the fade existed.
 pub const SECTION_FADE_ALREADY_VISIBLE: f32 = -1.0e6;
 
-/// Byte-for-byte the mix `model.wgsl`/`fluid.wgsl` compute per section:
+/// Byte-for-byte the mix `model.wgsl` computes per section:
 /// vanilla's render-section visibility —
 /// `elapsed >= duration ? 1.0 : elapsed / duration`, written here as an
 /// equivalent clamp so the CPU-side prediction in this crate's tests and the
@@ -1163,12 +1092,6 @@ pub fn write_section_origin(
 
 const MODEL_WGSL: &str = include_str!("shaders/model.wgsl");
 
-// The fluid (water) shader. Unlike the model shader it does **not** discard on
-// low alpha — water is a smooth translucent surface, not a cutout mask — and it
-// tints `tint_index` quads with the default water colour (#3F76E4) rather than
-// foliage green. Water's greyscale texture becomes blue here.
-const FLUID_WGSL: &str = include_str!("shaders/fluid.wgsl");
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1227,7 +1150,7 @@ mod tests {
     fn terrain_vertex_entries_share_math_and_do_not_read_uniform_origins() {
         use wgpu::naga;
 
-        for (name, source) in [("model", MODEL_WGSL), ("fluid", FLUID_WGSL)] {
+        for (name, source) in [("model", MODEL_WGSL)] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
             let info = naga::valid::Validator::new(
@@ -1288,47 +1211,32 @@ mod tests {
         }
     }
 
-    /// The fluid pass adjusts no depth of its own: its whole separation from a
-    /// coplanar block face is `bake_fluid`'s 0.001-block geometric inset.
-    ///
-    /// This is the guard on that. Under the forward `[0,1]` projection this
-    /// renderer used to carry, the inset collapsed to 0 ULP at 64 blocks and
-    /// **inverted** at 128, and `fluid.wgsl` compensated with a constant
-    /// window-depth nudge. Reversed-Z restored the inset (6,707 ULP at 2 blocks
-    /// down to 26 at 512 — `fluid_coplanar_depth_gate.rs` has the sweep), and a
-    /// constant window-depth offset is exactly the wrong shape to leave behind
-    /// under it: reversed depth shrinks with distance, so the same offset costs
-    /// ~2.5 blocks of backward push at 512 where it cost 0.001 at arm's length.
+    /// The model shader adjusts no depth of its own: a fluid surface's whole
+    /// separation from a coplanar block face is `bake_fluid`'s 0.001-block
+    /// geometric inset (`fluid_coplanar_depth_gate.rs` has the sweep, 6,707 ULP
+    /// at 2 blocks down to 26 at 512). A constant window-depth offset is the
+    /// wrong shape under reversed-Z, where depth shrinks with distance, so the
+    /// same offset costs ~2.5 blocks of backward push at 512.
     ///
     /// A source-text check because `cargo check` never compiles a shader and no
     /// pixel gate can see a small constant depth offset; it lives in this file
-    /// rather than in `fluid.wgsl` so the string it searches for cannot match
+    /// rather than in the shader so the string it searches for cannot match
     /// itself.
     #[test]
-    fn the_fluid_shader_adjusts_no_depth() {
+    fn the_model_shader_adjusts_no_depth() {
         assert!(
-            !FLUID_WGSL.contains("out.clip.z ="),
-            "fluid.wgsl writes to `out.clip.z` after projecting. Under \
-             reversed-Z the geometric inset is worth 26-6708 ULP on its own, and \
-             a constant window-depth offset costs world distance in proportion \
-             to the distance itself"
+            !MODEL_WGSL.contains("out.clip.z ="),
+            "model.wgsl writes to `out.clip.z` after projecting"
         );
+        // Control: the projection assignment the check should see is there,
+        // so a rewrite of the vertex stage cannot make this vacuous.
         assert!(
-            !FLUID_WGSL.contains("FLUID_DEPTH_NUDGE"),
-            "fluid.wgsl still declares or uses a depth nudge"
-        );
-        // Control: the detector can find the line it is looking for. The
-        // projection assignment it *should* see is still there, so a rename or a
-        // wholesale rewrite of `vs_main` cannot make this test vacuous.
-        assert!(
-            FLUID_WGSL.contains("out.clip = camera.view_proj * vec4<f32>(world, 1.0);"),
-            "control failed: `vs_main` no longer projects the way this test \
-             assumes, so the assertions above are searching a file whose shape \
-             they do not describe"
+            MODEL_WGSL.contains("out.clip = camera.view_proj * vec4<f32>(world, 1.0);"),
+            "control failed: the vertex stage no longer projects the way this test assumes"
         );
     }
 
-    /// The Rust constant and both WGSL copies must be the same number, or the
+    /// The Rust constant and the WGSL copy must be the same number, or the
     /// CPU-side prediction below describes a fade the GPU does not actually
     /// run. `cargo check` never compiles a shader (see `DESIGN.md`'s note on
     /// `no_wgsl_is_inlined_in_rust_sources`), so this string match is what
@@ -1339,11 +1247,6 @@ mod tests {
         assert!(
             MODEL_WGSL.contains(&decl),
             "model.wgsl does not declare `{decl}` — the shader and \
-             SECTION_FADE_DURATION_SECS have drifted apart"
-        );
-        assert!(
-            FLUID_WGSL.contains(&decl),
-            "fluid.wgsl does not declare `{decl}` — the shader and \
              SECTION_FADE_DURATION_SECS have drifted apart"
         );
         // Vanilla's real default (`Options`'s own decompiled source's `chunkSectionFadeInTime`,

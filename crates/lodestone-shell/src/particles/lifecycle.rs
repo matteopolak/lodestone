@@ -215,7 +215,7 @@ impl Particles {
             // separate from the curve. `sky_darken` is `1.0`: `Particles` has no
             // clock, so a particle does not yet dim at night. And this is the
             // *scalar* model, i.e. exactly vanilla's blue channel, where
-            // `model.wgsl`/`fluid.wgsl` sample the three-channel
+            // `model.wgsl` samples the three-channel
             // `light_color_from_levels` with its warm block tint and additive
             // sky/block combine — so a torch-lit particle is the right
             // brightness and slightly the wrong hue.

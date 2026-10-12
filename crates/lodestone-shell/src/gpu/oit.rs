@@ -60,7 +60,7 @@ impl RenderState {
         const NEARBY_DISTANCE_SQ: f32 = 32.0 * 32.0;
         let sortable: Vec<&(&super::terrain::ModelSectionGpu, f32)> = visible
             .iter()
-            .filter(|(s, _)| s.water_sort.borrow().is_some() || s.translucent_sort.borrow().is_some())
+            .filter(|(s, _)| s.translucent_sort.borrow().is_some())
             .collect();
         let block = [
             camera.x.floor() as i32,
@@ -79,36 +79,35 @@ impl RenderState {
                 camera.y - o[1] as f32,
                 camera.z - o[2] as f32,
             ];
-            for (sort, mesh) in [
-                (&section.water_sort, section.water.as_ref()),
-                (&section.translucent_sort, section.translucent.as_ref()),
-            ] {
-                let mut sort = sort.borrow_mut();
-                let (Some(sort), Some(mesh)) = (sort.as_mut(), mesh) else {
-                    continue;
-                };
-                if !should_resort(sort.last_viewpoint(), viewpoint, block_changed, nearby) {
-                    continue;
-                }
-                let indices = sort.resort(local, viewpoint);
-                match (mesh, self.model.as_ref()) {
-                    (super::terrain::ResidentMesh::Arena(a), Some(model)) => {
-                        model.mesh_arena.write_indices(queue, a, indices);
-                    }
-                    (super::terrain::ResidentMesh::Dedicated(m), _) => {
-                        m.write_indices(queue, indices);
-                    }
-                    _ => {}
-                }
-                resorted += 1;
+            let mut sort = section.translucent_sort.borrow_mut();
+            let (Some(sort), Some(mesh)) = (sort.as_mut(), section.translucent.as_ref()) else {
+                return;
+            };
+            if !should_resort(sort.last_viewpoint(), viewpoint, block_changed, nearby) {
+                return;
             }
+            let indices = sort.resort(local, viewpoint);
+            match (mesh, self.model.as_ref()) {
+                (super::terrain::ResidentMesh::Arena(a), Some(model)) => {
+                    model.mesh_arena.write_indices(queue, a, indices);
+                }
+                (super::terrain::ResidentMesh::Dedicated(m), _) => {
+                    m.write_indices(queue, indices);
+                }
+                _ => {}
+            }
+            resorted += 1;
         };
         let mut far = Vec::new();
         for entry in &sortable {
             // Never-sorted meshes sort immediately; the rest wait for the scan.
-            let unsorted = [(&entry.0.water_sort, entry.0.water.is_some()), (&entry.0.translucent_sort, entry.0.translucent.is_some())]
-                .iter()
-                .any(|(s, present)| *present && s.borrow().as_ref().is_some_and(|q| q.last_viewpoint().is_none()));
+            let unsorted = entry.0.translucent.is_some()
+                && entry
+                    .0
+                    .translucent_sort
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|q| q.last_viewpoint().is_none());
             if unsorted || entry.1 < NEARBY_DISTANCE_SQ {
                 visit(*entry, true);
             } else {
@@ -165,7 +164,6 @@ impl RenderState {
                     device,
                     self.color_format,
                     &model.translucent_pipeline,
-                    &model.water_pipeline,
                     stride,
                 );
                 let targets = OitTargets::new(
@@ -199,19 +197,13 @@ impl RenderState {
             return;
         };
 
-        let mut water = Vec::new();
-        let mut blocks = Vec::new();
+        let mut draws = Vec::new();
         for (section, _) in sections {
-            let offset = section.origin_alloc.offset() as u32;
-            if let Some(mesh) = section.water.as_ref() {
-                stats.water_sections_drawn += 1;
-                stats.total_quads += section.water_quad_count;
-                water.push(TerrainDraw::new(mesh, offset));
-            }
             if let Some(mesh) = section.translucent.as_ref() {
-                stats.translucent_sections_drawn += 1;
-                stats.total_quads += section.translucent_quad_count;
-                blocks.push(TerrainDraw::new(mesh, offset));
+                stats.water_sections_drawn += usize::from(section.water_quad_count > 0);
+                stats.translucent_sections_drawn += usize::from(section.translucent_quad_count > 0);
+                stats.total_quads += section.water_quad_count + section.translucent_quad_count;
+                draws.push(TerrainDraw::new(mesh, section.origin_alloc.offset() as u32));
             }
         }
 
@@ -226,7 +218,7 @@ impl RenderState {
                 model,
                 (&pipelines.fluid.bounds, &pipelines.block.bounds),
                 &model.cam_bind_group,
-                (&water, &blocks),
+                &draws,
                 &mut scratch,
             );
         }
@@ -237,7 +229,7 @@ impl RenderState {
                 model,
                 (&pipelines.fluid.transmittance, &pipelines.block.transmittance),
                 targets.transmittance_camera(),
-                (&water, &blocks),
+                &draws,
                 &mut scratch,
             );
         }
@@ -248,35 +240,33 @@ impl RenderState {
                 model,
                 (&pipelines.fluid.accumulate, &pipelines.block.accumulate),
                 targets.accumulate_camera(),
-                (&water, &blocks),
+                &draws,
                 stats,
             );
         }
         targets.composite(pipelines, encoder, scene);
         stats.oit_composites += 1;
-        stats.draw_calls += water.len() + blocks.len();
+        stats.draw_calls += draws.len();
     }
 }
 
-/// One stage's draws: water through the fluid pipeline, then translucent
-/// blocks through theirs. Order within a stage does not matter.
+/// One stage's draws: every section's mixed mesh through the fluid-only
+/// pipeline, then through the block-only one. Order within a stage does not
+/// matter.
 fn draw_stage(
     pass: &mut wgpu::RenderPass<'_>,
     model: &ModelRenderer,
     pipelines: (&wgpu::RenderPipeline, &wgpu::RenderPipeline),
     camera: &wgpu::BindGroup,
-    draws: (&[TerrainDraw<'_>], &[TerrainDraw<'_>]),
+    draws: &[TerrainDraw<'_>],
     stats: &mut RenderStats,
 ) {
     let mut camera_last = None;
-    pass.set_pipeline(pipelines.0);
-    pass.set_bind_group(1, &model.atlas_bind_group, &[]);
-    pass.set_bind_group(2, &model.water_anim_bind_group, &[]);
-    super::frame::emit_terrain_draws(pass, model, camera, draws.0, &mut camera_last, stats);
-
-    pass.set_pipeline(pipelines.1);
-    pass.set_bind_group(1, &model.atlas_bind_group, &[]);
-    pass.set_bind_group(2, &model.palette_bind_group, &[]);
-    pass.set_bind_group(3, &model.anim_bind_group, &[]);
-    super::frame::emit_terrain_draws(pass, model, camera, draws.1, &mut camera_last, stats);
+    for pipeline in [pipelines.0, pipelines.1] {
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+        pass.set_bind_group(2, &model.palette_bind_group, &[]);
+        pass.set_bind_group(3, &model.anim_bind_group, &[]);
+        super::frame::emit_terrain_draws(pass, model, camera, draws, &mut camera_last, stats);
+    }
 }

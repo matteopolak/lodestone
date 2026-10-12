@@ -252,6 +252,17 @@ override alpha_cutout: f32 = 0.5;
 // peak per-pixel difference 19/255. See `docs/terrain-sky-holes.md`.
 override use_rgss: f32 = 0.0;
 
+// Which vertices of a mixed mesh this pipeline draws: `0` all of them, `1`
+// only block surfaces, `2` only fluid surfaces. The sorted translucent pass
+// draws a section's water and translucent blocks as one mesh and takes `0`;
+// the order-independent stages keep a pipeline per kind (their depth
+// comparisons differ) and take `1` and `2`, collapsing the other kind's
+// triangles to a point.
+override surface_filter: f32 = 0.0;
+
+// `ModelVertex::cutout_bypass` value marking a fluid surface; see its doc.
+const FLUID_SURFACE: u32 = 2u;
+
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> origin: Origin;
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
@@ -512,6 +523,10 @@ fn model_vertex(
     out.tint_rgb_override = tint_rgb_override;
     out.cutout_bypass = packed.w;
     out.visibility = section_visibility(camera.fog_ambient_light.w, section_origin.w);
+    let is_fluid = packed.w == FLUID_SURFACE;
+    if ((surface_filter == 1.0 && is_fluid) || (surface_filter == 2.0 && !is_fluid)) {
+        out.clip = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
     return out;
 }
 
@@ -543,18 +558,31 @@ fn shade_fragment(in: VsOut) -> vec4<f32> {
     // uniform control flow, and both arms state their own level or gradient --
     // `du`/`dv` were taken above, in uniform control flow -- so neither needs an
     // implicit derivative.
+    let fluid = in.cutout_bypass == FLUID_SURFACE;
     var tex: vec4<f32>;
-    if (use_rgss > 0.5) {
-        tex = sample_rgss(in.uv, pixel_size, du, dv, texel_screen_size);
+    if (fluid) {
+        // Water is a smooth mipmapped surface: plain gradient sampling, with
+        // the animated frames offset in V at the same gradients.
+        tex = textureSampleGrad(atlas_tex, atlas_smp, in.uv, du, dv);
+        if (in.anim_idx != 0u) {
+            let slot = anim.slots[in.anim_idx];
+            let a = textureSampleGrad(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_a), du, dv);
+            let b = textureSampleGrad(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_b), du, dv);
+            tex = mix(a, b, slot.blend);
+        }
     } else {
-        tex = sample_nearest(in.uv, pixel_size, du, dv, texel_screen_size);
-    }
-    if (in.anim_idx != 0u) {
-        let slot = anim.slots[in.anim_idx];
-        let snapped = snap_uv(in.uv, pixel_size, texel_screen_size);
-        let a = textureSampleLevel(atlas_tex, atlas_smp, snapped + vec2<f32>(0.0, slot.v_off_a), 0.0);
-        let b = textureSampleLevel(atlas_tex, atlas_smp, snapped + vec2<f32>(0.0, slot.v_off_b), 0.0);
-        tex = mix(a, b, slot.blend);
+        if (use_rgss > 0.5) {
+            tex = sample_rgss(in.uv, pixel_size, du, dv, texel_screen_size);
+        } else {
+            tex = sample_nearest(in.uv, pixel_size, du, dv, texel_screen_size);
+        }
+        if (in.anim_idx != 0u) {
+            let slot = anim.slots[in.anim_idx];
+            let snapped = snap_uv(in.uv, pixel_size, texel_screen_size);
+            let a = textureSampleLevel(atlas_tex, atlas_smp, snapped + vec2<f32>(0.0, slot.v_off_a), 0.0);
+            let b = textureSampleLevel(atlas_tex, atlas_smp, snapped + vec2<f32>(0.0, slot.v_off_b), 0.0);
+            tex = mix(a, b, slot.blend);
+        }
     }
     // Cutout: drop near-transparent texels (cross-plants, leaves) so they render
     // correctly on the opaque pass -- unless this quad opted out
@@ -581,7 +609,15 @@ fn shade_fragment(in: VsOut) -> vec4<f32> {
     // established explicit RGB override; no existing mesh uses an intermediate
     // alpha, so the two encodings cannot collide.
     let white_flash = in.tint_rgb_override.a == 1u;
-    if (in.tint_rgb_override.a == 255u) {
+    if (fluid) {
+        // Default water colour (#3F76E4) for a tinted quad with no resolved
+        // biome colour; any nonzero override alpha carries the real one.
+        let water = vec3<f32>(0.247, 0.463, 0.894);
+        tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), water, select(0.0, 1.0, in.tint_idx != 255u));
+        if (in.tint_rgb_override.a != 0u) {
+            tint_col = vec3<f32>(in.tint_rgb_override.rgb) / 255.0;
+        }
+    } else if (in.tint_rgb_override.a == 255u) {
         tint_col = vec3<f32>(in.tint_rgb_override.rgb) / 255.0;
     } else if (in.tint_idx != 255u) {
         tint_col = palette.colors[in.tint_idx].rgb;

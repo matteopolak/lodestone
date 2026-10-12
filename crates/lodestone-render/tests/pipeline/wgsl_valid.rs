@@ -45,10 +45,6 @@ const COMPOSITIONS: &[(&str, &[&str])] = &[
         &["model.wgsl", "oit_common.wgsl", "oit_stages.wgsl"],
     ),
     (
-        "fluid.wgsl + oit_common.wgsl + oit_stages.wgsl",
-        &["fluid.wgsl", "oit_common.wgsl", "oit_stages.wgsl"],
-    ),
-    (
         "oit_common.wgsl + oit_composite.wgsl",
         &["oit_common.wgsl", "oit_composite.wgsl"],
     ),

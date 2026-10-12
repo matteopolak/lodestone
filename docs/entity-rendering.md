@@ -50,7 +50,7 @@ Final pixel is `texel * diffuse * light_term`, faded toward fog.
 | texture format | sheet must be `_srgb` | plain `Rgba8Unorm` plus an sRGB swapchain double-encodes |
 | fog | shared camera uniform, byte-compatible with the block shader | keeps the pass inside the 4-bind-group floor |
 
-Pose eye height and baby dimensions are not in the eye-height table. Entities draw after opaque terrain and before the translucent water pass (the fluid pipeline writes no depth, so drawing after water paints opaque colour over it).
+Pose eye height and baby dimensions are not in the eye-height table. Entities draw after opaque terrain and before the translucent water pass (the translucent terrain pipeline writes no depth, so drawing after water paints opaque colour over it).
 
 ### Render layers
 

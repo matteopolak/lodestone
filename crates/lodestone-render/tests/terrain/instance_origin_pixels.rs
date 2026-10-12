@@ -6,6 +6,7 @@ use lodestone_render::{
     fog::{FogSettings, FogUniform},
     model_anim_buffer, model_palette_buffer, model_shared_camera_buffer_with_fog,
 };
+use lodestone_render::models::FLUID_SURFACE;
 use wgpu::util::DeviceExt;
 
 const W: u32 = 96;
@@ -53,12 +54,9 @@ impl Material {
     }
 
     fn pipeline(self, device: &wgpu::Device, stride: u64, instance: bool) -> ModelPipeline {
-        match (self, instance) {
-            (Self::Fluid, false) => ModelPipeline::for_fluid(device, FORMAT),
-            (Self::Fluid, true) => ModelPipeline::for_terrain_fluid(device, FORMAT, stride)
-                .expect("GPU must support the terrain origin stream"),
-            (_, false) => ModelPipeline::for_layer(device, FORMAT, self.layer()),
-            (_, true) => ModelPipeline::for_terrain(device, FORMAT, self.layer(), stride)
+        match instance {
+            false => ModelPipeline::for_layer(device, FORMAT, self.layer()),
+            true => ModelPipeline::for_terrain(device, FORMAT, self.layer(), stride)
                 .expect("GPU must support the terrain origin stream"),
         }
     }
@@ -71,7 +69,7 @@ impl Material {
 #[derive(Clone, Copy)]
 enum OriginPath { Uniform, Instance, ExplicitWorld, ForcedZero }
 
-fn quad(fixture: &Fixture, world: bool) -> ModelMesh {
+fn quad(fixture: &Fixture, world: bool, material: Material) -> ModelMesh {
     let [left, right, bottom, top, z] = if world {
         fixture.world_bounds
     } else {
@@ -80,7 +78,8 @@ fn quad(fixture: &Fixture, world: bool) -> ModelMesh {
     };
     let v = |x, y, u, v| ModelVertex {
         position: [x, y, z], uv: [u, v], ao: 1.0, light: 0xff, tint: 255,
-        anim: 0, cutout_bypass: 0,
+        anim: 0,
+        cutout_bypass: if matches!(material, Material::Fluid) { FLUID_SURFACE } else { 0 },
         tint_rgb_override: [fixture.tint[0], fixture.tint[1], fixture.tint[2], 255],
     };
     ModelMesh {
@@ -141,9 +140,9 @@ fn render(gpu: &GpuContext, material: Material, path: OriginPath) -> Vec<u8> {
     let animation_group = pipeline.anim_bind_group(device, &animation);
 
     let mut arena = ModelMeshArena::with_block_sizes(4096, 1024);
-    let _padding = arena.upload(device, queue, &quad(&FIXTURES[0], world)).expect("arena padding");
+    let _padding = arena.upload(device, queue, &quad(&FIXTURES[0], world, material)).expect("arena padding");
     let meshes: Vec<_> = FIXTURES.iter().enumerate().map(|(i, fixture)| {
-        let mesh = quad(fixture, world);
+        let mesh = quad(fixture, world, material);
         if i == 0 {
             Mesh::Dedicated(GpuModelMesh::upload(device, &mesh).expect("dedicated fixture"))
         } else {

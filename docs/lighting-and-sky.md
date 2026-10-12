@@ -90,6 +90,6 @@ A real server sends no light update for a block you break to the player who brok
 
 ## Dependencies
 
-- `lodestone_render::light`: the one Rust authority for the lightmap curve and colour combine, duplicated into `model.wgsl`/`entity.wgsl`/`fluid.wgsl` (WGSL has no include). `lodestone_render::models`/`block_models` for corner math and census accessors.
+- `lodestone_render::light`: the one Rust authority for the lightmap curve and colour combine, duplicated into `model.wgsl`/`entity.wgsl` (WGSL has no include). `lodestone_render::models`/`block_models` for corner math and census accessors.
 - `lodestone_data::shade_brightness` and `light_props`; `crates/versions/26.2` for `DayClock` and dimension-type decode; `lodestone_world::relight`/`LightProperties`.
 - The pinned decompile under `.cache/mc/<version>/client-src` for constants and formulas (reference only).

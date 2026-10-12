@@ -909,6 +909,11 @@ fn mesh_fluids_is_byte_identical_to_the_pre_refactor_implementation() {
 # scenes it moved, because the file's whole value is that a line changing is
 # surprising:
 #
+#  5. Water vertices carry the fluid surface marker in the vertex byte that was
+#     zero, so water and translucent blocks draw as one mesh through one
+#     pipeline. All eleven water lines moved, `vh` and `gh` only: vertex and
+#     index counts and every `ih` are unchanged, and no lava line moved.
+#
 #  4. The block atlas grew its gutter -- `AtlasBuilder::with_padding(1 <<
 #     BLOCK_ATLAS_MIP_LEVELS)`, matching vanilla's own stitcher padding, so a minified
 #     Linear tap at a sprite's own edge stops inside that sprite. That repacked

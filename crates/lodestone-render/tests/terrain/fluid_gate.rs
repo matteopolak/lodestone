@@ -3,8 +3,8 @@
 //!
 //! The scene is deliberately minimal so the assertion is unambiguous: clear the
 //! framebuffer to a solid **red** "sea floor", then draw a full-frame water quad
-//! through the real [`ModelPipeline::for_fluid`] pass (alpha blending, no depth
-//! writes, no cutout discard). If water is genuinely translucent, the red floor
+//! through the real translucent [`ModelPipeline`] pass (alpha blending, no cutout discard
+//! for fluid-marked vertices). If water is genuinely translucent, the red floor
 //! survives in the blended result.
 //!
 //! The **negative control** is executed in the same test and observed failing:
@@ -18,9 +18,10 @@
 //! `#[ignore]`d because it needs a real GPU adapter; run explicitly:
 //! `cargo test -p lodestone-render --test fluid_gate -- --ignored --nocapture`.
 
+use lodestone_render::models::FLUID_SURFACE;
 use lodestone_render::{
-    GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex, model_anim_buffer,
-    model_shared_camera_buffer, section_origin_buffer,
+    GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex, RenderLayer, model_anim_buffer,
+    model_palette_buffer, model_shared_camera_buffer, section_origin_buffer,
 };
 
 const W: u32 = 64;
@@ -83,7 +84,7 @@ fn append_water_quad(mesh: &mut ModelMesh, z: f32, reverse: bool) {
             light: 0xFF,
             tint: 0,
             anim: 0,
-            cutout_bypass: 0,
+            cutout_bypass: FLUID_SURFACE,
             tint_rgb_override: [0, 0, 0, 0],
         });
     }
@@ -126,7 +127,7 @@ fn render_mesh_center(
     let device = &gpu.device;
     let queue = &gpu.queue;
 
-    let pipeline = ModelPipeline::for_fluid(device, FORMAT);
+    let pipeline = ModelPipeline::for_layer(device, FORMAT, RenderLayer::Translucent);
     let atlas = GpuAtlas::from_rgba(
         device,
         queue,
@@ -140,8 +141,10 @@ fn render_mesh_center(
     let cam_buffer = model_shared_camera_buffer(device, glam::Mat4::IDENTITY.to_cols_array_2d());
     let origin_buffer = section_origin_buffer(device, [0.0, 0.0, 0.0]);
     let cam_bg = pipeline.camera_bind_group(device, &cam_buffer, &origin_buffer);
-    // The fluid shader carries the shared animation group (group 2); bind an
-    // empty (all-static) slot table so no quad animates.
+    // Bind an empty (all-static) slot table so no quad animates, and a white
+    // palette.
+    let palette_buffer = model_palette_buffer(device, &[[1.0; 4]; 256]);
+    let palette_bg = pipeline.palette_bind_group(device, &palette_buffer);
     let anim_buffer = model_anim_buffer(device, &[]);
     let anim_bg = pipeline.anim_bind_group(device, &anim_buffer);
     let mesh = GpuModelMesh::upload(device, source_mesh).expect("non-empty water mesh");
@@ -206,7 +209,8 @@ fn render_mesh_center(
         pass.set_pipeline(&pipeline.pipeline);
         pass.set_bind_group(0, &cam_bg, &[0]);
         pass.set_bind_group(1, &atlas_bg, &[]);
-        pass.set_bind_group(2, &anim_bg, &[]);
+        pass.set_bind_group(2, &palette_bg, &[]);
+        pass.set_bind_group(3, &anim_bg, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.index_count, 0, 0..1);

@@ -847,7 +847,7 @@ impl RenderState {
             device,
             visible_model_sections
                 .iter()
-                .any(|(section, _)| section.water.is_some() || section.translucent.is_some()),
+                .any(|(section, _)| section.translucent.is_some()),
         );
         if self.translucent_sorting && !oit_split {
             stats.translucent_resorts =
@@ -1929,56 +1929,14 @@ impl RenderState {
                 #[cfg(feature = "window")]
                 { world_pass_begins += 1; }
             } else if let Some(model) = &self.model {
-                // Translucent water, drawn after all opaque model terrain so the
-                // sea floor already written to depth shows through the surface
-                // (depth test on, depth write off, alpha blend — the fluid
-                // pipeline). Same camera + atlas bind groups as the opaque pass.
-                pass.set_pipeline(&model.water_pipeline.pipeline);
-                pass.set_bind_group(1, &model.atlas_bind_group, &[]);
-                pass.set_bind_group(2, &model.water_anim_bind_group, &[]);
-                terrain_draws.clear();
-                for (section, distance) in &visible_model_sections {
-                    let Some(water) = section.water.as_ref() else {
-                        continue;
-                    };
-                    stats.water_sections_drawn += 1;
-                    let mut draw =
-                        TerrainDraw::new(water, section.origin_alloc.offset() as u32);
-                    draw.sort_dist2 = *distance;
-                    terrain_draws.push(draw);
-                    stats.total_quads += section.water_quad_count;
-                }
-                super::terrain::sort_back_to_front(&mut terrain_draws);
-                stats.draw_calls += terrain_draws.len();
-                emit_terrain_draws(
-                    &mut pass,
-                    model,
-                    &model.cam_bind_group,
-                    &terrain_draws,
-                    &mut terrain_cam_group_last,
-                    &mut stats,
-                );
-
-                // Translucent **block** geometry — stained glass, ice, the
-                // nether portal swirl — drawn right after water through its
-                // own pipeline (`RenderLayer::Translucent`'s `MODEL_WGSL`
-                // variant, not the fluid shader: it needs the palette bind
-                // group a fluid-tinted quad has none of). Owner report: "the
-                // nether portal swirly block is missing is opaque when it
-                // isnt supposed to be" — before this pass existed, every
-                // block regardless of `RenderLayer` was folded into the one
-                // opaque/cutout mesh above, which draws with no blending.
-                //
-                // Same camera/atlas/palette/anim bind groups as the opaque
-                // pass (see `ModelRenderer::translucent_pipeline`'s doc for
-                // why that reuse is sound), same back-to-front-by-section
-                // order as water. Not interleaved with water's own sort: the
-                // two are separate pipelines and separate draw batches, so a
-                // translucent block and a water surface that overlap along
-                // the view axis in the *same* section pair can still
-                // composite in the wrong order relative to each other. Known,
-                // narrower limitation than "opaque" — see `translucent`
-                // field's doc.
+                // Water and translucent blocks (stained glass, ice, the nether
+                // portal swirl) are one mesh per section, drawn after all opaque
+                // model terrain so the sea floor already in depth shows
+                // through. The quads inside each mesh are sorted back to front
+                // together (`resort_translucent`), so a pane behind water
+                // blends under it whatever the depths; sections draw
+                // farthest first. One pipeline shades both kinds, telling
+                // water apart by a per-vertex marker.
                 pass.set_pipeline(&model.translucent_pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.palette_bind_group, &[]);
@@ -1988,12 +1946,14 @@ impl RenderState {
                     let Some(translucent) = section.translucent.as_ref() else {
                         continue;
                     };
-                    stats.translucent_sections_drawn += 1;
+                    stats.water_sections_drawn += usize::from(section.water_quad_count > 0);
+                    stats.translucent_sections_drawn +=
+                        usize::from(section.translucent_quad_count > 0);
                     let mut draw =
                         TerrainDraw::new(translucent, section.origin_alloc.offset() as u32);
                     draw.sort_dist2 = *distance;
                     terrain_draws.push(draw);
-                    stats.total_quads += section.translucent_quad_count;
+                    stats.total_quads += section.water_quad_count + section.translucent_quad_count;
                 }
                 super::terrain::sort_back_to_front(&mut terrain_draws);
                 stats.draw_calls += terrain_draws.len();
@@ -2287,7 +2247,7 @@ fn collect_visible_model_sections<'a>(
 ) -> Vec<(&'a super::terrain::ModelSectionGpu, f32)> {
     let mut visible = Vec::with_capacity(model.sections.len());
     for (key, section) in &model.sections {
-        if section.mesh.is_none() && section.water.is_none() && section.translucent.is_none() {
+        if section.mesh.is_none() && section.translucent.is_none() {
             continue;
         }
         let coord = key.coord();
@@ -2303,11 +2263,11 @@ fn collect_visible_model_sections<'a>(
             }
         }
         if verdict != CullVerdict::Visible {
-            stats.water_sections_culled += usize::from(section.water.is_some());
-            stats.translucent_sections_culled += usize::from(section.translucent.is_some());
+            stats.water_sections_culled += usize::from(section.water_quad_count > 0);
+            stats.translucent_sections_culled += usize::from(section.translucent_quad_count > 0);
             continue;
         }
-        let distance = if section.water.is_some() || section.translucent.is_some() {
+        let distance = if section.translucent.is_some() {
             super::terrain::section_center_distance_sq(coord, camera.position)
         } else {
             0.0

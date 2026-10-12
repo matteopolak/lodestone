@@ -21,6 +21,11 @@
 # scenes it moved, because the file's whole value is that a line changing is
 # surprising:
 #
+#  5. Water vertices carry the fluid surface marker in the vertex byte that was
+#     zero, so water and translucent blocks draw as one mesh through one
+#     pipeline. All eleven water lines moved, `vh` and `gh` only: vertex and
+#     index counts and every `ih` are unchanged, and no lava line moved.
+#
 #  4. The block atlas grew its gutter -- `AtlasBuilder::with_padding(1 <<
 #     BLOCK_ATLAS_MIP_LEVELS)`, matching vanilla's own stitcher padding, so a minified
 #     Linear tap at a sprite's own edge stops inside that sprite. That repacked
@@ -67,15 +72,15 @@
 #     was originally generated from the implementation immediately before it.
 water_only water[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
 ocean_floor water[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-surface water[v=2048 i=3072 vh=756c4238df7456fd ih=c1914beb7a580825 gh=a40d37b4ae330f6d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-submerged_cave water[v=1584 i=2376 vh=cc8c720d76ac1be5 ih=6329a3a3f5a4eea5 gh=dc4357447ada28a5] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-flowing_slope water[v=2048 i=3072 vh=6481ac659b65603d ih=c1914beb7a580825 gh=902e15583fe65b2d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-grass_shore water[v=512 i=768 vh=39677100ff12f55d ih=d44927c814175325 gh=18c6ab5cd849d58d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-glass_shore water[v=512 i=768 vh=6585617e2705bc3d ih=d44927c814175325 gh=5cbbd8b8bf77269d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-path_bank water[v=2304 i=3456 vh=ac3d9b2cdee39625 ih=4a39d86a56e5a425 gh=357ca7a03394ad85] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-lava_and_water water[v=2048 i=3072 vh=388870342971eca9 ih=c1914beb7a580825 gh=145a034a7eed1401] lava[v=2048 i=3072 vh=be1ab533f1d97e99 ih=c1914beb7a580825 gh=8fa57e1c6b1efbb1]
-waterlogged water[v=2048 i=3072 vh=756c4238df7456fd ih=c1914beb7a580825 gh=a40d37b4ae330f6d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-waterlogged_stair_beside_air water[v=2048 i=3072 vh=e5c3df81915f954d ih=c1914beb7a580825 gh=c24ec9cd6a57c235] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+surface water[v=2048 i=3072 vh=5743d40545296d3d ih=c1914beb7a580825 gh=8f9546943397875d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+submerged_cave water[v=1584 i=2376 vh=b08908368883f6dd ih=6329a3a3f5a4eea5 gh=cf10a34005f44e15] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+flowing_slope water[v=2048 i=3072 vh=74b4cd167c9e8c05 ih=c1914beb7a580825 gh=1bc79e17022e5c85] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+grass_shore water[v=512 i=768 vh=fe3e1f6c68f0913d ih=d44927c814175325 gh=3d60398df68264ed] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+glass_shore water[v=512 i=768 vh=937481d2e25df6bd ih=d44927c814175325 gh=060bd77f49d6665d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+path_bank water[v=2304 i=3456 vh=6eda8f2a73221ea5 ih=4a39d86a56e5a425 gh=f85e5d85441badd5] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+lava_and_water water[v=2048 i=3072 vh=6fefbe9a4a248f89 ih=c1914beb7a580825 gh=77ab78d06937eb49] lava[v=2048 i=3072 vh=be1ab533f1d97e99 ih=c1914beb7a580825 gh=8fa57e1c6b1efbb1]
+waterlogged water[v=2048 i=3072 vh=5743d40545296d3d ih=c1914beb7a580825 gh=8f9546943397875d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+waterlogged_stair_beside_air water[v=2048 i=3072 vh=fb5e1db523cf7305 ih=c1914beb7a580825 gh=0e11531e144b0bfd] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
 dry water[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-puddle_low_corner water[v=4 i=6 vh=f1f8fba4cb8aa5b1 ih=65c4284031300747 gh=49f83c08cc08fe0d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
-puddle_high_corner water[v=4 i=6 vh=1d6a93bff45e6f65 ih=65c4284031300747 gh=3e1c96e48f01dfc5] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+puddle_low_corner water[v=4 i=6 vh=dcd6a76138cfaa49 ih=65c4284031300747 gh=7e451c037605327d] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]
+puddle_high_corner water[v=4 i=6 vh=d7f0f44cd8b546cd ih=65c4284031300747 gh=3c6c829d602f3a25] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325 gh=cbf29ce484222325]

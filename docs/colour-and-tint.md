@@ -10,7 +10,7 @@ The rule behind every colour operation in the renderer, and the pipelines built 
 
 Every tint or shade multiply is `srgb_to_linear(linear_to_srgb(rgb) * tint * shade)`. Multiplying in linear light pulls every factor toward `1.0` and washes the result out; the error is largest on dark backgrounds and vanishes near white.
 
-It applies in three places: block/model/fluid shader tint and directional shade; `fog::multiply_gamma` and `scale_gamma` (the CPU twin for fog and void fog); and world-text drop shadow (a flat quarter in gamma space).
+It applies in three places: block/model shader tint and directional shade; `fog::multiply_gamma` and `scale_gamma` (the CPU twin for fog and void fog); and world-text drop shadow (a flat quarter in gamma space).
 
 The native swapchain is an sRGB view, so ordinary `ALPHA_BLENDING` decodes the destination, blends linearly and re-encodes. That is right for most passes and wrong for those compositing vanilla's flat gamma-byte colours (world text, below).
 

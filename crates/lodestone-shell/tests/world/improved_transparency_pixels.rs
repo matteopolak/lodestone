@@ -9,11 +9,12 @@
 //! ahead; both cover the same block of pixels, which therefore see water in front
 //! of glass in front of the backdrop. The water wall shows two surfaces along a
 //! ray (its near face and the far face's inward copy), the glass wall one (its
-//! back face is culled). The sorted pipeline draws all water before all
-//! translucent blocks, so it paints the glass **over** the water (glass is
-//! behind it, but water writes no depth); within the water it re-sorts the
-//! section's quads back to front, which is depth order. With sorting off
-//! it draws them in mesh order instead, and that is the control.
+//! back face is culled). The two walls sit in different sections, which the
+//! sorted pipeline draws farthest first, and it re-sorts each section's quads
+//! back to front, so the frame is in depth order. Painting the glass over the
+//! water instead, as a pipeline that draws all water before all translucent
+//! blocks does, is the control. Water and glass in one section are
+//! `translucent_quads_in_one_section_are_drawn_back_to_front`'s third scene.
 //!
 //! # The expectation
 //!
@@ -35,8 +36,8 @@
 //!
 //! # Three predictions, one per claim
 //!
-//! * **Draw order** (`fold` in the sorted pipeline's order: water far face then
-//!   near face, then glass) must match the sorted frames. That validates the
+//! * **Draw order** (`fold` in the sorted pipeline's order: glass, then water
+//!   far face, then near face) must match the sorted frames. That validates the
 //!   fold: it reproduces a blend sequence whose answer is known. With sorting
 //!   off the same fold in mesh order must match the unsorted frame.
 //! * **Depth order** (`fold` front to back) is what the order-independent
@@ -58,9 +59,9 @@
 //!   [`oit_representation`] also gives a prediction of what the GPU computes
 //!   without the half-float and quantisation terms, which the frame must match
 //!   far more tightly.
-//! * **Both orders differ**: the sorted two-layer frame must disagree with the
-//!   depth-order prediction on nearly every checked pixel, or the scene cannot
-//!   tell the orders apart.
+//! * **The orders differ**: the sorted two-layer frame must disagree with the
+//!   glass-over-water prediction on nearly every checked pixel, or the scene
+//!   cannot tell the orders apart.
 //!
 //! One layer alone (water; glass) is held to the same standard on both paths,
 //! and the whole frame outside what the layer touches must be untouched.
@@ -1146,15 +1147,15 @@ fn glass_behind_water_composites_water_over_glass_whatever_the_draw_order() {
         sorted: &'a Frame,
         improved: &'a Frame,
     }
-    // Water is painted before any glass; within the water, far face first.
-    let water_draw = |px: &[(u32, u32)], glass_on_top: bool| -> Vec<Vec<Plane>> {
+    // The glass section is farther, so it is painted first; within the water,
+    // far face first.
+    let water_draw = |px: &[(u32, u32)], glass_behind: bool| -> Vec<Vec<Plane>> {
         px.iter()
             .map(|_| {
-                let mut order = Vec::new();
-                if glass_on_top {
+                let mut order = vec![Plane::WaterNear, Plane::WaterFar];
+                if glass_behind {
                     order.push(Plane::GlassFront);
                 }
-                order.extend([Plane::WaterNear, Plane::WaterFar]);
                 order
             })
             .collect()
@@ -1273,14 +1274,20 @@ fn glass_behind_water_composites_water_over_glass_whatever_the_draw_order() {
             glass_tolerance = sorted_check.widest_tolerance + improved_check.widest_tolerance;
         }
         if case.name == "water over glass" {
-            // The control: the sorted frame against the depth-order prediction.
+            // The control: the sorted frame against the glass-over-water
+            // prediction, the order a water-then-blocks pipeline paints.
+            let glass_over_water: Vec<Vec<&Layer>> = vec![
+                vec![by_plane(Plane::GlassFront), by_plane(Plane::WaterNear), by_plane(Plane::WaterFar)];
+                case.px.len()
+            ];
+            let wrong_order = fold(&stone_px, &glass_over_water);
             let mut apart = Box2::new();
             let mut worst = 0.0f64;
             let mut sum = 0.0f64;
             for (i, &(x, y)) in case.px.iter().enumerate() {
                 let got = encoded(case.sorted, x, y);
                 let deviation = (0..3)
-                    .map(|c| (got[c] - to_byte(true_order.value[i][c])).abs())
+                    .map(|c| (got[c] - to_byte(wrong_order.value[i][c])).abs())
                     .fold(0.0, f64::max);
                 worst = worst.max(deviation);
                 sum += deviation;
@@ -1293,14 +1300,14 @@ fn glass_behind_water_composites_water_over_glass_whatever_the_draw_order() {
     }
     let (apart, worst, mean, n) = two_layer_control.expect("the two-layer case ran");
     eprintln!(
-        "  sorted vs depth-order prediction: worst {worst:.1}, mean {mean:.1} levels; beyond \
+        "  sorted vs glass-over-water prediction: worst {worst:.1}, mean {mean:.1} levels; beyond \
          {CONTROL_MIN_DEVIATION}: {apart}"
     );
     assert!(
         apart.count * 10 >= n * 9,
-        "control failed: only {} of {n} overlap pixels differ from the depth-order prediction by \
-         more than {CONTROL_MIN_DEVIATION} levels on the sorted pipeline ({apart}); the scene \
-         cannot tell the two orders apart",
+        "control failed: only {} of {n} overlap pixels differ from the glass-over-water \
+         prediction by more than {CONTROL_MIN_DEVIATION} levels ({apart}); the scene cannot \
+         tell the two orders apart",
         apart.count
     );
 
@@ -1411,9 +1418,12 @@ const MIN_UNSORTED_PERCENT: usize = 1;
 /// other, are drawn in depth order: the sorted frame matches the
 /// order-independent one, and the frame with sorting off does not.
 ///
-/// Two scenes, one per translucent mesh: a near red and a far blue stained
-/// glass wall (translucent blocks), and a floating water slab seen from below,
-/// whose dark underside is nearer than its bright top.
+/// Three scenes: a near red and a far blue stained glass wall, a floating water
+/// slab seen from below (whose dark underside is nearer than its bright top),
+/// and a red glass wall four blocks behind a water wall in the same section.
+/// Water and translucent blocks share one mesh, so the third is ordered like
+/// the first two; a pipeline drawing all water before all blocks paints the
+/// glass over the water, which is what sorting off reproduces there.
 #[test]
 #[ignore = "requires a GPU adapter with FLOAT32_BLENDABLE and the vanilla client.jar"]
 fn translucent_quads_in_one_section_are_drawn_back_to_front() {
@@ -1503,9 +1513,28 @@ fn translucent_quads_in_one_section_are_drawn_back_to_front() {
         })
         .collect();
 
+    // Scene C: the water wall of the first gate with red glass four blocks
+    // behind it, both in the section covering z 0..16.
+    let mut mixed_world = empty_world(&ids);
+    let mixed_water: Wall = ([-6, 65, 8], [-1, 68, 8]);
+    let mixed_glass: Wall = ([-10, 64, 12], [-1, 69, 12]);
+    assert!(mixed_world.fill_region(mixed_water.0, mixed_water.1, ids.water) > 0);
+    assert!(mixed_world.fill_region(mixed_glass.0, mixed_glass.1, ids.glass) > 0);
+    let mixed_camera = camera_at(0.0);
+    let mixed_patches = [
+        Patch::at(mixed_water, 8.001, WATER_TOP_ROW_HEIGHT),
+        Patch::at(mixed_water, 8.999, WATER_TOP_ROW_HEIGHT),
+        Patch::front_of(mixed_glass),
+    ];
+    let mixed_px: Vec<(u32, u32)> = all_pixels()
+        .filter(|&(x, y)| mixed_patches.iter().all(|p| p.crossed_by(&mixed_camera, x, y)))
+        .filter(|&(x, y)| mixed_patches.iter().all(|p| clear_of_block_edges(&mixed_camera, x, y, p.z)))
+        .collect();
+
     let scenes = [
         Scene { name: "translucent blocks (red glass over blue glass)", world: glass_world, camera: glass_camera, px: glass_px, control_beyond: 16.0 },
         Scene { name: "water (dark underside over bright top)", world: water_world, camera: water_camera, px: water_px, control_beyond: 6.0 },
+        Scene { name: "water over glass in one section", world: mixed_world, camera: mixed_camera, px: mixed_px, control_beyond: 16.0 },
     ];
     for scene in &scenes {
         assert!(scene.px.len() > 2_000, "{}: only {} checkable pixels", scene.name, scene.px.len());

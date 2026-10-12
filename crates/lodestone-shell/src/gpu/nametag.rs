@@ -246,8 +246,8 @@ impl WorldTextLight {
     /// Vanilla's lightmap texel for `packed`, as an RGB multiplier.
     ///
     /// This is [`lodestone_render::light_color`] and nothing else — the one
-    /// authority `shaders/model.wgsl`, `shaders/entity.wgsl` and
-    /// `shaders/fluid.wgsl` all duplicate. It is resolved on the CPU here
+    /// authority `shaders/model.wgsl` and
+    /// `shaders/entity.wgsl` duplicate. It is resolved on the CPU here
     /// rather than in `shaders/nametag.wgsl` because that shader's whole
     /// input is one flat vertex colour: vanilla's `text.vsh` does
     /// `vertexColor = Color * sample_lightmap(Sampler2, UV2)` in its *vertex*
